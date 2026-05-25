@@ -1,25 +1,29 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
 import type { LineMessageEvent } from "@/lib/line/types";
+import type { Database } from "@/types/database";
 
 export interface ParseResult {
-  parserName: string;
+  parserName:    string;
   parserVersion: string;
-  data: Record<string, unknown>;
+  data:          Record<string, unknown>;
+  /** Writes the parsed data to the correct table */
+  persist(
+    supabase: SupabaseClient<Database>,
+    rawMessageId: string
+  ): Promise<void>;
 }
 
 export interface Parser {
-  name: string;
-  version: string;
-  /** Message types this parser handles, e.g. ['text'] */
+  name:           string;
+  version:        string;
   supportedTypes: string[];
-  /** Returns true if this parser can handle the given event */
   canHandle(event: LineMessageEvent): boolean;
-  /** Parses the event and returns structured data */
   parse(event: LineMessageEvent): Promise<ParseResult>;
 }
 
 export abstract class BaseParser implements Parser {
-  abstract name: string;
-  abstract version: string;
+  abstract name:           string;
+  abstract version:        string;
   abstract supportedTypes: string[];
 
   canHandle(event: LineMessageEvent): boolean {
@@ -27,8 +31,4 @@ export abstract class BaseParser implements Parser {
   }
 
   abstract parse(event: LineMessageEvent): Promise<ParseResult>;
-
-  protected result(data: Record<string, unknown>): ParseResult {
-    return { parserName: this.name, parserVersion: this.version, data };
-  }
 }

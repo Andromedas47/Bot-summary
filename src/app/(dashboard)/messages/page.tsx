@@ -2,7 +2,14 @@ import { createClient } from "@/lib/supabase/server";
 import { TopBar } from "@/components/dashboard/TopBar";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/Card";
 import { MessageTable } from "@/components/messages/MessageTable";
-import type { RawEvent } from "@/types";
+import type { RawMessage } from "@/types";
+import type { LineEventType } from "@/types/database";
+
+const VALID_EVENT_TYPES = new Set<LineEventType>([
+  "message", "follow", "unfollow", "join", "leave",
+  "memberJoined", "memberLeft", "postback", "beacon",
+  "accountLink", "unsend", "videoPlayComplete",
+]);
 
 const PAGE_SIZE = 50;
 
@@ -10,60 +17,58 @@ interface PageProps {
   searchParams: Promise<{ page?: string; type?: string }>;
 }
 
-async function getEvents(page: number, type?: string) {
+async function getMessages(page: number, type?: string) {
   const supabase = await createClient();
   const from = (page - 1) * PAGE_SIZE;
-  const to = from + PAGE_SIZE - 1;
+  const to   = from + PAGE_SIZE - 1;
+
+  const eventType = type && VALID_EVENT_TYPES.has(type as LineEventType)
+    ? (type as LineEventType)
+    : undefined;
 
   let query = supabase
-    .from("line_raw_events")
+    .from("raw_messages")
     .select("*", { count: "exact" })
     .order("created_at", { ascending: false })
     .range(from, to);
 
-  if (type) {
-    query = query.eq("event_type", type);
-  }
+  if (eventType) query = query.eq("event_type", eventType);
 
   const { data, count, error } = await query;
-
   if (error) throw new Error(error.message);
 
   return {
-    events: (data ?? []) as RawEvent[],
-    total: count ?? 0,
+    messages:   (data ?? []) as RawMessage[],
+    total:      count ?? 0,
     totalPages: Math.ceil((count ?? 0) / PAGE_SIZE),
   };
 }
 
 export default async function MessagesPage({ searchParams }: PageProps) {
   const params = await searchParams;
-  const page = Math.max(1, parseInt(params.page ?? "1", 10));
-  const type = params.type;
+  const page   = Math.max(1, parseInt(params.page ?? "1", 10));
+  const type   = params.type;
 
-  const { events, total, totalPages } = await getEvents(page, type);
+  const { messages, total, totalPages } = await getMessages(page, type);
 
   return (
     <>
       <TopBar title="Messages" />
 
       <div className="p-4 sm:p-6 space-y-4">
-        <div className="flex items-center justify-between">
-          <p className="text-sm text-slate-500">
-            {total.toLocaleString()} total event{total !== 1 ? "s" : ""}
-          </p>
-        </div>
+        <p className="text-sm text-slate-500">
+          {total.toLocaleString()} message{total !== 1 ? "s" : ""}
+        </p>
 
         <Card>
           <CardHeader>
-            <CardTitle>All Events</CardTitle>
+            <CardTitle>All Messages</CardTitle>
           </CardHeader>
           <CardContent className="p-0 pb-2">
-            <MessageTable events={events} />
+            <MessageTable events={messages} />
           </CardContent>
         </Card>
 
-        {/* Pagination */}
         {totalPages > 1 && (
           <div className="flex items-center justify-center gap-2 py-2">
             {page > 1 && (
@@ -74,9 +79,7 @@ export default async function MessagesPage({ searchParams }: PageProps) {
                 Previous
               </a>
             )}
-            <span className="text-sm text-slate-500">
-              Page {page} of {totalPages}
-            </span>
+            <span className="text-sm text-slate-500">Page {page} of {totalPages}</span>
             {page < totalPages && (
               <a
                 href={`/messages?page=${page + 1}${type ? `&type=${type}` : ""}`}

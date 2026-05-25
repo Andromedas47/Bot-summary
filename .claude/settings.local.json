@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "PowerShell(bun --version)"
+      "PowerShell(bun --version)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }

@@ -75,46 +75,6 @@ export interface Database {
         Relationships: [];
       };
 
-      weigh_entries: {
-        Row: {
-          id:               string;
-          raw_message_id:   string;
-          line_user_id:     string;
-          weight_kg:        number;
-          body_fat_pct:     number | null;
-          muscle_mass_kg:   number | null;
-          bmi:              number | null;
-          note:             string | null;
-          recorded_at:      string;
-          created_at:       string;
-        };
-        Insert: {
-          id?:              string;
-          raw_message_id:   string;
-          line_user_id:     string;
-          weight_kg:        number;
-          body_fat_pct?:    number | null;
-          muscle_mass_kg?:  number | null;
-          bmi?:             number | null;
-          note?:            string | null;
-          recorded_at?:     string;
-          created_at?:      string;
-        };
-        Update: {
-          id?:              string;
-          raw_message_id?:  string;
-          line_user_id?:    string;
-          weight_kg?:       number;
-          body_fat_pct?:    number | null;
-          muscle_mass_kg?:  number | null;
-          bmi?:             number | null;
-          note?:            string | null;
-          recorded_at?:     string;
-          created_at?:      string;
-        };
-        Relationships: [];
-      };
-
       parse_errors: {
         Row: {
           id:               string;
@@ -148,6 +108,80 @@ export interface Database {
         };
         Relationships: [];
       };
+
+      produce_sessions: {
+        Row: {
+          id:             string;
+          raw_message_id: string;
+          line_user_id:   string | null;
+          staff_name:     string;
+          session_date:   string | null;
+          session_title:  string | null;
+          total_items:    number;
+          parser_errors:  Json | null;
+          created_at:     string;
+        };
+        Insert: {
+          id?:            string;
+          raw_message_id: string;
+          line_user_id?:  string | null;
+          staff_name:     string;
+          session_date?:  string | null;
+          session_title?: string | null;
+          total_items?:   number;
+          parser_errors?: Json | null;
+          created_at?:    string;
+        };
+        Update: {
+          id?:            string;
+          raw_message_id?: string;
+          line_user_id?:  string | null;
+          staff_name?:    string;
+          session_date?:  string | null;
+          session_title?: string | null;
+          total_items?:   number;
+          parser_errors?: Json | null;
+          created_at?:    string;
+        };
+        Relationships: [];
+      };
+
+      produce_items: {
+        Row: {
+          id:             string;
+          session_id:     string;
+          item_number:    number | null;
+          product_name:   string;
+          price_per_unit: number | null;
+          quantity:       number | null;
+          unit:           string | null;
+          section:        string;
+          created_at:     string;
+        };
+        Insert: {
+          id?:             string;
+          session_id:      string;
+          item_number?:    number | null;
+          product_name:    string;
+          price_per_unit?: number | null;
+          quantity?:       number | null;
+          unit?:           string | null;
+          section?:        string;
+          created_at?:     string;
+        };
+        Update: {
+          id?:             string;
+          session_id?:     string;
+          item_number?:    number | null;
+          product_name?:   string;
+          price_per_unit?: number | null;
+          quantity?:       number | null;
+          unit?:           string | null;
+          section?:        string;
+          created_at?:     string;
+        };
+        Relationships: [];
+      };
     };
     Views:          { [_ in never]: never };
     Functions:      { [_ in never]: never };
@@ -162,6 +196,7 @@ export interface Database {
 }
 
 // ─── Convenience row aliases ──────────────────────────────────────────
-export type RawMessageRow   = Database["public"]["Tables"]["raw_messages"]["Row"];
-export type WeighEntryRow   = Database["public"]["Tables"]["weigh_entries"]["Row"];
-export type ParseErrorRow   = Database["public"]["Tables"]["parse_errors"]["Row"];
+export type RawMessageRow      = Database["public"]["Tables"]["raw_messages"]["Row"];
+export type ParseErrorRow      = Database["public"]["Tables"]["parse_errors"]["Row"];
+export type ProduceSessionRow  = Database["public"]["Tables"]["produce_sessions"]["Row"];
+export type ProduceItemRow     = Database["public"]["Tables"]["produce_items"]["Row"];

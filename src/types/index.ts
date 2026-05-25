@@ -4,8 +4,9 @@ export type {
   LineMessageType,
   ParseErrorType,
   RawMessageRow,
-  WeighEntryRow,
   ParseErrorRow,
+  ProduceSessionRow,
+  ProduceItemRow,
 } from "./database";
 
 // ─── Domain models (richer than raw DB rows) ─────────────────────────
@@ -27,21 +28,6 @@ export interface RawMessage {
   created_at:    string;
 }
 
-export interface WeighEntry {
-  id:             string;
-  raw_message_id: string;
-  line_user_id:   string;
-  weight_kg:      number;
-  body_fat_pct:   number | null;
-  muscle_mass_kg: number | null;
-  bmi:            number | null;
-  note:           string | null;
-  recorded_at:    string;
-  created_at:     string;
-  /** Joined from raw_messages when requested */
-  raw_message?:   RawMessage;
-}
-
 export interface ParseError {
   id:             string;
   raw_message_id: string;
@@ -57,22 +43,30 @@ export interface ParseError {
 
 // ─── Dashboard aggregates ─────────────────────────────────────────────
 
-export interface DashboardStats {
-  total_messages:    number;
-  processed_count:   number;
-  unprocessed_count: number;
-  weigh_entries:     number;
-  parse_errors:      number;
-  messages_today:    number;
+// ─── Produce weighing domain models ──────────────────────────────────
+
+export interface ProduceSession {
+  id:             string;
+  raw_message_id: string;
+  line_user_id:   string | null;
+  staff_name:     string;
+  session_date:   string | null;
+  session_title:  string | null;
+  total_items:    number;
+  parser_errors:  string[] | null;
+  created_at:     string;
 }
 
-export interface UserWeightSummary {
-  line_user_id:   string;
-  entry_count:    number;
-  latest_weight:  number;
-  lowest_weight:  number;
-  highest_weight: number;
-  latest_at:      string;
+export interface ProduceItem {
+  id:             string;
+  session_id:     string;
+  item_number:    number | null;
+  product_name:   string;
+  price_per_unit: number | null;
+  quantity:       number | null;
+  unit:           string | null;
+  section:        string;
+  created_at:     string;
 }
 
 // ─── Utility ─────────────────────────────────────────────────────────

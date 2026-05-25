@@ -2,12 +2,14 @@
 
 import { useState } from "react";
 import { Sidebar } from "./Sidebar";
+import { SignOutButton } from "@/components/auth/SignOutButton";
 
 interface TopBarProps {
   title: string;
+  userEmail?: string | null;
 }
 
-export function TopBar({ title }: TopBarProps) {
+export function TopBar({ title, userEmail }: TopBarProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   return (
@@ -42,10 +44,18 @@ export function TopBar({ title }: TopBarProps) {
 
         <div className="ml-auto flex items-center gap-2">
           {/* Webhook status indicator */}
-          <div className="flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700">
+          <div className="hidden sm:flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700">
             <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
             Webhook active
           </div>
+
+          {userEmail && (
+            <span className="hidden md:block text-xs text-slate-400 max-w-40 truncate">
+              {userEmail}
+            </span>
+          )}
+
+          <SignOutButton />
         </div>
       </header>
     </>

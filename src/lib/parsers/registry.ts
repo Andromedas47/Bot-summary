@@ -23,6 +23,5 @@ class ParserRegistry {
 
 export const parserRegistry = new ParserRegistry();
 
-// Register parsers here as they are built:
-// import { OrderParser } from './order'
-// parserRegistry.register(new OrderParser())
+import { WeighSessionParser } from "./weigh-session/parser";
+parserRegistry.register(new WeighSessionParser());

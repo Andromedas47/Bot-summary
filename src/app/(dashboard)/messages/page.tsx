@@ -1,9 +1,16 @@
+import { Suspense } from "react";
 import { createClient } from "@/lib/supabase/server";
-import { TopBar } from "@/components/dashboard/TopBar";
+import { DashboardTopBar } from "@/components/dashboard/DashboardTopBar";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/Card";
+import { Pagination } from "@/components/ui/Pagination";
+import { SearchInput } from "@/components/ui/SearchInput";
+import { FilterSelect } from "@/components/ui/FilterSelect";
+import { ExportButton } from "@/components/ui/ExportButton";
 import { MessageTable } from "@/components/messages/MessageTable";
 import type { RawMessage } from "@/types";
 import type { LineEventType } from "@/types/database";
+
+const PAGE_SIZE = 50;
 
 const VALID_EVENT_TYPES = new Set<LineEventType>([
   "message", "follow", "unfollow", "join", "leave",
@@ -11,17 +18,33 @@ const VALID_EVENT_TYPES = new Set<LineEventType>([
   "accountLink", "unsend", "videoPlayComplete",
 ]);
 
-const PAGE_SIZE = 50;
+const EVENT_TYPE_OPTIONS = [
+  { value: "message",  label: "message" },
+  { value: "follow",   label: "follow" },
+  { value: "unfollow", label: "unfollow" },
+  { value: "join",     label: "join" },
+  { value: "leave",    label: "leave" },
+  { value: "postback", label: "postback" },
+];
+
+const PROCESSED_OPTIONS = [
+  { value: "yes", label: "Processed" },
+  { value: "no",  label: "Pending" },
+];
 
 interface PageProps {
-  searchParams: Promise<{ page?: string; type?: string }>;
+  searchParams: Promise<{ page?: string; type?: string; q?: string; processed?: string }>;
 }
 
-async function getMessages(page: number, type?: string) {
-  const supabase = await createClient();
-  const from = (page - 1) * PAGE_SIZE;
-  const to   = from + PAGE_SIZE - 1;
-
+async function getMessages(
+  page: number,
+  q?: string,
+  type?: string,
+  processed?: string,
+) {
+  const supabase  = await createClient();
+  const from      = (page - 1) * PAGE_SIZE;
+  const to        = from + PAGE_SIZE - 1;
   const eventType = type && VALID_EVENT_TYPES.has(type as LineEventType)
     ? (type as LineEventType)
     : undefined;
@@ -32,7 +55,10 @@ async function getMessages(page: number, type?: string) {
     .order("created_at", { ascending: false })
     .range(from, to);
 
-  if (eventType) query = query.eq("event_type", eventType);
+  if (q)                   query = query.ilike("raw_text", `%${q}%`);
+  if (eventType)           query = query.eq("event_type", eventType);
+  if (processed === "yes") query = query.eq("is_processed", true);
+  if (processed === "no")  query = query.eq("is_processed", false);
 
   const { data, count, error } = await query;
   if (error) throw new Error(error.message);
@@ -45,51 +71,59 @@ async function getMessages(page: number, type?: string) {
 }
 
 export default async function MessagesPage({ searchParams }: PageProps) {
-  const params = await searchParams;
-  const page   = Math.max(1, parseInt(params.page ?? "1", 10));
-  const type   = params.type;
+  const params    = await searchParams;
+  const page      = Math.max(1, parseInt(params.page ?? "1", 10));
+  const q         = params.q;
+  const type      = params.type;
+  const processed = params.processed;
 
-  const { messages, total, totalPages } = await getMessages(page, type);
+  const { messages, total, totalPages } = await getMessages(page, q, type, processed);
 
   return (
     <>
-      <TopBar title="Messages" />
+      <DashboardTopBar title="Messages" />
 
       <div className="p-4 sm:p-6 space-y-4">
-        <p className="text-sm text-slate-500">
-          {total.toLocaleString()} message{total !== 1 ? "s" : ""}
-        </p>
-
         <Card>
           <CardHeader>
-            <CardTitle>All Messages</CardTitle>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <CardTitle>All Messages</CardTitle>
+                <p className="text-sm text-slate-500 mt-0.5">
+                  {total.toLocaleString()} message{total !== 1 ? "s" : ""}
+                  {q ? ` matching "${q}"` : ""}
+                </p>
+              </div>
+
+              <Suspense fallback={<div className="h-9 w-48 animate-pulse rounded-lg bg-slate-100" />}>
+                <div className="flex flex-wrap items-center gap-2">
+                  <SearchInput placeholder="Search text…" defaultValue={q ?? ""} />
+                  <FilterSelect
+                    label="Event"
+                    paramName="type"
+                    options={EVENT_TYPE_OPTIONS}
+                  />
+                  <FilterSelect
+                    label="Status"
+                    paramName="processed"
+                    options={PROCESSED_OPTIONS}
+                  />
+                  <ExportButton exportPath="/api/export/messages" />
+                </div>
+              </Suspense>
+            </div>
           </CardHeader>
+
           <CardContent className="p-0 pb-2">
             <MessageTable events={messages} />
+            <Pagination
+              page={page}
+              totalPages={totalPages}
+              basePath="/messages"
+              params={{ q, type, processed }}
+            />
           </CardContent>
         </Card>
-
-        {totalPages > 1 && (
-          <div className="flex items-center justify-center gap-2 py-2">
-            {page > 1 && (
-              <a
-                href={`/messages?page=${page - 1}${type ? `&type=${type}` : ""}`}
-                className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
-              >
-                Previous
-              </a>
-            )}
-            <span className="text-sm text-slate-500">Page {page} of {totalPages}</span>
-            {page < totalPages && (
-              <a
-                href={`/messages?page=${page + 1}${type ? `&type=${type}` : ""}`}
-                className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
-              >
-                Next
-              </a>
-            )}
-          </div>
-        )}
       </div>
     </>
   );

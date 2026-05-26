@@ -49,14 +49,14 @@ export function DailyTable({ rows }: { rows: DailyRow[] }) {
 
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[1300px] border-collapse text-sm">
+      <table className="w-full min-w-325 border-collapse text-sm">
         <thead className="sticky top-0 z-10 bg-slate-100 shadow-sm">
           <tr className="border-b-2 border-slate-300">
             <th className={`${TH} w-10 text-right`}>#</th>
             <th className={`${TH} w-28`}>วันที่</th>
             <th className={`${TH} w-36`}>ตลาด</th>
             <th className={`${TH} w-32`}>คนขาย</th>
-            <th className={`${TH} min-w-[160px]`}>รายการ</th>
+            <th className={`${TH} min-w-40`}>รายการ</th>
             <th className={`${TH} w-20 text-right`}>จำนวน</th>
             <th className={`${TH} w-16`}>หน่วย</th>
             <th className={`${TH} w-24 text-right`}>ราคา/หน่วย</th>
@@ -65,7 +65,7 @@ export function DailyTable({ rows }: { rows: DailyRow[] }) {
             <th className={`${TH} w-24 text-right text-slate-400`}>เงินสด</th>
             <th className={`${TH} w-28 text-right text-slate-400`}>ค่าใช้จ่าย</th>
             <th className={`${TH} w-24 text-right text-slate-400`}>คงเหลือ</th>
-            <th className={`${TH} min-w-[120px] text-slate-400`}>หมายเหตุ</th>
+            <th className={`${TH} min-w-30 text-slate-400`}>หมายเหตุ</th>
           </tr>
         </thead>
         <tbody>

@@ -1,46 +1,68 @@
+import { createClient as createSupabaseClient } from "@supabase/supabase-js";
+import { unstable_cache } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
+import { timed } from "@/lib/supabase/timing";
 import { DashboardTopBar } from "@/components/dashboard/DashboardTopBar";
 import { StatCard } from "@/components/dashboard/StatCard";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/Card";
 import { MessageTable } from "@/components/messages/MessageTable";
 import { SessionsTable } from "@/components/weigh-entries/SessionsTable";
 import type { RawMessage, ProduceSession } from "@/types";
+import type { Database } from "@/types/database";
 
-async function getDashboardStats() {
+// Aggregate counts cached for 60 s — anon client (no cookies) because
+// unstable_cache runs outside the request context; RLS allows anon reads.
+const getCachedCounts = unstable_cache(
+  async () => {
+    const db = createSupabaseClient<Database>(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    );
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const [totalRes, processedRes, unprocessedRes, sessionsRes, errorsRes, todayRes] =
+      await Promise.all([
+        db.from("raw_messages").select("id", { count: "exact", head: true }),
+        db.from("raw_messages").select("id", { count: "exact", head: true }).eq("is_processed", true),
+        db.from("raw_messages").select("id", { count: "exact", head: true }).eq("is_processed", false),
+        db.from("produce_sessions").select("id", { count: "exact", head: true }),
+        db.from("parse_errors").select("id", { count: "exact", head: true }),
+        db.from("raw_messages").select("id", { count: "exact", head: true }).gte("created_at", today.toISOString()),
+      ]);
+
+    return {
+      total:       totalRes.count       ?? 0,
+      processed:   processedRes.count   ?? 0,
+      unprocessed: unprocessedRes.count ?? 0,
+      sessions:    sessionsRes.count    ?? 0,
+      errors:      errorsRes.count      ?? 0,
+      today:       todayRes.count       ?? 0,
+    };
+  },
+  ["overview-counts"],
+  { revalidate: 60 },
+);
+
+async function getRecentData() {
   const supabase = await createClient();
-
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  const [
-    totalRes, processedRes, unprocessedRes,
-    sessionsRes, errorsRes, todayRes,
-    recentMsgsRes, recentSessionsRes,
-  ] = await Promise.all([
-    supabase.from("raw_messages").select("id", { count: "exact", head: true }),
-    supabase.from("raw_messages").select("id", { count: "exact", head: true }).eq("is_processed", true),
-    supabase.from("raw_messages").select("id", { count: "exact", head: true }).eq("is_processed", false),
-    supabase.from("produce_sessions").select("id", { count: "exact", head: true }),
-    supabase.from("parse_errors").select("id", { count: "exact", head: true }),
-    supabase.from("raw_messages").select("id", { count: "exact", head: true }).gte("created_at", today.toISOString()),
-    supabase.from("raw_messages").select("*").order("created_at", { ascending: false }).limit(10),
-    supabase.from("produce_sessions").select("*").order("created_at", { ascending: false }).limit(5),
-  ]);
-
+  const [recentMsgsRes, recentSessionsRes] = await timed("overview:recent", () => Promise.all([
+    supabase.from("raw_messages")
+      .select("id,event_type,message_type,raw_text,is_processed,source_type,created_at")
+      .order("created_at", { ascending: false }).limit(10),
+    supabase.from("produce_sessions")
+      .select("id,session_date,staff_name,session_title,total_items,parser_errors,created_at")
+      .order("created_at", { ascending: false }).limit(5),
+  ]));
   return {
-    total:           totalRes.count      ?? 0,
-    processed:       processedRes.count  ?? 0,
-    unprocessed:     unprocessedRes.count ?? 0,
-    sessions:        sessionsRes.count   ?? 0,
-    errors:          errorsRes.count     ?? 0,
-    today:           todayRes.count      ?? 0,
-    recentMessages:  (recentMsgsRes.data     ?? []) as RawMessage[],
-    recentSessions:  (recentSessionsRes.data ?? []) as ProduceSession[],
+    recentMessages: (recentMsgsRes.data ?? []) as RawMessage[],
+    recentSessions: (recentSessionsRes.data ?? []) as ProduceSession[],
   };
 }
 
 export default async function OverviewPage() {
-  const s = await getDashboardStats();
+  const [counts, recent] = await Promise.all([getCachedCounts(), getRecentData()]);
+  const s = { ...counts, ...recent };
 
   return (
     <>

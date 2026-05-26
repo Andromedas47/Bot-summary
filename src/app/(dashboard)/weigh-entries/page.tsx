@@ -1,5 +1,6 @@
 import { Suspense } from "react";
 import { createClient } from "@/lib/supabase/server";
+import { timed } from "@/lib/supabase/timing";
 import { DashboardTopBar } from "@/components/dashboard/DashboardTopBar";
 import { StatCard } from "@/components/dashboard/StatCard";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/Card";
@@ -55,7 +56,7 @@ async function getSessions(
 
   let query = supabase
     .from("produce_sessions")
-    .select("*", { count: "exact" })
+    .select("id,session_date,staff_name,session_title,total_items,parser_errors,created_at", { count: "exact" })
     .order("created_at", { ascending: false })
     .range(from, to);
 
@@ -80,10 +81,10 @@ export default async function WeighEntriesPage({ searchParams }: PageProps) {
   const errors = params.errors;
 
   const supabase = await createClient();
-  const [stats, { sessions, total, totalPages }] = await Promise.all([
+  const [stats, { sessions, total, totalPages }] = await timed("weigh-entries:all", () => Promise.all([
     getStats(supabase),
     getSessions(supabase, page, q, errors),
-  ]);
+  ]));
 
   return (
     <>

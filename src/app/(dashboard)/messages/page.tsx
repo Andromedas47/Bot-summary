@@ -1,5 +1,6 @@
 import { Suspense } from "react";
 import { createClient } from "@/lib/supabase/server";
+import { timed } from "@/lib/supabase/timing";
 import { DashboardTopBar } from "@/components/dashboard/DashboardTopBar";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/Card";
 import { Pagination } from "@/components/ui/Pagination";
@@ -51,7 +52,7 @@ async function getMessages(
 
   let query = supabase
     .from("raw_messages")
-    .select("*", { count: "exact" })
+    .select("id,event_type,message_type,raw_text,is_processed,source_type,created_at", { count: "exact" })
     .order("created_at", { ascending: false })
     .range(from, to);
 
@@ -77,7 +78,7 @@ export default async function MessagesPage({ searchParams }: PageProps) {
   const type      = params.type;
   const processed = params.processed;
 
-  const { messages, total, totalPages } = await getMessages(page, q, type, processed);
+  const { messages, total, totalPages } = await timed("messages:list", () => getMessages(page, q, type, processed));
 
   return (
     <>

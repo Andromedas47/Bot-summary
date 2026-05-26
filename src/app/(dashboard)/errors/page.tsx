@@ -1,5 +1,6 @@
 import { Suspense } from "react";
 import { createClient } from "@/lib/supabase/server";
+import { timed } from "@/lib/supabase/timing";
 import { DashboardTopBar } from "@/components/dashboard/DashboardTopBar";
 import { StatCard } from "@/components/dashboard/StatCard";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/Card";
@@ -73,7 +74,7 @@ async function getErrors(
 
   let query = supabase
     .from("parse_errors")
-    .select("*", { count: "exact" })
+    .select("id,created_at,parser_name,parser_version,error_type,error_message", { count: "exact" })
     .order("created_at", { ascending: false })
     .range(from, to);
 
@@ -99,10 +100,10 @@ export default async function ErrorsPage({ searchParams }: PageProps) {
   const parser = params.parser;
 
   const supabase = await createClient();
-  const [stats, { errors, total, totalPages }] = await Promise.all([
+  const [stats, { errors, total, totalPages }] = await timed("errors:all", () => Promise.all([
     getStats(supabase),
     getErrors(supabase, page, q, type, parser),
-  ]);
+  ]));
 
   return (
     <>

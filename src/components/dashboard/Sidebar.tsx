@@ -4,14 +4,14 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 interface NavItem {
-  href: string;
+  href:  string;
   label: string;
-  icon: React.ReactNode;
+  icon:  React.ReactNode;
 }
 
-const navItems: NavItem[] = [
+const operationalItems: NavItem[] = [
   {
-    href: "/",
+    href:  "/",
     label: "ตารางรายวัน",
     icon: (
       <svg className="size-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
@@ -20,8 +20,20 @@ const navItems: NavItem[] = [
     ),
   },
   {
-    href: "/messages",
-    label: "LINE Messages",
+    href:  "/financial-summary",
+    label: "สรุปการเงิน",
+    icon: (
+      <svg className="size-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z" />
+      </svg>
+    ),
+  },
+];
+
+const adminItems: NavItem[] = [
+  {
+    href:  "/admin/messages",
+    label: "ข้อความดิบ LINE",
     icon: (
       <svg className="size-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" d="M8.625 12a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H8.25m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H12m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 0 1-2.555-.337A5.972 5.972 0 0 1 5.41 20.97a5.969 5.969 0 0 1-.474-.065 4.48 4.48 0 0 0 .978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25Z" />
@@ -29,17 +41,17 @@ const navItems: NavItem[] = [
     ),
   },
   {
-    href: "/weigh-entries",
-    label: "รายการชั่ง",
+    href:  "/admin/weigh-entries",
+    label: "Session แยกวิเคราะห์",
     icon: (
       <svg className="size-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v17.25m0 0c-1.472 0-2.882.265-4.185.75M12 20.25c1.472 0 2.882.265 4.185.75M18.75 4.97A48.416 48.416 0 0 0 12 4.5c-2.291 0-4.545.16-6.75.47m13.5 0c1.01.143 2.01.317 3 .52m-3-.52 2.62 10.726c.122.499-.106 1.028-.589 1.202a5.988 5.988 0 0 1-2.031.352 5.988 5.988 0 0 1-2.031-.352c-.483-.174-.711-.703-.59-1.202L18.75 4.971Zm-16.5.52c.99-.203 1.99-.377 3-.52m0 0 2.62 10.726c.122.499-.106 1.028-.589 1.202a5.989 5.989 0 0 1-2.031.352 5.989 5.989 0 0 1-2.031-.352c-.483-.174-.711-.703-.59-1.202L5.25 4.971Z" />
+        <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
       </svg>
     ),
   },
   {
-    href: "/errors",
-    label: "รายการผิดพลาด",
+    href:  "/admin/errors",
+    label: "บันทึกข้อผิดพลาด",
     icon: (
       <svg className="size-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
@@ -50,6 +62,46 @@ const navItems: NavItem[] = [
 
 interface SidebarProps {
   onClose?: () => void;
+}
+
+function NavSection({
+  title,
+  items,
+  pathname,
+  onClose,
+}: {
+  title: string;
+  items: NavItem[];
+  pathname: string;
+  onClose?: () => void;
+}) {
+  return (
+    <div>
+      <p className="px-3 mb-1 text-xs font-semibold uppercase tracking-wider text-slate-500">
+        {title}
+      </p>
+      <div className="space-y-0.5">
+        {items.map((item) => {
+          const isActive = pathname === item.href;
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              onClick={onClose}
+              className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
+                isActive
+                  ? "bg-[#06C755] text-white"
+                  : "text-slate-400 hover:bg-slate-800 hover:text-white"
+              }`}
+            >
+              {item.icon}
+              {item.label}
+            </Link>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 export function Sidebar({ onClose }: SidebarProps) {
@@ -68,25 +120,20 @@ export function Sidebar({ onClose }: SidebarProps) {
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 px-3 py-4 space-y-1">
-        {navItems.map((item) => {
-          const isActive = pathname === item.href;
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              onClick={onClose}
-              className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
-                isActive
-                  ? "bg-[#06C755] text-white"
-                  : "text-slate-400 hover:bg-slate-800 hover:text-white"
-              }`}
-            >
-              {item.icon}
-              {item.label}
-            </Link>
-          );
-        })}
+      <nav className="flex-1 px-3 py-4 space-y-5 overflow-y-auto">
+        <NavSection
+          title="ปฏิบัติการ"
+          items={operationalItems}
+          pathname={pathname}
+          onClose={onClose}
+        />
+        <div className="border-t border-slate-800" />
+        <NavSection
+          title="ผู้ดูแลระบบ"
+          items={adminItems}
+          pathname={pathname}
+          onClose={onClose}
+        />
       </nav>
 
       {/* Footer */}

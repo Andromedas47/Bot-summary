@@ -30,19 +30,24 @@ const btnBase =
 const btnActive = "border-slate-300 text-slate-700 hover:bg-slate-50";
 const btnDisabled = "border-slate-200 text-slate-300 cursor-not-allowed";
 
-export function Pagination({ page, totalPages, basePath, params = {} }: PaginationProps) {
-  if (totalPages <= 1) return null;
-
-  const ChevronLeft = () => (
+function ChevronLeft() {
+  return (
     <svg className="size-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" />
     </svg>
   );
-  const ChevronRight = () => (
+}
+
+function ChevronRight() {
+  return (
     <svg className="size-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
     </svg>
   );
+}
+
+export function Pagination({ page, totalPages, basePath, params = {} }: PaginationProps) {
+  if (totalPages <= 1) return null;
 
   return (
     <div className="flex items-center justify-center gap-1 py-3">

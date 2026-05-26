@@ -13,34 +13,37 @@ import type { DailyRow } from "@/components/daily-table/DailyTable";
 const PAGE_SIZE = 100;
 
 interface PageProps {
-  searchParams: Promise<{ page?: string; date?: string; market?: string; staff?: string }>;
+  searchParams: Promise<{
+    page?:    string;
+    date?:    string;
+    market?:  string;
+    staff?:   string;
+    product?: string;
+  }>;
 }
 
-async function getRows(
+async function getTransactions(
   supabase: Awaited<ReturnType<typeof createServiceClient>>,
-  page: number,
-  date?: string,
-  market?: string,
-  staff?: string,
+  page:     number,
+  date?:    string,
+  market?:  string,
+  staff?:   string,
+  product?: string,
 ) {
   const from = (page - 1) * PAGE_SIZE;
   const to   = from + PAGE_SIZE - 1;
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let query: any = supabase
-    .from("produce_items")
-    .select(
-      "id,item_number,product_name,price_per_unit,quantity,unit,section,created_at," +
-      "produce_sessions!inner(session_date,session_title,staff_name)",
-      { count: "exact" },
-    )
-    .order("created_at", { ascending: false })
-    .order("item_number", { ascending: true, nullsFirst: false })
+  let query = supabase
+    .from("produce_transactions")
+    .select("*", { count: "exact" })
+    .order("session_created_at", { ascending: false })
+    .order("item_number",        { ascending: true,  nullsFirst: false })
     .range(from, to);
 
-  if (date)   query = query.eq("produce_sessions.session_date", date);
-  if (market) query = query.ilike("produce_sessions.session_title", `%${market}%`);
-  if (staff)  query = query.ilike("produce_sessions.staff_name", `%${staff}%`);
+  if (date)    query = query.eq("transaction_date", date);
+  if (market)  query = query.ilike("market_name",   `%${market}%`);
+  if (staff)   query = query.ilike("staff_name",    `%${staff}%`);
+  if (product) query = query.ilike("product_name",  `%${product}%`);
 
   const { data, count, error } = await query;
   if (error) throw new Error(error.message);
@@ -53,21 +56,23 @@ async function getRows(
 }
 
 export default async function HomePage({ searchParams }: PageProps) {
-  const params = await searchParams;
-  const page   = Math.max(1, parseInt(params.page ?? "1", 10));
-  const date   = params.date;
-  const market = params.market;
-  const staff  = params.staff;
+  const params  = await searchParams;
+  const page    = Math.max(1, parseInt(params.page ?? "1", 10));
+  const date    = params.date;
+  const market  = params.market;
+  const staff   = params.staff;
+  const product = params.product;
 
   const supabase = await createServiceClient();
   const { rows, total, totalPages } = await timed("daily-table:list", () =>
-    getRows(supabase, page, date, market, staff),
+    getTransactions(supabase, page, date, market, staff, product),
   );
 
   const exportQuery = new URLSearchParams();
-  if (date)   exportQuery.set("date", date);
-  if (market) exportQuery.set("market", market);
-  if (staff)  exportQuery.set("staff", staff);
+  if (date)    exportQuery.set("date",    date);
+  if (market)  exportQuery.set("market",  market);
+  if (staff)   exportQuery.set("staff",   staff);
+  if (product) exportQuery.set("product", product);
   const exportPath = `/api/export/daily-table${exportQuery.size > 0 ? `?${exportQuery}` : ""}`;
 
   return (
@@ -82,9 +87,10 @@ export default async function HomePage({ searchParams }: PageProps) {
                 <CardTitle>ตารางรายการสินค้า</CardTitle>
                 <p className="text-sm text-slate-500 mt-0.5">
                   {total.toLocaleString()} รายการ
-                  {date   ? ` · วันที่ ${date}`           : ""}
-                  {market ? ` · ตลาด "${market}"`         : ""}
-                  {staff  ? ` · เจ้าหน้าที่ "${staff}"`  : ""}
+                  {date    ? ` · วันที่ ${date}`           : ""}
+                  {market  ? ` · ตลาด "${market}"`         : ""}
+                  {staff   ? ` · เจ้าหน้าที่ "${staff}"`  : ""}
+                  {product ? ` · สินค้า "${product}"`      : ""}
                 </p>
               </div>
 
@@ -101,6 +107,11 @@ export default async function HomePage({ searchParams }: PageProps) {
                     paramName="staff"
                     defaultValue={staff ?? ""}
                   />
+                  <SearchInput
+                    placeholder="ค้นหาสินค้า…"
+                    paramName="product"
+                    defaultValue={product ?? ""}
+                  />
                   <ExportButton exportPath={exportPath} />
                 </div>
               </Suspense>
@@ -113,7 +124,7 @@ export default async function HomePage({ searchParams }: PageProps) {
               page={page}
               totalPages={totalPages}
               basePath="/"
-              params={{ date, market, staff }}
+              params={{ date, market, staff, product }}
             />
           </CardContent>
         </Card>

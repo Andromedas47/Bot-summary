@@ -1,0 +1,13 @@
+--- CONNECTIVITY PRE-CHECKS ----------------------------------------------------
+COMPONENT         TARGET                     STATUS  DETAILS
+DNS Resolution    region1.v2.argotunnel.com  PASS    DNS Resolved successfully
+DNS Resolution    region2.v2.argotunnel.com  PASS    DNS Resolved successfully
+UDP Connectivity  region1.v2.argotunnel.com  PASS    QUIC connection successful
+UDP Connectivity  region2.v2.argotunnel.com  PASS    QUIC connection successful
+TCP Connectivity  region1.v2.argotunnel.com  PASS    HTTP/2 connection successful
+TCP Connectivity  region2.v2.argotunnel.com  PASS    HTTP/2 connection successful
+Cloudflare API    api.cloudflare.com:443     PASS    API is reachable
+
+SUMMARY: Environment is healthy. cloudflared will use 'quic' as primary protocol.
+--------------------------------------------------------------------------------
+

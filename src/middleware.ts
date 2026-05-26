@@ -38,6 +38,11 @@ export async function middleware(req: NextRequest) {
     return res;
   }
 
+  // Local parser test endpoint is disabled in production by its route handler.
+  if (process.env.NODE_ENV !== "production" && pathname === "/api/test-parser") {
+    return res;
+  }
+
   // All other routes require a session
   if (!user) {
     const loginUrl = new URL("/login", req.url);

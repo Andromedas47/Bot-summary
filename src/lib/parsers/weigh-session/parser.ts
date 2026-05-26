@@ -44,13 +44,21 @@ export function parseWeighSession(text: string): WeighSession {
       }
     }
 
+    if (!date && prefixMatch) {
+      const m = content.match(RE.DATE_IN_TEXT);
+      if (m) {
+        date = parseBuddhistDate(m[1], m[2], m[3]);
+      }
+    }
+
     // ── Session end ────────────────────────────────────────────────────────
     if (RE.SESSION_END.test(content)) {
       if (pendingItem?.product_name) {
         items.push(finalize(pendingItem, currentSection));
         pendingItem = null;
       }
-      break;
+      currentSection = "main";
+      continue;
     }
 
     // ── Header state: wait for session title ───────────────────────────────

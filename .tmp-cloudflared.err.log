@@ -1,0 +1,69 @@
+2026-05-26T08:51:34Z INF Thank you for trying Cloudflare Tunnel. Doing so, without a Cloudflare account, is a quick way to experiment and try it out. However, be aware that these account-less Tunnels have no uptime guarantee, are subject to the Cloudflare Online Services Terms of Use (https://www.cloudflare.com/website-terms/), and Cloudflare reserves the right to investigate your use of Tunnels for violations of such terms. If you intend to use Tunnels in production you should use a pre-created named tunnel by following: https://developers.cloudflare.com/cloudflare-one/connections/connect-apps
+2026-05-26T08:51:34Z INF Requesting new quick Tunnel on trycloudflare.com...
+2026-05-26T08:51:40Z INF +--------------------------------------------------------------------------------------------+
+2026-05-26T08:51:40Z INF |  Your quick Tunnel has been created! Visit it at (it may take some time to be reachable):  |
+2026-05-26T08:51:40Z INF |  https://precipitation-naval-book-wesley.trycloudflare.com                                 |
+2026-05-26T08:51:40Z INF +--------------------------------------------------------------------------------------------+
+2026-05-26T08:51:40Z INF Cannot determine default configuration path. No file [config.yml config.yaml] in [~/.cloudflared ~/.cloudflare-warp ~/cloudflare-warp]
+2026-05-26T08:51:40Z INF Version 2026.5.1 (Checksum 8b97b5af442651e07c52caa9c79c6f60032bc10b675c2b36dd11c7690d9942e3)
+2026-05-26T08:51:40Z INF GOOS: windows, GOVersion: go1.26.3, GoArch: amd64
+2026-05-26T08:51:40Z INF Settings: map[ha-connections:1 protocol:quic url:http://localhost:3000]
+2026-05-26T08:51:40Z INF cloudflared will not automatically update on Windows systems.
+2026-05-26T08:51:40Z INF Generated Connector ID: 16e47a04-024b-4a77-9eef-01990be7a230
+2026-05-26T08:51:40Z INF Initial protocol quic
+2026-05-26T08:51:40Z INF ICMP proxy will use 192.168.1.145 as source for IPv4
+2026-05-26T08:51:40Z INF ICMP proxy will use 2405:9800:bca1:492b:a2a7:c92f:8c01:8731 in zone Wi-Fi as source for IPv6
+2026-05-26T08:51:40Z INF cloudflared does not support loading the system root certificate pool on Windows. Please use --origin-ca-pool <PATH> to specify the path to the certificate pool
+2026-05-26T08:51:40Z INF ICMP proxy will use 192.168.1.145 as source for IPv4
+2026-05-26T08:51:40Z INF Tunnel connection curve preferences: [X25519MLKEM768 CurveID(65074) CurveP256] connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T08:51:40Z INF ICMP proxy will use 2405:9800:bca1:492b:a2a7:c92f:8c01:8731 in zone Wi-Fi as source for IPv6
+2026-05-26T08:51:40Z INF Starting metrics server on 127.0.0.1:20241/metrics
+2026-05-26T08:51:40Z INF precheck component="DNS Resolution" details="DNS Resolved successfully" run_id=ead6361b-71db-48ce-aae9-ece92643526b status=pass target=region1.v2.argotunnel.com
+2026-05-26T08:51:40Z INF precheck component="DNS Resolution" details="DNS Resolved successfully" run_id=ead6361b-71db-48ce-aae9-ece92643526b status=pass target=region2.v2.argotunnel.com
+2026-05-26T08:51:40Z INF precheck component="UDP Connectivity" details="QUIC connection successful" run_id=ead6361b-71db-48ce-aae9-ece92643526b status=pass target=region1.v2.argotunnel.com
+2026-05-26T08:51:40Z INF precheck component="UDP Connectivity" details="QUIC connection successful" run_id=ead6361b-71db-48ce-aae9-ece92643526b status=pass target=region2.v2.argotunnel.com
+2026-05-26T08:51:40Z INF precheck component="TCP Connectivity" details="HTTP/2 connection successful" run_id=ead6361b-71db-48ce-aae9-ece92643526b status=pass target=region1.v2.argotunnel.com
+2026-05-26T08:51:40Z INF precheck component="TCP Connectivity" details="HTTP/2 connection successful" run_id=ead6361b-71db-48ce-aae9-ece92643526b status=pass target=region2.v2.argotunnel.com
+2026-05-26T08:51:40Z INF precheck component="Cloudflare API" details="API is reachable" run_id=ead6361b-71db-48ce-aae9-ece92643526b status=pass target=api.cloudflare.com:443
+2026-05-26T08:51:40Z INF precheck complete hard_fail=false run_id=ead6361b-71db-48ce-aae9-ece92643526b suggested_protocol=quic
+2026-05-26T08:51:41Z INF Registered tunnel connection connIndex=0 connection=8cb50b8b-2c84-4380-a110-85bd510ed3f0 event=0 ip=2606:4700:a8::1 location=sin02 protocol=quic
+2026-05-26T09:29:04Z ERR failed to accept incoming stream requests error="failed to accept QUIC stream: write udp [::]:65158->[2606:4700:a8::1]:7844: wsasendto: A socket operation was attempted to an unreachable network." connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T09:29:04Z ERR failed to run the datagram handler error="write udp [::]:65158->[2606:4700:a8::1]:7844: wsasendto: A socket operation was attempted to an unreachable network." connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T09:29:04Z ERR failed to serve tunnel connection error="accept stream listener encountered a failure while serving" connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T09:29:04Z ERR Serve tunnel error error="accept stream listener encountered a failure while serving" connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T09:29:04Z INF Retrying connection in up to 1s connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T09:29:06Z INF Tunnel connection curve preferences: [X25519MLKEM768 CurveID(65074) CurveP256] connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T09:29:06Z INF Registered tunnel connection connIndex=0 connection=0ec96376-63e3-4e39-b969-01e86419a5c5 event=0 ip=2606:4700:a8::1 location=sin12 protocol=quic
+2026-05-26T09:37:43Z ERR failed to accept incoming stream requests error="failed to accept QUIC stream: write udp [::]:65158->[2606:4700:a8::1]:7844: wsasendto: A socket operation was attempted to an unreachable network." connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T09:37:43Z ERR failed to run the datagram handler error="write udp [::]:65158->[2606:4700:a8::1]:7844: wsasendto: A socket operation was attempted to an unreachable network." connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T09:37:43Z ERR failed to serve tunnel connection error="accept stream listener encountered a failure while serving" connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T09:37:43Z ERR Serve tunnel error error="accept stream listener encountered a failure while serving" connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T09:37:43Z INF Retrying connection in up to 1s connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T09:37:44Z INF Tunnel connection curve preferences: [X25519MLKEM768 CurveID(65074) CurveP256] connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T09:37:45Z INF Registered tunnel connection connIndex=0 connection=ede04d49-ae19-4153-adbe-47ce8f7562f8 event=0 ip=2606:4700:a8::1 location=sin22 protocol=quic
+2026-05-26T09:50:42Z ERR failed to accept incoming stream requests error="failed to accept QUIC stream: write udp [::]:65158->[2606:4700:a8::1]:7844: wsasendto: A socket operation was attempted to an unreachable network." connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T09:50:42Z ERR failed to run the datagram handler error="write udp [::]:65158->[2606:4700:a8::1]:7844: wsasendto: A socket operation was attempted to an unreachable network." connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T09:50:42Z ERR failed to serve tunnel connection error="accept stream listener encountered a failure while serving" connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T09:50:42Z ERR Serve tunnel error error="accept stream listener encountered a failure while serving" connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T09:50:42Z INF Retrying connection in up to 1s connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T09:50:44Z INF Tunnel connection curve preferences: [X25519MLKEM768 CurveID(65074) CurveP256] connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T09:50:44Z INF Registered tunnel connection connIndex=0 connection=5c9457d8-571f-474d-852f-a612abff6c6e event=0 ip=2606:4700:a8::1 location=sin11 protocol=quic
+2026-05-26T11:47:48Z ERR failed to accept incoming stream requests error="failed to accept QUIC stream: write udp [::]:65158->[2606:4700:a8::1]:7844: wsasendto: A socket operation was attempted to an unreachable network." connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T11:47:48Z ERR failed to run the datagram handler error="write udp [::]:65158->[2606:4700:a8::1]:7844: wsasendto: A socket operation was attempted to an unreachable network." connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T11:47:48Z ERR failed to serve tunnel connection error="accept stream listener encountered a failure while serving" connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T11:47:48Z ERR Serve tunnel error error="accept stream listener encountered a failure while serving" connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T11:47:48Z INF Retrying connection in up to 1s connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T11:47:48Z INF Tunnel connection curve preferences: [X25519MLKEM768 CurveID(65074) CurveP256] connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T11:47:48Z ERR Failed to dial a quic connection error="failed to dial to edge with quic: write udp [::]:65158->[2606:4700:a8::1]:7844: wsasendto: A socket operation was attempted to an unreachable network." connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T11:47:48Z INF Retrying connection in up to 4s connIndex=0 event=0 ip=2606:4700:a8::1
+2026-05-26T11:47:52Z INF Tunnel connection curve preferences: [X25519MLKEM768 CurveID(65074) CurveP256] connIndex=0 event=0 ip=198.41.200.193
+2026-05-26T11:47:53Z INF Registered tunnel connection connIndex=0 connection=e6c74e8f-f572-4bd9-a6ca-40bfd40d7183 event=0 ip=198.41.200.193 location=sin22 protocol=quic
+2026-05-26T11:48:47Z INF Initiating graceful shutdown due to signal terminated ...
+2026-05-26T11:48:47Z ERR failed to run the datagram handler error="Application error 0x0 (remote)" connIndex=0 event=0 ip=198.41.200.193
+2026-05-26T11:48:47Z ERR failed to serve tunnel connection error="accept stream listener encountered a failure while serving" connIndex=0 event=0 ip=198.41.200.193
+2026-05-26T11:48:47Z ERR Serve tunnel error error="accept stream listener encountered a failure while serving" connIndex=0 event=0 ip=198.41.200.193
+2026-05-26T11:48:47Z INF Retrying connection in up to 1s connIndex=0 event=0 ip=198.41.200.193
+2026-05-26T11:48:47Z ERR Connection terminated connIndex=0
+2026-05-26T11:48:47Z ERR no more connections active and exiting
+2026-05-26T11:48:47Z INF Tunnel server stopped
+2026-05-26T11:48:47Z INF Metrics server stopped

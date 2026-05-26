@@ -32,9 +32,10 @@ export const RE = {
   //   "18/5/2568" → full Buddhist year  2568 → Gregorian 2025
   // Captures: [1]=day, [2]=month, [3]=year
   DATE_ONLY: /^(\d{1,2})[\/\-.](\d{1,2})[\/\-.]((?:25)?\d{2})\s*$/,
+  DATE_IN_TEXT: /(\d{1,2})[\/\-.](\d{1,2})[\/\-.]((?:25)?\d{2})/,
 
-  // Session title contains รายการชั่ง
-  SESSION_START: /รายการชั่ง/,
+  // Session title contains รายการชั่ง, or real-world short headers like "จิ๋วเบิก 25/5/2569"
+  SESSION_START: /รายการชั่ง|เบิก/,
 
   // All observed end markers start with จบรายการ
   SESSION_END: /^จบรายการ/,

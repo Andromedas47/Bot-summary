@@ -183,7 +183,31 @@ export interface Database {
         Relationships: [];
       };
     };
-    Views:          { [_ in never]: never };
+    Views: {
+      produce_transactions: {
+        Row: {
+          id:                 string;
+          item_number:        number | null;
+          product_name:       string;
+          price_per_unit:     number | null;
+          quantity:           number | null;
+          total_amount:       number | null;
+          unit:               string | null;
+          section:            string;
+          item_created_at:    string;
+          session_id:         string;
+          transaction_date:   string | null;
+          market_name:        string | null;
+          staff_name:         string;
+          session_created_at: string;
+          raw_message_id:     string;
+          source_message:     string | null;
+        };
+        Insert: never;
+        Update: never;
+        Relationships: [];
+      };
+    };
     Functions:      { [_ in never]: never };
     CompositeTypes: { [_ in never]: never };
     Enums: {

@@ -31,7 +31,7 @@ export function TopBar({ title, userEmail }: TopBarProps) {
         {/* Mobile menu toggle */}
         <button
           type="button"
-          className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 lg:hidden"
+          className="rounded-lg p-2.5 text-slate-500 hover:bg-slate-100 lg:hidden"
           onClick={() => setMobileOpen(true)}
           aria-label="Open sidebar"
         >
@@ -46,7 +46,7 @@ export function TopBar({ title, userEmail }: TopBarProps) {
           {/* Webhook status indicator */}
           <div className="hidden sm:flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700">
             <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
-            Webhook active
+            เชื่อมต่อแล้ว
           </div>
 
           {userEmail && (

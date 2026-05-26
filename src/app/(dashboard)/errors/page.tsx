@@ -19,20 +19,16 @@ const VALID_ERROR_TYPES = new Set<ParseErrorType>([
 ]);
 
 const ERROR_TYPE_OPTIONS = [
-  { value: "format_error",     label: "Format error" },
-  { value: "validation_error", label: "Validation error" },
-  { value: "unknown_format",   label: "Unknown format" },
-  { value: "parser_crash",     label: "Parser crash" },
-  { value: "timeout",          label: "Timeout" },
-  { value: "unsupported_type", label: "Unsupported type" },
-];
-
-const PARSER_OPTIONS = [
-  { value: "weigh-session", label: "weigh-session" },
+  { value: "format_error",     label: "รูปแบบไม่ถูกต้อง" },
+  { value: "validation_error", label: "ข้อมูลไม่ถูกต้อง" },
+  { value: "unknown_format",   label: "รูปแบบไม่รู้จัก" },
+  { value: "parser_crash",     label: "ระบบขัดข้อง" },
+  { value: "timeout",          label: "หมดเวลา" },
+  { value: "unsupported_type", label: "ประเภทไม่รองรับ" },
 ];
 
 interface PageProps {
-  searchParams: Promise<{ page?: string; q?: string; type?: string; parser?: string }>;
+  searchParams: Promise<{ page?: string; q?: string; type?: string }>;
 }
 
 async function getStats(supabase: Awaited<ReturnType<typeof createClient>>) {
@@ -97,25 +93,23 @@ export default async function ErrorsPage({ searchParams }: PageProps) {
   const page   = Math.max(1, parseInt(params.page ?? "1", 10));
   const q      = params.q;
   const type   = params.type;
-  const parser = params.parser;
 
   const supabase = await createClient();
   const [stats, { errors, total, totalPages }] = await timed("errors:all", () => Promise.all([
     getStats(supabase),
-    getErrors(supabase, page, q, type, parser),
+    getErrors(supabase, page, q, type),
   ]));
 
   return (
     <>
-      <DashboardTopBar title="Parse Errors" />
+      <DashboardTopBar title="รายการผิดพลาด" />
 
       <div className="p-4 sm:p-6 space-y-6">
-        {/* Stats */}
         <div className="grid gap-4 sm:grid-cols-3">
           <StatCard
-            title="Total Errors"
+            title="ข้อผิดพลาดทั้งหมด"
             value={stats.total.toLocaleString()}
-            description="All time"
+            description="ตั้งแต่เริ่มใช้งาน"
             accentColor="bg-red-100 text-red-600"
             icon={
               <svg className="size-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
@@ -124,9 +118,9 @@ export default async function ErrorsPage({ searchParams }: PageProps) {
             }
           />
           <StatCard
-            title="Errors Today"
+            title="ข้อผิดพลาดวันนี้"
             value={stats.today.toLocaleString()}
-            description="Since midnight"
+            description="นับตั้งแต่เที่ยงคืน"
             accentColor="bg-orange-100 text-orange-600"
             icon={
               <svg className="size-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
@@ -135,9 +129,9 @@ export default async function ErrorsPage({ searchParams }: PageProps) {
             }
           />
           <StatCard
-            title="Parser Crashes"
+            title="ข้อผิดพลาดร้ายแรง"
             value={stats.crashes.toLocaleString()}
-            description="Unhandled exceptions"
+            description="ปัญหาที่ไม่สามารถดำเนินการต่อได้"
             accentColor="bg-red-100 text-red-700"
             icon={
               <svg className="size-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
@@ -147,30 +141,24 @@ export default async function ErrorsPage({ searchParams }: PageProps) {
           />
         </div>
 
-        {/* Table card */}
         <Card>
           <CardHeader>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <CardTitle>Parse Errors</CardTitle>
+                <CardTitle>รายการข้อผิดพลาด</CardTitle>
                 <p className="text-sm text-slate-500 mt-0.5">
-                  {total.toLocaleString()} error{total !== 1 ? "s" : ""}
-                  {q ? ` matching "${q}"` : ""}
+                  {total.toLocaleString()} รายการ
+                  {q ? ` ที่ตรงกับ "${q}"` : ""}
                 </p>
               </div>
 
               <Suspense fallback={<div className="h-9 w-48 animate-pulse rounded-lg bg-slate-100" />}>
                 <div className="flex flex-wrap items-center gap-2">
-                  <SearchInput placeholder="Search errors…" defaultValue={q ?? ""} />
+                  <SearchInput placeholder="ค้นหาข้อผิดพลาด…" defaultValue={q ?? ""} />
                   <FilterSelect
-                    label="Type"
+                    label="ประเภท"
                     paramName="type"
                     options={ERROR_TYPE_OPTIONS}
-                  />
-                  <FilterSelect
-                    label="Parser"
-                    paramName="parser"
-                    options={PARSER_OPTIONS}
                   />
                   <ExportButton exportPath="/api/export/errors" />
                 </div>
@@ -184,7 +172,7 @@ export default async function ErrorsPage({ searchParams }: PageProps) {
               page={page}
               totalPages={totalPages}
               basePath="/errors"
-              params={{ q, type, parser }}
+              params={{ q, type }}
             />
           </CardContent>
         </Card>

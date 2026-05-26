@@ -14,8 +14,8 @@ import type { ProduceSession } from "@/types";
 const PAGE_SIZE = 50;
 
 const HAS_ERRORS_OPTIONS = [
-  { value: "yes", label: "With errors" },
-  { value: "no",  label: "No errors" },
+  { value: "yes", label: "มีข้อผิดพลาด" },
+  { value: "no",  label: "ไม่มีข้อผิดพลาด" },
 ];
 
 interface PageProps {
@@ -88,15 +88,14 @@ export default async function WeighEntriesPage({ searchParams }: PageProps) {
 
   return (
     <>
-      <DashboardTopBar title="Weigh Entries" />
+      <DashboardTopBar title="รายการชั่ง" />
 
       <div className="p-4 sm:p-6 space-y-6">
-        {/* Stats */}
         <div className="grid gap-4 sm:grid-cols-3">
           <StatCard
-            title="Total Sessions"
+            title="รายการชั่งทั้งหมด"
             value={stats.total.toLocaleString()}
-            description="All time"
+            description="ตั้งแต่เริ่มใช้งาน"
             accentColor="bg-emerald-100 text-emerald-600"
             icon={
               <svg className="size-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
@@ -105,9 +104,9 @@ export default async function WeighEntriesPage({ searchParams }: PageProps) {
             }
           />
           <StatCard
-            title="Sessions Today"
+            title="รายการชั่งวันนี้"
             value={stats.today.toLocaleString()}
-            description="Since midnight"
+            description="นับตั้งแต่เที่ยงคืน"
             accentColor="bg-blue-100 text-blue-600"
             icon={
               <svg className="size-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
@@ -116,9 +115,9 @@ export default async function WeighEntriesPage({ searchParams }: PageProps) {
             }
           />
           <StatCard
-            title="Sessions with Errors"
+            title="รายการที่มีปัญหา"
             value={stats.withErrors.toLocaleString()}
-            description="Partial parse failures"
+            description="ชั่งสำเร็จบางส่วน"
             accentColor="bg-amber-100 text-amber-600"
             icon={
               <svg className="size-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
@@ -128,23 +127,22 @@ export default async function WeighEntriesPage({ searchParams }: PageProps) {
           />
         </div>
 
-        {/* Table card */}
         <Card>
           <CardHeader>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <CardTitle>Produce Sessions</CardTitle>
+                <CardTitle>รายการชั่งทั้งหมด</CardTitle>
                 <p className="text-sm text-slate-500 mt-0.5">
-                  {total.toLocaleString()} session{total !== 1 ? "s" : ""}
-                  {q ? ` matching "${q}"` : ""}
+                  {total.toLocaleString()} รายการ
+                  {q ? ` ที่ตรงกับ "${q}"` : ""}
                 </p>
               </div>
 
               <Suspense fallback={<div className="h-9 w-48 animate-pulse rounded-lg bg-slate-100" />}>
                 <div className="flex flex-wrap items-center gap-2">
-                  <SearchInput placeholder="Search staff…" defaultValue={q ?? ""} />
+                  <SearchInput placeholder="ค้นหาเจ้าหน้าที่…" defaultValue={q ?? ""} />
                   <FilterSelect
-                    label="Errors"
+                    label="สถานะ"
                     paramName="errors"
                     options={HAS_ERRORS_OPTIONS}
                   />

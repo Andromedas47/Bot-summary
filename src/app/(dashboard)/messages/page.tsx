@@ -19,18 +19,9 @@ const VALID_EVENT_TYPES = new Set<LineEventType>([
   "accountLink", "unsend", "videoPlayComplete",
 ]);
 
-const EVENT_TYPE_OPTIONS = [
-  { value: "message",  label: "message" },
-  { value: "follow",   label: "follow" },
-  { value: "unfollow", label: "unfollow" },
-  { value: "join",     label: "join" },
-  { value: "leave",    label: "leave" },
-  { value: "postback", label: "postback" },
-];
-
 const PROCESSED_OPTIONS = [
-  { value: "yes", label: "Processed" },
-  { value: "no",  label: "Pending" },
+  { value: "yes", label: "ประมวลแล้ว" },
+  { value: "no",  label: "รอดำเนินการ" },
 ];
 
 interface PageProps {
@@ -82,30 +73,25 @@ export default async function MessagesPage({ searchParams }: PageProps) {
 
   return (
     <>
-      <DashboardTopBar title="Messages" />
+      <DashboardTopBar title="LINE Messages" />
 
       <div className="p-4 sm:p-6 space-y-4">
         <Card>
           <CardHeader>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <CardTitle>All Messages</CardTitle>
+                <CardTitle>ข้อความทั้งหมด</CardTitle>
                 <p className="text-sm text-slate-500 mt-0.5">
-                  {total.toLocaleString()} message{total !== 1 ? "s" : ""}
-                  {q ? ` matching "${q}"` : ""}
+                  {total.toLocaleString()} ข้อความ
+                  {q ? ` ที่ตรงกับ "${q}"` : ""}
                 </p>
               </div>
 
               <Suspense fallback={<div className="h-9 w-48 animate-pulse rounded-lg bg-slate-100" />}>
                 <div className="flex flex-wrap items-center gap-2">
-                  <SearchInput placeholder="Search text…" defaultValue={q ?? ""} />
+                  <SearchInput placeholder="ค้นหาข้อความ…" defaultValue={q ?? ""} />
                   <FilterSelect
-                    label="Event"
-                    paramName="type"
-                    options={EVENT_TYPE_OPTIONS}
-                  />
-                  <FilterSelect
-                    label="Status"
+                    label="สถานะ"
                     paramName="processed"
                     options={PROCESSED_OPTIONS}
                   />

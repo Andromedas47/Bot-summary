@@ -5,9 +5,10 @@ import { useSearchParams } from "next/navigation";
 interface ExportButtonProps {
   exportPath: string;
   label?: string;
+  downloadName?: string;
 }
 
-export function ExportButton({ exportPath, label = "Export CSV" }: ExportButtonProps) {
+export function ExportButton({ exportPath, label = "Export CSV", downloadName }: ExportButtonProps) {
   const searchParams = useSearchParams();
   const qs = searchParams.toString();
   const href = qs ? `${exportPath}?${qs}` : exportPath;
@@ -15,6 +16,7 @@ export function ExportButton({ exportPath, label = "Export CSV" }: ExportButtonP
   return (
     <a
       href={href}
+      download={downloadName}
       className="flex shrink-0 items-center gap-2 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 transition-colors"
     >
       <svg className="size-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">

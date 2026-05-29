@@ -110,7 +110,7 @@ export default async function HomePage({ searchParams }: PageProps) {
                     defaultValue={product ?? ""}
                     className="w-full sm:w-44"
                   />
-                  <ExportButton exportPath={exportPath} label="Export PDF" />
+                  <ExportButton exportPath={exportPath} label="Export PDF" downloadName="daily-table.pdf" />
                 </div>
               </Suspense>
             </div>

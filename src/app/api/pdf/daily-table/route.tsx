@@ -45,10 +45,17 @@ export async function GET(req: NextRequest) {
 
   const filterLabel = req.nextUrl.searchParams.toString() || "all";
 
-  registerFonts();
-  const buffer = await renderToBuffer(
-    <DailyTableDoc rows={rows} filterLabel={filterLabel} />,
-  );
+  let buffer: Buffer;
+  try {
+    registerFonts();
+    buffer = await renderToBuffer(
+      <DailyTableDoc rows={rows} filterLabel={filterLabel} />,
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "unknown pdf render error";
+    console.error("daily table pdf render failed", err);
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
 
   return new NextResponse(new Uint8Array(buffer), {
     headers: {

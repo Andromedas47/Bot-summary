@@ -137,8 +137,7 @@ export class WebhookService {
       if (hasSessionEnd(normalizedText)) {
         console.log("session end detected — finalizing accumulated session", sessionKey);
         log.info("session end detected — finalizing accumulated session", { sessionKey });
-        await pendingService.delete(sessionKey);
-        return this.finalizeAccumulated(
+        const result = await this.finalizeAccumulated(
           updated.accumulated_text,
           updated.latest_reply_token,
           updated.line_user_id,
@@ -147,6 +146,8 @@ export class WebhookService {
           event.type,
           log,
         );
+        await pendingService.delete(sessionKey);
+        return result;
       }
 
       log.debug("message appended to pending session — waiting for session end", { sessionKey });
@@ -217,7 +218,15 @@ export class WebhookService {
       if (isDuplicate) {
         log.info("duplicate session — skipping insert");
         if (replyToken) {
-          replyLineMessage(replyToken, "รายการนี้เคยบันทึกแล้ว").catch(() => {});
+          console.log("duplicate reply triggered");
+          try {
+            await replyLineMessage(replyToken, "รายการนี้เคยบันทึกแล้ว");
+            console.log("duplicate reply success");
+          } catch (replyErr) {
+            const replyMsg = replyErr instanceof Error ? replyErr.message : String(replyErr);
+            console.log("duplicate reply error:", replyMsg);
+            log.error("duplicate reply failed", { error: replyMsg });
+          }
         }
         return { eventId, eventType, status: "saved", parsed: false };
       }

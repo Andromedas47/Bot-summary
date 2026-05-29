@@ -8,6 +8,7 @@ import { replyLineMessage, buildWeighSessionSummary } from "@/lib/line/reply";
 import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
 import { RE } from "@/lib/parsers/weigh-session/regex";
 import { PendingSessionService } from "@/lib/line/pending-session-service";
+import { DailySummaryService } from "@/lib/line/daily-summary-service";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 
 type Supabase      = SupabaseClient<Database>;
@@ -224,6 +225,12 @@ export class WebhookService {
 
       log.info("accumulated session finalized", { items: parsed.items.length, staff: parsed.staff_name });
 
+      await new DailySummaryService(this.supabase).recalculate(
+        parsed.date ?? bangkokToday(),
+        parsed.staff_name,
+        parsed.session_title ?? null,
+      );
+
       log.info("pending session finalized", { items: parsed.items.length, staff: parsed.staff_name });
 
       if (replyToken) {
@@ -276,6 +283,15 @@ export class WebhookService {
       await result.persist(this.supabase, rawMessageId);
 
       log.info("parse succeeded", { parser: parser.name });
+
+      if (parser.name === "weigh-session" && result.data) {
+        const ws = result.data as unknown as WeighSession;
+        await new DailySummaryService(this.supabase).recalculate(
+          ws.date ?? bangkokToday(),
+          ws.staff_name,
+          ws.session_title ?? null,
+        );
+      }
 
       if (replyToken && result.data) {
         const summaryText = parser.name === "weigh-session"

@@ -191,6 +191,49 @@ export interface Database {
         };
         Relationships: [];
       };
+      daily_summaries: {
+        Row: {
+          id:                 string;
+          summary_date:       string;
+          staff_name:         string;
+          market_name:        string;
+          borrow_total:       number;
+          return_total:       number;
+          bad_return_total:   number;
+          net_sales:          number;
+          transaction_count:  number;
+          created_at:         string;
+          updated_at:         string;
+        };
+        Insert: {
+          id?:                string;
+          summary_date:       string;
+          staff_name?:        string;
+          market_name?:       string;
+          borrow_total?:      number;
+          return_total?:      number;
+          bad_return_total?:  number;
+          net_sales?:         number;
+          transaction_count?: number;
+          created_at?:        string;
+          updated_at?:        string;
+        };
+        Update: {
+          id?:                string;
+          summary_date?:      string;
+          staff_name?:        string;
+          market_name?:       string;
+          borrow_total?:      number;
+          return_total?:      number;
+          bad_return_total?:  number;
+          net_sales?:         number;
+          transaction_count?: number;
+          created_at?:        string;
+          updated_at?:        string;
+        };
+        Relationships: [];
+      };
+
       settlement_entries: {
         Row: {
           id:              string;
@@ -275,3 +318,4 @@ export type RawMessageRow      = Database["public"]["Tables"]["raw_messages"]["R
 export type ParseErrorRow      = Database["public"]["Tables"]["parse_errors"]["Row"];
 export type ProduceSessionRow  = Database["public"]["Tables"]["produce_sessions"]["Row"];
 export type ProduceItemRow     = Database["public"]["Tables"]["produce_items"]["Row"];
+export type DailySummaryRow    = Database["public"]["Tables"]["daily_summaries"]["Row"];

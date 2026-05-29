@@ -181,7 +181,6 @@ export default async function FinancialSummaryPage({ searchParams }: PageProps) 
         <FinancialTable
           groups={groups}
           initialSettlements={settlements}
-          month={month}
         />
 
       </div>

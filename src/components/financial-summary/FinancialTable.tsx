@@ -56,11 +56,9 @@ const INPUT_CLS =
 export function FinancialTable({
   groups,
   initialSettlements,
-  month,
 }: {
   groups:              GroupRow[];
   initialSettlements:  SettlementEntry[];
-  month:               string;
 }) {
   const [cells, setCells] = useState<Map<string, CellState>>(() => {
     const m = new Map<string, CellState>();

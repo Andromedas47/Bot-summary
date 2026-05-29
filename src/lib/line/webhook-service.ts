@@ -108,6 +108,7 @@ export class WebhookService {
       const updated = await pendingService.append(sessionKey, text, replyToken);
 
       if (hasSessionEnd(text)) {
+        console.log("session end detected — finalizing accumulated session", sessionKey);
         log.info("session end detected — finalizing accumulated session", { sessionKey });
         await pendingService.delete(sessionKey);
         return this.finalizeAccumulated(
@@ -127,13 +128,15 @@ export class WebhookService {
 
     // ── 5. No active pending session ──────────────────────────────────────────
     if (RE.SESSION_START.test(text)) {
-      if (hasItemLine(text)) {
-        // Complete single-message (backward compat) — parse directly
-        log.info("single-message session detected, parsing directly");
+      if (hasSessionEnd(text) || hasItemLine(text)) {
+        // Complete single-message: has SESSION_END or item lines → parse directly
+        console.log("single complete message detected — parsing directly");
+        log.info("single complete message detected (has SESSION_END or items), parsing directly");
         return this.runParser(msgEvent, rawMessageId, eventId, event.type, log);
       }
 
       // Header-only → start accumulating
+      console.log("session header detected — starting pending session", sessionKey);
       log.info("session header detected — starting pending session", { sessionKey });
       await pendingService.create(sessionKey, text, replyToken, lineUserId);
       return { eventId, eventType: event.type, status: "saved", parsed: false };
@@ -202,7 +205,10 @@ export class WebhookService {
 
       log.info("accumulated session finalized", { items: parsed.items.length, staff: parsed.staff_name });
 
+      log.info("pending session finalized", { items: parsed.items.length, staff: parsed.staff_name });
+
       if (replyToken) {
+        console.log("reply triggered for finalized session");
         const summary = buildWeighSessionSummary(parsed);
         replyLineMessage(replyToken, summary).catch((e) =>
           log.error("reply failed", { error: String(e) })

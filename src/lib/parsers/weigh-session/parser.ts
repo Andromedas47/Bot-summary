@@ -2,6 +2,7 @@ import { BaseParser, type ParseResult } from "@/lib/parsers/base";
 import type { LineMessageEvent, LineTextMessage } from "@/lib/line/types";
 import { getUserId } from "@/lib/line/verify";
 import { logger } from "@/lib/logger";
+import { computeItemHash } from "@/lib/line/session-dedup-service";
 import { RE } from "./regex";
 import type {
   WeighSession,
@@ -71,7 +72,7 @@ export function parseWeighSession(text: string, fallbackDate: string | null = nu
 
     // ── Header state: wait for session title ───────────────────────────────
     if (state === "header") {
-      if (!prefixMatch) continue;
+      // Accept both prefixed (LINE export) and bare (direct typed) header lines.
 
       // Try "พี่ดำ-วิหาร เบิก ..." format first
       const smMatch = content.match(RE.SELLER_MARKET);
@@ -94,17 +95,38 @@ export function parseWeighSession(text: string, fallbackDate: string | null = nu
 
     // ── Items state ────────────────────────────────────────────────────────
 
-    // Bare line (no prefix) → quantity/weight line
+    // Bare line (no prefix) — quantity, item, or tx-type marker
     if (!prefixMatch) {
-      const m = content.match(RE.QUANTITY);
-      if (m) {
+      const qm = content.match(RE.QUANTITY);
+      if (qm) {
         if (pendingItem?.product_name) {
-          pendingItem.quantity = parseFloat(m[1]);
-          pendingItem.unit     = m[2] as ProduceUnit;
+          pendingItem.quantity = parseFloat(qm[1]);
+          pendingItem.unit     = qm[2] as ProduceUnit;
           items.push(finalize(pendingItem, currentSection, currentTxType));
           pendingItem = null;
         } else {
           parseErrors.push(`quantity with no preceding item: "${line}"`);
+        }
+      } else {
+        const im = content.match(RE.ITEM);
+        if (im) {
+          // Item line sent without LINE export timestamp (direct typed message)
+          if (pendingItem?.product_name) items.push(finalize(pendingItem, currentSection, currentTxType));
+          pendingItem = {
+            item_number:    parseInt(im[1], 10),
+            product_name:   im[2].trim(),
+            price_per_unit: parseFloat(im[3]),
+            quantity:       null,
+            unit:           null,
+          };
+        } else if (content.length > 0) {
+          // Non-item bare line → section / transaction-type marker
+          if (pendingItem?.product_name) {
+            items.push(finalize(pendingItem, currentSection, currentTxType));
+            pendingItem = null;
+          }
+          currentSection = content;
+          currentTxType  = classifyTxType(content);
         }
       }
       continue;
@@ -272,6 +294,7 @@ export class WeighSessionParser extends BaseParser {
               unit:             item.unit        ?? undefined,
               section:          item.section,
               transaction_type: item.transaction_type,
+              item_hash:        computeItemHash(parsed, item),
             });
 
           if (itemErr) {

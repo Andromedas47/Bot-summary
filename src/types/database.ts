@@ -163,6 +163,7 @@ export interface Database {
           unit:             string | null;
           section:          string;
           transaction_type: string;
+          item_hash:        string | null;
           created_at:       string;
         };
         Insert: {
@@ -175,6 +176,7 @@ export interface Database {
           unit?:             string | null;
           section?:          string;
           transaction_type?: string;
+          item_hash?:        string | null;
           created_at?:       string;
         };
         Update: {
@@ -187,10 +189,36 @@ export interface Database {
           unit?:             string | null;
           section?:          string;
           transaction_type?: string;
+          item_hash?:        string | null;
           created_at?:       string;
         };
         Relationships: [];
       };
+      imported_sessions: {
+        Row: {
+          id:               string;
+          session_hash:     string;
+          transaction_date: string | null;
+          staff_name:       string;
+          market_name:      string;
+          transaction_type: string;
+          raw_text:         string | null;
+          created_at:       string;
+        };
+        Insert: {
+          id?:               string;
+          session_hash:      string;
+          transaction_date?: string | null;
+          staff_name?:       string;
+          market_name?:      string;
+          transaction_type?: string;
+          raw_text?:         string | null;
+          created_at?:       string;
+        };
+        Update: never;
+        Relationships: [];
+      };
+
       daily_summaries: {
         Row: {
           id:                 string;
@@ -286,6 +314,7 @@ export interface Database {
           unit:               string | null;
           section:            string;
           transaction_type:   string;
+          item_hash:          string | null;
           item_created_at:    string;
           session_id:         string;
           transaction_date:   string | null;
@@ -318,4 +347,5 @@ export type RawMessageRow      = Database["public"]["Tables"]["raw_messages"]["R
 export type ParseErrorRow      = Database["public"]["Tables"]["parse_errors"]["Row"];
 export type ProduceSessionRow  = Database["public"]["Tables"]["produce_sessions"]["Row"];
 export type ProduceItemRow     = Database["public"]["Tables"]["produce_items"]["Row"];
-export type DailySummaryRow    = Database["public"]["Tables"]["daily_summaries"]["Row"];
+export type DailySummaryRow      = Database["public"]["Tables"]["daily_summaries"]["Row"];
+export type ImportedSessionRow   = Database["public"]["Tables"]["imported_sessions"]["Row"];

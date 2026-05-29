@@ -9,6 +9,7 @@ import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
 import { RE } from "@/lib/parsers/weigh-session/regex";
 import { PendingSessionService } from "@/lib/line/pending-session-service";
 import { DailySummaryService } from "@/lib/line/daily-summary-service";
+import { SessionDedupService, computeItemHash } from "@/lib/line/session-dedup-service";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 
 type Supabase      = SupabaseClient<Database>;
@@ -183,6 +184,26 @@ export class WebhookService {
         log.warn("finalized with parse errors", { errors: parsed.parse_errors });
       }
 
+      // Fix 2: guard empty parse
+      if (parsed.items.length === 0) {
+        log.warn("parsed session has no items — aborting");
+        if (replyToken) {
+          replyLineMessage(replyToken, "อ่านรายการไม่สำเร็จ กรุณาตรวจสอบรูปแบบข้อความ").catch(() => {});
+        }
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      // Fix 3: dedup check
+      const dedup       = new SessionDedupService(this.supabase);
+      const isDuplicate = await dedup.checkAndRecord(parsed, accumulatedText);
+      if (isDuplicate) {
+        log.info("duplicate session — skipping insert");
+        if (replyToken) {
+          replyLineMessage(replyToken, "รายการนี้เคยบันทึกแล้ว").catch(() => {});
+        }
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
       // Persist session
       const { data: session, error: sessionErr } = await this.supabase
         .from("produce_sessions")
@@ -212,6 +233,7 @@ export class WebhookService {
           unit:             item.unit        ?? undefined,
           section:          item.section,
           transaction_type: item.transaction_type,
+          item_hash:        computeItemHash(parsed, item),
         });
         if (itemErr) {
           log.warn("failed to insert produce_item", { product: item.product_name, error: itemErr.message });
@@ -275,12 +297,39 @@ export class WebhookService {
     try {
       const result = await parser.parse(msgEvent);
 
+      // Fix 2 + 3: weigh-session specific guards before any DB writes
+      if (parser.name === "weigh-session" && result.data) {
+        const ws = result.data as unknown as WeighSession;
+
+        // Fix 2: empty items guard
+        if (ws.items.length === 0) {
+          log.warn("parsed session has no items — aborting");
+          if (replyToken) {
+            replyLineMessage(replyToken, "อ่านรายการไม่สำเร็จ กรุณาตรวจสอบรูปแบบข้อความ").catch(() => {});
+          }
+          return { eventId, eventType, status: "saved", parsed: false };
+        }
+
+        // Fix 3: dedup check
+        const rawText     = (msgEvent.message as import("@/lib/line/types").LineTextMessage).text;
+        const dedup       = new SessionDedupService(this.supabase);
+        const isDuplicate = await dedup.checkAndRecord(ws, rawText);
+        if (isDuplicate) {
+          log.info("duplicate session — skipping insert");
+          if (replyToken) {
+            replyLineMessage(replyToken, "รายการนี้เคยบันทึกแล้ว").catch(() => {});
+          }
+          return { eventId, eventType, status: "saved", parsed: false };
+        }
+      }
+
+      // Fix 4: persist first, then mark processed
+      await result.persist(this.supabase, rawMessageId);
+
       await this.supabase
         .from("raw_messages")
         .update({ is_processed: true })
         .eq("id", rawMessageId);
-
-      await result.persist(this.supabase, rawMessageId);
 
       log.info("parse succeeded", { parser: parser.name });
 

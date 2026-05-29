@@ -37,7 +37,7 @@ export const RE = {
 
   // Session title contains รายการชั่ง, เบิก, คืน, or คืนเสีย.
   // Also matches "พี่ดำ-วิหาร เบิก 26/5/2569" via the เบิก keyword.
-  SESSION_START: /รายการชั่ง|เบิก|คืนเสีย|คืน/,
+  SESSION_START: /รายการชั่ง|เบิก|คืนเสีย|คืน|(?:^|\s)เสีย\s+\d{1,2}\/\d{1,2}\/\d{4}/,
 
   // All observed end markers start with จบรายการ
   SESSION_END: /^จบรายการ/,

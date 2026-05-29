@@ -142,7 +142,12 @@ export class WebhookService {
       return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
 
-    log.debug("no parser matched text message — left unprocessed");
+    if (hasSessionEnd(text)) {
+      console.log("SESSION_END received but no pending session found — ignoring", sessionKey);
+      log.warn("SESSION_END received without active pending session", { sessionKey });
+    } else {
+      log.debug("no parser matched text message — left unprocessed");
+    }
     return { eventId, eventType: event.type, status: "saved", parsed: false };
   }
 

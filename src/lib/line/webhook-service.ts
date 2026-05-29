@@ -35,6 +35,16 @@ function hasItemLine(text: string): boolean {
   return text.split("\n").some((l) => RE.ITEM.test(l.trim()));
 }
 
+// Strip LINE export prefix "HH:MM sender " from each line so that
+// hasSessionEnd / SESSION_START / ITEM checks work on clean content.
+function normalizeLine(line: string): string {
+  return line.replace(/^\d{1,2}:\d{2}\s+\S+\s+/, "");
+}
+
+function normalizeText(text: string): string {
+  return text.split("\n").map(normalizeLine).join("\n");
+}
+
 // ── Service ───────────────────────────────────────────────────────────────────
 
 export class WebhookService {
@@ -79,13 +89,17 @@ export class WebhookService {
     }
 
     // ── 3. Test-message shortcut (before any parser) ──────────────────────────
-    const text       = (message as LineTextMessage).text;
-    const replyToken = msgEvent.replyToken;
-    const sessionKey = getSourceId(msgEvent.source);
-    const lineUserId = getUserId(msgEvent.source);
+    const text           = (message as LineTextMessage).text;
+    const normalizedText = normalizeText(text);
+    const replyToken     = msgEvent.replyToken;
+    const sessionKey     = getSourceId(msgEvent.source);
+    const lineUserId     = getUserId(msgEvent.source);
 
-    console.log("incoming text:", text);
+    console.log("incoming text (raw):", text);
+    console.log("incoming text (normalized):", normalizedText);
     console.log("replyToken exists:", !!replyToken);
+    console.log("hasSessionStart:", RE.SESSION_START.test(normalizedText));
+    console.log("hasSessionEnd:", hasSessionEnd(normalizedText));
 
     if (text.trim().toLowerCase() === "test") {
       console.log("test reply triggered");
@@ -104,10 +118,10 @@ export class WebhookService {
     }
 
     if (pending) {
-      // Append this message to the ongoing session
-      const updated = await pendingService.append(sessionKey, text, replyToken);
+      // Append normalized text so accumulated_text is clean for the parser
+      const updated = await pendingService.append(sessionKey, normalizedText, replyToken);
 
-      if (hasSessionEnd(text)) {
+      if (hasSessionEnd(normalizedText)) {
         console.log("session end detected — finalizing accumulated session", sessionKey);
         log.info("session end detected — finalizing accumulated session", { sessionKey });
         await pendingService.delete(sessionKey);
@@ -127,22 +141,22 @@ export class WebhookService {
     }
 
     // ── 5. No active pending session ──────────────────────────────────────────
-    if (RE.SESSION_START.test(text)) {
-      if (hasSessionEnd(text) || hasItemLine(text)) {
+    if (RE.SESSION_START.test(normalizedText)) {
+      if (hasSessionEnd(normalizedText) || hasItemLine(normalizedText)) {
         // Complete single-message: has SESSION_END or item lines → parse directly
         console.log("single complete message detected — parsing directly");
         log.info("single complete message detected (has SESSION_END or items), parsing directly");
         return this.runParser(msgEvent, rawMessageId, eventId, event.type, log);
       }
 
-      // Header-only → start accumulating
+      // Header-only → start accumulating (store normalized so parser gets clean text)
       console.log("session header detected — starting pending session", sessionKey);
       log.info("session header detected — starting pending session", { sessionKey });
-      await pendingService.create(sessionKey, text, replyToken, lineUserId);
+      await pendingService.create(sessionKey, normalizedText, replyToken, lineUserId);
       return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
 
-    if (hasSessionEnd(text)) {
+    if (hasSessionEnd(normalizedText)) {
       console.log("SESSION_END received but no pending session found — ignoring", sessionKey);
       log.warn("SESSION_END received without active pending session", { sessionKey });
     } else {

@@ -1,6 +1,7 @@
 import React from "react";
 import { Document, Page, Text, View, StyleSheet } from "@react-pdf/renderer";
 import type { GroupRow, SettlementEntry } from "@/components/financial-summary/FinancialTable";
+import { calculateSettlementTotals } from "@/lib/summary/transactions";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -37,8 +38,18 @@ function enrichGroups(groups: GroupRow[], settlements: SettlementEntry[]) {
   return groups.map((g) => {
     const k   = `${g.date}||${g.time ?? ""}||${g.seller}||${g.market}`;
     const s   = map.get(k) ?? { transfer: 0, cash: 0 };
-    const ยอดขาย = s.transfer + s.cash;
-    return { ...g, ยอดโอน: s.transfer, เงินสด: s.cash, ยอดขาย, ขาดเกิน: ยอดขาย - g.ยอดส่ง };
+    const settlement = calculateSettlementTotals({
+      ยอดส่ง: g.ยอดส่ง,
+      money_transfer: s.transfer,
+      money_cash: s.cash,
+    });
+    return {
+      ...g,
+      ยอดโอน: settlement.ยอดโอน,
+      เงินสด: settlement.เงินสด,
+      ยอดขาย: settlement.ยอดขาย,
+      ขาดเกิน: settlement.ขาดเกิน,
+    };
   });
 }
 

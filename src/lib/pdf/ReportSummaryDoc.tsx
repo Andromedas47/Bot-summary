@@ -1,6 +1,6 @@
 import React from "react";
 import { Document, Page, Text, View, StyleSheet } from "@react-pdf/renderer";
-import type { ReportRow, SettlementMap } from "@/components/report-summary/ReportSummary";
+import { buildReportGroups, type ReportRow, type SettlementMap } from "@/lib/summary/report";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -44,7 +44,7 @@ interface ReportGroup {
   ขาดเกิน:          number;
 }
 
-function buildGroups(rows: ReportRow[], settlements: SettlementMap): ReportGroup[] {
+export function buildGroups(rows: ReportRow[], settlements: SettlementMap): ReportGroup[] {
   const map = new Map<string, ReportGroup>();
 
   for (const r of rows) {
@@ -307,7 +307,7 @@ export interface ReportSummaryDocProps {
 }
 
 export function ReportSummaryDoc({ rows, settlements, filterLabel }: ReportSummaryDocProps) {
-  const groups  = buildGroups(rows, settlements);
+  const groups  = buildReportGroups(rows, settlements);
   const today   = new Date().toLocaleDateString("th-TH", { day: "numeric", month: "long", year: "numeric" });
 
   return (

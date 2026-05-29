@@ -12,7 +12,7 @@ import type {
 
 // ── Pure parse function (exported for unit tests) ─────────────────────────────
 
-export function parseWeighSession(text: string): WeighSession {
+export function parseWeighSession(text: string, fallbackDate: string | null = null): WeighSession {
   const lines = text
     .split("\n")
     .map((l) => l.trim())
@@ -141,7 +141,7 @@ export function parseWeighSession(text: string): WeighSession {
   }
 
   return {
-    date,
+    date:             date ?? fallbackDate,
     staff_name:       staffName ?? senderName ?? "",
     sender_name:      senderName,
     transaction_time: txTime,
@@ -188,6 +188,23 @@ function parseBuddhistDate(day: string, month: string, year: string): string {
   return `${gregorianYear}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
 }
 
+function bangkokDateFromTimestamp(timestamp: number | undefined): string | null {
+  if (timestamp == null || !Number.isFinite(timestamp)) return null;
+
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Bangkok",
+    year:     "numeric",
+    month:    "2-digit",
+    day:      "2-digit",
+  }).formatToParts(new Date(timestamp));
+
+  const year  = parts.find((p) => p.type === "year")?.value;
+  const month = parts.find((p) => p.type === "month")?.value;
+  const day   = parts.find((p) => p.type === "day")?.value;
+
+  return year && month && day ? `${year}-${month}-${day}` : null;
+}
+
 // ── Parser class ──────────────────────────────────────────────────────────────
 
 export class WeighSessionParser extends BaseParser {
@@ -203,7 +220,7 @@ export class WeighSessionParser extends BaseParser {
   async parse(event: LineMessageEvent): Promise<ParseResult> {
     const text   = (event.message as LineTextMessage).text;
     const userId = getUserId(event.source);
-    const parsed = parseWeighSession(text);
+    const parsed = parseWeighSession(text, bangkokDateFromTimestamp(event.timestamp));
 
     const log = logger.child({
       parser: this.name,

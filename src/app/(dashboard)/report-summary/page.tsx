@@ -5,7 +5,8 @@ import { DashboardTopBar } from "@/components/dashboard/DashboardTopBar";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/Card";
 import { DateInput } from "@/components/ui/DateInput";
 import { SearchInput } from "@/components/ui/SearchInput";
-import { ReportSummary, type ReportRow, type SettlementMap } from "@/components/report-summary/ReportSummary";
+import { ReportSummary } from "@/components/report-summary/ReportSummary";
+import type { ReportRow, SettlementMap } from "@/lib/summary/report";
 
 interface PageProps {
   searchParams: Promise<{

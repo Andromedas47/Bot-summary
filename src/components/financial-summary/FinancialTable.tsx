@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef } from "react";
+import { calculateSettlementTotals } from "@/lib/summary/transactions";
 
 export interface GroupRow {
   date:    string;
@@ -121,8 +122,13 @@ export function FinancialTable({
     grandโอน     += c.money_transfer;
     grandสด      += c.money_cash;
   }
-  const grandยอดขาย = grandโอน + grandสด;
-  const grandขาดเกิน = grandยอดขาย - grandยอดส่ง;
+  const grandSettlement = calculateSettlementTotals({
+    ยอดส่ง: grandยอดส่ง,
+    money_transfer: grandโอน,
+    money_cash: grandสด,
+  });
+  const grandยอดขาย = grandSettlement.ยอดขาย;
+  const grandขาดเกิน = grandSettlement.ขาดเกิน;
 
   return (
     <div className="space-y-5">
@@ -172,8 +178,13 @@ export function FinancialTable({
               groups.map((g, i) => {
                 const k       = gk(g.date, g.time, g.seller, g.market);
                 const c       = getCell(k);
-                const ยอดขาย  = c.money_transfer + c.money_cash;
-                const ขาดเกิน = ยอดขาย - g.ยอดส่ง;
+                const settlement = calculateSettlementTotals({
+                  ยอดส่ง: g.ยอดส่ง,
+                  money_transfer: c.money_transfer,
+                  money_cash: c.money_cash,
+                });
+                const ยอดขาย = settlement.ยอดขาย;
+                const ขาดเกิน = settlement.ขาดเกิน;
 
                 return (
                   <tr

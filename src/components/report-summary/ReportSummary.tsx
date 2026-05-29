@@ -2,42 +2,14 @@
 
 import { useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
+import {
+  buildReportGroups,
+  type ReportGroup,
+  type ReportRow,
+  type SettlementMap,
+} from "@/lib/summary/report";
 
-// ── Types ─────────────────────────────────────────────────────────────────────
-
-export interface ReportRow {
-  transaction_date:  string | null;
-  market_name:       string | null;
-  staff_name:        string;
-  product_name:      string;
-  quantity:          number | null;
-  unit:              string | null;
-  price_per_unit:    number | null;
-  total_amount:      number | null;
-  transaction_type:  string;
-  item_number:       number | null;
-}
-
-export type SettlementMap = Record<string, { ยอดโอน: number; ยอดขาย: number }>;
-
-interface ReportGroup {
-  date:              string;
-  market:            string;
-  seller:            string;
-  เบิก:              ReportRow[];
-  คืน:               ReportRow[];
-  คืนเสีย:           ReportRow[];
-  ยอดเบิก:           number;
-  ยอดคืน:            number;
-  ยอดคืนเสีย:        number;
-  ยอดส่ง:            number;
-  ยอดโอน:            number;
-  ยอดขาย:            number;
-  เงินสดต้องส่งเจ๊:  number;
-  ขาดเกิน:           number;
-}
-
-// ── Formatters ────────────────────────────────────────────────────────────────
+export type { ReportRow, SettlementMap };
 
 function fmtNum(n: number): string {
   const r = Math.round(n * 100) / 100;
@@ -55,75 +27,11 @@ function fmtDateThai(d: string): string {
     .format(new Date(d + "T00:00:00"));
 }
 
-// ── Business logic ────────────────────────────────────────────────────────────
-
-function buildGroups(rows: ReportRow[], settlements: SettlementMap): ReportGroup[] {
-  const map = new Map<string, ReportGroup>();
-
-  for (const r of rows) {
-    const date   = r.transaction_date ?? "ไม่ระบุวันที่";
-    const market = r.market_name      ?? "ไม่ระบุตลาด";
-    const seller = r.staff_name       || "ไม่ระบุ";
-    const key    = `${date}||${market}||${seller}`;
-
-    if (!map.has(key)) {
-      map.set(key, {
-        date, market, seller,
-        เบิก: [], คืน: [], คืนเสีย: [],
-        ยอดเบิก: 0, ยอดคืน: 0, ยอดคืนเสีย: 0,
-        ยอดส่ง: 0, ยอดโอน: 0, ยอดขาย: 0,
-        เงินสดต้องส่งเจ๊: 0, ขาดเกิน: 0,
-      });
-    }
-
-    const g   = map.get(key)!;
-    const amt = r.total_amount ?? 0;
-
-    switch (r.transaction_type) {
-      case "เบิก":
-      case "เบิกเพิ่ม":
-        g.เบิก.push(r);
-        g.ยอดเบิก += amt;
-        break;
-      case "คืน":
-        g.คืน.push(r);
-        g.ยอดคืน += amt;
-        break;
-      case "คืนเสีย":
-        g.คืนเสีย.push(r);
-        g.ยอดคืนเสีย += amt;
-        break;
-    }
-  }
-
-  return Array.from(map.values())
-    .map(g => {
-      const key       = `${g.date}||${g.market}||${g.seller}`;
-      const s         = settlements[key] ?? { ยอดโอน: 0, ยอดขาย: 0 };
-      const ยอดส่ง    = g.ยอดเบิก - g.ยอดคืน - g.ยอดคืนเสีย;
-      const ยอดโอน    = s.ยอดโอน;
-      const ยอดขาย    = s.ยอดขาย;
-      return {
-        ...g,
-        ยอดส่ง,
-        ยอดโอน,
-        ยอดขาย,
-        เงินสดต้องส่งเจ๊: ยอดส่ง - ยอดโอน,
-        ขาดเกิน:          ยอดขาย - ยอดส่ง,
-      };
-    })
-    .sort((a, b) =>
-      a.date.localeCompare(b.date) ||
-      a.market.localeCompare(b.market) ||
-      a.seller.localeCompare(b.seller),
-    );
-}
-
 function itemLine(r: ReportRow, i: number): string {
-  const qty   = r.quantity       ?? 0;
-  const unit  = r.unit           ?? "";
+  const qty = r.quantity ?? 0;
+  const unit = r.unit ?? "";
   const price = r.price_per_unit ?? 0;
-  const total = r.total_amount   ?? 0;
+  const total = r.total_amount ?? 0;
   return `${i + 1}. ${r.product_name} ${fmtNum(qty)} ${unit} x ${fmtNum(price)} = ${fmtNum(total)}`;
 }
 
@@ -171,8 +79,6 @@ function generateText(g: ReportGroup): string {
   return lines.join("\n");
 }
 
-// ── Copy button ───────────────────────────────────────────────────────────────
-
 function CopyButton({ text, label = "คัดลอก" }: { text: string; label?: string }) {
   const [copied, setCopied] = useState(false);
 
@@ -203,27 +109,25 @@ function CopyButton({ text, label = "คัดลอก" }: { text: string; labe
   );
 }
 
-// ── Main component ────────────────────────────────────────────────────────────
-
 export function ReportSummary({
   rows,
   settlements,
   pdfUrl,
 }: {
-  rows:        ReportRow[];
+  rows: ReportRow[];
   settlements: SettlementMap;
-  pdfUrl?:     string;
+  pdfUrl?: string;
 }) {
   const printRef = useRef<HTMLDivElement>(null);
-  const groups   = buildGroups(rows, settlements);
+  const groups = buildReportGroups(rows, settlements);
 
   const allText = groups.map(generateText).join("\n\n");
 
   function handleDownload() {
     const blob = new Blob([allText], { type: "text/plain;charset=utf-8" });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement("a");
-    a.href     = url;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
     a.download = `รายงานสรุป-${new Date().toISOString().slice(0, 10)}.txt`;
     a.click();
     URL.revokeObjectURL(url);
@@ -259,7 +163,6 @@ export function ReportSummary({
 
   return (
     <div className="space-y-4">
-      {/* Global actions */}
       <div className="flex flex-wrap items-center gap-2">
         <CopyButton text={allText} label={`คัดลอกทั้งหมด (${groups.length} กลุ่ม)`} />
         {pdfUrl && (
@@ -281,13 +184,12 @@ export function ReportSummary({
         </Button>
         <Button variant="secondary" size="sm" onClick={handlePrint}>
           <svg className="size-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M6.72 13.829c-.24.03-.48.062-.72.096m.72-.096a42.415 42.415 0 0 1 10.56 0m-10.56 0L6.34 18m10.94-4.171c.24.03.48.062.72.096m-.72-.096L17.66 18m0 0 .229 2.523a1.125 1.125 0 0 1-1.12 1.227H7.231c-.662 0-1.18-.568-1.12-1.227L6.34 18m11.318 0h1.091A2.25 2.25 0 0 0 21 15.75V9.456c0-1.081-.768-2.015-1.837-2.175a48.055 48.055 0 0 0-1.913-.247M6.34 18H5.25A2.25 2.25 0 0 1 3 15.75V9.456c0-1.081.768-2.015 1.837-2.175a48.041 48.041 0 0 1 1.913-.247m10.5 0a48.536 48.536 0 0 0-10.5 0m10.5 0V3.375c0-.621-.504-1.125-1.125-1.125h-8.25c-.621 0-1.125.504-1.125 1.125v3.659M18 10.5h.008v.008H18V10.5Zm-3 0h.008v.008H15V10.5Z" />
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6.72 13.829c-.24.03-.48.062-.72.096m.72-.096a42.415 42.415 0 0 1 10.56 0m-10.56 0L6.34 18m10.94-4.171c.24.03.48.062.72.096m-.72-.096L17.66 18m0 0 .229 2.523a1.125 1.125 0 0 1-1.12 1.227H7.231c-.662 0-1.18-.568-1.12-1.227L6.34 18m11.318 0h1.091A2.25 2.25 0 0 0 21 15.75V9.456c0-1.081-.768-2.015-1.837-2.175a48.055 48.055 0 0 0-1.913-.247M6.34 18H5.25A2.25 2.25 0 0 1 3 15.75V9.456c0-1.081.768-2.015 1.837-2.175a48.041 48.041 0 0 1 1.913-.247m10.5 0a48.536 48.536 0 0 0-10.5 0m10.5 0V3.375c0-.621-.504-1.125-1.125-1.125h-8.25c-.621 0-.504.504-1.125 1.125v3.659M18 10.5h.008v.008H18V10.5Zm-3 0h.008v.008H15V10.5Z" />
           </svg>
           พิมพ์
         </Button>
       </div>
 
-      {/* Report cards */}
       <div ref={printRef} className="space-y-4">
         {groups.map((g) => {
           const text = generateText(g);

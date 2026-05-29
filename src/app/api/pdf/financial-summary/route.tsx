@@ -7,6 +7,13 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { registerFonts } from "@/lib/pdf/fonts";
 import { FinancialSummaryDoc } from "@/lib/pdf/FinancialSummaryDoc";
 import type { GroupRow, SettlementEntry } from "@/components/financial-summary/FinancialTable";
+import {
+  KNOWN_TX_TYPES,
+  addTransactionAmount,
+  calculateYodSong,
+  emptyTransactionTotals,
+  isKnownTransactionType,
+} from "@/lib/summary/transactions";
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
 
@@ -30,13 +37,11 @@ type TxRow = {
   total_amount:     number | null;
 };
 
-const KNOWN_TX_TYPES = ["เบิก", "เบิกเพิ่ม", "คืน", "คืนเสีย"] as const;
-
 function buildGroups(rows: TxRow[]): GroupRow[] {
-  const map = new Map<string, Omit<GroupRow, "ยอดส่ง">>();
+  const map = new Map<string, GroupRow>();
 
   for (const r of rows) {
-    if (!(KNOWN_TX_TYPES as readonly string[]).includes(r.transaction_type)) continue;
+    if (!isKnownTransactionType(r.transaction_type)) continue;
     const date   = r.transaction_date ?? "ไม่ระบุวันที่";
     const time   = r.transaction_time ?? null;
     const seller = r.staff_name        || "ไม่ระบุ";
@@ -44,19 +49,13 @@ function buildGroups(rows: TxRow[]): GroupRow[] {
     const key    = `${date}||${time ?? ""}||${seller}||${market}`;
     const amt    = r.total_amount ?? 0;
 
-    if (!map.has(key)) map.set(key, { date, time, seller, market, เบิก: 0, คืน: 0, คืนเสีย: 0 });
+    if (!map.has(key)) map.set(key, { date, time, seller, market, ...emptyTransactionTotals() });
     const g = map.get(key)!;
-
-    switch (r.transaction_type) {
-      case "เบิก":
-      case "เบิกเพิ่ม": g.เบิก    += amt; break;
-      case "คืน":       g.คืน     += amt; break;
-      case "คืนเสีย":   g.คืนเสีย += amt; break;
-    }
+    addTransactionAmount(g, { transaction_type: r.transaction_type, total_amount: amt });
   }
 
   return Array.from(map.values())
-    .map((g) => ({ ...g, ยอดส่ง: g.เบิก - g.คืน - g.คืนเสีย }))
+    .map((g) => ({ ...g, ยอดส่ง: calculateYodSong(g) }))
     .sort((a, b) =>
       a.date.localeCompare(b.date) ||
       (a.time ?? "").localeCompare(b.time ?? "") ||

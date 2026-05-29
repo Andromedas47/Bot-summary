@@ -350,6 +350,11 @@ describe("edge cases", () => {
 
     expect(result.date).toBe("2025-05-18");
   });
+
+  it("uses fallback date when message text has time but no date", () => {
+    const result = parseWeighSession("12:47 เสือ รายการชั่งคืน", "2026-05-29");
+    expect(result.date).toBe("2026-05-29");
+  });
 });
 
 // ── Regex unit tests ──────────────────────────────────────────────────────────

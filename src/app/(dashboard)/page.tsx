@@ -73,7 +73,7 @@ export default async function HomePage({ searchParams }: PageProps) {
   if (market)  exportQuery.set("market",  market);
   if (seller)  exportQuery.set("seller",  seller);
   if (product) exportQuery.set("product", product);
-  const exportPath = `/api/export/daily-table${exportQuery.size > 0 ? `?${exportQuery}` : ""}`;
+  const exportPath = `/api/pdf/daily-table${exportQuery.size > 0 ? `?${exportQuery}` : ""}`;
 
   return (
     <>
@@ -82,8 +82,8 @@ export default async function HomePage({ searchParams }: PageProps) {
       <div className="p-4 sm:p-6">
         <Card>
           <CardHeader>
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-              <div>
+            <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+              <div className="shrink-0">
                 <CardTitle>ตารางรายการสินค้า</CardTitle>
                 <p className="text-sm text-slate-500 mt-0.5">
                   {total.toLocaleString()} รายการ
@@ -95,7 +95,7 @@ export default async function HomePage({ searchParams }: PageProps) {
               </div>
 
               <Suspense fallback={<div className="h-9 w-64 animate-pulse rounded-lg bg-slate-100" />}>
-                <div className="flex flex-wrap items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2 xl:flex-nowrap xl:justify-end">
                   <DateInput defaultValue={date ?? ""} />
                   <SearchInput
                     placeholder="ค้นหาตลาด…"
@@ -112,7 +112,7 @@ export default async function HomePage({ searchParams }: PageProps) {
                     paramName="product"
                     defaultValue={product ?? ""}
                   />
-                  <ExportButton exportPath={exportPath} />
+                  <ExportButton exportPath={exportPath} label="Export PDF" />
                 </div>
               </Suspense>
             </div>

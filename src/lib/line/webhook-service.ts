@@ -37,13 +37,22 @@ function hasItemLine(text: string): boolean {
   return text.split("\n").some((l) => RE.ITEM.test(l.trim()));
 }
 
-// Strip LINE export prefix "HH:MM sender " from each line so that
-// hasSessionEnd / SESSION_START / ITEM checks work on clean content.
-function normalizeLine(line: string): string {
-  return line.replace(/^\d{1,2}:\d{2}\s+\S+\s+/, "");
+// SESSION_END lines like "จบรายการคืน" contain "คืน" which also matches SESSION_START.
+// Skip SESSION_END lines before testing so pure closing messages are never treated as headers.
+export function hasSessionStart(text: string): boolean {
+  return text.split("\n").some((l) => {
+    const line = l.trim();
+    return !RE.SESSION_END.test(line) && RE.SESSION_START.test(line);
+  });
 }
 
-function normalizeText(text: string): string {
+// Strip LINE export prefix "HH:MM sender " or "HH.MM sender " from each line so that
+// hasSessionEnd / SESSION_START / ITEM checks work on clean content.
+export function normalizeLine(line: string): string {
+  return line.replace(/^\d{1,2}[:.]\d{2}\s+\S+\s+/, "");
+}
+
+export function normalizeText(text: string): string {
   return text.split("\n").map(normalizeLine).join("\n");
 }
 
@@ -143,7 +152,7 @@ export class WebhookService {
     }
 
     // ── 5. No active pending session ──────────────────────────────────────────
-    if (RE.SESSION_START.test(normalizedText)) {
+    if (hasSessionStart(normalizedText)) {
       if (hasSessionEnd(normalizedText) || hasItemLine(normalizedText)) {
         // Complete single-message: has SESSION_END or item lines → parse directly
         console.log("single complete message detected — parsing directly");

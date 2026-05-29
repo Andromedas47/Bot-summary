@@ -28,7 +28,7 @@ export function DateInput({ defaultValue = "", paramName = "date" }: DateInputPr
       type="date"
       defaultValue={defaultValue}
       onChange={(e) => onChange(e.target.value)}
-      className="rounded-lg border border-slate-300 bg-white py-2 px-3 text-sm text-slate-900 focus:border-[#06C755] focus:outline-none focus:ring-2 focus:ring-[#06C755]/20"
+      className="w-45 shrink-0 rounded-lg border border-slate-300 bg-white py-2 px-3 text-sm text-slate-900 focus:border-[#06C755] focus:outline-none focus:ring-2 focus:ring-[#06C755]/20"
     />
   );
 }

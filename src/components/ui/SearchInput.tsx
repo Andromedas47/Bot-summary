@@ -7,12 +7,14 @@ interface SearchInputProps {
   placeholder?: string;
   paramName?: string;
   defaultValue?: string;
+  className?: string;
 }
 
 export function SearchInput({
   placeholder = "Search…",
   paramName = "q",
   defaultValue = "",
+  className = "w-full sm:w-48",
 }: SearchInputProps) {
   const router   = useRouter();
   const pathname = usePathname();
@@ -43,7 +45,7 @@ export function SearchInput({
   }, [value, push]);
 
   return (
-    <div className="relative">
+    <div className="relative min-w-0 shrink-0">
       <svg
         className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 size-4 text-slate-400"
         fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"
@@ -55,7 +57,7 @@ export function SearchInput({
         value={value}
         onChange={(e) => setValue(e.target.value)}
         placeholder={placeholder}
-        className="rounded-lg border border-slate-300 bg-white py-2 pl-9 pr-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-[#06C755] focus:outline-none focus:ring-2 focus:ring-[#06C755]/20 w-full sm:w-60"
+        className={`rounded-lg border border-slate-300 bg-white py-2 pl-9 pr-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-[#06C755] focus:outline-none focus:ring-2 focus:ring-[#06C755]/20 ${className}`}
       />
     </div>
   );

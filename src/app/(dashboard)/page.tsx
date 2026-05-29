@@ -68,12 +68,7 @@ export default async function HomePage({ searchParams }: PageProps) {
     getTransactions(supabase, page, date, market, seller, product),
   );
 
-  const exportQuery = new URLSearchParams();
-  if (date)    exportQuery.set("date",    date);
-  if (market)  exportQuery.set("market",  market);
-  if (seller)  exportQuery.set("seller",  seller);
-  if (product) exportQuery.set("product", product);
-  const exportPath = `/api/pdf/daily-table${exportQuery.size > 0 ? `?${exportQuery}` : ""}`;
+  const exportPath = "/api/pdf/daily-table";
 
   return (
     <>
@@ -101,16 +96,19 @@ export default async function HomePage({ searchParams }: PageProps) {
                     placeholder="ค้นหาตลาด…"
                     paramName="market"
                     defaultValue={market ?? ""}
+                    className="w-full sm:w-40"
                   />
                   <SearchInput
                     placeholder="ค้นหาคนขาย…"
                     paramName="seller"
                     defaultValue={seller ?? ""}
+                    className="w-full sm:w-40"
                   />
                   <SearchInput
                     placeholder="ค้นหาสินค้า…"
                     paramName="product"
                     defaultValue={product ?? ""}
+                    className="w-full sm:w-44"
                   />
                   <ExportButton exportPath={exportPath} label="Export PDF" />
                 </div>

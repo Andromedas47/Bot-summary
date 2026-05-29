@@ -5,9 +5,13 @@ import { getSourceId, getUserId } from "@/lib/line/verify";
 import { parserRegistry } from "@/lib/parsers/registry";
 import { logger } from "@/lib/logger";
 import { replyLineMessage, buildWeighSessionSummary } from "@/lib/line/reply";
+import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
+import { RE } from "@/lib/parsers/weigh-session/regex";
+import { PendingSessionService } from "@/lib/line/pending-session-service";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 
-type Supabase = SupabaseClient<Database>;
+type Supabase      = SupabaseClient<Database>;
+type ChildLogger   = ReturnType<typeof logger.child>;
 
 export interface WebhookProcessResult {
   eventId:   string;
@@ -17,24 +21,32 @@ export interface WebhookProcessResult {
   error?:    string;
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function bangkokToday(): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Bangkok" }).format(new Date());
+}
+
+function hasSessionEnd(text: string): boolean {
+  return text.split("\n").some((l) => RE.SESSION_END.test(l.trim()));
+}
+
+function hasItemLine(text: string): boolean {
+  return text.split("\n").some((l) => RE.ITEM.test(l.trim()));
+}
+
+// ── Service ───────────────────────────────────────────────────────────────────
+
 export class WebhookService {
   constructor(private readonly supabase: Supabase) {}
 
-  async processEvents(
-    events: LineEvent[],
-    destination: string
-  ): Promise<WebhookProcessResult[]> {
-    return Promise.all(
-      events.map((event) => this.processOne(event, destination))
-    );
+  async processEvents(events: LineEvent[], destination: string): Promise<WebhookProcessResult[]> {
+    return Promise.all(events.map((e) => this.processOne(e, destination)));
   }
 
-  private async processOne(
-    event: LineEvent,
-    destination: string
-  ): Promise<WebhookProcessResult> {
+  private async processOne(event: LineEvent, destination: string): Promise<WebhookProcessResult> {
     const eventId = event.webhookEventId;
-    const log = logger.child({ eventId, eventType: event.type });
+    const log     = logger.child({ eventId, eventType: event.type });
 
     log.info("processing event");
 
@@ -45,14 +57,13 @@ export class WebhookService {
       log.info("duplicate event — skipped");
       return { eventId, eventType: event.type, status: "duplicate" };
     }
-
     if (rawMessageId === "error") {
       return { eventId, eventType: event.type, status: "error", error: "db insert failed" };
     }
 
     log.debug("raw message saved", { rawMessageId });
 
-    // ── 2. Parse text messages ────────────────────────────────────────────────
+    // ── 2. Only process text messages ─────────────────────────────────────────
     if (event.type !== "message") {
       log.debug("non-message event — no parsing needed");
       return { eventId, eventType: event.type, status: "saved" };
@@ -67,27 +78,164 @@ export class WebhookService {
       return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
 
-    // ── 3. Test-message shortcut (before any parser) ─────────────────────────
-    const replyToken  = msgEvent.replyToken;
-    const messageText = (message as LineTextMessage).text;
+    // ── 3. Test-message shortcut (before any parser) ──────────────────────────
+    const text       = (message as LineTextMessage).text;
+    const replyToken = msgEvent.replyToken;
+    const sessionKey = getSourceId(msgEvent.source);
+    const lineUserId = getUserId(msgEvent.source);
 
-    console.log("incoming text:", messageText);
+    console.log("incoming text:", text);
     console.log("replyToken exists:", !!replyToken);
 
-    if (messageText.trim().toLowerCase() === "test") {
+    if (text.trim().toLowerCase() === "test") {
       console.log("test reply triggered");
-      if (replyToken) {
-        await replyLineMessage(replyToken, "Bot รับข้อความได้แล้ว ✅");
-      }
+      if (replyToken) await replyLineMessage(replyToken, "Bot รับข้อความได้แล้ว ✅");
       return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
 
-    // ── 4. Find and run parser ────────────────────────────────────────────────
-    const parser = parserRegistry.findParser(msgEvent);
+    // ── 4. Pending session flow ───────────────────────────────────────────────
+    const pendingService = new PendingSessionService(this.supabase);
+    let pending = await pendingService.get(sessionKey);
+
+    if (pending && pendingService.isExpired(pending)) {
+      log.info("pending session expired — resetting", { sessionKey });
+      await pendingService.delete(sessionKey);
+      pending = null;
+    }
+
+    if (pending) {
+      // Append this message to the ongoing session
+      const updated = await pendingService.append(sessionKey, text, replyToken);
+
+      if (hasSessionEnd(text)) {
+        log.info("session end detected — finalizing accumulated session", { sessionKey });
+        await pendingService.delete(sessionKey);
+        return this.finalizeAccumulated(
+          updated.accumulated_text,
+          updated.latest_reply_token,
+          updated.line_user_id,
+          rawMessageId,
+          eventId,
+          event.type,
+          log,
+        );
+      }
+
+      log.debug("message appended to pending session — waiting for session end", { sessionKey });
+      return { eventId, eventType: event.type, status: "saved", parsed: false };
+    }
+
+    // ── 5. No active pending session ──────────────────────────────────────────
+    if (RE.SESSION_START.test(text)) {
+      if (hasItemLine(text)) {
+        // Complete single-message (backward compat) — parse directly
+        log.info("single-message session detected, parsing directly");
+        return this.runParser(msgEvent, rawMessageId, eventId, event.type, log);
+      }
+
+      // Header-only → start accumulating
+      log.info("session header detected — starting pending session", { sessionKey });
+      await pendingService.create(sessionKey, text, replyToken, lineUserId);
+      return { eventId, eventType: event.type, status: "saved", parsed: false };
+    }
+
+    log.debug("no parser matched text message — left unprocessed");
+    return { eventId, eventType: event.type, status: "saved", parsed: false };
+  }
+
+  // ── Finalize accumulated multi-message session ────────────────────────────
+  private async finalizeAccumulated(
+    accumulatedText:  string,
+    replyToken:       string | null,
+    lineUserId:       string | null,
+    rawMessageId:     string,
+    eventId:          string,
+    eventType:        string,
+    log:              ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    try {
+      const parsed = parseWeighSession(accumulatedText, bangkokToday());
+
+      if (parsed.parse_errors.length > 0) {
+        log.warn("finalized with parse errors", { errors: parsed.parse_errors });
+      }
+
+      // Persist session
+      const { data: session, error: sessionErr } = await this.supabase
+        .from("produce_sessions")
+        .insert({
+          raw_message_id:   rawMessageId,
+          line_user_id:     lineUserId ?? undefined,
+          staff_name:       parsed.staff_name,
+          sender_name:      parsed.sender_name      ?? undefined,
+          transaction_time: parsed.transaction_time ?? undefined,
+          session_date:     parsed.date             ?? undefined,
+          session_title:    parsed.session_title    ?? undefined,
+          total_items:      parsed.items.length,
+          parser_errors:    parsed.parse_errors.length > 0 ? parsed.parse_errors : null,
+        })
+        .select("id")
+        .single();
+
+      if (sessionErr) throw new Error(`produce_session insert failed: ${sessionErr.message}`);
+
+      for (const item of parsed.items) {
+        const { error: itemErr } = await this.supabase.from("produce_items").insert({
+          session_id:       session.id,
+          item_number:      item.item_number,
+          product_name:     item.product_name,
+          price_per_unit:   item.price_per_unit,
+          quantity:         item.quantity    ?? undefined,
+          unit:             item.unit        ?? undefined,
+          section:          item.section,
+          transaction_type: item.transaction_type,
+        });
+        if (itemErr) {
+          log.warn("failed to insert produce_item", { product: item.product_name, error: itemErr.message });
+        }
+      }
+
+      await this.supabase
+        .from("raw_messages")
+        .update({ is_processed: true })
+        .eq("id", rawMessageId);
+
+      log.info("accumulated session finalized", { items: parsed.items.length, staff: parsed.staff_name });
+
+      if (replyToken) {
+        const summary = buildWeighSessionSummary(parsed);
+        replyLineMessage(replyToken, summary).catch((e) =>
+          log.error("reply failed", { error: String(e) })
+        );
+      }
+
+      return { eventId, eventType, status: "saved", parsed: true };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("finalize accumulated session failed", { error: errorMessage });
+
+      if (replyToken) {
+        replyLineMessage(replyToken, "ยังอ่านรายการนี้ไม่ได้ครับ กรุณาตรวจรูปแบบข้อความอีกครั้ง").catch(() => {});
+      }
+
+      return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
+    }
+  }
+
+  // ── Single-message parser flow (backward compat) ──────────────────────────
+  private async runParser(
+    msgEvent:     LineMessageEvent,
+    rawMessageId: string,
+    eventId:      string,
+    eventType:    string,
+    log:          ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const parser     = parserRegistry.findParser(msgEvent);
+    const replyToken = msgEvent.replyToken;
 
     if (!parser) {
-      log.debug("no parser matched text message — left unprocessed");
-      return { eventId, eventType: event.type, status: "saved", parsed: false };
+      log.debug("no parser matched");
+      return { eventId, eventType, status: "saved", parsed: false };
     }
 
     log.info("running parser", { parser: parser.name, version: parser.version });
@@ -116,7 +264,7 @@ export class WebhookService {
         }
       }
 
-      return { eventId, eventType: event.type, status: "saved", parsed: true };
+      return { eventId, eventType, status: "saved", parsed: true };
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       log.error("parser crashed", { parser: parser.name, error: errorMessage });
@@ -131,21 +279,14 @@ export class WebhookService {
       });
 
       if (replyToken) {
-        replyLineMessage(replyToken, "ยังอ่านรายการนี้ไม่ได้ครับ กรุณาตรวจรูปแบบข้อความอีกครั้ง").catch((e) =>
-          log.error("reply failed", { error: String(e) })
-        );
+        replyLineMessage(replyToken, "ยังอ่านรายการนี้ไม่ได้ครับ กรุณาตรวจรูปแบบข้อความอีกครั้ง").catch(() => {});
       }
 
-      return {
-        eventId,
-        eventType: event.type,
-        status:    "saved",
-        parsed:    false,
-        error:     errorMessage,
-      };
+      return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
     }
   }
 
+  // ── DB helpers ────────────────────────────────────────────────────────────
   private async saveRawMessage(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     event: any,
@@ -172,9 +313,7 @@ export class WebhookService {
       .single();
 
     if (error) {
-      // 23505 = unique_violation — duplicate webhookEventId from LINE redelivery
       if (error.code === "23505") return null;
-
       logger.error("failed to insert raw_message", {
         code:    error.code,
         message: error.message,
@@ -186,10 +325,7 @@ export class WebhookService {
     return data.id;
   }
 
-  private async recordUnsupportedType(
-    rawMessageId: string,
-    message: LineMessage
-  ): Promise<void> {
+  private async recordUnsupportedType(rawMessageId: string, message: LineMessage): Promise<void> {
     await this.supabase.from("parse_errors").insert({
       raw_message_id: rawMessageId,
       parser_name:    "registry",

@@ -66,7 +66,8 @@ export function DailyTable({ rows }: { rows: DailyRow[] }) {
   }
 
   return (
-    <div className="overflow-x-auto">
+    <div className="relative">
+      <div className="overflow-x-auto [-webkit-overflow-scrolling:touch]">
       <table className="w-full min-w-225 border-collapse text-sm">
         <thead className="sticky top-0 z-10 bg-slate-100 shadow-sm">
           <tr className="border-b-2 border-slate-300">
@@ -134,6 +135,9 @@ export function DailyTable({ rows }: { rows: DailyRow[] }) {
           ))}
         </tbody>
       </table>
+      </div>
+      {/* Scroll hint fade — visible only on mobile */}
+      <div className="pointer-events-none absolute right-0 top-0 h-full w-8 bg-linear-to-l from-white/80 to-transparent sm:hidden" />
     </div>
   );
 }

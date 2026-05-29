@@ -50,16 +50,23 @@ export function Pagination({ page, totalPages, basePath, params = {} }: Paginati
   if (totalPages <= 1) return null;
 
   return (
-    <div className="flex items-center justify-center gap-1 py-3">
+    <div className="flex items-center justify-center gap-1 py-3 px-4">
+      {/* Prev button */}
       {page > 1 ? (
         <a href={href(basePath, params, page - 1)} className={`${btnBase} ${btnActive}`}>
-          <ChevronLeft /> Prev
+          <ChevronLeft /> <span className="hidden sm:inline">Prev</span>
         </a>
       ) : (
-        <span className={`${btnBase} ${btnDisabled}`}><ChevronLeft /> Prev</span>
+        <span className={`${btnBase} ${btnDisabled}`}><ChevronLeft /> <span className="hidden sm:inline">Prev</span></span>
       )}
 
-      <div className="flex items-center gap-1 mx-1">
+      {/* Mobile: "หน้า X / Y" */}
+      <span className="sm:hidden px-3 text-sm text-slate-500">
+        หน้า <span className="font-semibold text-slate-800">{page}</span> / {totalPages}
+      </span>
+
+      {/* Desktop: page number buttons */}
+      <div className="hidden sm:flex items-center gap-1 mx-1">
         {pageRange(page, totalPages).map((p, i) =>
           p === "…" ? (
             <span key={`e${i}`} className="px-2 text-slate-400 text-sm">…</span>
@@ -79,12 +86,13 @@ export function Pagination({ page, totalPages, basePath, params = {} }: Paginati
         )}
       </div>
 
+      {/* Next button */}
       {page < totalPages ? (
         <a href={href(basePath, params, page + 1)} className={`${btnBase} ${btnActive}`}>
-          Next <ChevronRight />
+          <span className="hidden sm:inline">Next</span> <ChevronRight />
         </a>
       ) : (
-        <span className={`${btnBase} ${btnDisabled}`}>Next <ChevronRight /></span>
+        <span className={`${btnBase} ${btnDisabled}`}><span className="hidden sm:inline">Next</span> <ChevronRight /></span>
       )}
     </div>
   );

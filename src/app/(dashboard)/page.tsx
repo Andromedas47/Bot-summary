@@ -7,6 +7,7 @@ import { Pagination } from "@/components/ui/Pagination";
 import { SearchInput } from "@/components/ui/SearchInput";
 import { DateInput } from "@/components/ui/DateInput";
 import { ExportButton } from "@/components/ui/ExportButton";
+import { FilterPanel } from "@/components/ui/FilterPanel";
 import { DailyTable } from "@/components/daily-table/DailyTable";
 import type { DailyRow } from "@/components/daily-table/DailyTable";
 
@@ -89,8 +90,12 @@ export default async function HomePage({ searchParams }: PageProps) {
                 </p>
               </div>
 
-              <Suspense fallback={<div className="h-9 w-64 animate-pulse rounded-lg bg-slate-100" />}>
-                <div className="flex flex-wrap items-center gap-2 xl:flex-nowrap xl:justify-end">
+              <Suspense fallback={<div className="h-9 w-full animate-pulse rounded-lg bg-slate-100 xl:w-64" />}>
+                <FilterPanel
+                  exportButton={
+                    <ExportButton exportPath={exportPath} label="Export PDF" downloadName="daily-table.pdf" />
+                  }
+                >
                   <DateInput defaultValue={date ?? ""} />
                   <SearchInput
                     placeholder="ค้นหาตลาด…"
@@ -110,8 +115,7 @@ export default async function HomePage({ searchParams }: PageProps) {
                     defaultValue={product ?? ""}
                     className="w-full sm:w-44"
                   />
-                  <ExportButton exportPath={exportPath} label="Export PDF" downloadName="daily-table.pdf" />
-                </div>
+                </FilterPanel>
               </Suspense>
             </div>
           </CardHeader>

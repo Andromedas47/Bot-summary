@@ -1,9 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { LineEvent, LineMessageEvent, LineMessage } from "@/lib/line/types";
+import type { LineEvent, LineMessageEvent, LineMessage, LineTextMessage } from "@/lib/line/types";
 import type { Database, LineMessageType } from "@/types/database";
 import { getSourceId, getUserId } from "@/lib/line/verify";
 import { parserRegistry } from "@/lib/parsers/registry";
 import { logger } from "@/lib/logger";
+import { replyLineMessage, buildWeighSessionSummary } from "@/lib/line/reply";
+import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 
 type Supabase = SupabaseClient<Database>;
 
@@ -66,10 +68,20 @@ export class WebhookService {
     }
 
     // ── 3. Find and run parser ────────────────────────────────────────────────
-    const parser = parserRegistry.findParser(msgEvent);
+    const parser      = parserRegistry.findParser(msgEvent);
+    const replyToken  = msgEvent.replyToken;
+    const messageText = (message as LineTextMessage).text;
 
     if (!parser) {
       log.debug("no parser matched text message — left unprocessed");
+
+      // Reply to simple test messages
+      if (replyToken && /test/i.test(messageText.trim())) {
+        replyLineMessage(replyToken, "Bot รับข้อความจากกลุ่มนี้ได้แล้ว ✅").catch((e) =>
+          log.error("reply failed", { error: String(e) })
+        );
+      }
+
       return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
 
@@ -86,6 +98,19 @@ export class WebhookService {
       await result.persist(this.supabase, rawMessageId);
 
       log.info("parse succeeded", { parser: parser.name });
+
+      if (replyToken && result.data) {
+        const summaryText = parser.name === "weigh-session"
+          ? buildWeighSessionSummary(result.data as unknown as WeighSession)
+          : null;
+
+        if (summaryText) {
+          replyLineMessage(replyToken, summaryText).catch((e) =>
+            log.error("reply failed", { error: String(e) })
+          );
+        }
+      }
+
       return { eventId, eventType: event.type, status: "saved", parsed: true };
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -99,6 +124,12 @@ export class WebhookService {
         error_message:  errorMessage,
         error_detail:   err instanceof Error ? { stack: err.stack } : null,
       });
+
+      if (replyToken) {
+        replyLineMessage(replyToken, "ยังอ่านรายการนี้ไม่ได้ครับ กรุณาตรวจรูปแบบข้อความอีกครั้ง").catch((e) =>
+          log.error("reply failed", { error: String(e) })
+        );
+      }
 
       return {
         eventId,

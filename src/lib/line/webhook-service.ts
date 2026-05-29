@@ -67,21 +67,26 @@ export class WebhookService {
       return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
 
-    // ── 3. Find and run parser ────────────────────────────────────────────────
-    const parser      = parserRegistry.findParser(msgEvent);
+    // ── 3. Test-message shortcut (before any parser) ─────────────────────────
     const replyToken  = msgEvent.replyToken;
     const messageText = (message as LineTextMessage).text;
 
+    console.log("incoming text:", messageText);
+    console.log("replyToken exists:", !!replyToken);
+
+    if (messageText.trim().toLowerCase() === "test") {
+      console.log("test reply triggered");
+      if (replyToken) {
+        await replyLineMessage(replyToken, "Bot รับข้อความได้แล้ว ✅");
+      }
+      return { eventId, eventType: event.type, status: "saved", parsed: false };
+    }
+
+    // ── 4. Find and run parser ────────────────────────────────────────────────
+    const parser = parserRegistry.findParser(msgEvent);
+
     if (!parser) {
       log.debug("no parser matched text message — left unprocessed");
-
-      // Reply to simple test messages
-      if (replyToken && /test/i.test(messageText.trim())) {
-        replyLineMessage(replyToken, "Bot รับข้อความจากกลุ่มนี้ได้แล้ว ✅").catch((e) =>
-          log.error("reply failed", { error: String(e) })
-        );
-      }
-
       return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
 

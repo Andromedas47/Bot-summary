@@ -7,6 +7,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { registerFonts } from "@/lib/pdf/fonts";
 import { ReportSummaryDoc } from "@/lib/pdf/ReportSummaryDoc";
 import type { ReportRow, SettlementMap } from "@/lib/summary/report";
+import { displayMarketName } from "@/lib/market";
 
 // ── Data fetchers (mirror report-summary page) ────────────────────────────────
 
@@ -60,7 +61,7 @@ async function getSettlements(
     settlement_date: string; market_name: string; staff_name: string;
     money_transfer: number; money_cash: number;
   }[]) {
-    const key = `${s.settlement_date}||${s.market_name}||${s.staff_name}`;
+    const key = `${s.settlement_date}||${displayMarketName(s.market_name, "")}||${s.staff_name}`;
     if (!map[key]) map[key] = { ยอดโอน: 0, ยอดขาย: 0 };
     map[key].ยอดโอน += s.money_transfer;
     map[key].ยอดขาย += s.money_transfer + s.money_cash;

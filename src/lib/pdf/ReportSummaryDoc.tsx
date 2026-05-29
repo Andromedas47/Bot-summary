@@ -1,6 +1,7 @@
 import React from "react";
 import { Document, Page, Text, View, StyleSheet } from "@react-pdf/renderer";
 import { buildReportGroups, type ReportRow, type SettlementMap } from "@/lib/summary/report";
+import { displayMarketName } from "@/lib/market";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -49,7 +50,7 @@ export function buildGroups(rows: ReportRow[], settlements: SettlementMap): Repo
 
   for (const r of rows) {
     const date   = r.transaction_date ?? "ไม่ระบุวันที่";
-    const market = r.market_name      ?? "ไม่ระบุตลาด";
+    const market = displayMarketName(r.market_name, "ไม่ระบุตลาด");
     const seller = r.staff_name       || "ไม่ระบุ";
     const key    = `${date}||${market}||${seller}`;
 

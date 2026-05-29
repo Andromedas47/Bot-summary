@@ -7,6 +7,7 @@
 
 // Thai character class (letters + vowel signs + tone marks, all in U+0E00-U+0E7F)
 const TH = "\\u0E00-\\u0E7F";
+const MARKET = `${TH}\\d\\sฯๆ().\\-/`;
 
 export const RE = {
   // "18:53 เสือ <content>" — time separator can be colon or dot
@@ -55,6 +56,6 @@ export const RE = {
   // seller = before dash, market = between dash and tx-type keyword
   // Captures: [1]=seller, [2]=market, [3]=tx_type_keyword
   SELLER_MARKET: new RegExp(
-    `^([${TH}]+)-([${TH}\\s]+?)\\s+(เบิกเพิ่ม|เบิก|คืนเสีย|คืน)`,
+    `^([${TH}\\s]+?)-([${MARKET}]+?)\\s+(เบิกเพิ่ม|เบิก|คืนเสีย|คืน)`,
   ),
 } as const;

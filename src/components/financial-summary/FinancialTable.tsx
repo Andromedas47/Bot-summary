@@ -2,6 +2,7 @@
 
 import { useState, useRef } from "react";
 import { calculateSettlementTotals } from "@/lib/summary/transactions";
+import { displayMarketName } from "@/lib/market";
 
 export interface GroupRow {
   date:    string;
@@ -64,7 +65,7 @@ export function FinancialTable({
   const [cells, setCells] = useState<Map<string, CellState>>(() => {
     const m = new Map<string, CellState>();
     for (const s of initialSettlements) {
-      m.set(gk(s.settlement_date, s.settlement_time || null, s.staff_name, s.market_name), {
+      m.set(gk(s.settlement_date, s.settlement_time || null, s.staff_name, displayMarketName(s.market_name, "")), {
         money_transfer: s.money_transfer,
         money_cash:     s.money_cash,
       });

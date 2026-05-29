@@ -9,6 +9,7 @@ import {
   emptyTransactionTotals,
   isKnownTransactionType,
 } from "@/lib/summary/transactions";
+import { displayMarketName } from "@/lib/market";
 import Link from "next/link";
 
 interface PageProps {
@@ -58,7 +59,7 @@ function buildGroups(rows: TxRow[]): GroupRow[] {
     const date   = r.transaction_date ?? "ไม่ระบุวันที่";
     const time   = r.transaction_time ?? null;
     const seller = r.staff_name        || "ไม่ระบุ";
-    const market = r.market_name       || "ไม่ระบุ";
+    const market = displayMarketName(r.market_name, "ไม่ระบุ");
     const key    = `${date}||${time ?? ""}||${seller}||${market}`;
     const amt    = r.total_amount ?? 0;
 

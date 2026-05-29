@@ -2,6 +2,7 @@ import React from "react";
 import { Document, Page, Text, View, StyleSheet } from "@react-pdf/renderer";
 import type { GroupRow, SettlementEntry } from "@/components/financial-summary/FinancialTable";
 import { calculateSettlementTotals } from "@/lib/summary/transactions";
+import { displayMarketName } from "@/lib/market";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -31,7 +32,7 @@ function diffColor(n: number): string {
 function enrichGroups(groups: GroupRow[], settlements: SettlementEntry[]) {
   const map = new Map<string, { transfer: number; cash: number }>();
   for (const s of settlements) {
-    const k = `${s.settlement_date}||${s.settlement_time ?? ""}||${s.staff_name}||${s.market_name}`;
+    const k = `${s.settlement_date}||${s.settlement_time ?? ""}||${s.staff_name}||${displayMarketName(s.market_name, "")}`;
     const cur = map.get(k) ?? { transfer: 0, cash: 0 };
     map.set(k, { transfer: cur.transfer + s.money_transfer, cash: cur.cash + s.money_cash });
   }

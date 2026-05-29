@@ -1,6 +1,7 @@
 import React from "react";
 import { Document, Page, Text, View, StyleSheet } from "@react-pdf/renderer";
 import type { DailyRow } from "@/components/daily-table/DailyTable";
+import { displayMarketName } from "@/lib/market";
 
 function fmt(n: number | null | undefined, decimals = 2): string {
   if (n == null) return "-";
@@ -143,7 +144,7 @@ export function DailyTableDoc({ rows, filterLabel }: { rows: DailyRow[]; filterL
               fmtTime(r.transaction_time ?? r.session_created_at),
               r.sender_name ?? r.staff_name,
               r.staff_name,
-              r.market_name ?? "-",
+              displayMarketName(r.market_name, "-"),
               r.transaction_type,
               String(r.item_number ?? ""),
               r.product_name,

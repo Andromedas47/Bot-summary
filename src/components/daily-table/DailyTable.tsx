@@ -1,6 +1,7 @@
 "use client";
 
 import type { Database } from "@/types/database";
+import { displayMarketName } from "@/lib/market";
 
 export type DailyRow = Database["public"]["Views"]["produce_transactions"]["Row"];
 
@@ -105,7 +106,7 @@ export function DailyTable({ rows }: { rows: DailyRow[] }) {
                 {row.staff_name}
               </td>
               <td className={`${TD} text-slate-700`}>
-                {row.market_name ?? "—"}
+                {displayMarketName(row.market_name)}
               </td>
               <td className={`${TD}`}>
                 <TxBadge type={row.transaction_type} />

@@ -3,6 +3,7 @@ import {
   calculateYodSong,
   transactionBucket,
 } from "@/lib/summary/transactions";
+import { displayMarketName } from "@/lib/market";
 
 export interface ReportRow {
   transaction_date: string | null;
@@ -44,7 +45,7 @@ export function buildReportGroups(rows: ReportRow[], settlements: SettlementMap)
     if (!bucket) continue;
 
     const date = r.transaction_date ?? "ไม่ระบุวันที่";
-    const market = r.market_name ?? "ไม่ระบุตลาด";
+    const market = displayMarketName(r.market_name, "ไม่ระบุตลาด");
     const seller = r.staff_name || "ไม่ระบุ";
     const key = `${date}||${market}||${seller}`;
 

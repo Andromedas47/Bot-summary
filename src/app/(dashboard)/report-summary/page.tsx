@@ -7,6 +7,7 @@ import { DateInput } from "@/components/ui/DateInput";
 import { SearchInput } from "@/components/ui/SearchInput";
 import { ReportSummary } from "@/components/report-summary/ReportSummary";
 import type { ReportRow, SettlementMap } from "@/lib/summary/report";
+import { displayMarketName } from "@/lib/market";
 
 interface PageProps {
   searchParams: Promise<{
@@ -75,7 +76,7 @@ async function getSettlements(
     money_transfer:  number;
     money_cash:      number;
   }[]) {
-    const key = `${s.settlement_date}||${s.market_name}||${s.staff_name}`;
+    const key = `${s.settlement_date}||${displayMarketName(s.market_name, "")}||${s.staff_name}`;
     if (!map[key]) map[key] = { ยอดโอน: 0, ยอดขาย: 0 };
     map[key].ยอดโอน += s.money_transfer;
     map[key].ยอดขาย += s.money_transfer + s.money_cash;

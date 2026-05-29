@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import type { DailyRow } from "@/components/daily-table/DailyTable";
+import { displayMarketName } from "@/lib/market";
 
 function toCsv(rows: Record<string, unknown>[]): string {
   if (rows.length === 0) return "";
@@ -45,7 +46,7 @@ export async function GET(req: NextRequest) {
     เวลารายการ:     r.transaction_time     ?? "",
     "ผู้ส่ง LINE":  r.sender_name          ?? r.staff_name,
     คนขาย:          r.staff_name,
-    ตลาด:            r.market_name          ?? "",
+    ตลาด:            displayMarketName(r.market_name, ""),
     ประเภท:          r.transaction_type,
     ลำดับ:           r.item_number          ?? "",
     สินค้า:          r.product_name,

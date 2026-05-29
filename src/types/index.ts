@@ -46,27 +46,30 @@ export interface ParseError {
 // ─── Produce weighing domain models ──────────────────────────────────
 
 export interface ProduceSession {
-  id:             string;
-  raw_message_id: string;
-  line_user_id:   string | null;
-  staff_name:     string;
-  session_date:   string | null;
-  session_title:  string | null;
-  total_items:    number;
-  parser_errors:  string[] | null;
-  created_at:     string;
+  id:               string;
+  raw_message_id:   string;
+  line_user_id:     string | null;
+  staff_name:       string;
+  sender_name:      string | null;
+  transaction_time: string | null;
+  session_date:     string | null;
+  session_title:    string | null;
+  total_items:      number;
+  parser_errors:    string[] | null;
+  created_at:       string;
 }
 
 export interface ProduceItem {
-  id:             string;
-  session_id:     string;
-  item_number:    number | null;
-  product_name:   string;
-  price_per_unit: number | null;
-  quantity:       number | null;
-  unit:           string | null;
-  section:        string;
-  created_at:     string;
+  id:               string;
+  session_id:       string;
+  item_number:      number | null;
+  product_name:     string;
+  price_per_unit:   number | null;
+  quantity:         number | null;
+  unit:             string | null;
+  section:          string;
+  transaction_type: string;
+  created_at:       string;
 }
 
 // ─── Utility ─────────────────────────────────────────────────────────

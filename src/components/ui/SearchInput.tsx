@@ -1,6 +1,6 @@
 "use client";
 
-import { useRouter, usePathname, useSearchParams } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 interface SearchInputProps {
@@ -14,20 +14,26 @@ export function SearchInput({
   paramName = "q",
   defaultValue = "",
 }: SearchInputProps) {
-  const router       = useRouter();
-  const pathname     = usePathname();
-  const searchParams = useSearchParams();
+  const router   = useRouter();
+  const pathname = usePathname();
   const [value, setValue] = useState(defaultValue);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const push = useCallback(
     (v: string) => {
-      const params = new URLSearchParams(searchParams.toString());
+      // Read the live URL rather than reactive searchParams to keep push stable
+      // and break the render→searchParams→push→useEffect→push loop.
+      const params = new URLSearchParams(window.location.search);
       if (v) { params.set(paramName, v); } else { params.delete(paramName); }
       params.delete("page");
-      router.replace(`${pathname}?${params.toString()}`);
+
+      const targetSearch  = params.toString();
+      const currentSearch = window.location.search.replace(/^\?/, "");
+      if (targetSearch === currentSearch) return;
+
+      router.replace(`${pathname}?${targetSearch}`);
     },
-    [router, pathname, searchParams, paramName],
+    [router, pathname, paramName],
   );
 
   useEffect(() => {

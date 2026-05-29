@@ -3,7 +3,12 @@ import type { LineMessageEvent, LineTextMessage } from "@/lib/line/types";
 import { getUserId } from "@/lib/line/verify";
 import { logger } from "@/lib/logger";
 import { RE } from "./regex";
-import type { WeighSession, WeighSessionItem, ProduceUnit } from "./types";
+import type {
+  WeighSession,
+  WeighSessionItem,
+  ProduceUnit,
+  TransactionType,
+} from "./types";
 
 // ── Pure parse function (exported for unit tests) ─────────────────────────────
 
@@ -13,29 +18,35 @@ export function parseWeighSession(text: string): WeighSession {
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
 
-  let staffName:      string | null = null;
-  let date:           string | null = null;
-  let sessionTitle:   string | null = null;
-  let currentSection                = "main";
-  let state: "header" | "items"     = "header";
+  let senderName:      string | null = null;
+  let txTime:          string | null = null;
+  let staffName:       string | null = null;
+  let date:            string | null = null;
+  let sessionTitle:    string | null = null;
+  let currentSection                 = "main";
+  let currentTxType: TransactionType = "เบิก";
+  let state: "header" | "items"      = "header";
 
-  const items:       WeighSessionItem[]      = [];
-  const parseErrors: string[]                = [];
+  const items:       WeighSessionItem[]        = [];
+  const parseErrors: string[]                  = [];
   let   pendingItem: Partial<WeighSessionItem> | null = null;
 
   for (const line of lines) {
-    // Separate TIME_PREFIX lines from bare lines
     const prefixMatch = line.match(RE.TIME_PREFIX);
     let   content: string;
 
     if (prefixMatch) {
-      if (!staffName) staffName = prefixMatch[2];
+      // Capture sender and time from first TIME_PREFIX occurrence
+      if (!senderName) {
+        senderName = prefixMatch[2];
+        txTime     = prefixMatch[1]; // "HH:MM" or "HH.MM"
+      }
       content = prefixMatch[3].trim();
     } else {
       content = line;
     }
 
-    // ── Date: only from bare lines, extract once ───────────────────────────
+    // ── Date extraction ────────────────────────────────────────────────────
     if (!date && !prefixMatch) {
       const m = content.match(RE.DATE_ONLY);
       if (m) {
@@ -43,18 +54,15 @@ export function parseWeighSession(text: string): WeighSession {
         continue;
       }
     }
-
-    if (!date && prefixMatch) {
+    if (!date) {
       const m = content.match(RE.DATE_IN_TEXT);
-      if (m) {
-        date = parseBuddhistDate(m[1], m[2], m[3]);
-      }
+      if (m) date = parseBuddhistDate(m[1], m[2], m[3]);
     }
 
     // ── Session end ────────────────────────────────────────────────────────
     if (RE.SESSION_END.test(content)) {
       if (pendingItem?.product_name) {
-        items.push(finalize(pendingItem, currentSection));
+        items.push(finalize(pendingItem, currentSection, currentTxType));
         pendingItem = null;
       }
       currentSection = "main";
@@ -63,39 +71,50 @@ export function parseWeighSession(text: string): WeighSession {
 
     // ── Header state: wait for session title ───────────────────────────────
     if (state === "header") {
-      if (prefixMatch && RE.SESSION_START.test(content)) {
-        sessionTitle = content;
+      if (!prefixMatch) continue;
+
+      // Try "พี่ดำ-วิหาร เบิก ..." format first
+      const smMatch = content.match(RE.SELLER_MARKET);
+      if (smMatch) {
+        staffName    = smMatch[1].trim();
+        sessionTitle = smMatch[2].trim();
+        currentTxType = classifyTxType(smMatch[3] as TransactionType);
         state = "items";
+        continue;
       }
-      // Ignore all other lines (blank separators, unrelated messages)
+
+      // Fall back to traditional "รายการชั่งเบิก" etc.
+      if (RE.SESSION_START.test(content)) {
+        sessionTitle  = content;
+        currentTxType = classifyTxType(content);
+        state         = "items";
+      }
       continue;
     }
 
     // ── Items state ────────────────────────────────────────────────────────
 
-    // Bare line (no prefix) → must be a quantity/weight line
+    // Bare line (no prefix) → quantity/weight line
     if (!prefixMatch) {
       const m = content.match(RE.QUANTITY);
       if (m) {
         if (pendingItem?.product_name) {
           pendingItem.quantity = parseFloat(m[1]);
           pendingItem.unit     = m[2] as ProduceUnit;
-          items.push(finalize(pendingItem, currentSection));
+          items.push(finalize(pendingItem, currentSection, currentTxType));
           pendingItem = null;
         } else {
           parseErrors.push(`quantity with no preceding item: "${line}"`);
         }
       }
-      // Bare non-quantity lines (blank lines already filtered) → ignore
       continue;
     }
 
     // Staff-prefixed line: try item pattern first
     const itemMatch = content.match(RE.ITEM);
     if (itemMatch) {
-      // Flush previous pending item (item had no weight — save with null)
       if (pendingItem?.product_name) {
-        items.push(finalize(pendingItem, currentSection));
+        items.push(finalize(pendingItem, currentSection, currentTxType));
       }
       pendingItem = {
         item_number:    parseInt(itemMatch[1], 10),
@@ -107,39 +126,55 @@ export function parseWeighSession(text: string): WeighSession {
       continue;
     }
 
-    // Staff-prefixed non-item line → section marker
+    // Staff-prefixed non-item line → section / transaction-type marker
     if (pendingItem?.product_name) {
-      items.push(finalize(pendingItem, currentSection));
+      items.push(finalize(pendingItem, currentSection, currentTxType));
       pendingItem = null;
     }
     currentSection = content;
+    currentTxType  = classifyTxType(content);
   }
 
   // Trailing pending item (missing session-end marker)
   if (pendingItem?.product_name) {
-    items.push(finalize(pendingItem, currentSection));
+    items.push(finalize(pendingItem, currentSection, currentTxType));
   }
 
   return {
     date,
-    staff_name:    staffName ?? "",
-    session_title: sessionTitle,
+    staff_name:       staffName ?? senderName ?? "",
+    sender_name:      senderName,
+    transaction_time: txTime,
+    session_title:    sessionTitle,
     items,
-    parse_errors:  parseErrors,
+    parse_errors:     parseErrors,
   };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function finalize(p: Partial<WeighSessionItem>, section: string): WeighSessionItem {
+function finalize(
+  p:       Partial<WeighSessionItem>,
+  section: string,
+  txType:  TransactionType,
+): WeighSessionItem {
   return {
-    item_number:    p.item_number!,
-    product_name:   p.product_name!,
-    price_per_unit: p.price_per_unit!,
-    quantity:       p.quantity ?? null,
-    unit:           p.unit     ?? null,
+    item_number:      p.item_number!,
+    product_name:     p.product_name!,
+    price_per_unit:   p.price_per_unit!,
+    quantity:         p.quantity ?? null,
+    unit:             p.unit     ?? null,
     section,
+    transaction_type: txType,
   };
+}
+
+function classifyTxType(text: string): TransactionType {
+  if (RE.TX_TYPE_BEIK_PHERM.test(text)) return "เบิกเพิ่ม";
+  if (RE.TX_TYPE_KUEN_SIA.test(text))   return "คืนเสีย";
+  if (RE.TX_TYPE_KUEN.test(text))       return "คืน";
+  if (RE.TX_TYPE_BEIK.test(text))       return "เบิก";
+  return "เบิก"; // safe default
 }
 
 /**
@@ -157,7 +192,7 @@ function parseBuddhistDate(day: string, month: string, year: string): string {
 
 export class WeighSessionParser extends BaseParser {
   name           = "weigh-session";
-  version        = "1.0.0";
+  version        = "1.1.0";
   supportedTypes = ["text"];
 
   override canHandle(event: LineMessageEvent): boolean {
@@ -191,13 +226,15 @@ export class WeighSessionParser extends BaseParser {
         const { data: session, error: sessionErr } = await supabase
           .from("produce_sessions")
           .insert({
-            raw_message_id: rawMessageId,
-            line_user_id:   userId,
-            staff_name:     parsed.staff_name,
-            session_date:   parsed.date          ?? undefined,
-            session_title:  parsed.session_title ?? undefined,
-            total_items:    parsed.items.length,
-            parser_errors:  parsed.parse_errors.length > 0 ? parsed.parse_errors : null,
+            raw_message_id:   rawMessageId,
+            line_user_id:     userId,
+            staff_name:       parsed.staff_name,
+            sender_name:      parsed.sender_name   ?? undefined,
+            transaction_time: parsed.transaction_time ?? undefined,
+            session_date:     parsed.date          ?? undefined,
+            session_title:    parsed.session_title ?? undefined,
+            total_items:      parsed.items.length,
+            parser_errors:    parsed.parse_errors.length > 0 ? parsed.parse_errors : null,
           })
           .select("id")
           .single();
@@ -206,18 +243,18 @@ export class WeighSessionParser extends BaseParser {
           throw new Error(`produce_session insert failed: ${sessionErr.message}`);
         }
 
-        // Insert items individually so one failure doesn't block the rest
         for (const item of parsed.items) {
           const { error: itemErr } = await supabase
             .from("produce_items")
             .insert({
-              session_id:     session.id,
-              item_number:    item.item_number,
-              product_name:   item.product_name,
-              price_per_unit: item.price_per_unit,
-              quantity:       item.quantity ?? undefined,
-              unit:           item.unit     ?? undefined,
-              section:        item.section,
+              session_id:       session.id,
+              item_number:      item.item_number,
+              product_name:     item.product_name,
+              price_per_unit:   item.price_per_unit,
+              quantity:         item.quantity    ?? undefined,
+              unit:             item.unit        ?? undefined,
+              section:          item.section,
+              transaction_type: item.transaction_type,
             });
 
           if (itemErr) {

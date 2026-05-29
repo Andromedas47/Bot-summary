@@ -17,7 +17,7 @@ interface PageProps {
     page?:    string;
     date?:    string;
     market?:  string;
-    staff?:   string;
+    seller?:  string;
     product?: string;
   }>;
 }
@@ -27,7 +27,7 @@ async function getTransactions(
   page:     number,
   date?:    string,
   market?:  string,
-  staff?:   string,
+  seller?:  string,
   product?: string,
 ) {
   const from = (page - 1) * PAGE_SIZE;
@@ -42,7 +42,7 @@ async function getTransactions(
 
   if (date)    query = query.eq("transaction_date", date);
   if (market)  query = query.ilike("market_name",   `%${market}%`);
-  if (staff)   query = query.ilike("staff_name",    `%${staff}%`);
+  if (seller)  query = query.ilike("staff_name",    `%${seller}%`);
   if (product) query = query.ilike("product_name",  `%${product}%`);
 
   const { data, count, error } = await query;
@@ -60,18 +60,18 @@ export default async function HomePage({ searchParams }: PageProps) {
   const page    = Math.max(1, parseInt(params.page ?? "1", 10));
   const date    = params.date;
   const market  = params.market;
-  const staff   = params.staff;
+  const seller  = params.seller;
   const product = params.product;
 
   const supabase = await createServiceClient();
   const { rows, total, totalPages } = await timed("daily-table:list", () =>
-    getTransactions(supabase, page, date, market, staff, product),
+    getTransactions(supabase, page, date, market, seller, product),
   );
 
   const exportQuery = new URLSearchParams();
   if (date)    exportQuery.set("date",    date);
   if (market)  exportQuery.set("market",  market);
-  if (staff)   exportQuery.set("staff",   staff);
+  if (seller)  exportQuery.set("seller",  seller);
   if (product) exportQuery.set("product", product);
   const exportPath = `/api/export/daily-table${exportQuery.size > 0 ? `?${exportQuery}` : ""}`;
 
@@ -87,10 +87,10 @@ export default async function HomePage({ searchParams }: PageProps) {
                 <CardTitle>ตารางรายการสินค้า</CardTitle>
                 <p className="text-sm text-slate-500 mt-0.5">
                   {total.toLocaleString()} รายการ
-                  {date    ? ` · วันที่ ${date}`           : ""}
-                  {market  ? ` · ตลาด "${market}"`         : ""}
-                  {staff   ? ` · เจ้าหน้าที่ "${staff}"`  : ""}
-                  {product ? ` · สินค้า "${product}"`      : ""}
+                  {date    ? ` · วันที่ ${date}`       : ""}
+                  {market  ? ` · ตลาด "${market}"`     : ""}
+                  {seller  ? ` · คนขาย "${seller}"`    : ""}
+                  {product ? ` · สินค้า "${product}"`  : ""}
                 </p>
               </div>
 
@@ -103,9 +103,9 @@ export default async function HomePage({ searchParams }: PageProps) {
                     defaultValue={market ?? ""}
                   />
                   <SearchInput
-                    placeholder="ค้นหาเจ้าหน้าที่…"
-                    paramName="staff"
-                    defaultValue={staff ?? ""}
+                    placeholder="ค้นหาคนขาย…"
+                    paramName="seller"
+                    defaultValue={seller ?? ""}
                   />
                   <SearchInput
                     placeholder="ค้นหาสินค้า…"
@@ -124,7 +124,7 @@ export default async function HomePage({ searchParams }: PageProps) {
               page={page}
               totalPages={totalPages}
               basePath="/"
-              params={{ date, market, staff, product }}
+              params={{ date, market, seller, product }}
             />
           </CardContent>
         </Card>

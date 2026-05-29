@@ -100,7 +100,7 @@ export function buildGroups(rows: ReportRow[], settlements: SettlementMap): Repo
 
 const S = StyleSheet.create({
   page: {
-    fontFamily: "Sarabun",
+    fontFamily: "SarabunPDF",
     fontSize: 9,
     paddingTop: 30,
     paddingBottom: 40,

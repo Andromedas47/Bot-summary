@@ -1,22 +1,21 @@
+import path from "path";
 import { Font } from "@react-pdf/renderer";
 
 let registered = false;
+
+function fontPath(filename: string): string {
+  return path.join(process.cwd(), "public", "fonts", filename);
+}
 
 export function registerFonts() {
   if (registered) return;
   registered = true;
 
   Font.register({
-    family: "Sarabun",
+    family: "SarabunPDF",
     fonts: [
-      {
-        src: "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/sarabun/static/Sarabun-Regular.ttf",
-        fontWeight: "normal",
-      },
-      {
-        src: "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/sarabun/static/Sarabun-Bold.ttf",
-        fontWeight: "bold",
-      },
+      { src: fontPath("Sarabun-Regular.ttf"), fontWeight: "normal" },
+      { src: fontPath("Sarabun-Bold.ttf"),    fontWeight: "bold" },
     ],
   });
 

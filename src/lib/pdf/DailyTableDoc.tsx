@@ -31,7 +31,7 @@ function fmtTime(d: string | null | undefined): string {
 
 const S = StyleSheet.create({
   page: {
-    fontFamily: "Sarabun",
+    fontFamily: "SarabunPDF",
     fontSize: 7,
     paddingTop: 24,
     paddingBottom: 32,

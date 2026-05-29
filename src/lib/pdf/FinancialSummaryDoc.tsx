@@ -57,7 +57,7 @@ function enrichGroups(groups: GroupRow[], settlements: SettlementEntry[]) {
 
 const S = StyleSheet.create({
   page: {
-    fontFamily: "Sarabun",
+    fontFamily: "SarabunPDF",
     fontSize: 8,
     paddingTop: 28,
     paddingBottom: 36,

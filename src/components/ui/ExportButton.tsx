@@ -24,7 +24,7 @@ export function ExportButton({ exportPath, label = "Export CSV", downloadName }:
       const contentType = res.headers.get("content-type") ?? "";
 
       if (!res.ok || contentType.includes("text/html") || contentType.includes("application/json")) {
-        const detail = contentType.includes("application/json")
+        const detail = contentType.includes("application/json") || contentType.includes("text/html")
           ? await res.text()
           : `HTTP ${res.status}`;
         throw new Error(detail);
@@ -44,7 +44,8 @@ export function ExportButton({ exportPath, label = "Export CSV", downloadName }:
       URL.revokeObjectURL(url);
     } catch (err) {
       console.error("export failed", err);
-      alert("Export ไม่สำเร็จ กรุณาลองใหม่ หรือเข้าสู่ระบบใหม่อีกครั้ง");
+      const message = err instanceof Error ? err.message : "Unknown export error";
+      alert(`Export failed: ${message}`);
     } finally {
       setIsExporting(false);
     }

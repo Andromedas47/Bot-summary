@@ -33,7 +33,7 @@ export class PendingSessionService {
     replyToken:  string | null,
     lineUserId:  string | null,
   ): Promise<void> {
-    await this.supabase.from("pending_sessions").upsert(
+    const { error } = await this.supabase.from("pending_sessions").upsert(
       {
         session_key:        sessionKey,
         accumulated_text:   text,
@@ -43,6 +43,7 @@ export class PendingSessionService {
       },
       { onConflict: "session_key" },
     );
+    if (error) throw new Error(`pending session create failed: ${error.message}`);
   }
 
   async append(

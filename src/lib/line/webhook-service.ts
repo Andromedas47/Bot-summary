@@ -109,7 +109,7 @@ export class WebhookService {
     console.log("incoming text (raw):", text);
     console.log("incoming text (normalized):", normalizedText);
     console.log("replyToken exists:", !!replyToken);
-    console.log("hasSessionStart:", RE.SESSION_START.test(normalizedText));
+    console.log("hasSessionStart:", hasSessionStart(normalizedText));
     console.log("hasSessionEnd:", hasSessionEnd(normalizedText));
 
     if (text.trim().toLowerCase() === "test") {
@@ -120,7 +120,9 @@ export class WebhookService {
 
     // ── 4. Pending session flow ───────────────────────────────────────────────
     const pendingService = new PendingSessionService(this.supabase);
+    console.log("pending session lookup started", sessionKey);
     let pending = await pendingService.get(sessionKey);
+    console.log("pending session found:", !!pending, pending ? `key=${pending.session_key}` : "");
 
     if (pending && pendingService.isExpired(pending)) {
       log.info("pending session expired — resetting", { sessionKey });
@@ -163,7 +165,14 @@ export class WebhookService {
       // Header-only → start accumulating (store normalized so parser gets clean text)
       console.log("session header detected — starting pending session", sessionKey);
       log.info("session header detected — starting pending session", { sessionKey });
-      await pendingService.create(sessionKey, normalizedText, replyToken, lineUserId);
+      try {
+        await pendingService.create(sessionKey, normalizedText, replyToken, lineUserId);
+        console.log("pending session create succeeded", sessionKey);
+      } catch (createErr) {
+        const msg = createErr instanceof Error ? createErr.message : String(createErr);
+        console.log("pending session create FAILED:", msg);
+        log.error("pending session create failed", { sessionKey, error: msg });
+      }
       return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
 

@@ -106,7 +106,7 @@ export function DailyTable({ rows }: { rows: DailyRow[] }) {
       {/* Desktop table — full column view */}
       <div className="hidden sm:block overflow-x-auto [-webkit-overflow-scrolling:touch]">
         <table className="w-full min-w-225 border-collapse text-sm">
-          <thead className="sticky top-14 z-10">
+          <thead>
             <tr className="bg-slate-50 border-y border-slate-200">
               <th className={`${TH} w-28`}>วันที่รายการ</th>
               <th className={`${TH} w-20`}>เวลา</th>

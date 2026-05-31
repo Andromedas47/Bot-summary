@@ -299,7 +299,7 @@ export function FinancialTable({
       {/* Desktop table — hidden on small screens */}
       <div className="hidden sm:block overflow-x-auto rounded-xl border border-slate-200 shadow-sm">
         <table className="w-full text-sm border-collapse">
-          <thead className="sticky top-14 z-10">
+          <thead>
             <tr className="bg-slate-50 border-b border-slate-200">
               <th className={TH}>วันที่</th>
               <th className={TH}>เวลา</th>

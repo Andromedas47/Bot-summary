@@ -13,7 +13,11 @@ import type {
 
 // ── Pure parse function (exported for unit tests) ─────────────────────────────
 
-export function parseWeighSession(text: string, fallbackDate: string | null = null): WeighSession {
+export function parseWeighSession(
+  text:         string,
+  fallbackDate: string | null = null,
+  fallbackTime: string | null = null,
+): WeighSession {
   const lines = text
     .split("\n")
     .map((l) => l.trim())
@@ -184,7 +188,7 @@ export function parseWeighSession(text: string, fallbackDate: string | null = nu
     date:             date ?? fallbackDate,
     staff_name:       staffName ?? senderName ?? "",
     sender_name:      senderName,
-    transaction_time: txTime,
+    transaction_time: txTime ?? fallbackTime ?? null,
     session_title:    sessionTitle,
     items,
     parse_errors:     parseErrors,
@@ -245,6 +249,23 @@ function bangkokDateFromTimestamp(timestamp: number | undefined): string | null 
   return year && month && day ? `${year}-${month}-${day}` : null;
 }
 
+/** Converts a LINE event timestamp (ms) to Bangkok local time "HH:mm". */
+export function bangkokTimeFromTimestamp(ts: number | undefined): string | null {
+  if (ts == null || !Number.isFinite(ts)) return null;
+
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Bangkok",
+    hour:     "2-digit",
+    minute:   "2-digit",
+    hour12:   false,
+  }).formatToParts(new Date(ts));
+
+  const h = parts.find((p) => p.type === "hour")?.value;
+  const m = parts.find((p) => p.type === "minute")?.value;
+
+  return h && m ? `${h}:${m}` : null;
+}
+
 // ── Parser class ──────────────────────────────────────────────────────────────
 
 export class WeighSessionParser extends BaseParser {
@@ -260,7 +281,11 @@ export class WeighSessionParser extends BaseParser {
   async parse(event: LineMessageEvent): Promise<ParseResult> {
     const text   = (event.message as LineTextMessage).text;
     const userId = getUserId(event.source);
-    const parsed = parseWeighSession(text, bangkokDateFromTimestamp(event.timestamp));
+    const parsed = parseWeighSession(
+      text,
+      bangkokDateFromTimestamp(event.timestamp),
+      bangkokTimeFromTimestamp(event.timestamp),
+    );
 
     const log = logger.child({
       parser: this.name,

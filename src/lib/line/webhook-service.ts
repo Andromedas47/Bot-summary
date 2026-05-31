@@ -5,7 +5,7 @@ import { getSourceId, getUserId } from "@/lib/line/verify";
 import { parserRegistry } from "@/lib/parsers/registry";
 import { logger } from "@/lib/logger";
 import { replyLineMessage, buildWeighSessionSummary } from "@/lib/line/reply";
-import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
+import { parseWeighSession, bangkokTimeFromTimestamp } from "@/lib/parsers/weigh-session/parser";
 import { RE } from "@/lib/parsers/weigh-session/regex";
 import { PendingSessionService } from "@/lib/line/pending-session-service";
 import { DailySummaryService } from "@/lib/line/daily-summary-service";
@@ -131,12 +131,15 @@ export class WebhookService {
     }
 
     if (pending) {
-      // Append normalized text so accumulated_text is clean for the parser
-      const updated = await pendingService.append(sessionKey, normalizedText, replyToken);
+      // Append raw text so the parser can extract senderName from TIME_PREFIX
+      const updated = await pendingService.append(sessionKey, text, replyToken);
 
       if (hasSessionEnd(normalizedText)) {
         console.log("session end detected — finalizing accumulated session", sessionKey);
         log.info("session end detected — finalizing accumulated session", { sessionKey });
+        // Fallback time for sessions sent without LINE export format (no TIME_PREFIX).
+        // LINE export messages carry their own prefix so parser extracts time directly.
+        const fallbackTime = bangkokTimeFromTimestamp(new Date(updated.created_at).getTime());
         const result = await this.finalizeAccumulated(
           updated.accumulated_text,
           updated.latest_reply_token,
@@ -145,6 +148,7 @@ export class WebhookService {
           eventId,
           event.type,
           log,
+          fallbackTime,
         );
         await pendingService.delete(sessionKey);
         return result;
@@ -163,11 +167,11 @@ export class WebhookService {
         return this.runParser(msgEvent, rawMessageId, eventId, event.type, log);
       }
 
-      // Header-only → start accumulating (store normalized so parser gets clean text)
+      // Header-only → start accumulating (store raw text so parser sees TIME_PREFIX sender)
       console.log("session header detected — starting pending session", sessionKey);
       log.info("session header detected — starting pending session", { sessionKey });
       try {
-        await pendingService.create(sessionKey, normalizedText, replyToken, lineUserId);
+        await pendingService.create(sessionKey, text, replyToken, lineUserId);
         console.log("pending session create succeeded", sessionKey);
       } catch (createErr) {
         const msg = createErr instanceof Error ? createErr.message : String(createErr);
@@ -195,10 +199,11 @@ export class WebhookService {
     eventId:          string,
     eventType:        string,
     log:              ChildLogger,
+    fallbackTime:     string | null = null,
   ): Promise<WebhookProcessResult> {
     try {
       console.log("[TRACE][finalizeAccumulated] accumulated_text_before_parse:\n" + accumulatedText);
-      const parsed = parseWeighSession(accumulatedText, bangkokToday());
+      const parsed = parseWeighSession(accumulatedText, bangkokToday(), fallbackTime);
       console.log("[TRACE][finalizeAccumulated] parser_output:", JSON.stringify({ date: parsed.date, staff_name: parsed.staff_name, items_count: parsed.items.length, items: parsed.items, parse_errors: parsed.parse_errors }, null, 2));
 
       if (parsed.parse_errors.length > 0) {

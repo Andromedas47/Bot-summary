@@ -110,7 +110,7 @@ export function DailyTable({ rows }: { rows: DailyRow[] }) {
             <tr className="bg-slate-50 border-y border-slate-200">
               <th className={`${TH} w-28`}>วันที่รายการ</th>
               <th className={`${TH} w-20`}>เวลา</th>
-              <th className={`${TH} w-28`}>ผู้ส่ง LINE</th>
+              <th className={`${TH} w-28`}>ชื่อใน prefix</th>
               <th className={`${TH} w-28`}>คนขาย</th>
               <th className={`${TH} w-32`}>ตลาด</th>
               <th className={`${TH} w-28`}>ประเภท</th>

@@ -117,7 +117,7 @@ async function getPageData(month: string): Promise<{
     fetchAllTxRows(supabase, from, toExclusive),
     supabase
       .from("settlement_entries")
-      .select("settlement_date, settlement_time, staff_name, market_name, money_transfer, money_cash")
+      .select("settlement_date, settlement_time, staff_name, market_name, money_transfer, money_cash, expenses")
       .gte("settlement_date", from)
       .lt("settlement_date",  toExclusive),
   ]);

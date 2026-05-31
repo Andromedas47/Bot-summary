@@ -15,13 +15,13 @@ export default async function SettlementEntryPage({ searchParams }: PageProps) {
   const params = await searchParams;
   const { date, market, seller } = params;
 
-  let initial: { moneyTransfer: number; moneyCash: number; notes: string } | undefined;
+  let initial: { moneyTransfer: number; moneyCash: number; expenses: number; notes: string } | undefined;
 
   if (date && market && seller) {
     const supabase = await createServiceClient();
     const { data } = await supabase
       .from("settlement_entries")
-      .select("money_transfer, money_cash, notes")
+      .select("money_transfer, money_cash, expenses, notes")
       .eq("settlement_date", date)
       .eq("settlement_time", "")
       .eq("staff_name", seller)
@@ -32,6 +32,7 @@ export default async function SettlementEntryPage({ searchParams }: PageProps) {
       initial = {
         moneyTransfer: (data as { money_transfer: number }).money_transfer,
         moneyCash:     (data as { money_cash: number }).money_cash,
+        expenses:      (data as { expenses: number }).expenses ?? 0,
         notes:         (data as { notes: string }).notes ?? "",
       };
     }
@@ -57,6 +58,7 @@ export default async function SettlementEntryPage({ searchParams }: PageProps) {
                 seller:        seller ?? "",
                 moneyTransfer: initial?.moneyTransfer ?? 0,
                 moneyCash:     initial?.moneyCash     ?? 0,
+                expenses:      initial?.expenses      ?? 0,
                 notes:         initial?.notes         ?? "",
               }}
             />

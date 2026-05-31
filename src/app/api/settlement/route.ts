@@ -35,11 +35,12 @@ export async function POST(req: NextRequest) {
     market_name?:     string;
     money_transfer?:  number;
     money_cash?:      number;
+    expenses?:        number;
     notes?:           string;
   };
 
   const { settlement_date, settlement_time = "", staff_name = "", market_name = "",
-          money_transfer = 0, money_cash = 0, notes = "" } = body;
+          money_transfer = 0, money_cash = 0, expenses = 0, notes = "" } = body;
 
   if (!settlement_date) return NextResponse.json({ error: "settlement_date required" }, { status: 400 });
 
@@ -48,7 +49,7 @@ export async function POST(req: NextRequest) {
     .from("settlement_entries")
     .upsert(
       { settlement_date, settlement_time, staff_name, market_name,
-        money_transfer, money_cash, notes, updated_at: new Date().toISOString() },
+        money_transfer, money_cash, expenses, notes, updated_at: new Date().toISOString() },
       { onConflict: "settlement_date,settlement_time,staff_name,market_name" },
     )
     .select()

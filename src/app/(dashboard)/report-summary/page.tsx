@@ -63,7 +63,7 @@ async function getSettlements(
 
   const { data, error } = await supabase
     .from("settlement_entries")
-    .select("settlement_date, market_name, staff_name, money_transfer, money_cash")
+    .select("settlement_date, market_name, staff_name, money_transfer, money_cash, expenses")
     .in("settlement_date", dates);
 
   if (error) throw new Error(error.message);
@@ -75,11 +75,14 @@ async function getSettlements(
     staff_name:      string;
     money_transfer:  number;
     money_cash:      number;
+    expenses:        number;
   }[]) {
     const key = `${s.settlement_date}||${displayMarketName(s.market_name, "")}||${s.staff_name}`;
-    if (!map[key]) map[key] = { ยอดโอน: 0, ยอดขาย: 0 };
+    if (!map[key]) map[key] = { ยอดโอน: 0, เงินสด: 0, ค่าใช้จ่าย: 0, ยอดขาย: 0 };
     map[key].ยอดโอน += s.money_transfer;
-    map[key].ยอดขาย += s.money_transfer + s.money_cash;
+    map[key].เงินสด += s.money_cash;
+    map[key].ค่าใช้จ่าย += s.expenses;
+    map[key].ยอดขาย += s.money_transfer + s.money_cash + s.expenses;
   }
 
   return map;

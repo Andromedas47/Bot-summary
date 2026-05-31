@@ -70,7 +70,7 @@ export function calculateSettlementTotals({
   expenses?: number;
   labor?: number;
 }): SettlementTotals {
-  const ยอดขาย = money_transfer + money_cash;
+  const ยอดขาย = money_transfer + money_cash + expenses;
   return {
     ยอดโอน: money_transfer,
     เงินสด: money_cash,

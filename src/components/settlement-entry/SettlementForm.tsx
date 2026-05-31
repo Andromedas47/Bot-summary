@@ -17,6 +17,7 @@ interface InitialValues {
   seller:        string;
   moneyTransfer: number;
   moneyCash:     number;
+  expenses:      number;
   notes:         string;
 }
 
@@ -34,6 +35,7 @@ export function SettlementForm({ initial }: { initial?: Partial<InitialValues> }
   const [seller,        setSeller]        = useState(initial?.seller        ?? "");
   const [moneyTransfer, setMoneyTransfer] = useState(initial?.moneyTransfer ?? 0);
   const [moneyCash,     setMoneyCash]     = useState(initial?.moneyCash     ?? 0);
+  const [expenses,      setExpenses]      = useState(initial?.expenses      ?? 0);
   const [notes,         setNotes]         = useState(initial?.notes         ?? "");
   const [yodSong,       setYodSong]       = useState<YodSong | null>(null);
   const [fetchError,    setFetchError]    = useState("");
@@ -42,7 +44,7 @@ export function SettlementForm({ initial }: { initial?: Partial<InitialValues> }
   const [fetching,      startFetch]       = useTransition();
   const [saving,        startSave]        = useTransition();
 
-  const ยอดขาย  = moneyTransfer + moneyCash;
+  const ยอดขาย  = moneyTransfer + moneyCash + expenses;
   const ขาดเกิน = yodSong != null ? ยอดขาย - yodSong.ยอดส่ง : null;
 
   const month = date ? date.slice(0, 7) : null;
@@ -76,6 +78,7 @@ export function SettlementForm({ initial }: { initial?: Partial<InitialValues> }
           market_name:     market,
           money_transfer:  moneyTransfer,
           money_cash:      moneyCash,
+          expenses,
           notes,
         }),
       });
@@ -152,6 +155,19 @@ export function SettlementForm({ initial }: { initial?: Partial<InitialValues> }
               className={INPUT_CLS + " text-right tabular-nums"}
             />
           </div>
+
+          <div className="space-y-1">
+            <label className="block text-xs font-semibold text-slate-600">ค่าใช้จ่าย</label>
+            <input
+              type="number"
+              min={0}
+              step="0.01"
+              value={expenses || ""}
+              placeholder="0"
+              onChange={e => setExpenses(parseFloat(e.target.value) || 0)}
+              className={INPUT_CLS + " text-right tabular-nums"}
+            />
+          </div>
         </div>
 
         <div className="space-y-1">
@@ -169,7 +185,7 @@ export function SettlementForm({ initial }: { initial?: Partial<InitialValues> }
       {/* Auto-calc summary */}
       <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3">
         <div className="flex items-center justify-between">
-          <span className="text-sm font-semibold text-slate-700">ยอดขาย (เงินโอน + เงินสด)</span>
+          <span className="text-sm font-semibold text-slate-700">ยอดขาย (โอน + สด + ค่าใช้จ่าย)</span>
           <span className="text-base font-bold tabular-nums text-slate-800">
             {fmtMoney(ยอดขาย)}
           </span>

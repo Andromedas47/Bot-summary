@@ -271,6 +271,7 @@ export interface Database {
           market_name:     string;
           money_transfer:  number;
           money_cash:      number;
+          expenses:        number;
           notes:           string;
           created_at:      string;
           updated_at:      string;
@@ -283,6 +284,7 @@ export interface Database {
           market_name?:     string;
           money_transfer?:  number;
           money_cash?:      number;
+          expenses?:        number;
           notes?:           string;
           created_at?:      string;
           updated_at?:      string;
@@ -295,6 +297,7 @@ export interface Database {
           market_name?:     string;
           money_transfer?:  number;
           money_cash?:      number;
+          expenses?:        number;
           notes?:           string;
           created_at?:      string;
           updated_at?:      string;

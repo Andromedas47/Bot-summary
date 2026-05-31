@@ -18,7 +18,12 @@ export interface ReportRow {
   item_number: number | null;
 }
 
-export type SettlementMap = Record<string, { ยอดโอน: number; ยอดขาย: number }>;
+export type SettlementMap = Record<string, {
+  ยอดโอน: number;
+  เงินสด: number;
+  ค่าใช้จ่าย: number;
+  ยอดขาย: number;
+}>;
 
 export interface ReportGroup {
   date: string;
@@ -86,17 +91,17 @@ export function buildReportGroups(rows: ReportRow[], settlements: SettlementMap)
   return Array.from(map.values())
     .map((g) => {
       const key = `${g.date}||${g.market}||${g.seller}`;
-      const s = settlements[key] ?? { ยอดโอน: 0, ยอดขาย: 0 };
+      const s = settlements[key] ?? { ยอดโอน: 0, เงินสด: 0, ค่าใช้จ่าย: 0, ยอดขาย: 0 };
       const ยอดส่ง = calculateYodSong({
         เบิก: g.ยอดเบิก,
         คืน: g.ยอดคืน,
         คืนเสีย: g.ยอดคืนเสีย,
       });
-      const moneyCash = s.ยอดขาย - s.ยอดโอน;
       const settlement = calculateSettlementTotals({
         ยอดส่ง,
         money_transfer: s.ยอดโอน,
-        money_cash: moneyCash,
+        money_cash: s.เงินสด,
+        expenses: s.ค่าใช้จ่าย,
       });
 
       return {

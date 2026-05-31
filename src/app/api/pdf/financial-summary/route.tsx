@@ -96,7 +96,7 @@ export async function GET(req: NextRequest) {
   // Fetch settlements
   const { data: settlData, error: settlErr } = await supabase
     .from("settlement_entries")
-    .select("settlement_date, settlement_time, staff_name, market_name, money_transfer, money_cash")
+    .select("settlement_date, settlement_time, staff_name, market_name, money_transfer, money_cash, expenses")
     .gte("settlement_date", from)
     .lt("settlement_date",  toExclusive);
   if (settlErr) return NextResponse.json({ error: settlErr.message }, { status: 500 });

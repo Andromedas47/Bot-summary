@@ -357,6 +357,81 @@ describe("edge cases", () => {
   });
 });
 
+// ── Real sample: พี่ดำ-เฉลิมฯ72 with แพค unit ────────────────────────────────
+
+describe("real sample: พี่ดำ-เฉลิมฯ72 ทุเรียน with แพค unit (4 items)", () => {
+  const SAMPLE = `\
+พี่ดำ-เฉลิมฯ72ทุเรียน เบิก 30/5/2569
+
+1หมอนทอง119บาท
+
+23.4.โล
+
+2ก้านยาว109บาท
+
+8.6.โล
+
+3ชะนี100บาท
+
+15.5.โล
+
+5ทุเนียนกล่อง80บาท
+
+20.แพค
+
+จบรายการเบิก`;
+
+  const result = parseWeighSession(SAMPLE);
+
+  it("parses 4 items", () => {
+    expect(result.items).toHaveLength(4);
+  });
+
+  it("parses no errors", () => {
+    expect(result.parse_errors).toHaveLength(0);
+  });
+
+  it("extracts staff name and date", () => {
+    expect(result.staff_name).toBe("พี่ดำ");
+    expect(result.date).toBe("2026-05-30");
+  });
+
+  it("parses item 1 — หมอนทอง 23.4 โล", () => {
+    expect(result.items[0]).toMatchObject({
+      item_number: 1, product_name: "หมอนทอง", price_per_unit: 119,
+      quantity: 23.4, unit: "โล",
+    });
+  });
+
+  it("parses item 2 — ก้านยาว 8.6 โล", () => {
+    expect(result.items[1]).toMatchObject({
+      item_number: 2, product_name: "ก้านยาว", price_per_unit: 109,
+      quantity: 8.6, unit: "โล",
+    });
+  });
+
+  it("parses item 3 — ชะนี 15.5 โล", () => {
+    expect(result.items[2]).toMatchObject({
+      item_number: 3, product_name: "ชะนี", price_per_unit: 100,
+      quantity: 15.5, unit: "โล",
+    });
+  });
+
+  it("parses item 5 — ทุเนียนกล่อง 20 แพค (skipped number 4 is ok)", () => {
+    expect(result.items[3]).toMatchObject({
+      item_number: 5, product_name: "ทุเนียนกล่อง", price_per_unit: 80,
+      quantity: 20, unit: "แพค",
+    });
+  });
+
+  it("total borrow = 119×23.4 + 109×8.6 + 100×15.5 + 80×20 = 6,872", () => {
+    const borrow = result.items
+      .filter((i) => i.transaction_type === "เบิก" || i.transaction_type === "เบิกเพิ่ม")
+      .reduce((sum, i) => sum + (i.price_per_unit ?? 0) * (i.quantity ?? 0), 0);
+    expect(borrow).toBeCloseTo(6872, 1);
+  });
+});
+
 // ── Regex unit tests ──────────────────────────────────────────────────────────
 
 describe("RE.QUANTITY", () => {
@@ -370,6 +445,8 @@ describe("RE.QUANTITY", () => {
     ["6.ลูก",     6,    "ลูก"],
     ["13.กล่อง",  13,   "กล่อง"],
     ["12.กล่อง",  12,   "กล่อง"],
+    ["20.แพค",    20,   "แพค"],
+    ["5แพค",       5,   "แพค"],
   ];
 
   cases.forEach(([input, expectedAmt, expectedUnit]) => {

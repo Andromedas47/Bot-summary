@@ -24,9 +24,9 @@ export const RE = {
   // Quantity with unit — trailing dot before unit is optional (scale output format):
   //   "38โล"  "18.5โล"  "38.1.โล"  "28.โล"
   //   "9ลูก"  "23.ลูก"  "6.ลูก"
-  //   "13.กล่อง"
+  //   "13.กล่อง"  "20.แพค"  "5แพค"
   // Captures: [1]=amount, [2]=unit
-  QUANTITY: /^(\d+(?:\.\d+)?)\.?\s*(โล|ลูก|กล่อง)\s*$/,
+  QUANTITY: /^(\d+(?:\.\d+)?)\.?\s*(โล|ลูก|กล่อง|แพค)\s*$/,
 
   // Full-line date (anchored to avoid false matches inside item lines):
   //   "25/5/69"   → short Buddhist year 2569 → Gregorian 2026

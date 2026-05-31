@@ -32,6 +32,7 @@ export function parseWeighSession(text: string, fallbackDate: string | null = nu
   const parseErrors: string[]                  = [];
   let   pendingItem: Partial<WeighSessionItem> | null = null;
 
+  console.log("[TRACE][parseWeighSession] input_lines:", JSON.stringify(lines));
   for (const line of lines) {
     const prefixMatch = line.match(RE.TIME_PREFIX);
     let   content: string;
@@ -46,6 +47,7 @@ export function parseWeighSession(text: string, fallbackDate: string | null = nu
     } else {
       content = line;
     }
+    console.log(`[TRACE][parseWeighSession] line="${line}" state=${state} content="${content}" hasPrefix=${!!prefixMatch} pendingItem=${JSON.stringify(pendingItem)}`);
 
     // ── Date extraction ────────────────────────────────────────────────────
     if (!date && !prefixMatch) {
@@ -62,8 +64,11 @@ export function parseWeighSession(text: string, fallbackDate: string | null = nu
 
     // ── Session end ────────────────────────────────────────────────────────
     if (RE.SESSION_END.test(content)) {
+      console.log("[TRACE][parseWeighSession] SESSION_END detected, pendingItem:", JSON.stringify(pendingItem));
       if (pendingItem?.product_name) {
-        items.push(finalize(pendingItem, currentSection, currentTxType));
+        const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
+        console.log("[TRACE][parseWeighSession] PUSH_ITEM(session-end):", JSON.stringify(finalizedItem), "items_total_after:", items.length + 1);
+        items.push(finalizedItem);
         pendingItem = null;
       }
       currentSection = "main";
@@ -102,7 +107,9 @@ export function parseWeighSession(text: string, fallbackDate: string | null = nu
         if (pendingItem?.product_name) {
           pendingItem.quantity = parseFloat(qm[1]);
           pendingItem.unit     = qm[2] as ProduceUnit;
-          items.push(finalize(pendingItem, currentSection, currentTxType));
+          const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
+          console.log("[TRACE][parseWeighSession] PUSH_ITEM(quantity):", JSON.stringify(finalizedItem), "items_total_after:", items.length + 1);
+          items.push(finalizedItem);
           pendingItem = null;
         } else {
           parseErrors.push(`quantity with no preceding item: "${line}"`);
@@ -111,7 +118,11 @@ export function parseWeighSession(text: string, fallbackDate: string | null = nu
         const im = content.match(RE.ITEM);
         if (im) {
           // Item line sent without LINE export timestamp (direct typed message)
-          if (pendingItem?.product_name) items.push(finalize(pendingItem, currentSection, currentTxType));
+          if (pendingItem?.product_name) {
+            const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
+            console.log("[TRACE][parseWeighSession] PUSH_ITEM(displaced):", JSON.stringify(finalizedItem), "items_total_after:", items.length + 1);
+            items.push(finalizedItem);
+          }
           pendingItem = {
             item_number:    parseInt(im[1], 10),
             product_name:   im[2].trim(),
@@ -119,14 +130,18 @@ export function parseWeighSession(text: string, fallbackDate: string | null = nu
             quantity:       null,
             unit:           null,
           };
+          console.log("[TRACE][parseWeighSession] SET_PENDING_ITEM:", JSON.stringify(pendingItem));
         } else if (content.length > 0) {
           // Non-item bare line → section / transaction-type marker
           if (pendingItem?.product_name) {
-            items.push(finalize(pendingItem, currentSection, currentTxType));
+            const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
+            console.log("[TRACE][parseWeighSession] PUSH_ITEM(section-change):", JSON.stringify(finalizedItem), "items_total_after:", items.length + 1);
+            items.push(finalizedItem);
             pendingItem = null;
           }
           currentSection = content;
           currentTxType  = classifyTxType(content);
+          console.log("[TRACE][parseWeighSession] SECTION_CHANGE:", content, "txType:", currentTxType);
         }
       }
       continue;
@@ -159,8 +174,11 @@ export function parseWeighSession(text: string, fallbackDate: string | null = nu
 
   // Trailing pending item (missing session-end marker)
   if (pendingItem?.product_name) {
-    items.push(finalize(pendingItem, currentSection, currentTxType));
+    const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
+    console.log("[TRACE][parseWeighSession] PUSH_ITEM(trailing):", JSON.stringify(finalizedItem), "items_total_after:", items.length + 1);
+    items.push(finalizedItem);
   }
+  console.log("[TRACE][parseWeighSession] final_items_count:", items.length);
 
   return {
     date:             date ?? fallbackDate,

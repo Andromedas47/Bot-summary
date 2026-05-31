@@ -197,7 +197,9 @@ export class WebhookService {
     log:              ChildLogger,
   ): Promise<WebhookProcessResult> {
     try {
+      console.log("[TRACE][finalizeAccumulated] accumulated_text_before_parse:\n" + accumulatedText);
       const parsed = parseWeighSession(accumulatedText, bangkokToday());
+      console.log("[TRACE][finalizeAccumulated] parser_output:", JSON.stringify({ date: parsed.date, staff_name: parsed.staff_name, items_count: parsed.items.length, items: parsed.items, parse_errors: parsed.parse_errors }, null, 2));
 
       if (parsed.parse_errors.length > 0) {
         log.warn("finalized with parse errors", { errors: parsed.parse_errors });
@@ -288,7 +290,9 @@ export class WebhookService {
 
       if (replyToken) {
         console.log("reply triggered for finalized session");
+        console.log("[TRACE][finalizeAccumulated] items_before_summary:", JSON.stringify(parsed.items.map(i => ({ item_number: i.item_number, product_name: i.product_name, price_per_unit: i.price_per_unit, quantity: i.quantity, unit: i.unit, transaction_type: i.transaction_type }))));
         const summary = buildWeighSessionSummary(parsed);
+        console.log("[TRACE][finalizeAccumulated] summary_reply_payload:", summary);
         try {
           await replyLineMessage(replyToken, summary);
         } catch (e) {
@@ -332,11 +336,13 @@ export class WebhookService {
     log.info("running parser", { parser: parser.name, version: parser.version });
 
     try {
+      console.log("[TRACE][runParser] text_before_parse:", (msgEvent.message as import("@/lib/line/types").LineTextMessage).text);
       const result = await parser.parse(msgEvent);
 
       // Fix 2 + 3: weigh-session specific guards before any DB writes
       if (parser.name === "weigh-session" && result.data) {
         const ws = result.data as unknown as WeighSession;
+        console.log("[TRACE][runParser] parser_output:", JSON.stringify({ date: ws.date, staff_name: ws.staff_name, items_count: ws.items.length, items: ws.items, parse_errors: ws.parse_errors }, null, 2));
 
         // Fix 2: empty items guard
         if (ws.items.length === 0) {
@@ -393,6 +399,8 @@ export class WebhookService {
           : null;
 
         if (summaryText) {
+          console.log("[TRACE][runParser] items_before_summary:", JSON.stringify((result.data as unknown as WeighSession).items.map(i => ({ item_number: i.item_number, product_name: i.product_name, price_per_unit: i.price_per_unit, quantity: i.quantity, unit: i.unit, transaction_type: i.transaction_type }))));
+          console.log("[TRACE][runParser] summary_reply_payload:", summaryText);
           try {
             await replyLineMessage(replyToken, summaryText);
           } catch (e) {

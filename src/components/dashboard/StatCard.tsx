@@ -19,19 +19,19 @@ export function StatCard({
   description,
   icon,
   trend,
-  accentColor = "bg-slate-100 text-slate-600",
+  accentColor = "bg-slate-100 text-slate-500",
 }: StatCardProps) {
   return (
     <Card>
-      <CardContent className="pt-6">
-        <div className="flex items-start justify-between">
+      <CardContent className="pt-5 pb-5">
+        <div className="flex items-start justify-between gap-3">
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-slate-500 truncate">{title}</p>
-            <p className="mt-1 text-2xl font-bold text-slate-900 tabular-nums">
+            <p className="text-xs font-medium text-slate-500 uppercase tracking-wide truncate">{title}</p>
+            <p className="mt-1.5 text-2xl font-bold text-slate-900 tabular-nums leading-none">
               {value}
             </p>
             {description && (
-              <p className="mt-1 text-xs text-slate-400">{description}</p>
+              <p className="mt-1.5 text-xs text-slate-400">{description}</p>
             )}
             {trend && (
               <p

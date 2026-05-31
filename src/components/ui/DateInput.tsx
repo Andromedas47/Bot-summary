@@ -6,9 +6,10 @@ import { useCallback } from "react";
 interface DateInputProps {
   defaultValue?: string;
   paramName?: string;
+  label?: string;
 }
 
-export function DateInput({ defaultValue = "", paramName = "date" }: DateInputProps) {
+export function DateInput({ defaultValue = "", paramName = "date", label }: DateInputProps) {
   const router       = useRouter();
   const pathname     = usePathname();
   const searchParams = useSearchParams();
@@ -28,7 +29,8 @@ export function DateInput({ defaultValue = "", paramName = "date" }: DateInputPr
       type="date"
       defaultValue={defaultValue}
       onChange={(e) => onChange(e.target.value)}
-      className="w-45 shrink-0 rounded-lg border border-slate-300 bg-white py-2 px-3 text-sm text-slate-900 focus:border-[#06C755] focus:outline-none focus:ring-2 focus:ring-[#06C755]/20"
+      aria-label={label ?? "เลือกวันที่"}
+      className="h-11 sm:h-9 w-44 shrink-0 rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-900 transition-colors focus:border-[#06C755] focus:outline-none focus:ring-2 focus:ring-[#06C755]/15"
     />
   );
 }

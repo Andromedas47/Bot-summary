@@ -1,6 +1,6 @@
 import { LoginForm } from "@/components/auth/LoginForm";
 
-export const metadata = { title: "Sign in — LINE Dashboard" };
+export const metadata = { title: "เข้าสู่ระบบ — LINE Dashboard" };
 
 export default function LoginPage() {
   return (
@@ -15,7 +15,7 @@ export default function LoginPage() {
           </div>
           <div className="text-center">
             <h1 className="text-xl font-semibold text-white">LINE Dashboard</h1>
-            <p className="mt-1 text-sm text-slate-400">Sign in to continue</p>
+            <p className="mt-1 text-sm text-slate-400">เข้าสู่ระบบเพื่อดำเนินการต่อ</p>
           </div>
         </div>
 

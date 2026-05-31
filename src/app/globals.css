@@ -1,11 +1,56 @@
 @import "tailwindcss";
 
 @theme {
-  --font-sans: var(--font-geist), ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-sarabun), ui-sans-serif, system-ui, sans-serif;
   --color-brand: #06c755;
   --color-brand-dark: #05b34d;
+  --color-brand-muted: #e8faf0;
 }
 
 *, *::before, *::after {
   box-sizing: border-box;
+}
+
+/* Thin scrollbar for all scrollable containers */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 99px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Selection color */
+::selection {
+  background-color: #06c75528;
+  color: inherit;
+}
+
+/* Consistent focus ring using brand color */
+:focus-visible {
+  outline: 2px solid #06c755;
+  outline-offset: 2px;
+}
+
+/* Tabular nums for number cells */
+.num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* Respect prefers-reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

@@ -20,7 +20,7 @@ export default function DailyTableLoading() {
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1300px]">
+            <table className="w-full min-w-325">
               <thead>
                 <tr className="bg-slate-100 border-b-2 border-slate-200">
                   {Array.from({ length: 14 }).map((_, i) => (

@@ -25,10 +25,9 @@ function pageRange(current: number, total: number): (number | "…")[] {
   return [1, "…", current - 1, current, current + 1, "…", total];
 }
 
-const btnBase =
-  "flex items-center gap-1 rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors";
-const btnActive = "border-slate-300 text-slate-700 hover:bg-slate-50";
-const btnDisabled = "border-slate-200 text-slate-300 cursor-not-allowed";
+const btnBase = "flex items-center gap-1 rounded-lg border px-3 py-1.5 min-h-11 sm:min-h-0 text-sm font-medium transition-all duration-150";
+const btnActive = "border-slate-200 bg-white text-slate-700 hover:bg-slate-50 hover:border-slate-300 shadow-sm";
+const btnDisabled = "border-slate-100 bg-slate-50 text-slate-300 cursor-not-allowed";
 
 function ChevronLeft() {
   return (
@@ -51,13 +50,12 @@ export function Pagination({ page, totalPages, basePath, params = {} }: Paginati
 
   return (
     <div className="flex items-center justify-center gap-1 py-3 px-4">
-      {/* Prev button */}
       {page > 1 ? (
         <a href={href(basePath, params, page - 1)} className={`${btnBase} ${btnActive}`}>
-          <ChevronLeft /> <span className="hidden sm:inline">Prev</span>
+          <ChevronLeft /> <span className="hidden sm:inline">ก่อน</span>
         </a>
       ) : (
-        <span className={`${btnBase} ${btnDisabled}`}><ChevronLeft /> <span className="hidden sm:inline">Prev</span></span>
+        <span className={`${btnBase} ${btnDisabled}`}><ChevronLeft /> <span className="hidden sm:inline">ก่อน</span></span>
       )}
 
       {/* Mobile: "หน้า X / Y" */}
@@ -74,10 +72,10 @@ export function Pagination({ page, totalPages, basePath, params = {} }: Paginati
             <a
               key={p}
               href={href(basePath, params, p)}
-              className={`min-w-[2rem] rounded-lg px-2 py-1.5 text-center text-sm font-medium transition-colors ${
+              className={`min-w-8 min-h-11 sm:min-h-0 rounded-lg px-2 py-1.5 text-center text-sm font-medium transition-all duration-150 ${
                 p === page
-                  ? "bg-[#06C755] text-white"
-                  : "border border-slate-300 text-slate-700 hover:bg-slate-50"
+                  ? "bg-[#06C755] text-white shadow-sm"
+                  : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 shadow-sm"
               }`}
             >
               {p}
@@ -86,13 +84,12 @@ export function Pagination({ page, totalPages, basePath, params = {} }: Paginati
         )}
       </div>
 
-      {/* Next button */}
       {page < totalPages ? (
         <a href={href(basePath, params, page + 1)} className={`${btnBase} ${btnActive}`}>
-          <span className="hidden sm:inline">Next</span> <ChevronRight />
+          <span className="hidden sm:inline">ถัดไป</span> <ChevronRight />
         </a>
       ) : (
-        <span className={`${btnBase} ${btnDisabled}`}><span className="hidden sm:inline">Next</span> <ChevronRight /></span>
+        <span className={`${btnBase} ${btnDisabled}`}><span className="hidden sm:inline">ถัดไป</span> <ChevronRight /></span>
       )}
     </div>
   );

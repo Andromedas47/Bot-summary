@@ -10,7 +10,7 @@ interface FilterSelectProps {
   allLabel?: string;
 }
 
-export function FilterSelect({ label, paramName, options, allLabel = "All" }: FilterSelectProps) {
+export function FilterSelect({ label, paramName, options, allLabel = "ทั้งหมด" }: FilterSelectProps) {
   const router       = useRouter();
   const pathname     = usePathname();
   const searchParams = useSearchParams();
@@ -28,11 +28,11 @@ export function FilterSelect({ label, paramName, options, allLabel = "All" }: Fi
 
   return (
     <div className="flex items-center gap-2">
-      <label className="text-sm text-slate-500 whitespace-nowrap">{label}</label>
+      <label className="text-xs font-medium text-slate-500 whitespace-nowrap">{label}</label>
       <select
         value={current}
         onChange={(e) => onChange(e.target.value)}
-        className="rounded-lg border border-slate-300 bg-white py-2 pl-3 pr-8 text-sm text-slate-900 focus:border-[#06C755] focus:outline-none focus:ring-2 focus:ring-[#06C755]/20"
+        className="h-9 rounded-lg border border-slate-300 bg-white pl-3 pr-7 text-sm text-slate-900 transition-colors focus:border-[#06C755] focus:outline-none focus:ring-2 focus:ring-[#06C755]/15"
       >
         <option value="">{allLabel}</option>
         {options.map((o) => (

@@ -30,18 +30,20 @@ export function Card({ children, className = "" }: CardProps) {
 
 export function CardHeader({ children, className = "" }: CardHeaderProps) {
   return (
-    <div className={`flex flex-col gap-1.5 p-6 ${className}`}>{children}</div>
+    <div className={`flex flex-col gap-1 px-5 py-4 border-b border-slate-100 ${className}`}>
+      {children}
+    </div>
   );
 }
 
 export function CardTitle({ children, className = "" }: CardTitleProps) {
   return (
-    <h3 className={`text-lg font-semibold text-slate-900 ${className}`}>
+    <h3 className={`text-[0.9375rem] font-semibold text-slate-900 ${className}`}>
       {children}
     </h3>
   );
 }
 
 export function CardContent({ children, className = "" }: CardContentProps) {
-  return <div className={`p-6 pt-0 ${className}`}>{children}</div>;
+  return <div className={`p-5 pt-0 ${className}`}>{children}</div>;
 }

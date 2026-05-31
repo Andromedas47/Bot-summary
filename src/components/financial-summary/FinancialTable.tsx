@@ -38,7 +38,7 @@ function gk(date: string, time: string | null, seller: string, market: string) {
 }
 
 function fmtNum(n: number, dec = 2): string {
-  return n.toLocaleString("th-TH", { minimumFractionDigits: 0, maximumFractionDigits: dec });
+  return n.toLocaleString("th-TH", { minimumFractionDigits: dec, maximumFractionDigits: dec });
 }
 
 function fmtDate(d: string): string {

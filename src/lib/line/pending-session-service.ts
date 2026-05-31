@@ -51,29 +51,16 @@ export class PendingSessionService {
     newText:     string,
     replyToken:  string | null,
   ): Promise<PendingSession> {
-    const { data: current } = await this.supabase
-      .from("pending_sessions")
-      .select("accumulated_text")
-      .eq("session_key", sessionKey)
-      .single();
-
-    const combined = current
-      ? `${(current as { accumulated_text: string }).accumulated_text}\n${newText}`
-      : newText;
-
-    const { data, error } = await this.supabase
-      .from("pending_sessions")
-      .update({
-        accumulated_text:   combined,
-        latest_reply_token: replyToken,
-        updated_at:         new Date().toISOString(),
-      })
-      .eq("session_key", sessionKey)
-      .select()
-      .single();
-
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data, error } = await (this.supabase as any).rpc("append_pending_session", {
+      p_session_key:  sessionKey,
+      p_new_text:     newText,
+      p_reply_token:  replyToken,
+    });
     if (error) throw new Error(`pending session append failed: ${error.message}`);
-    return data as PendingSession;
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!row) throw new Error(`pending session not found for append: ${sessionKey}`);
+    return row as PendingSession;
   }
 
   async delete(sessionKey: string): Promise<void> {

@@ -17,6 +17,7 @@ export async function replyLineMessage(replyToken: string, text: string): Promis
   if (!res.ok) {
     const errorText = await res.text();
     logger.error("LINE reply failed", { status: res.status, body: errorText });
+    throw new Error(`LINE reply HTTP ${res.status}: ${errorText}`);
   }
 }
 

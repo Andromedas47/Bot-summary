@@ -207,7 +207,11 @@ export class WebhookService {
       if (parsed.items.length === 0) {
         log.warn("parsed session has no items — aborting");
         if (replyToken) {
-          replyLineMessage(replyToken, "อ่านรายการไม่สำเร็จ กรุณาตรวจสอบรูปแบบข้อความ").catch(() => {});
+          try {
+            await replyLineMessage(replyToken, "อ่านรายการไม่สำเร็จ กรุณาตรวจสอบรูปแบบข้อความ");
+          } catch (e) {
+            log.error("reply failed", { error: String(e) });
+          }
         }
         return { eventId, eventType, status: "saved", parsed: false };
       }
@@ -285,9 +289,11 @@ export class WebhookService {
       if (replyToken) {
         console.log("reply triggered for finalized session");
         const summary = buildWeighSessionSummary(parsed);
-        replyLineMessage(replyToken, summary).catch((e) =>
-          log.error("reply failed", { error: String(e) })
-        );
+        try {
+          await replyLineMessage(replyToken, summary);
+        } catch (e) {
+          log.error("reply failed", { error: String(e) });
+        }
       }
 
       return { eventId, eventType, status: "saved", parsed: true };
@@ -296,7 +302,11 @@ export class WebhookService {
       log.error("finalize accumulated session failed", { error: errorMessage });
 
       if (replyToken) {
-        replyLineMessage(replyToken, "ยังอ่านรายการนี้ไม่ได้ครับ กรุณาตรวจรูปแบบข้อความอีกครั้ง").catch(() => {});
+        try {
+          await replyLineMessage(replyToken, "ยังอ่านรายการนี้ไม่ได้ครับ กรุณาตรวจรูปแบบข้อความอีกครั้ง");
+        } catch (e) {
+          log.error("reply failed", { error: String(e) });
+        }
       }
 
       return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
@@ -332,7 +342,11 @@ export class WebhookService {
         if (ws.items.length === 0) {
           log.warn("parsed session has no items — aborting");
           if (replyToken) {
-            replyLineMessage(replyToken, "อ่านรายการไม่สำเร็จ กรุณาตรวจสอบรูปแบบข้อความ").catch(() => {});
+            try {
+              await replyLineMessage(replyToken, "อ่านรายการไม่สำเร็จ กรุณาตรวจสอบรูปแบบข้อความ");
+            } catch (e) {
+              log.error("reply failed", { error: String(e) });
+            }
           }
           return { eventId, eventType, status: "saved", parsed: false };
         }
@@ -344,7 +358,11 @@ export class WebhookService {
         if (isDuplicate) {
           log.info("duplicate session — skipping insert");
           if (replyToken) {
-            replyLineMessage(replyToken, "รายการนี้เคยบันทึกแล้ว").catch(() => {});
+            try {
+              await replyLineMessage(replyToken, "รายการนี้เคยบันทึกแล้ว");
+            } catch (e) {
+              log.error("reply failed", { error: String(e) });
+            }
           }
           return { eventId, eventType, status: "saved", parsed: false };
         }
@@ -375,9 +393,11 @@ export class WebhookService {
           : null;
 
         if (summaryText) {
-          replyLineMessage(replyToken, summaryText).catch((e) =>
-            log.error("reply failed", { error: String(e) })
-          );
+          try {
+            await replyLineMessage(replyToken, summaryText);
+          } catch (e) {
+            log.error("reply failed", { error: String(e) });
+          }
         }
       }
 
@@ -396,7 +416,11 @@ export class WebhookService {
       });
 
       if (replyToken) {
-        replyLineMessage(replyToken, "ยังอ่านรายการนี้ไม่ได้ครับ กรุณาตรวจรูปแบบข้อความอีกครั้ง").catch(() => {});
+        try {
+          await replyLineMessage(replyToken, "ยังอ่านรายการนี้ไม่ได้ครับ กรุณาตรวจรูปแบบข้อความอีกครั้ง");
+        } catch (e) {
+          log.error("reply failed", { error: String(e) });
+        }
       }
 
       return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };

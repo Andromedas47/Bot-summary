@@ -27,54 +27,65 @@ function fmt(n: number): string {
 }
 
 export function buildWeighSessionSummary(session: WeighSession): string {
-  let borrowCount    = 0;
-  let returnCount    = 0;
-  let badReturnCount = 0;
-  let borrowTotal    = 0;
-  let returnTotal    = 0;
-  let badReturnTotal = 0;
+  type Item = typeof session.items[number];
+
+  const borrowItems: Item[]    = [];
+  const returnItems: Item[]    = [];
+  const badReturnItems: Item[] = [];
 
   for (const item of session.items) {
-    const amount = (item.price_per_unit ?? 0) * (item.quantity ?? 0);
     if (item.transaction_type === "เบิก" || item.transaction_type === "เบิกเพิ่ม") {
-      borrowTotal += amount;
-      borrowCount++;
+      borrowItems.push(item);
     } else if (item.transaction_type === "คืน") {
-      returnTotal += amount;
-      returnCount++;
+      returnItems.push(item);
     } else if (item.transaction_type === "คืนเสีย") {
-      badReturnTotal += amount;
-      badReturnCount++;
+      badReturnItems.push(item);
     }
   }
 
-  const hasBorrow    = borrowCount > 0;
-  const hasReturn    = returnCount > 0;
-  const hasBadReturn = badReturnCount > 0;
-  const hasMixed     = hasBorrow && (hasReturn || hasBadReturn);
+  const sumItems = (items: Item[]) =>
+    items.reduce((acc, it) => acc + (it.price_per_unit ?? 0) * (it.quantity ?? 0), 0);
+
+  const borrowTotal    = sumItems(borrowItems);
+  const returnTotal    = sumItems(returnItems);
+  const badReturnTotal = sumItems(badReturnItems);
+  const netSend        = borrowTotal - returnTotal - badReturnTotal;
+
+  const itemLine = (item: Item, i: number): string => {
+    const qty   = item.quantity ?? 0;
+    const unit  = item.unit ? ` ${item.unit}` : "";
+    const price = item.price_per_unit ?? 0;
+    const total = price * qty;
+    return `${i + 1}. ${item.product_name} ${fmt(qty)}${unit} × ${fmt(price)} = ${fmt(total)}`;
+  };
+
+  const buildSection = (label: string, subtotalLabel: string, items: Item[], total: number): string[] => {
+    if (items.length === 0) return [];
+    return [label, ...items.map(itemLine), `${subtotalLabel}: ${fmt(total)} บาท`];
+  };
 
   const dateLabel = session.date ? formatThaiDate(session.date) : "";
-  const header = [
+  const lines: string[] = [
     "บันทึกแล้ว ✅",
     "",
     `${session.staff_name}${dateLabel ? ` — ${dateLabel}` : ""}`,
   ];
 
-  const body: string[] = [];
+  const sections = [
+    buildSection("เบิก",    "รวมเบิก", borrowItems,    borrowTotal),
+    buildSection("ชั่งคืน", "รวมคืน",  returnItems,    returnTotal),
+    buildSection("คืนเสีย", "รวมเสีย", badReturnItems, badReturnTotal),
+  ].filter(s => s.length > 0);
 
-  if (hasBorrow) {
-    body.push(`เบิก: ${borrowCount} รายการ รวม ${fmt(borrowTotal)} บาท`);
-  }
-  if (hasReturn) {
-    body.push(`ชั่งคืน: ${returnCount} รายการ รวม ${fmt(returnTotal)} บาท`);
-  }
-  if (hasBadReturn) {
-    body.push(`คืนเสีย: ${badReturnCount} รายการ รวม ${fmt(badReturnTotal)} บาท`);
-  }
-  if (hasMixed) {
-    const netSendTotal = borrowTotal - returnTotal - badReturnTotal;
-    body.push("", `ยอดส่งสุทธิ: ${fmt(netSendTotal)} บาท`);
+  for (const s of sections) {
+    lines.push("", ...s);
   }
 
-  return [...header, "", ...body].join("\n");
+  lines.push("");
+  if (borrowItems.length > 0)    lines.push(`ยอดเบิก: ${fmt(borrowTotal)} บาท`);
+  if (returnItems.length > 0)    lines.push(`ยอดคืน: ${fmt(returnTotal)} บาท`);
+  if (badReturnItems.length > 0) lines.push(`ยอดเสีย: ${fmt(badReturnTotal)} บาท`);
+  lines.push(`ยอดส่ง: ${fmt(netSend)} บาท`);
+
+  return lines.join("\n");
 }

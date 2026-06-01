@@ -49,7 +49,6 @@ export function buildWeighSessionSummary(session: WeighSession): string {
   const borrowTotal    = sumItems(borrowItems);
   const returnTotal    = sumItems(returnItems);
   const badReturnTotal = sumItems(badReturnItems);
-  const netSend        = borrowTotal - returnTotal - badReturnTotal;
 
   const itemLine = (item: Item, i: number): string => {
     const qty   = item.quantity ?? 0;
@@ -80,12 +79,6 @@ export function buildWeighSessionSummary(session: WeighSession): string {
   for (const s of sections) {
     lines.push("", ...s);
   }
-
-  lines.push("");
-  if (borrowItems.length > 0)    lines.push(`ยอดเบิก: ${fmt(borrowTotal)} บาท`);
-  if (returnItems.length > 0)    lines.push(`ยอดคืน: ${fmt(returnTotal)} บาท`);
-  if (badReturnItems.length > 0) lines.push(`ยอดเสีย: ${fmt(badReturnTotal)} บาท`);
-  lines.push(`ยอดส่ง: ${fmt(netSend)} บาท`);
 
   return lines.join("\n");
 }

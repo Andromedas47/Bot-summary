@@ -4,6 +4,7 @@ import { logger } from "@/lib/logger";
 import { pushLineMessage } from "@/lib/line/reply";
 import { buildDailySummaryMessage } from "@/lib/line/daily-summary-message";
 import type { DailySummaryMessageRow } from "@/lib/line/daily-summary-message";
+import { bangkokBusinessDateNow } from "@/lib/business-date";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,7 +28,7 @@ interface GroupedSummaryRow extends DailySummaryMessageRow {
 }
 
 function bangkokToday(): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Bangkok" }).format(new Date());
+  return bangkokBusinessDateNow();
 }
 
 function isIsoDate(value: string): boolean {

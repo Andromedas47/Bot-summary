@@ -537,6 +537,33 @@ describe("WeighSessionParser timestamp fallback", () => {
     const result = await new WeighSessionParser().parse(event);
     expect(result.data.transaction_time).toBe("18:34");
   });
+
+  it("uses previous business date before 04:00 Bangkok when text has no date", async () => {
+    const event: LineMessageEvent = {
+      type: "message",
+      webhookEventId: "event-before-cutoff",
+      deliveryContext: { isRedelivery: false },
+      timestamp: Date.UTC(2026, 5, 1, 19, 30, 0), // 2026-06-02 02:30 Bangkok
+      source: { type: "user", userId: "user-1" },
+      mode: "active",
+      replyToken: "reply-token",
+      message: {
+        id: "message-before-cutoff",
+        type: "text",
+        quoteToken: "quote-token",
+        text: [
+          "กี้-ตลาด72 เบิก",
+          "1.หมอนทอง119บาท",
+          "10โล",
+          "จบรายการเบิก",
+        ].join("\n"),
+      },
+    };
+
+    const result = await new WeighSessionParser().parse(event);
+    expect(result.data.date).toBe("2026-06-01");
+    expect(result.data.transaction_time).toBe("02:30");
+  });
 });
 
 describe("RE.QUANTITY", () => {

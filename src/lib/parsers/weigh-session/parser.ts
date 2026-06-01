@@ -3,6 +3,7 @@ import type { LineMessageEvent, LineTextMessage } from "@/lib/line/types";
 import { getUserId } from "@/lib/line/verify";
 import { logger } from "@/lib/logger";
 import { computeItemHash } from "@/lib/line/session-dedup-service";
+import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
 import { RE } from "./regex";
 import type {
   WeighSession,
@@ -232,23 +233,6 @@ function parseBuddhistDate(day: string, month: string, year: string): string {
   return `${gregorianYear}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
 }
 
-function bangkokDateFromTimestamp(timestamp: number | undefined): string | null {
-  if (timestamp == null || !Number.isFinite(timestamp)) return null;
-
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "Asia/Bangkok",
-    year:     "numeric",
-    month:    "2-digit",
-    day:      "2-digit",
-  }).formatToParts(new Date(timestamp));
-
-  const year  = parts.find((p) => p.type === "year")?.value;
-  const month = parts.find((p) => p.type === "month")?.value;
-  const day   = parts.find((p) => p.type === "day")?.value;
-
-  return year && month && day ? `${year}-${month}-${day}` : null;
-}
-
 /** Converts a LINE event timestamp (ms) to Bangkok local time "HH:mm". */
 export function bangkokTimeFromTimestamp(ts: number | undefined): string | null {
   if (ts == null || !Number.isFinite(ts)) return null;
@@ -283,7 +267,7 @@ export class WeighSessionParser extends BaseParser {
     const userId = getUserId(event.source);
     const parsed = parseWeighSession(
       text,
-      bangkokDateFromTimestamp(event.timestamp),
+      bangkokBusinessDateFromTimestamp(event.timestamp),
       bangkokTimeFromTimestamp(event.timestamp),
     );
 

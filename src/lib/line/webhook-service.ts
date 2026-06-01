@@ -11,6 +11,7 @@ import { PendingSessionService } from "@/lib/line/pending-session-service";
 import { DailySummaryService } from "@/lib/line/daily-summary-service";
 import { SessionDedupService, computeItemHash } from "@/lib/line/session-dedup-service";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
+import { bangkokBusinessDateNow } from "@/lib/business-date";
 
 type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
@@ -26,7 +27,7 @@ export interface WebhookProcessResult {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function bangkokToday(): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Bangkok" }).format(new Date());
+  return bangkokBusinessDateNow();
 }
 
 function hasSessionEnd(text: string): boolean {

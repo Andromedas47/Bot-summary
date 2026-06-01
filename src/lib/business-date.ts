@@ -1,0 +1,51 @@
+const BANGKOK_TIME_ZONE = "Asia/Bangkok";
+const DEFAULT_CUTOFF_HOUR = 4;
+
+function bangkokParts(timestamp: number): { year: number; month: number; day: number; hour: number } | null {
+  if (!Number.isFinite(timestamp)) return null;
+
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: BANGKOK_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(timestamp));
+
+  const year = Number(parts.find((p) => p.type === "year")?.value);
+  const month = Number(parts.find((p) => p.type === "month")?.value);
+  const day = Number(parts.find((p) => p.type === "day")?.value);
+  const hour = Number(parts.find((p) => p.type === "hour")?.value);
+
+  if (![year, month, day, hour].every(Number.isFinite)) return null;
+  return { year, month, day, hour };
+}
+
+function isoDateFromParts(year: number, month: number, day: number): string {
+  return new Date(Date.UTC(year, month - 1, day)).toISOString().slice(0, 10);
+}
+
+function previousIsoDate(year: number, month: number, day: number): string {
+  return new Date(Date.UTC(year, month - 1, day) - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+export function bangkokBusinessDateFromTimestamp(
+  timestamp: number | undefined,
+  cutoffHour = DEFAULT_CUTOFF_HOUR,
+): string | null {
+  if (timestamp == null) return null;
+
+  const parts = bangkokParts(timestamp);
+  if (!parts) return null;
+
+  if (parts.hour < cutoffHour) {
+    return previousIsoDate(parts.year, parts.month, parts.day);
+  }
+
+  return isoDateFromParts(parts.year, parts.month, parts.day);
+}
+
+export function bangkokBusinessDateNow(cutoffHour = DEFAULT_CUTOFF_HOUR): string {
+  return bangkokBusinessDateFromTimestamp(Date.now(), cutoffHour) ?? new Date().toISOString().slice(0, 10);
+}

@@ -208,10 +208,15 @@ function finalize(
     product_name:     p.product_name!,
     price_per_unit:   p.price_per_unit!,
     quantity:         p.quantity ?? null,
-    unit:             p.unit     ?? null,
+    unit:             normalizeUnit(p.unit),
     section,
     transaction_type: txType,
   };
+}
+
+function normalizeUnit(unit: ProduceUnit | "แพ็ค" | null | undefined): ProduceUnit | null {
+  if (unit === "แพ็ค") return "แพค";
+  return unit ?? null;
 }
 
 function classifyTxType(text: string): TransactionType {

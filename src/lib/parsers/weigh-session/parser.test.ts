@@ -579,6 +579,7 @@ describe("RE.QUANTITY", () => {
     ["12.กล่อง",  12,   "กล่อง"],
     ["20.แพค",    20,   "แพค"],
     ["5แพค",       5,   "แพค"],
+    ["1แพ็ค",      1,    "แพ็ค"],
   ];
 
   cases.forEach(([input, expectedAmt, expectedUnit]) => {
@@ -593,6 +594,38 @@ describe("RE.QUANTITY", () => {
   it("does not match non-quantity lines", () => {
     expect("1.หมอนทอง119บาท".match(RE.QUANTITY)).toBeNull();
     expect("รายการชั่งคืน".match(RE.QUANTITY)).toBeNull();
+  });
+});
+
+describe("real sample: คืนเสีย with แพ็ค spelling", () => {
+  const result = parseWeighSession(`\
+20:57 เสือ กี้-วัดทุ่งลานนา คืนเสีย 1/6/2569
+20:58 เสือ 1.หมอนทอง119บาท
+2.4โล
+20:58 เสือ 2.องุ่นแดง100บาท
+1โล
+20:58 เสือ 3.แก้วมังกร40บาท
+1.8โล
+20:58 เสือ 4.แอปเปิ้ล5บาท
+1ลูก
+20:58 เสือ 5.ส้มไต้หวัน45บาท
+0.6โล
+20:58 เสือ 6.สาลี่หอม40บาท
+1.2โล
+20:58 เสือ 7.ทุเรียนลูกค้าเคลม160บาท
+1แพ็ค
+20:58 เสือ จบรายการคืนเสีย`);
+
+  it("parses all items as bad returns", () => {
+    expect(result.items).toHaveLength(7);
+    expect(result.items.every((item) => item.transaction_type === "คืนเสีย")).toBe(true);
+    expect(result.items[6]).toMatchObject({
+      item_number: 7,
+      product_name: "ทุเรียนลูกค้าเคลม",
+      price_per_unit: 160,
+      quantity: 1,
+      unit: "แพค",
+    });
   });
 });
 

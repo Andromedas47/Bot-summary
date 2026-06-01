@@ -63,7 +63,14 @@ export class WebhookService {
   constructor(private readonly supabase: Supabase) {}
 
   async processEvents(events: LineEvent[], destination: string): Promise<WebhookProcessResult[]> {
-    return Promise.all(events.map((e) => this.processOne(e, destination)));
+    const sorted = [...events].sort((a, b) => a.timestamp - b.timestamp);
+    const results: WebhookProcessResult[] = [];
+
+    for (const event of sorted) {
+      results.push(await this.processOne(event, destination));
+    }
+
+    return results;
   }
 
   private async processOne(event: LineEvent, destination: string): Promise<WebhookProcessResult> {

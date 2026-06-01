@@ -23,12 +23,14 @@ export interface SettlementEntry {
   money_transfer:  number;
   money_cash:      number;
   expenses:        number;
+  labor:           number;
 }
 
 interface CellState {
   money_transfer: number;
   money_cash:     number;
   expenses:       number;
+  labor:          number;
 }
 
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -114,6 +116,7 @@ export function FinancialTable({
         money_transfer: s.money_transfer,
         money_cash:     s.money_cash,
         expenses:       s.expenses,
+        labor:          s.labor,
       });
     }
     return m;
@@ -123,13 +126,13 @@ export function FinancialTable({
   const savingKeys = useRef<Set<string>>(new Set());
 
   function getCell(key: string): CellState {
-    return cells.get(key) ?? { money_transfer: 0, money_cash: 0, expenses: 0 };
+    return cells.get(key) ?? { money_transfer: 0, money_cash: 0, expenses: 0, labor: 0 };
   }
 
   function handleChange(key: string, field: keyof CellState, raw: string) {
     const value = parseFloat(raw) || 0;
     setCells(prev => {
-      const cur = prev.get(key) ?? { money_transfer: 0, money_cash: 0, expenses: 0 };
+      const cur = prev.get(key) ?? { money_transfer: 0, money_cash: 0, expenses: 0, labor: 0 };
       return new Map(prev).set(key, { ...cur, [field]: value });
     });
   }
@@ -138,7 +141,7 @@ export function FinancialTable({
     if (savingKeys.current.has(key)) return;
     savingKeys.current.add(key);
     setSaveStates(prev => new Map(prev).set(key, "saving"));
-    const cur = cells.get(key) ?? { money_transfer: 0, money_cash: 0, expenses: 0 };
+    const cur = cells.get(key) ?? { money_transfer: 0, money_cash: 0, expenses: 0, labor: 0 };
     try {
       const res = await fetch("/api/settlement", {
         method:  "POST",
@@ -151,6 +154,7 @@ export function FinancialTable({
           money_transfer:  cur.money_transfer,
           money_cash:      cur.money_cash,
           expenses:        cur.expenses,
+          labor:           cur.labor,
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -171,7 +175,7 @@ export function FinancialTable({
   }
 
   let grandเบิก = 0, grandคืน = 0, grandคืนเสีย = 0, grandยอดส่ง = 0,
-      grandโอน = 0, grandสด = 0, grandExpenses = 0;
+      grandโอน = 0, grandสด = 0, grandExpenses = 0, grandLabor = 0;
   for (const g of groups) {
     const c = getCell(gk(g.date, g.time, g.seller, g.market));
     grandเบิก    += g.เบิก;
@@ -181,12 +185,14 @@ export function FinancialTable({
     grandโอน     += c.money_transfer;
     grandสด      += c.money_cash;
     grandExpenses += c.expenses;
+    grandLabor += c.labor;
   }
   const grandSettlement = calculateSettlementTotals({
     ยอดส่ง: grandยอดส่ง,
     money_transfer: grandโอน,
     money_cash: grandสด,
     expenses: grandExpenses,
+    labor: grandLabor,
   });
   const grandยอดขาย = grandSettlement.ยอดขาย;
   const grandขาดเกิน = grandSettlement.ขาดเกิน;
@@ -224,6 +230,7 @@ export function FinancialTable({
               money_transfer: c.money_transfer,
               money_cash: c.money_cash,
               expenses: c.expenses,
+              labor: c.labor,
             });
             const saveState = saveStates.get(k) ?? "idle";
 
@@ -260,8 +267,8 @@ export function FinancialTable({
                   </div>
                 </div>
 
-                <div className="flex items-end gap-2">
-                  <div className="flex-1">
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
                     <span className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">เงินโอน</span>
                     <input
                       type="number"
@@ -275,7 +282,7 @@ export function FinancialTable({
                       onBlur={() => handleBlur(g, k)}
                     />
                   </div>
-                  <div className="flex-1">
+                  <div>
                     <span className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">เงินสด</span>
                     <input
                       type="number"
@@ -289,7 +296,7 @@ export function FinancialTable({
                       onBlur={() => handleBlur(g, k)}
                     />
                   </div>
-                  <div className="flex-1">
+                  <div>
                     <span className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">ค่าใช้จ่าย</span>
                     <input
                       type="number"
@@ -303,7 +310,21 @@ export function FinancialTable({
                       onBlur={() => handleBlur(g, k)}
                     />
                   </div>
-                  <div className="pb-1.5 flex items-center">
+                  <div>
+                    <span className="block text-[10px] text-slate-400 uppercase tracking-wide mb-1">ค่าแรง</span>
+                    <input
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      value={c.labor || ""}
+                      placeholder="0"
+                      aria-label="ค่าแรง"
+                      className={mobileInputCls(saveState)}
+                      onChange={e => handleChange(k, "labor", e.target.value)}
+                      onBlur={() => handleBlur(g, k)}
+                    />
+                  </div>
+                  <div className="col-span-2 flex justify-end">
                     <SaveIcon state={saveState} />
                   </div>
                 </div>
@@ -333,6 +354,7 @@ export function FinancialTable({
               <th className={`${TH} text-right text-indigo-600`}>เงินโอน</th>
               <th className={`${TH} text-right text-amber-600`}>เงินสด</th>
               <th className={`${TH} text-right text-orange-600`}>ค่าใช้จ่าย</th>
+              <th className={`${TH} text-right text-pink-600`}>ค่าแรง</th>
               <th className={`${TH} text-right`}>ยอดขาย</th>
               <th className={`${TH} text-right`}>ขาด/เกิน</th>
             </tr>
@@ -340,7 +362,7 @@ export function FinancialTable({
           <tbody>
             {groups.length === 0 ? (
               <tr>
-                <td colSpan={13} className="px-3 py-10 text-center text-sm text-slate-400">
+                <td colSpan={14} className="px-3 py-10 text-center text-sm text-slate-400">
                   ไม่มีข้อมูลในเดือนนี้
                 </td>
               </tr>
@@ -353,6 +375,7 @@ export function FinancialTable({
                   money_transfer: c.money_transfer,
                   money_cash: c.money_cash,
                   expenses: c.expenses,
+                  labor: c.labor,
                 });
                 const ยอดขาย  = settlement.ยอดขาย;
                 const ขาดเกิน = settlement.ขาดเกิน;
@@ -412,16 +435,29 @@ export function FinancialTable({
                       />
                     </td>
                     <td className="px-3 py-2 text-right">
+                      <input
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        value={c.expenses || ""}
+                        placeholder="0"
+                        aria-label="ค่าใช้จ่าย"
+                        className={desktopInputCls(saveState)}
+                        onChange={e => handleChange(k, "expenses", e.target.value)}
+                        onBlur={() => handleBlur(g, k)}
+                      />
+                    </td>
+                    <td className="px-3 py-2 text-right">
                       <div className="inline-flex items-center gap-1 justify-end">
                         <input
                           type="number"
                           min={0}
                           step="0.01"
-                          value={c.expenses || ""}
+                          value={c.labor || ""}
                           placeholder="0"
-                          aria-label="ค่าใช้จ่าย"
+                          aria-label="ค่าแรง"
                           className={desktopInputCls(saveState)}
-                          onChange={e => handleChange(k, "expenses", e.target.value)}
+                          onChange={e => handleChange(k, "labor", e.target.value)}
                           onBlur={() => handleBlur(g, k)}
                         />
                         <SaveIcon state={saveState} />
@@ -449,6 +485,7 @@ export function FinancialTable({
                 <td className={`${TD} text-right font-bold text-indigo-800`}>{fmtNum(grandโอน)}</td>
                 <td className={`${TD} text-right font-bold text-amber-700`}>{fmtNum(grandสด)}</td>
                 <td className={`${TD} text-right font-bold text-orange-700`}>{fmtNum(grandExpenses)}</td>
+                <td className={`${TD} text-right font-bold text-pink-700`}>{fmtNum(grandLabor)}</td>
                 <td className={`${TD} text-right font-bold text-slate-800`}>{fmtNum(grandยอดขาย)}</td>
                 <DiffCell value={grandขาดเกิน} />
               </tr>
@@ -458,8 +495,8 @@ export function FinancialTable({
       </div>
 
       <p className="text-xs text-slate-400 leading-relaxed">
-        * ยอดส่ง = เบิก − คืน − คืนเสีย &nbsp;·&nbsp; ยอดขาย = เงินโอน + เงินสด + ค่าใช้จ่าย &nbsp;·&nbsp;
-        ขาด/เกิน = ยอดขาย − ยอดส่ง &nbsp;·&nbsp; กรอกเงินโอน/เงินสด/ค่าใช้จ่าย แล้วคลิกออกเพื่อบันทึก
+        * ยอดส่ง = เบิก − คืน − คืนเสีย &nbsp;·&nbsp; ยอดขาย = เงินโอน + เงินสด + ค่าใช้จ่าย + ค่าแรง &nbsp;·&nbsp;
+        ขาด/เกิน = ยอดขาย − ยอดส่ง &nbsp;·&nbsp; กรอกเงินโอน/เงินสด/ค่าใช้จ่าย/ค่าแรง แล้วคลิกออกเพื่อบันทึก
       </p>
     </div>
   );

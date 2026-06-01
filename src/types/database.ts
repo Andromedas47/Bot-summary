@@ -272,6 +272,7 @@ export interface Database {
           money_transfer:  number;
           money_cash:      number;
           expenses:        number;
+          labor:           number;
           notes:           string;
           created_at:      string;
           updated_at:      string;
@@ -285,6 +286,7 @@ export interface Database {
           money_transfer?:  number;
           money_cash?:      number;
           expenses?:        number;
+          labor?:           number;
           notes?:           string;
           created_at?:      string;
           updated_at?:      string;
@@ -298,6 +300,7 @@ export interface Database {
           money_transfer?:  number;
           money_cash?:      number;
           expenses?:        number;
+          labor?:           number;
           notes?:           string;
           created_at?:      string;
           updated_at?:      string;

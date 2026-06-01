@@ -2,6 +2,7 @@ import React from "react";
 import { Document, Page, Text, View, StyleSheet } from "@react-pdf/renderer";
 import { buildReportGroups, type ReportRow, type SettlementMap } from "@/lib/summary/report";
 import { displayMarketName } from "@/lib/market";
+import { calculateSettlementTotals } from "@/lib/summary/transactions";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -77,17 +78,22 @@ export function buildGroups(rows: ReportRow[], settlements: SettlementMap): Repo
   return Array.from(map.values())
     .map((g) => {
       const key       = `${g.date}||${g.market}||${g.seller}`;
-      const s         = settlements[key] ?? { ยอดโอน: 0, ยอดขาย: 0 };
+      const s         = settlements[key] ?? { ยอดโอน: 0, เงินสด: 0, ค่าใช้จ่าย: 0, ค่าแรง: 0, ยอดขาย: 0 };
       const ยอดส่ง    = g.ยอดเบิก - g.ยอดคืน - g.ยอดคืนเสีย;
-      const ยอดโอน    = s.ยอดโอน;
-      const ยอดขาย    = s.ยอดขาย;
+      const settlement = calculateSettlementTotals({
+        ยอดส่ง,
+        money_transfer: s.ยอดโอน,
+        money_cash: s.เงินสด,
+        expenses: s.ค่าใช้จ่าย,
+        labor: s.ค่าแรง,
+      });
       return {
         ...g,
         ยอดส่ง,
-        ยอดโอน,
-        ยอดขาย,
-        เงินสดต้องส่งเจ๊: ยอดส่ง - ยอดโอน,
-        ขาดเกิน:          ยอดขาย - ยอดส่ง,
+        ยอดโอน: settlement.ยอดโอน,
+        ยอดขาย: settlement.ยอดขาย,
+        เงินสดต้องส่งเจ๊: settlement.เงินสดต้องส่งเจ๊,
+        ขาดเกิน: settlement.ขาดเกิน,
       };
     })
     .sort((a, b) =>

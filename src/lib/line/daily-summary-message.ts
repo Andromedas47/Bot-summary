@@ -13,7 +13,7 @@ export interface DailySummaryMessageRow {
 }
 
 function fmt(n: number): string {
-  return n.toLocaleString("th-TH", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  return n.toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 export function buildDailySummaryMessage(date: string, rows: DailySummaryMessageRow[]): string {

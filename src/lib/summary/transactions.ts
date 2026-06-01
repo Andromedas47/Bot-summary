@@ -17,6 +17,8 @@ export interface TransactionTotals {
 export interface SettlementTotals {
   ยอดโอน: number;
   เงินสด: number;
+  ค่าใช้จ่าย: number;
+  ค่าแรง: number;
   ยอดขาย: number;
   เงินสดต้องส่งเจ๊: number;
   ขาดเกิน: number;
@@ -70,10 +72,12 @@ export function calculateSettlementTotals({
   expenses?: number;
   labor?: number;
 }): SettlementTotals {
-  const ยอดขาย = money_transfer + money_cash + expenses;
+  const ยอดขาย = money_transfer + money_cash + expenses + labor;
   return {
     ยอดโอน: money_transfer,
     เงินสด: money_cash,
+    ค่าใช้จ่าย: expenses,
+    ค่าแรง: labor,
     ยอดขาย,
     เงินสดต้องส่งเจ๊: ยอดส่ง - money_transfer - expenses - labor,
     ขาดเกิน: ยอดขาย - ยอดส่ง,

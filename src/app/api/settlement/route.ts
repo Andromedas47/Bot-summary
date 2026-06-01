@@ -1,5 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
+import { pushLineMessage } from "@/lib/line/reply";
+import { buildSettlementLineMessage } from "@/lib/line/settlement-message";
+import { displayMarketName } from "@/lib/market";
+import {
+  KNOWN_TX_TYPES,
+  addTransactionAmount,
+  calculateSettlementTotals,
+  emptyTransactionTotals,
+} from "@/lib/summary/transactions";
 
 function monthRange(month: string): { from: string; toExclusive: string } {
   const [y, m] = month.split("-").map(Number);
@@ -36,11 +45,14 @@ export async function POST(req: NextRequest) {
     money_transfer?:  number;
     money_cash?:      number;
     expenses?:        number;
+    labor?:           number;
     notes?:           string;
+    notify_line?:     boolean;
   };
 
   const { settlement_date, settlement_time = "", staff_name = "", market_name = "",
-          money_transfer = 0, money_cash = 0, expenses = 0, notes = "" } = body;
+          money_transfer = 0, money_cash = 0, expenses = 0, labor = 0, notes = "",
+          notify_line = false } = body;
 
   if (!settlement_date) return NextResponse.json({ error: "settlement_date required" }, { status: 400 });
 
@@ -49,12 +61,95 @@ export async function POST(req: NextRequest) {
     .from("settlement_entries")
     .upsert(
       { settlement_date, settlement_time, staff_name, market_name,
-        money_transfer, money_cash, expenses, notes, updated_at: new Date().toISOString() },
+        money_transfer, money_cash, expenses, labor, notes, updated_at: new Date().toISOString() },
       { onConflict: "settlement_date,settlement_time,staff_name,market_name" },
     )
     .select()
     .single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json(data);
+
+  let lineTargets = 0;
+  let lineError: string | null = null;
+
+  if (notify_line) {
+    try {
+      const { transactions, sourceIds } = await getSettlementContext(supabase, {
+        settlement_date,
+        staff_name,
+        market_name,
+      });
+      const settlement = calculateSettlementTotals({
+        ยอดส่ง: transactions.ยอดส่ง,
+        money_transfer,
+        money_cash,
+        expenses,
+        labor,
+      });
+      const message = buildSettlementLineMessage({
+        date: settlement_date,
+        staffName: staff_name,
+        marketName: market_name,
+        transactions,
+        settlement,
+        notes,
+      });
+
+      for (const sourceId of sourceIds) {
+        await pushLineMessage(sourceId, message);
+        lineTargets += 1;
+      }
+    } catch (err) {
+      lineError = err instanceof Error ? err.message : "LINE notification failed";
+    }
+  }
+
+  return NextResponse.json({ ...data, lineTargets, lineError });
+}
+
+async function getSettlementContext(
+  supabase: Awaited<ReturnType<typeof createServiceClient>>,
+  params: { settlement_date: string; staff_name: string; market_name: string },
+) {
+  const { settlement_date, staff_name, market_name } = params;
+  let query = supabase
+    .from("produce_transactions")
+    .select("transaction_type, total_amount, market_name, raw_message_id")
+    .eq("transaction_date", settlement_date)
+    .in("transaction_type", KNOWN_TX_TYPES as unknown as string[]);
+
+  if (staff_name) query = query.eq("staff_name", staff_name);
+
+  const { data, error } = await query;
+  if (error) throw new Error(error.message);
+
+  const marketLabel = displayMarketName(market_name, "");
+  const rows = (data ?? []).filter(row => {
+    if (!marketLabel) return true;
+    return displayMarketName(row.market_name ?? "", "") === marketLabel || row.market_name === market_name;
+  });
+
+  const transactions = emptyTransactionTotals();
+  for (const row of rows) {
+    addTransactionAmount(transactions, {
+      transaction_type: row.transaction_type as string,
+      total_amount: (row.total_amount as number) ?? 0,
+    });
+  }
+
+  const rawMessageIds = Array.from(new Set(
+    rows.map(row => row.raw_message_id as string | null).filter((id): id is string => Boolean(id)),
+  ));
+  if (rawMessageIds.length === 0) return { transactions, sourceIds: [] as string[] };
+
+  const { data: rawRows, error: rawError } = await supabase
+    .from("raw_messages")
+    .select("source_id")
+    .in("id", rawMessageIds);
+  if (rawError) throw new Error(rawError.message);
+
+  const sourceIds = Array.from(new Set(
+    (rawRows ?? []).map(row => row.source_id as string | null).filter((id): id is string => Boolean(id)),
+  ));
+  return { transactions, sourceIds };
 }

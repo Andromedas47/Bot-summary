@@ -81,6 +81,7 @@ describe("buildWeighSessionSummary — section subtotals", () => {
   it("session เบิกอย่างเดียว แสดง รวมเบิก", () => {
     const result = buildWeighSessionSummary(makeSession({ items: [BORROW_ITEM] }));
     expect(result).toContain("รวมเบิก:");
+    expect(result).toContain("รวมเบิก: 1,000.00 บาท");
     expect(result).not.toContain("รวมคืน:");
     expect(result).not.toContain("รวมเสีย:");
   });

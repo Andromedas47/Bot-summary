@@ -18,7 +18,7 @@ function thaiDate(d: string): string {
 }
 
 function fmt(n: number): string {
-  return n.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function diffColor(n: number): string {
@@ -30,30 +30,33 @@ function diffColor(n: number): string {
 // ── Data ──────────────────────────────────────────────────────────────────────
 
 function enrichGroups(groups: GroupRow[], settlements: SettlementEntry[]) {
-  const map = new Map<string, { transfer: number; cash: number; expenses: number }>();
+  const map = new Map<string, { transfer: number; cash: number; expenses: number; labor: number }>();
   for (const s of settlements) {
     const k = `${s.settlement_date}||${s.settlement_time ?? ""}||${s.staff_name}||${displayMarketName(s.market_name, "")}`;
-    const cur = map.get(k) ?? { transfer: 0, cash: 0, expenses: 0 };
+    const cur = map.get(k) ?? { transfer: 0, cash: 0, expenses: 0, labor: 0 };
     map.set(k, {
       transfer: cur.transfer + s.money_transfer,
       cash:     cur.cash + s.money_cash,
       expenses: cur.expenses + s.expenses,
+      labor:    cur.labor + s.labor,
     });
   }
   return groups.map((g) => {
     const k   = `${g.date}||${g.time ?? ""}||${g.seller}||${g.market}`;
-    const s   = map.get(k) ?? { transfer: 0, cash: 0, expenses: 0 };
+    const s   = map.get(k) ?? { transfer: 0, cash: 0, expenses: 0, labor: 0 };
     const settlement = calculateSettlementTotals({
       ยอดส่ง: g.ยอดส่ง,
       money_transfer: s.transfer,
       money_cash: s.cash,
       expenses: s.expenses,
+      labor: s.labor,
     });
     return {
       ...g,
       ยอดโอน: settlement.ยอดโอน,
       เงินสด: settlement.เงินสด,
       ค่าใช้จ่าย: s.expenses,
+      ค่าแรง: s.labor,
       ยอดขาย: settlement.ยอดขาย,
       ขาดเกิน: settlement.ขาดเกิน,
     };
@@ -165,6 +168,7 @@ const COLS = [
   { label: "เงินโอน",  flex: 9,    left: false },
   { label: "เงินสด",   flex: 8,    left: false },
   { label: "ค่าใช้จ่าย", flex: 8,  left: false },
+  { label: "ค่าแรง",   flex: 8,    left: false },
   { label: "ยอดขาย",  flex: 9,    left: false },
   { label: "ขาด/เกิน", flex: 9,    left: false },
 ] as const;
@@ -183,7 +187,7 @@ export function FinancialSummaryDoc({ month, groups, settlements }: FinancialSum
 
   // Grand totals
   let gเบิก = 0, gคืน = 0, gคืนเสีย = 0, gยอดส่ง = 0;
-  let gโอน = 0, gสด = 0, gค่าใช้จ่าย = 0, gยอดขาย = 0, gขาดเกิน = 0;
+  let gโอน = 0, gสด = 0, gค่าใช้จ่าย = 0, gค่าแรง = 0, gยอดขาย = 0, gขาดเกิน = 0;
   for (const g of enriched) {
     gเบิก    += g.เบิก;
     gคืน     += g.คืน;
@@ -192,6 +196,7 @@ export function FinancialSummaryDoc({ month, groups, settlements }: FinancialSum
     gโอน     += g.ยอดโอน;
     gสด      += g.เงินสด;
     gค่าใช้จ่าย += g.ค่าใช้จ่าย;
+    gค่าแรง += g.ค่าแรง;
     gยอดขาย  += g.ยอดขาย;
     gขาดเกิน += g.ขาดเกิน;
   }
@@ -199,7 +204,7 @@ export function FinancialSummaryDoc({ month, groups, settlements }: FinancialSum
   const footValues = [
     `รวม ${enriched.length} กลุ่ม`, "", "",
     fmt(gเบิก), fmt(gคืน), fmt(gคืนเสีย), fmt(gยอดส่ง),
-    fmt(gโอน), fmt(gสด), fmt(gค่าใช้จ่าย), fmt(gยอดขาย), fmt(gขาดเกิน),
+    fmt(gโอน), fmt(gสด), fmt(gค่าใช้จ่าย), fmt(gค่าแรง), fmt(gยอดขาย), fmt(gขาดเกิน),
   ];
 
   return (
@@ -237,7 +242,7 @@ export function FinancialSummaryDoc({ month, groups, settlements }: FinancialSum
               const vals = [
                 thaiDate(g.date), g.seller, g.market,
                 fmt(g.เบิก), fmt(g.คืน), fmt(g.คืนเสีย), fmt(g.ยอดส่ง),
-                fmt(g.ยอดโอน), fmt(g.เงินสด), fmt(g.ค่าใช้จ่าย), fmt(g.ยอดขาย),
+                fmt(g.ยอดโอน), fmt(g.เงินสด), fmt(g.ค่าใช้จ่าย), fmt(g.ค่าแรง), fmt(g.ยอดขาย),
               ];
               return (
                 <View key={`${g.date}||${g.seller}||${g.market}`} style={[S.tr, i % 2 === 1 ? S.trAlt : {}]} wrap={false}>
@@ -265,8 +270,8 @@ export function FinancialSummaryDoc({ month, groups, settlements }: FinancialSum
           {enriched.length > 0 && (
             <View style={S.trFoot} wrap={false}>
               {COLS.map((c, ci) => (
-                <Text key={c.label} style={[S.tdFoot, ci === 0 ? S.tdLeft : {}, ci === 11 ? { color: diffColor(gขาดเกิน) } : {}]}>
-                  {ci === 11 ? (gขาดเกิน > 0 ? "+" : "") + fmt(gขาดเกิน) : footValues[ci]}
+                <Text key={c.label} style={[S.tdFoot, ci === 0 ? S.tdLeft : {}, ci === 12 ? { color: diffColor(gขาดเกิน) } : {}]}>
+                  {ci === 12 ? (gขาดเกิน > 0 ? "+" : "") + fmt(gขาดเกิน) : footValues[ci]}
                 </Text>
               ))}
             </View>

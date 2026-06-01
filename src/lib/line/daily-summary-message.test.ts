@@ -18,10 +18,10 @@ describe("buildDailySummaryMessage", () => {
 
     expect(result).toContain("สรุปยอดประจำวันที่ 1 มิถุนายน 2569");
     expect(result).toContain("กี้ — ตลาด72");
-    expect(result).toContain("เบิกรวม: 14,446.2 บาท");
-    expect(result).toContain("คืนรวม: 2,300 บาท");
-    expect(result).toContain("คืนเสียรวม: 500 บาท");
-    expect(result).toContain("ยอดส่ง: 11,646.2 บาท");
+    expect(result).toContain("เบิกรวม: 14,446.20 บาท");
+    expect(result).toContain("คืนรวม: 2,300.00 บาท");
+    expect(result).toContain("คืนเสียรวม: 500.00 บาท");
+    expect(result).toContain("ยอดส่ง: 11,646.20 บาท");
   });
 
   it("supports multiple staff/market rows", () => {
@@ -49,8 +49,8 @@ describe("buildDailySummaryMessage", () => {
     ]);
 
     expect(result).toContain("กี้ — ตลาด72");
-    expect(result).toContain("ยอดส่ง: 850 บาท");
+    expect(result).toContain("ยอดส่ง: 850.00 บาท");
     expect(result).toContain("พี่ดำ — ตลาด80");
-    expect(result).toContain("ยอดส่ง: 2,000 บาท");
+    expect(result).toContain("ยอดส่ง: 2,000.00 บาท");
   });
 });

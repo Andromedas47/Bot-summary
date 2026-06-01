@@ -22,6 +22,7 @@ export type SettlementMap = Record<string, {
   ยอดโอน: number;
   เงินสด: number;
   ค่าใช้จ่าย: number;
+  ค่าแรง: number;
   ยอดขาย: number;
 }>;
 
@@ -91,7 +92,7 @@ export function buildReportGroups(rows: ReportRow[], settlements: SettlementMap)
   return Array.from(map.values())
     .map((g) => {
       const key = `${g.date}||${g.market}||${g.seller}`;
-      const s = settlements[key] ?? { ยอดโอน: 0, เงินสด: 0, ค่าใช้จ่าย: 0, ยอดขาย: 0 };
+      const s = settlements[key] ?? { ยอดโอน: 0, เงินสด: 0, ค่าใช้จ่าย: 0, ค่าแรง: 0, ยอดขาย: 0 };
       const ยอดส่ง = calculateYodSong({
         เบิก: g.ยอดเบิก,
         คืน: g.ยอดคืน,
@@ -102,6 +103,7 @@ export function buildReportGroups(rows: ReportRow[], settlements: SettlementMap)
         money_transfer: s.ยอดโอน,
         money_cash: s.เงินสด,
         expenses: s.ค่าใช้จ่าย,
+        labor: s.ค่าแรง,
       });
 
       return {

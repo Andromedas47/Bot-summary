@@ -18,11 +18,12 @@ interface InitialValues {
   moneyTransfer: number;
   moneyCash:     number;
   expenses:      number;
+  labor:         number;
   notes:         string;
 }
 
 function fmtMoney(n: number): string {
-  return n.toLocaleString("th-TH", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  return n.toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 const INPUT_CLS =
@@ -36,6 +37,7 @@ export function SettlementForm({ initial }: { initial?: Partial<InitialValues> }
   const [moneyTransfer, setMoneyTransfer] = useState(initial?.moneyTransfer ?? 0);
   const [moneyCash,     setMoneyCash]     = useState(initial?.moneyCash     ?? 0);
   const [expenses,      setExpenses]      = useState(initial?.expenses      ?? 0);
+  const [labor,         setLabor]         = useState(initial?.labor         ?? 0);
   const [notes,         setNotes]         = useState(initial?.notes         ?? "");
   const [yodSong,       setYodSong]       = useState<YodSong | null>(null);
   const [fetchError,    setFetchError]    = useState("");
@@ -44,7 +46,7 @@ export function SettlementForm({ initial }: { initial?: Partial<InitialValues> }
   const [fetching,      startFetch]       = useTransition();
   const [saving,        startSave]        = useTransition();
 
-  const ยอดขาย  = moneyTransfer + moneyCash + expenses;
+  const ยอดขาย  = moneyTransfer + moneyCash + expenses + labor;
   const ขาดเกิน = yodSong != null ? ยอดขาย - yodSong.ยอดส่ง : null;
 
   const month = date ? date.slice(0, 7) : null;
@@ -79,15 +81,23 @@ export function SettlementForm({ initial }: { initial?: Partial<InitialValues> }
           money_transfer:  moneyTransfer,
           money_cash:      moneyCash,
           expenses,
+          labor,
           notes,
+          notify_line:     true,
         }),
       });
-      const json = await res.json() as { error?: string };
+      const json = await res.json() as { error?: string; lineError?: string | null; lineTargets?: number };
       if (!res.ok) {
         setSaveMsg(json.error ?? "บันทึกไม่สำเร็จ");
         setSaveStatus("error");
       } else {
-        setSaveMsg("บันทึกสำเร็จ");
+        setSaveMsg(
+          json.lineError
+            ? "บันทึกสำเร็จ แต่ส่ง LINE ไม่สำเร็จ"
+            : json.lineTargets === 0
+              ? "บันทึกสำเร็จ แต่ไม่พบกลุ่ม LINE สำหรับรายการนี้"
+              : "บันทึกสำเร็จและแจ้ง LINE แล้ว",
+        );
         setSaveStatus("saved");
       }
     });
@@ -168,6 +178,19 @@ export function SettlementForm({ initial }: { initial?: Partial<InitialValues> }
               className={INPUT_CLS + " text-right tabular-nums"}
             />
           </div>
+
+          <div className="space-y-1">
+            <label className="block text-xs font-semibold text-slate-600">ค่าแรง</label>
+            <input
+              type="number"
+              min={0}
+              step="0.01"
+              value={labor || ""}
+              placeholder="0"
+              onChange={e => setLabor(parseFloat(e.target.value) || 0)}
+              className={INPUT_CLS + " text-right tabular-nums"}
+            />
+          </div>
         </div>
 
         <div className="space-y-1">
@@ -185,7 +208,7 @@ export function SettlementForm({ initial }: { initial?: Partial<InitialValues> }
       {/* Auto-calc summary */}
       <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3">
         <div className="flex items-center justify-between">
-          <span className="text-sm font-semibold text-slate-700">ยอดขาย (โอน + สด + ค่าใช้จ่าย)</span>
+          <span className="text-sm font-semibold text-slate-700">ยอดขาย (โอน + สด + ค่าใช้จ่าย + ค่าแรง)</span>
           <span className="text-base font-bold tabular-nums text-slate-800">
             {fmtMoney(ยอดขาย)}
           </span>
@@ -220,7 +243,7 @@ export function SettlementForm({ initial }: { initial?: Partial<InitialValues> }
                 <span className="text-red-600">{fmtMoney(yodSong.คืนเสีย)}</span>
               </div>
               <div className="flex items-center justify-between pt-1 border-t border-slate-100">
-                <span className="text-xs text-slate-500">ยอดส่ง (เบิก−คืน−คืนเสีย)</span>
+                <span className="text-xs text-slate-500">ยอดขายสุทธิที่คำนวณได้ (เบิก−คืน−คืนเสีย)</span>
                 <span className="font-bold tabular-nums text-slate-800">{fmtMoney(yodSong.ยอดส่ง)}</span>
               </div>
             </div>

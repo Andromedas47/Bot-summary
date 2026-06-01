@@ -104,97 +104,101 @@ export function SettlementForm({ initial }: { initial?: Partial<InitialValues> }
   }
 
   return (
-    <div className="space-y-6 max-w-lg">
-      {/* Form fields */}
-      <div className="rounded-xl border border-slate-200 bg-white shadow-sm p-5 space-y-4">
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div className="space-y-1">
-            <label className="block text-xs font-semibold text-slate-600">วันที่</label>
-            <input
-              type="date"
-              value={date}
-              onChange={e => { setDate(e.target.value); setYodSong(null); }}
-              className={INPUT_CLS}
-            />
-          </div>
-
-          <div className="space-y-1">
-            <label className="block text-xs font-semibold text-slate-600">ตลาด</label>
-            <input
-              type="text"
-              value={market}
-              onChange={e => { setMarket(e.target.value); setYodSong(null); }}
-              placeholder="ชื่อตลาด (ตรงกัน)"
-              className={INPUT_CLS}
-            />
-          </div>
-
-          <div className="space-y-1">
-            <label className="block text-xs font-semibold text-slate-600">คนขาย</label>
-            <input
-              type="text"
-              value={seller}
-              onChange={e => { setSeller(e.target.value); setYodSong(null); }}
-              placeholder="ชื่อคนขาย (ตรงกัน)"
-              className={INPUT_CLS}
-            />
-          </div>
-
-          <div className="space-y-1">
-            <label className="block text-xs font-semibold text-slate-600">เงินโอน</label>
-            <input
-              type="number"
-              min={0}
-              step="0.01"
-              value={moneyTransfer || ""}
-              placeholder="0"
-              onChange={e => setMoneyTransfer(parseFloat(e.target.value) || 0)}
-              className={INPUT_CLS + " text-right tabular-nums"}
-            />
-          </div>
-
-          <div className="space-y-1">
-            <label className="block text-xs font-semibold text-slate-600">เงินสด</label>
-            <input
-              type="number"
-              min={0}
-              step="0.01"
-              value={moneyCash || ""}
-              placeholder="0"
-              onChange={e => setMoneyCash(parseFloat(e.target.value) || 0)}
-              className={INPUT_CLS + " text-right tabular-nums"}
-            />
-          </div>
-
-          <div className="space-y-1">
-            <label className="block text-xs font-semibold text-slate-600">ค่าใช้จ่าย</label>
-            <input
-              type="number"
-              min={0}
-              step="0.01"
-              value={expenses || ""}
-              placeholder="0"
-              onChange={e => setExpenses(parseFloat(e.target.value) || 0)}
-              className={INPUT_CLS + " text-right tabular-nums"}
-            />
-          </div>
-
-          <div className="space-y-1">
-            <label className="block text-xs font-semibold text-slate-600">ค่าแรง</label>
-            <input
-              type="number"
-              min={0}
-              step="0.01"
-              value={labor || ""}
-              placeholder="0"
-              onChange={e => setLabor(parseFloat(e.target.value) || 0)}
-              className={INPUT_CLS + " text-right tabular-nums"}
-            />
-          </div>
+    <div className="space-y-5 max-w-lg pt-5">
+      {/* Identity fields */}
+      <div className="grid grid-cols-2 gap-4">
+        <div className="space-y-1.5">
+          <label className="block text-xs font-medium text-slate-500 uppercase tracking-wide">วันที่</label>
+          <input
+            type="date"
+            value={date}
+            onChange={e => { setDate(e.target.value); setYodSong(null); }}
+            className={INPUT_CLS}
+          />
         </div>
 
-        <div className="space-y-1">
-          <label className="block text-xs font-semibold text-slate-600">หมายเหตุ</label>
+        <div className="space-y-1.5">
+          <label className="block text-xs font-medium text-slate-500 uppercase tracking-wide">ตลาด</label>
+          <input
+            type="text"
+            value={market}
+            onChange={e => { setMarket(e.target.value); setYodSong(null); }}
+            placeholder="ชื่อตลาด (ตรงกัน)"
+            className={INPUT_CLS}
+          />
+        </div>
+
+        <div className="col-span-2 space-y-1.5">
+          <label className="block text-xs font-medium text-slate-500 uppercase tracking-wide">คนขาย</label>
+          <input
+            type="text"
+            value={seller}
+            onChange={e => { setSeller(e.target.value); setYodSong(null); }}
+            placeholder="ชื่อคนขาย (ตรงกัน)"
+            className={INPUT_CLS}
+          />
+        </div>
+      </div>
+
+      {/* Divider */}
+      <div className="border-t border-slate-100" />
+
+      {/* Money fields */}
+      <div className="grid grid-cols-2 gap-4">
+        <div className="space-y-1.5">
+          <label className="block text-xs font-medium text-slate-500 uppercase tracking-wide">เงินโอน</label>
+          <input
+            type="number"
+            min={0}
+            step="0.01"
+            value={moneyTransfer || ""}
+            placeholder="0"
+            onChange={e => setMoneyTransfer(parseFloat(e.target.value) || 0)}
+            className={INPUT_CLS + " text-right tabular-nums"}
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="block text-xs font-medium text-slate-500 uppercase tracking-wide">เงินสด</label>
+          <input
+            type="number"
+            min={0}
+            step="0.01"
+            value={moneyCash || ""}
+            placeholder="0"
+            onChange={e => setMoneyCash(parseFloat(e.target.value) || 0)}
+            className={INPUT_CLS + " text-right tabular-nums"}
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="block text-xs font-medium text-slate-500 uppercase tracking-wide">ค่าใช้จ่าย</label>
+          <input
+            type="number"
+            min={0}
+            step="0.01"
+            value={expenses || ""}
+            placeholder="0"
+            onChange={e => setExpenses(parseFloat(e.target.value) || 0)}
+            className={INPUT_CLS + " text-right tabular-nums"}
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="block text-xs font-medium text-slate-500 uppercase tracking-wide">ค่าแรง</label>
+          <input
+            type="number"
+            min={0}
+            step="0.01"
+            value={labor || ""}
+            placeholder="0"
+            onChange={e => setLabor(parseFloat(e.target.value) || 0)}
+            className={INPUT_CLS + " text-right tabular-nums"}
+          />
+        </div>
+
+        <div className="col-span-2 space-y-1.5">
+          <label className="block text-xs font-medium text-slate-500 uppercase tracking-wide">หมายเหตุ</label>
           <textarea
             value={notes}
             onChange={e => setNotes(e.target.value)}
@@ -206,12 +210,10 @@ export function SettlementForm({ initial }: { initial?: Partial<InitialValues> }
       </div>
 
       {/* Auto-calc summary */}
-      <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3">
+      <div className="rounded-xl bg-slate-50 border border-slate-100 p-4 space-y-3">
         <div className="flex items-center justify-between">
-          <span className="text-sm font-semibold text-slate-700">ยอดขาย (โอน + สด + ค่าใช้จ่าย + ค่าแรง)</span>
-          <span className="text-base font-bold tabular-nums text-slate-800">
-            {fmtMoney(ยอดขาย)}
-          </span>
+          <span className="text-xs font-medium text-slate-500 uppercase tracking-wide">ยอดขายรวม</span>
+          <span className="text-lg font-bold tabular-nums text-slate-800">{fmtMoney(ยอดขาย)}</span>
         </div>
 
         <div className="border-t border-slate-200 pt-3 space-y-2">
@@ -231,30 +233,31 @@ export function SettlementForm({ initial }: { initial?: Partial<InitialValues> }
           </div>
 
           {yodSong && (
-            <div className="space-y-1.5 rounded-lg bg-white border border-slate-200 p-3 text-sm">
-              <div className="grid grid-cols-3 gap-2 text-xs text-slate-500 font-medium pb-1 border-b border-slate-100">
-                <span>ยอดเบิก</span>
-                <span>ยอดคืน</span>
-                <span>ยอดคืนเสีย</span>
+            <div className="rounded-lg bg-white border border-slate-200 p-3 space-y-2.5">
+              <div className="grid grid-cols-3 gap-2">
+                {([ ["ยอดเบิก", fmtMoney(yodSong.เบิก), "text-emerald-700"],
+                    ["ยอดคืน",  fmtMoney(yodSong.คืน),  "text-blue-600"],
+                    ["ยอดคืนเสีย", fmtMoney(yodSong.คืนเสีย), "text-red-600"],
+                ] as const).map(([label, value, color]) => (
+                  <div key={label} className="space-y-0.5">
+                    <p className="text-[11px] text-slate-400 font-medium">{label}</p>
+                    <p className={`text-sm font-semibold tabular-nums ${color}`}>{value}</p>
+                  </div>
+                ))}
               </div>
-              <div className="grid grid-cols-3 gap-2 tabular-nums font-semibold">
-                <span className="text-green-700">{fmtMoney(yodSong.เบิก)}</span>
-                <span className="text-blue-700">{fmtMoney(yodSong.คืน)}</span>
-                <span className="text-red-600">{fmtMoney(yodSong.คืนเสีย)}</span>
-              </div>
-              <div className="flex items-center justify-between pt-1 border-t border-slate-100">
-                <span className="text-xs text-slate-500">ยอดขายสุทธิที่คำนวณได้ (เบิก−คืน−คืนเสีย)</span>
-                <span className="font-bold tabular-nums text-slate-800">{fmtMoney(yodSong.ยอดส่ง)}</span>
+              <div className="flex items-center justify-between border-t border-slate-100 pt-2.5">
+                <span className="text-xs text-slate-500">ยอดขายสุทธิ (เบิก−คืน−คืนเสีย)</span>
+                <span className="text-sm font-bold tabular-nums text-slate-800">{fmtMoney(yodSong.ยอดส่ง)}</span>
               </div>
             </div>
           )}
 
           {ขาดเกิน != null && (
-            <div className="flex items-center justify-between">
-              <span className="text-sm font-semibold text-slate-700">ขาด/เกิน</span>
+            <div className="flex items-center justify-between rounded-lg bg-white border border-slate-200 px-3 py-2.5">
+              <span className="text-sm font-medium text-slate-600">ขาด / เกิน</span>
               <span className={`text-base font-bold tabular-nums ${
                 ขาดเกิน === 0 ? "text-slate-400" :
-                ขาดเกิน > 0   ? "text-green-700" : "text-red-600"
+                ขาดเกิน > 0   ? "text-emerald-600" : "text-red-600"
               }`}>
                 {ขาดเกิน > 0 ? "+" : ""}{fmtMoney(ขาดเกิน)}
               </span>
@@ -264,7 +267,7 @@ export function SettlementForm({ initial }: { initial?: Partial<InitialValues> }
       </div>
 
       {/* Actions */}
-      <div className="flex flex-wrap items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3 pt-1">
         <Button isLoading={saving} onClick={handleSave}>
           <svg className="size-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
@@ -275,7 +278,7 @@ export function SettlementForm({ initial }: { initial?: Partial<InitialValues> }
         {month && (
           <Link
             href={`/financial-summary?month=${month}`}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 transition-colors"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition-colors"
           >
             <svg className="size-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z" />
@@ -285,7 +288,7 @@ export function SettlementForm({ initial }: { initial?: Partial<InitialValues> }
         )}
 
         {saveStatus !== "idle" && (
-          <span className={`text-sm font-medium ${saveStatus === "saved" ? "text-green-600" : "text-red-600"}`}>
+          <span className={`text-sm font-medium ${saveStatus === "saved" ? "text-emerald-600" : "text-red-600"}`}>
             {saveMsg}
           </span>
         )}

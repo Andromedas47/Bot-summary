@@ -214,8 +214,8 @@ function finalize(
   };
 }
 
-function normalizeUnit(unit: ProduceUnit | "แพ็ค" | "เเพ็ค" | null | undefined): ProduceUnit | null {
-  if (unit === "แพ็ค" || unit === "เเพ็ค") return "แพค";
+function normalizeUnit(unit: ProduceUnit | "แพ็ค" | "แพ็ก" | "เเพ็ค" | null | undefined): ProduceUnit | null {
+  if (unit === "แพ็ค" || unit === "แพ็ก" || unit === "เเพ็ค") return "แพค";
   return unit ?? null;
 }
 

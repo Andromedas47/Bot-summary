@@ -22,6 +22,26 @@ export async function replyLineMessage(replyToken: string, text: string): Promis
   }
 }
 
+export async function pushLineMessage(to: string, text: string): Promise<void> {
+  const res = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      to,
+      messages: [{ type: "text", text }],
+    }),
+  });
+
+  if (!res.ok) {
+    const errorText = await res.text();
+    logger.error("LINE push failed", { status: res.status, body: errorText });
+    throw new Error(`LINE push HTTP ${res.status}: ${errorText}`);
+  }
+}
+
 function fmt(n: number): string {
   return n.toLocaleString("th-TH", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
 }

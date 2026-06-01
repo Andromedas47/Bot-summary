@@ -1,4 +1,5 @@
 import { logger } from "@/lib/logger";
+import { formatThaiDate } from "@/lib/date";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 
 export async function replyLineMessage(replyToken: string, text: string): Promise<void> {
@@ -26,6 +27,9 @@ function fmt(n: number): string {
 }
 
 export function buildWeighSessionSummary(session: WeighSession): string {
+  let borrowCount    = 0;
+  let returnCount    = 0;
+  let badReturnCount = 0;
   let borrowTotal    = 0;
   let returnTotal    = 0;
   let badReturnTotal = 0;
@@ -34,28 +38,43 @@ export function buildWeighSessionSummary(session: WeighSession): string {
     const amount = (item.price_per_unit ?? 0) * (item.quantity ?? 0);
     if (item.transaction_type === "เบิก" || item.transaction_type === "เบิกเพิ่ม") {
       borrowTotal += amount;
+      borrowCount++;
     } else if (item.transaction_type === "คืน") {
       returnTotal += amount;
+      returnCount++;
     } else if (item.transaction_type === "คืนเสีย") {
       badReturnTotal += amount;
+      badReturnCount++;
     }
   }
 
-  const netSendTotal = borrowTotal - returnTotal - badReturnTotal;
-  const itemCount    = session.items.length;
+  const hasBorrow    = borrowCount > 0;
+  const hasReturn    = returnCount > 0;
+  const hasBadReturn = badReturnCount > 0;
+  const hasMixed     = hasBorrow && (hasReturn || hasBadReturn);
 
-  const lines = [
-    "บันทึกข้อมูลเรียบร้อย ✅",
+  const dateLabel = session.date ? formatThaiDate(session.date) : "";
+  const header = [
+    "บันทึกแล้ว ✅",
     "",
-    `สรุป: ${session.staff_name}`,
-    `รายการทั้งหมด: ${itemCount} รายการ`,
-    "",
-    `เบิกรวม: ${fmt(borrowTotal)} บาท`,
-    `คืนรวม: ${fmt(returnTotal)} บาท`,
-    `คืนเสียรวม: ${fmt(badReturnTotal)} บาท`,
-    "",
-    `ยอดส่งสุทธิ: ${fmt(netSendTotal)} บาท`,
+    `${session.staff_name}${dateLabel ? ` — ${dateLabel}` : ""}`,
   ];
 
-  return lines.join("\n");
+  const body: string[] = [];
+
+  if (hasBorrow) {
+    body.push(`เบิก: ${borrowCount} รายการ รวม ${fmt(borrowTotal)} บาท`);
+  }
+  if (hasReturn) {
+    body.push(`ชั่งคืน: ${returnCount} รายการ รวม ${fmt(returnTotal)} บาท`);
+  }
+  if (hasBadReturn) {
+    body.push(`คืนเสีย: ${badReturnCount} รายการ รวม ${fmt(badReturnTotal)} บาท`);
+  }
+  if (hasMixed) {
+    const netSendTotal = borrowTotal - returnTotal - badReturnTotal;
+    body.push("", `ยอดส่งสุทธิ: ${fmt(netSendTotal)} บาท`);
+  }
+
+  return [...header, "", ...body].join("\n");
 }

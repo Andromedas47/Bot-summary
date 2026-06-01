@@ -8,6 +8,7 @@ import {
   type ReportRow,
   type SettlementMap,
 } from "@/lib/summary/report";
+import { formatThaiDate } from "@/lib/date";
 
 export type { ReportRow, SettlementMap };
 
@@ -22,10 +23,6 @@ function fmtSummary(n: number): string {
   return r.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
 }
 
-function fmtDateThai(d: string): string {
-  return new Intl.DateTimeFormat("th-TH", { day: "numeric", month: "long", year: "numeric" })
-    .format(new Date(d + "T00:00:00"));
-}
 
 function itemLine(r: ReportRow, i: number): string {
   const qty = r.quantity ?? 0;
@@ -36,7 +33,7 @@ function itemLine(r: ReportRow, i: number): string {
 }
 
 function generateText(g: ReportGroup): string {
-  const dateStr = g.date !== "ไม่ระบุวันที่" ? fmtDateThai(g.date) : g.date;
+  const dateStr = g.date !== "ไม่ระบุวันที่" ? formatThaiDate(g.date) : g.date;
   const lines: string[] = [];
 
   lines.push(`สรุป-${g.market} ${g.seller} วันที่ ${dateStr}`);
@@ -200,7 +197,7 @@ export function ReportSummary({
             >
               <div className="flex items-center justify-between gap-2 px-4 pt-4 pb-2 border-b border-slate-100">
                 <div className="text-sm font-semibold text-slate-700">
-                  {g.market} · {g.seller} · {g.date !== "ไม่ระบุวันที่" ? fmtDateThai(g.date) : g.date}
+                  {g.market} · {g.seller} · {g.date !== "ไม่ระบุวันที่" ? formatThaiDate(g.date) : g.date}
                 </div>
                 <CopyButton text={text} />
               </div>

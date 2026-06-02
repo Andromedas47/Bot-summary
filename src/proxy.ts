@@ -38,6 +38,11 @@ export async function proxy(req: NextRequest) {
     return res;
   }
 
+  // Cron endpoints use CRON_SECRET auth inside route handlers
+  if (pathname.startsWith("/api/cron")) {
+    return res;
+  }
+
   // Local parser test endpoint is disabled in production by its route handler.
   if (process.env.NODE_ENV !== "production" && pathname === "/api/test-parser") {
     return res;

@@ -21,6 +21,19 @@ export async function GET(req: NextRequest) {
   }
 
   const authHeader = req.headers.get("authorization");
+  if (req.nextUrl.searchParams.get("authdebug") === "1") {
+    return NextResponse.json({
+      hasCronSecret: Boolean(secret),
+      cronSecretLength: secret.length,
+      authHeaderExists: Boolean(authHeader),
+      authHeaderLength: authHeader?.length ?? 0,
+      authHeaderStartsWithBearer: authHeader?.startsWith("Bearer ") ?? false,
+      expectedHeaderLength: `Bearer ${secret}`.length,
+      nodeEnv: process.env.NODE_ENV,
+      vercelEnv: process.env.VERCEL_ENV,
+    });
+  }
+
   if (authHeader !== `Bearer ${secret}`) {
     logger.warn("daily summary cron rejected - invalid authorization");
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });

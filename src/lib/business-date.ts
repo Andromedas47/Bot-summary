@@ -49,3 +49,26 @@ export function bangkokBusinessDateFromTimestamp(
 export function bangkokBusinessDateNow(cutoffHour = DEFAULT_CUTOFF_HOUR): string {
   return bangkokBusinessDateFromTimestamp(Date.now(), cutoffHour) ?? new Date().toISOString().slice(0, 10);
 }
+
+export function bangkokCalendarDateFromTimestamp(timestamp: number | undefined): string | null {
+  if (timestamp == null) return null;
+
+  const parts = bangkokParts(timestamp);
+  if (!parts) return null;
+
+  return isoDateFromParts(parts.year, parts.month, parts.day);
+}
+
+export function previousBangkokCalendarDateFromTimestamp(timestamp: number | undefined): string | null {
+  if (timestamp == null) return null;
+
+  const parts = bangkokParts(timestamp);
+  if (!parts) return null;
+
+  return previousIsoDate(parts.year, parts.month, parts.day);
+}
+
+export function previousBangkokCalendarDateNow(): string {
+  return previousBangkokCalendarDateFromTimestamp(Date.now())
+    ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}

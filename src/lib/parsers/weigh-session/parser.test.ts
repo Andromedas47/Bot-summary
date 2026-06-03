@@ -667,6 +667,44 @@ describe("real sample: return session with หัว unit", () => {
   });
 });
 
+describe("real sample: พาซิโอ้ผัก borrow session with ถุง unit", () => {
+  const result = parseWeighSession(`\
+20:44 เสือ ต้อม-พาซิโอ้ผัก เบิก 3/6/2569
+20:45 เสือ 30ผักกาดดอง30บาท
+6.ถุง
+20:45 เสือ 31หน่อไม้ต้มเหลือง30บาท
+
+4.ถุง
+20:45 เสือ 44ข้าวคั่ว20บาท
+
+2.ถุง
+20:45 เสือ จบรายการเบิก`);
+
+  it("parses the session metadata and all bag items", () => {
+    expect(result.staff_name).toBe("ต้อม");
+    expect(result.session_title).toBe("พาซิโอ้ผัก");
+    expect(result.date).toBe("2026-06-03");
+    expect(result.parse_errors).toHaveLength(0);
+    expect(result.items).toHaveLength(3);
+    expect(result.items.every((item) => item.transaction_type === "เบิก")).toBe(true);
+    expect(result.items.map((item) => item.unit)).toEqual(["ถุง", "ถุง", "ถุง"]);
+    expect(result.items[0]).toMatchObject({
+      item_number: 30,
+      product_name: "ผักกาดดอง",
+      price_per_unit: 30,
+      quantity: 6,
+    });
+  });
+
+  it("totals the borrow items to 340", () => {
+    const total = result.items.reduce(
+      (sum, item) => sum + (item.price_per_unit ?? 0) * (item.quantity ?? 0),
+      0,
+    );
+    expect(total).toBe(340);
+  });
+});
+
 describe("RE.ITEM", () => {
   it("matches item with dot separator", () => {
     const m = "1.หมอนทอง119บาท".match(RE.ITEM);

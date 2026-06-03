@@ -328,27 +328,29 @@ export class WeighSessionParser extends BaseParser {
           throw new Error(`produce_session insert failed: ${sessionErr.message}`);
         }
 
-        for (const item of parsed.items) {
-          const { error: itemErr } = await supabase
-            .from("produce_items")
-            .insert({
-              session_id:       session.id,
-              item_number:      item.item_number,
-              product_name:     item.product_name,
-              price_per_unit:   item.price_per_unit,
-              quantity:         item.quantity    ?? undefined,
-              unit:             item.unit        ?? undefined,
-              section:          item.section,
-              transaction_type: item.transaction_type,
-              item_hash:        computeItemHash(parsed, item),
-            });
+        try {
+          for (const item of parsed.items) {
+            const { error: itemErr } = await supabase
+              .from("produce_items")
+              .insert({
+                session_id:       session.id,
+                item_number:      item.item_number,
+                product_name:     item.product_name,
+                price_per_unit:   item.price_per_unit,
+                quantity:         item.quantity    ?? undefined,
+                unit:             item.unit        ?? undefined,
+                section:          item.section,
+                transaction_type: item.transaction_type,
+                item_hash:        computeItemHash(parsed, item),
+              });
 
-          if (itemErr) {
-            log.warn("failed to insert produce_item", {
-              product: item.product_name,
-              error:   itemErr.message,
-            });
+            if (itemErr) {
+              throw new Error(`produce_item insert failed for ${item.product_name}: ${itemErr.message}`);
+            }
           }
+        } catch (err) {
+          await supabase.from("produce_sessions").delete().eq("id", session.id);
+          throw err;
         }
       },
     };

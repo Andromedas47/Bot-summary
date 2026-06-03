@@ -57,26 +57,72 @@ export function computeItemHash(
 export class SessionDedupService {
   constructor(private readonly supabase: AnyClient) {}
 
-  /**
-   * Atomically check + record.
-   * Returns true if this session was already imported (duplicate).
-   * Returns false if it is new (and records it in imported_sessions).
-   */
-  async checkAndRecord(parsed: WeighSession, rawText?: string): Promise<boolean> {
-    const hash           = computeSessionHash(parsed);
-    const sortedTxTypes  = [...new Set(parsed.items.map((i) => i.transaction_type))].sort().join(",");
+  private payload(parsed: WeighSession, rawText?: string) {
+    const sortedTxTypes = [...new Set(parsed.items.map((i) => i.transaction_type))].sort().join(",");
 
-    const { error } = await this.supabase.from("imported_sessions").insert({
-      session_hash:     hash,
+    return {
+      session_hash:     computeSessionHash(parsed),
       transaction_date: parsed.date ?? null,
       staff_name:       parsed.staff_name,
       market_name:      parsed.session_title ?? "",
       transaction_type: sortedTxTypes,
       raw_text:         rawText ?? null,
-    });
+    };
+  }
 
-    if (error?.code === "23505") return true;   // unique violation → duplicate
+  async isDuplicate(parsed: WeighSession): Promise<boolean> {
+    const { data, error } = await this.supabase
+      .from("imported_sessions")
+      .select("id")
+      .eq("session_hash", computeSessionHash(parsed))
+      .maybeSingle();
+
+    if (error) throw new Error(`imported_sessions lookup failed: ${error.message}`);
+    return !!data;
+  }
+
+  async hasPersistedItems(parsed: WeighSession): Promise<boolean> {
+    const hashes = parsed.items.map((item) => computeItemHash(parsed, item));
+    if (hashes.length === 0) return false;
+
+    const { data, error } = await this.supabase
+      .from("produce_items")
+      .select("id")
+      .in("item_hash", hashes)
+      .limit(1);
+
+    if (error) throw new Error(`produce_items dedup lookup failed: ${error.message}`);
+    return (data ?? []).length > 0;
+  }
+
+  async release(parsed: WeighSession): Promise<void> {
+    const { error } = await this.supabase
+      .from("imported_sessions")
+      .delete()
+      .eq("session_hash", computeSessionHash(parsed));
+
+    if (error) throw new Error(`imported_sessions release failed: ${error.message}`);
+  }
+
+  async record(parsed: WeighSession, rawText?: string): Promise<boolean> {
+    const { error } = await this.supabase
+      .from("imported_sessions")
+      .insert(this.payload(parsed, rawText));
+
+    if (error?.code === "23505") return true;
     if (error) throw new Error(`imported_sessions insert failed: ${error.message}`);
     return false;
+  }
+
+  /**
+   * Atomically check + record.
+   * Returns true if this session was already imported (duplicate).
+   * Returns false if it is new (and records it in imported_sessions).
+   *
+   * Prefer `isDuplicate` + successful persistence + `record` for new flows so a
+   * failed item insert cannot reserve a dedup hash permanently.
+   */
+  async checkAndRecord(parsed: WeighSession, rawText?: string): Promise<boolean> {
+    return this.record(parsed, rawText);
   }
 }

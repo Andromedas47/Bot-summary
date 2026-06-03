@@ -231,9 +231,14 @@ export class WebhookService {
         return { eventId, eventType, status: "saved", parsed: false };
       }
 
-      // Fix 3: dedup check
+      // Fix 3: dedup check. Old failures may have reserved a hash before any
+      // produce_items were inserted; release those ghost reservations.
       const dedup       = new SessionDedupService(this.supabase);
-      const isDuplicate = await dedup.checkAndRecord(parsed, accumulatedText);
+      let isDuplicate   = await dedup.isDuplicate(parsed);
+      if (isDuplicate && !(await dedup.hasPersistedItems(parsed))) {
+        await dedup.release(parsed);
+        isDuplicate = false;
+      }
       if (isDuplicate) {
         log.info("duplicate session — skipping insert");
         if (replyToken) {
@@ -269,21 +274,34 @@ export class WebhookService {
 
       if (sessionErr) throw new Error(`produce_session insert failed: ${sessionErr.message}`);
 
-      for (const item of parsed.items) {
-        const { error: itemErr } = await this.supabase.from("produce_items").insert({
-          session_id:       session.id,
-          item_number:      item.item_number,
-          product_name:     item.product_name,
-          price_per_unit:   item.price_per_unit,
-          quantity:         item.quantity    ?? undefined,
-          unit:             item.unit        ?? undefined,
-          section:          item.section,
-          transaction_type: item.transaction_type,
-          item_hash:        computeItemHash(parsed, item),
-        });
-        if (itemErr) {
-          log.warn("failed to insert produce_item", { product: item.product_name, error: itemErr.message });
+      try {
+        for (const item of parsed.items) {
+          const { error: itemErr } = await this.supabase.from("produce_items").insert({
+            session_id:       session.id,
+            item_number:      item.item_number,
+            product_name:     item.product_name,
+            price_per_unit:   item.price_per_unit,
+            quantity:         item.quantity    ?? undefined,
+            unit:             item.unit        ?? undefined,
+            section:          item.section,
+            transaction_type: item.transaction_type,
+            item_hash:        computeItemHash(parsed, item),
+          });
+          if (itemErr) {
+            throw new Error(`produce_item insert failed for ${item.product_name}: ${itemErr.message}`);
+          }
         }
+      } catch (err) {
+        await this.supabase.from("produce_sessions").delete().eq("id", session.id);
+        throw err;
+      }
+
+      const duplicateAfterPersist = await dedup.record(parsed, accumulatedText);
+      if (duplicateAfterPersist) {
+        await this.supabase.from("produce_sessions").delete().eq("id", session.id);
+        log.info("duplicate session recorded concurrently — removed current insert");
+        if (replyToken) await replyLineMessage(replyToken, "รายการนี้เคยบันทึกแล้ว");
+        return { eventId, eventType, status: "saved", parsed: false };
       }
 
       await this.supabase
@@ -340,6 +358,8 @@ export class WebhookService {
   ): Promise<WebhookProcessResult> {
     const parser     = parserRegistry.findParser(msgEvent);
     const replyToken = msgEvent.replyToken;
+    let weighSessionData: WeighSession | null = null;
+    let rawTextForDedup:  string | null       = null;
 
     if (!parser) {
       log.debug("no parser matched");
@@ -370,10 +390,15 @@ export class WebhookService {
           return { eventId, eventType, status: "saved", parsed: false };
         }
 
-        // Fix 3: dedup check
-        const rawText     = (msgEvent.message as import("@/lib/line/types").LineTextMessage).text;
-        const dedup       = new SessionDedupService(this.supabase);
-        const isDuplicate = await dedup.checkAndRecord(ws, rawText);
+        // Fix 3: dedup check. Old failures may have reserved a hash before any
+        // produce_items were inserted; release those ghost reservations.
+        const rawText   = (msgEvent.message as import("@/lib/line/types").LineTextMessage).text;
+        const dedup     = new SessionDedupService(this.supabase);
+        let isDuplicate = await dedup.isDuplicate(ws);
+        if (isDuplicate && !(await dedup.hasPersistedItems(ws))) {
+          await dedup.release(ws);
+          isDuplicate = false;
+        }
         if (isDuplicate) {
           log.info("duplicate session — skipping insert");
           if (replyToken) {
@@ -385,10 +410,29 @@ export class WebhookService {
           }
           return { eventId, eventType, status: "saved", parsed: false };
         }
+
+        weighSessionData = ws;
+        rawTextForDedup  = rawText;
       }
 
       // Fix 4: persist first, then mark processed
       await result.persist(this.supabase, rawMessageId);
+
+      if (parser.name === "weigh-session" && weighSessionData) {
+        const dedup = new SessionDedupService(this.supabase);
+        const duplicateAfterPersist = await dedup.record(weighSessionData, rawTextForDedup ?? undefined);
+        if (duplicateAfterPersist) {
+          log.info("duplicate session recorded concurrently after persist");
+          if (replyToken) {
+            try {
+              await replyLineMessage(replyToken, "รายการนี้เคยบันทึกแล้ว");
+            } catch (e) {
+              log.error("reply failed", { error: String(e) });
+            }
+          }
+          return { eventId, eventType, status: "saved", parsed: false };
+        }
+      }
 
       await this.supabase
         .from("raw_messages")

@@ -144,9 +144,14 @@ export function parseWeighSession(
             items.push(finalizedItem);
             pendingItem = null;
           }
-          currentSection = content;
-          currentTxType  = classifyTxType(content);
-          console.log("[TRACE][parseWeighSession] SECTION_CHANGE:", content, "txType:", currentTxType);
+          const nextTxType = detectTxType(content);
+          if (nextTxType) {
+            currentSection = content;
+            currentTxType  = nextTxType;
+            console.log("[TRACE][parseWeighSession] SECTION_CHANGE:", content, "txType:", currentTxType);
+          } else {
+            parseErrors.push(`unrecognized line: "${line}"`);
+          }
         }
       }
       continue;
@@ -173,8 +178,13 @@ export function parseWeighSession(
       items.push(finalize(pendingItem, currentSection, currentTxType));
       pendingItem = null;
     }
-    currentSection = content;
-    currentTxType  = classifyTxType(content);
+    const nextTxType = detectTxType(content);
+    if (nextTxType) {
+      currentSection = content;
+      currentTxType  = nextTxType;
+    } else {
+      parseErrors.push(`unrecognized line: "${line}"`);
+    }
   }
 
   // Trailing pending item (missing session-end marker)
@@ -220,11 +230,15 @@ function normalizeUnit(unit: ProduceUnit | "แพ็ค" | "แพ็ก" | "�
 }
 
 function classifyTxType(text: string): TransactionType {
+  return detectTxType(text) ?? "เบิก"; // safe default for session headers
+}
+
+function detectTxType(text: string): TransactionType | null {
   if (RE.TX_TYPE_BEIK_PHERM.test(text)) return "เบิกเพิ่ม";
   if (RE.TX_TYPE_KUEN_SIA.test(text))   return "คืนเสีย";
   if (RE.TX_TYPE_KUEN.test(text))       return "คืน";
   if (RE.TX_TYPE_BEIK.test(text))       return "เบิก";
-  return "เบิก"; // safe default
+  return null;
 }
 
 /**

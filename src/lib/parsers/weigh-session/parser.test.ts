@@ -585,6 +585,7 @@ describe("RE.QUANTITY", () => {
     ["3กำ",        3,    "กำ"],
     ["2มัด",       2,    "มัด"],
     ["5ถุง",        5,    "ถุง"],
+    ["16หัว",      16,    "หัว"],
   ];
 
   cases.forEach(([input, expectedAmt, expectedUnit]) => {
@@ -630,6 +631,38 @@ describe("real sample: คืนเสีย with แพ็ค spelling", () => 
       price_per_unit: 160,
       quantity: 1,
       unit: "แพค",
+    });
+  });
+});
+
+describe("real sample: return session with หัว unit", () => {
+  const result = parseWeighSession(`\
+00:47 เสือ ป้าลี-พาซิโอ้ผัก คืน 2/6/2569
+00:48 เสือ 1.มะละกอ20บาท
+11ลูก
+00:50 เสือ 9.บ็อคเคอรี่40บาท
+16หัว
+00:50 เสือ 10.กระหล่ำปลีนอก30บาท
+14แพ็ค
+00:51 เสือ 11.ดอกกวางตุ้ง10บาท
+36กำ
+01:02 เสือ จบรายการคืน`);
+
+  it("keeps every item as คืน after บ็อคเคอรี่16หัว", () => {
+    expect(result.items).toHaveLength(4);
+    expect(result.parse_errors).toHaveLength(0);
+    expect(result.items.every((item) => item.transaction_type === "คืน")).toBe(true);
+    expect(result.items[1]).toMatchObject({
+      item_number: 9,
+      product_name: "บ็อคเคอรี่",
+      price_per_unit: 40,
+      quantity: 16,
+      unit: "หัว",
+    });
+    expect(result.items[2]).toMatchObject({
+      item_number: 10,
+      product_name: "กระหล่ำปลีนอก",
+      transaction_type: "คืน",
     });
   });
 });

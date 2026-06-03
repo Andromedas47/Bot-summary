@@ -1,4 +1,4 @@
-export type ProduceUnit     = "โล" | "ลูก" | "กล่อง" | "แพค";
+export type ProduceUnit     = "โล" | "ลูก" | "กล่อง" | "แพค" | "กำ" | "มัด" | "ถุง" | "หัว";
 export type TransactionType = "เบิก" | "เบิกเพิ่ม" | "คืน" | "คืนเสีย";
 
 export interface WeighSessionItem {

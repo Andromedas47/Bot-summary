@@ -3,43 +3,75 @@ import { formatThaiDate } from "@/lib/date";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 
 export async function replyLineMessage(replyToken: string, text: string): Promise<void> {
-  const res = await fetch("https://api.line.me/v2/bot/message/reply", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      replyToken,
-      messages: [{ type: "text", text }],
-    }),
-  });
+  let res: Response;
+  try {
+    res = await fetch("https://api.line.me/v2/bot/message/reply", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        replyToken,
+        messages: [{ type: "text", text }],
+      }),
+    });
+  } catch {
+    logger.error("LINE API request failed", {
+      operation: "reply",
+      category: "network_error",
+    });
+    throw new Error("LINE reply network error");
+  }
 
   if (!res.ok) {
-    const errorText = await res.text();
-    logger.error("LINE reply failed", { status: res.status, body: errorText });
-    throw new Error(`LINE reply HTTP ${res.status}: ${errorText}`);
+    logger.error("LINE API request failed", {
+      operation: "reply",
+      status: res.status,
+      category: lineHttpErrorCategory(res.status),
+    });
+    throw new Error(`LINE reply HTTP ${res.status}`);
   }
 }
 
 export async function pushLineMessage(to: string, text: string): Promise<void> {
-  const res = await fetch("https://api.line.me/v2/bot/message/push", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      to,
-      messages: [{ type: "text", text }],
-    }),
-  });
+  let res: Response;
+  try {
+    res = await fetch("https://api.line.me/v2/bot/message/push", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        to,
+        messages: [{ type: "text", text }],
+      }),
+    });
+  } catch {
+    logger.error("LINE API request failed", {
+      operation: "push",
+      category: "network_error",
+    });
+    throw new Error("LINE push network error");
+  }
 
   if (!res.ok) {
-    const errorText = await res.text();
-    logger.error("LINE push failed", { status: res.status, body: errorText });
-    throw new Error(`LINE push HTTP ${res.status}: ${errorText}`);
+    logger.error("LINE API request failed", {
+      operation: "push",
+      status: res.status,
+      category: lineHttpErrorCategory(res.status),
+    });
+    throw new Error(`LINE push HTTP ${res.status}`);
   }
+}
+
+function lineHttpErrorCategory(status: number): string {
+  if (status === 401 || status === 403) return "authentication_error";
+  if (status === 429) return "rate_limit_error";
+  if (status >= 500) return "server_error";
+  if (status >= 400) return "client_error";
+  return "http_error";
 }
 
 function fmt(n: number): string {

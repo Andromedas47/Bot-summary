@@ -149,4 +149,22 @@ describe("SlipCheckService", () => {
     expect(pushes[0].to).toBe("group-1");
     expect(pushes[0].text).toContain("ยอดโอน 315 บาท");
   });
+
+  it("keeps an extracted check when the LINE push fails", async () => {
+    const fake = createFakeSupabase();
+    const service = new SlipCheckService(
+      fake.client,
+      { async extract() { return extraction; } },
+      async () => {
+        throw new Error("LINE push HTTP 500");
+      },
+    );
+
+    await expect(service.processEvidence("evidence-1")).resolves.toBeUndefined();
+    expect(fake.updatedChecks).toHaveLength(1);
+    expect(fake.updatedChecks[0]).toMatchObject({
+      status: "EXTRACTED",
+      slip_type: "BANK_SLIP_NO_QR",
+    });
+  });
 });

@@ -1,6 +1,16 @@
-import { describe, it, expect } from "bun:test";
-import { buildWeighSessionSummary } from "./reply";
+import { afterEach, describe, it, expect, spyOn } from "bun:test";
+import {
+  buildWeighSessionSummary,
+  pushLineMessage,
+  replyLineMessage,
+} from "./reply";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
+
+const originalFetch = globalThis.fetch;
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
 
 function makeSession(overrides: Partial<WeighSession> = {}): WeighSession {
   return {
@@ -128,5 +138,43 @@ describe("buildWeighSessionSummary — header", () => {
   it("session ที่ไม่มี items ยังแสดง header ได้", () => {
     const result = buildWeighSessionSummary(makeSession({ items: [] }));
     expect(result).toContain("บันทึกแล้ว ✅");
+  });
+});
+
+describe("LINE API error logging", () => {
+  it("does not log or throw the LINE reply response body", async () => {
+    const sensitiveBody = '{"message":"sensitive LINE detail"}';
+    globalThis.fetch = (async () =>
+      new Response(sensitiveBody, { status: 401 })) as unknown as typeof fetch;
+    const errorLog = spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(replyLineMessage("reply-token", "message")).rejects.toThrow(
+      "LINE reply HTTP 401",
+    );
+
+    const logged = errorLog.mock.calls.flat().join(" ");
+    expect(logged).toContain("authentication_error");
+    expect(logged).toContain("reply");
+    expect(logged).not.toContain(sensitiveBody);
+    expect(logged).not.toContain("sensitive LINE detail");
+    errorLog.mockRestore();
+  });
+
+  it("does not log or throw the LINE push response body", async () => {
+    const sensitiveBody = '{"message":"recipient detail"}';
+    globalThis.fetch = (async () =>
+      new Response(sensitiveBody, { status: 429 })) as unknown as typeof fetch;
+    const errorLog = spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(pushLineMessage("group-id", "message")).rejects.toThrow(
+      "LINE push HTTP 429",
+    );
+
+    const logged = errorLog.mock.calls.flat().join(" ");
+    expect(logged).toContain("rate_limit_error");
+    expect(logged).toContain("push");
+    expect(logged).not.toContain(sensitiveBody);
+    expect(logged).not.toContain("recipient detail");
+    errorLog.mockRestore();
   });
 });

@@ -20,6 +20,12 @@ export type ParseErrorType   =
   | "parser_crash" | "timeout" | "unsupported_type";
 export type SlipEvidenceStatus =
   | "RECEIVED" | "DOWNLOAD_FAILED" | "STORAGE_FAILED";
+export type SlipCheckStatus =
+  | "PROCESSING" | "EXTRACTED" | "PARTIAL_EXTRACTED"
+  | "NEED_REVIEW" | "FAILED";
+export type SlipType =
+  | "BANK_SLIP_QR" | "BANK_SLIP_NO_QR" | "THAI_HELP_THAI"
+  | "GWALLET" | "NUMBERS_ONLY" | "WHITE_PAPER" | "UNKNOWN";
 
 // ─── Database schema ──────────────────────────────────────────────────
 export interface Database {
@@ -364,6 +370,70 @@ export interface Database {
         };
         Relationships: [];
       };
+
+      slip_checks: {
+        Row: {
+          id:                    string;
+          evidence_id:           string;
+          status:                SlipCheckStatus;
+          slip_type:             SlipType;
+          gross_amount:          number | null;
+          discount_amount:       number | null;
+          paid_amount:           number | null;
+          transfer_amount:       number | null;
+          reference_id:          string | null;
+          transaction_time:      string | null;
+          sender_name:           string | null;
+          receiver_name:         string | null;
+          receiver_account_tail: string | null;
+          confidence:            number | null;
+          extracted_json:        Json | null;
+          failure_reason:        string | null;
+          created_at:            string;
+          updated_at:            string;
+        };
+        Insert: {
+          id?:                    string;
+          evidence_id:            string;
+          status:                 SlipCheckStatus;
+          slip_type?:             SlipType;
+          gross_amount?:          number | null;
+          discount_amount?:       number | null;
+          paid_amount?:           number | null;
+          transfer_amount?:       number | null;
+          reference_id?:          string | null;
+          transaction_time?:      string | null;
+          sender_name?:           string | null;
+          receiver_name?:         string | null;
+          receiver_account_tail?: string | null;
+          confidence?:            number | null;
+          extracted_json?:        Json | null;
+          failure_reason?:        string | null;
+          created_at?:            string;
+          updated_at?:            string;
+        };
+        Update: {
+          id?:                    string;
+          evidence_id?:           string;
+          status?:                 SlipCheckStatus;
+          slip_type?:              SlipType;
+          gross_amount?:           number | null;
+          discount_amount?:        number | null;
+          paid_amount?:            number | null;
+          transfer_amount?:        number | null;
+          reference_id?:           string | null;
+          transaction_time?:       string | null;
+          sender_name?:            string | null;
+          receiver_name?:          string | null;
+          receiver_account_tail?:  string | null;
+          confidence?:             number | null;
+          extracted_json?:         Json | null;
+          failure_reason?:         string | null;
+          created_at?:             string;
+          updated_at?:             string;
+        };
+        Relationships: [];
+      };
     };
     Views: {
       produce_transactions: {
@@ -413,3 +483,4 @@ export type ProduceItemRow     = Database["public"]["Tables"]["produce_items"]["
 export type DailySummaryRow      = Database["public"]["Tables"]["daily_summaries"]["Row"];
 export type ImportedSessionRow   = Database["public"]["Tables"]["imported_sessions"]["Row"];
 export type SlipEvidenceRow       = Database["public"]["Tables"]["slip_evidences"]["Row"];
+export type SlipCheckRow          = Database["public"]["Tables"]["slip_checks"]["Row"];

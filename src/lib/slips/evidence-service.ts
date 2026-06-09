@@ -64,7 +64,7 @@ export class SlipEvidenceService implements SlipEvidenceIngestor {
       content = await this.downloadContent(input.lineMessageId);
     } catch (error) {
       log.error("slip evidence download failed", { error: safeErrorMessage(error) });
-      await this.insertEvidence(input, {
+      const evidenceId = await this.insertEvidence(input, {
         storagePath,
         mimeType: null,
         byteSize: 0,
@@ -72,6 +72,7 @@ export class SlipEvidenceService implements SlipEvidenceIngestor {
         status: "DOWNLOAD_FAILED",
       });
       return {
+        evidenceId,
         status: "DOWNLOAD_FAILED",
         storagePath,
         sha256: DOWNLOAD_FAILED_SHA256,
@@ -91,17 +92,17 @@ export class SlipEvidenceService implements SlipEvidenceIngestor {
         error: storageError.message,
         byteSize: content.bytes.byteLength,
       });
-      await this.insertEvidence(input, {
+      const evidenceId = await this.insertEvidence(input, {
         storagePath,
         mimeType: content.mimeType,
         byteSize: content.bytes.byteLength,
         sha256,
         status: "STORAGE_FAILED",
       });
-      return { status: "STORAGE_FAILED", storagePath, sha256 };
+      return { evidenceId, status: "STORAGE_FAILED", storagePath, sha256 };
     }
 
-    await this.insertEvidence(input, {
+    const evidenceId = await this.insertEvidence(input, {
       storagePath,
       mimeType: content.mimeType,
       byteSize: content.bytes.byteLength,
@@ -125,7 +126,7 @@ export class SlipEvidenceService implements SlipEvidenceIngestor {
       mimeType: content.mimeType,
     });
 
-    return { status: "RECEIVED", storagePath, sha256 };
+    return { evidenceId, status: "RECEIVED", storagePath, sha256 };
   }
 
   private async insertEvidence(
@@ -137,24 +138,29 @@ export class SlipEvidenceService implements SlipEvidenceIngestor {
       sha256: string;
       status: SlipEvidenceStatus;
     },
-  ): Promise<void> {
-    const { error } = await this.supabase.from("slip_evidences").insert({
-      raw_message_id: input.rawMessageId,
-      line_message_id: input.lineMessageId,
-      source_id: input.sourceId,
-      source_type: input.sourceType,
-      line_user_id: input.lineUserId,
-      storage_bucket: SLIP_EVIDENCE_BUCKET,
-      storage_path: evidence.storagePath,
-      mime_type: evidence.mimeType,
-      byte_size: evidence.byteSize,
-      sha256: evidence.sha256,
-      status: evidence.status,
-    });
+  ): Promise<string> {
+    const { data, error } = await this.supabase
+      .from("slip_evidences")
+      .insert({
+        raw_message_id: input.rawMessageId,
+        line_message_id: input.lineMessageId,
+        source_id: input.sourceId,
+        source_type: input.sourceType,
+        line_user_id: input.lineUserId,
+        storage_bucket: SLIP_EVIDENCE_BUCKET,
+        storage_path: evidence.storagePath,
+        mime_type: evidence.mimeType,
+        byte_size: evidence.byteSize,
+        sha256: evidence.sha256,
+        status: evidence.status,
+      })
+      .select("id")
+      .single();
 
-    if (error) {
-      throw new Error(`slip_evidence insert failed: ${error.message}`);
+    if (error || !data) {
+      throw new Error(`slip_evidence insert failed: ${error?.message ?? "missing inserted row"}`);
     }
+    return data.id;
   }
 }
 

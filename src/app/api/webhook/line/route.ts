@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { after, NextRequest, NextResponse } from "next/server";
 import { verifyLineSignature } from "@/lib/line/verify";
 import { WebhookService } from "@/lib/line/webhook-service";
 import { createServiceClient } from "@/lib/supabase/server";
@@ -6,6 +6,7 @@ import { logger } from "@/lib/logger";
 import type { LineWebhookBody } from "@/lib/line/types";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
   // ── Signature verification ──────────────────────────────────────────────────
@@ -44,7 +45,9 @@ export async function POST(req: NextRequest) {
 
   // ── Process events ──────────────────────────────────────────────────────────
   const supabase = await createServiceClient();
-  const service  = new WebhookService(supabase);
+  const service = new WebhookService(supabase, {
+    scheduleBackgroundTask: (task) => after(task),
+  });
 
   const results = await service.processEvents(body.events, body.destination);
 

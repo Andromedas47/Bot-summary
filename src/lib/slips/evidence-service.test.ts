@@ -40,9 +40,17 @@ function createFakeSupabase(storageError?: string) {
     from(table: string) {
       if (table === "slip_evidences") {
         return {
-          async insert(row: Record<string, unknown>) {
+          insert(row: Record<string, unknown>) {
             evidenceRows.push(row);
-            return { error: null };
+            return {
+              select() {
+                return {
+                  async single() {
+                    return { data: { id: "evidence-1" }, error: null };
+                  },
+                };
+              },
+            };
           },
         };
       }
@@ -104,6 +112,7 @@ describe("SlipEvidenceService", () => {
     const result = await service.ingest(input);
 
     expect(result.status).toBe("RECEIVED");
+    expect(result.evidenceId).toBe("evidence-1");
     expect(fake.uploads).toEqual([{
       bucket: SLIP_EVIDENCE_BUCKET,
       path: "slips/2026-06-01/group-1/line-message-1.jpg",

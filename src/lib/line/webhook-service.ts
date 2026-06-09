@@ -20,10 +20,15 @@ import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 import { bangkokBusinessDateNow } from "@/lib/business-date";
 import { SlipEvidenceService } from "@/lib/slips/evidence-service";
 import type { SlipEvidenceIngestor } from "@/lib/slips/types";
+import {
+  SlipCheckService,
+  type SlipCheckProcessor,
+} from "@/lib/slips/check-service";
 
 type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
 type ReplyLineMessage = (replyToken: string, text: string) => Promise<void>;
+type ScheduleBackgroundTask = (task: () => Promise<void>) => void;
 
 const EVIDENCE_RECEIVED_REPLY = [
   "รับรูปหลักฐานแล้ว",
@@ -35,7 +40,9 @@ const EVIDENCE_FAILED_REPLY = "รับรูปไม่สำเร็จ ก
 
 interface WebhookServiceDependencies {
   evidenceIngestor?: SlipEvidenceIngestor;
+  checkProcessor?: SlipCheckProcessor;
   replyMessage?: ReplyLineMessage;
+  scheduleBackgroundTask?: ScheduleBackgroundTask;
 }
 
 export interface WebhookProcessResult {
@@ -83,7 +90,9 @@ export function normalizeText(text: string): string {
 
 export class WebhookService {
   private readonly evidenceIngestor: SlipEvidenceIngestor;
+  private readonly checkProcessor: SlipCheckProcessor;
   private readonly replyMessage: ReplyLineMessage;
+  private readonly scheduleBackgroundTask: ScheduleBackgroundTask;
 
   constructor(
     private readonly supabase: Supabase,
@@ -91,7 +100,18 @@ export class WebhookService {
   ) {
     this.evidenceIngestor =
       dependencies.evidenceIngestor ?? new SlipEvidenceService(supabase);
+    this.checkProcessor =
+      dependencies.checkProcessor ?? new SlipCheckService(supabase);
     this.replyMessage = dependencies.replyMessage ?? replyLineMessage;
+    this.scheduleBackgroundTask =
+      dependencies.scheduleBackgroundTask
+      ?? ((task) => {
+        void task().catch((error) => {
+          logger.error("background slip check failed", {
+            error: error instanceof Error ? error.message : "unknown_error",
+          });
+        });
+      });
   }
 
   async processEvents(events: LineEvent[], destination: string): Promise<WebhookProcessResult[]> {
@@ -270,6 +290,13 @@ export class WebhookService {
             error: error instanceof Error ? error.message : String(error),
           });
         }
+      }
+
+      if (result.status === "RECEIVED" && result.evidenceId) {
+        const evidenceId = result.evidenceId;
+        this.scheduleBackgroundTask(
+          () => this.checkProcessor.processEvidence(evidenceId),
+        );
       }
 
       return {

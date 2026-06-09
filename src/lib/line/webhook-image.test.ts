@@ -75,19 +75,30 @@ describe("WebhookService image messages", () => {
     const fake = createWebhookSupabase();
     const evidenceInputs: SlipEvidenceInput[] = [];
     const replies: Array<{ token: string; text: string }> = [];
+    const processedEvidenceIds: string[] = [];
+    const backgroundTasks: Array<() => Promise<void>> = [];
     const service = new WebhookService(fake.client, {
       evidenceIngestor: {
         async ingest(input) {
           evidenceInputs.push(input);
           return {
+            evidenceId: "evidence-1",
             status: "RECEIVED",
             storagePath: "private/path.jpg",
             sha256: "a".repeat(64),
           };
         },
       },
+      checkProcessor: {
+        async processEvidence(evidenceId) {
+          processedEvidenceIds.push(evidenceId);
+        },
+      },
       async replyMessage(token, text) {
         replies.push({ token, text });
+      },
+      scheduleBackgroundTask(task) {
+        backgroundTasks.push(task);
       },
     });
 
@@ -126,6 +137,10 @@ describe("WebhookService image messages", () => {
       token: "reply-line-message-1",
       text: "รับรูปหลักฐานแล้ว\nระบบบันทึกรูปไว้เรียบร้อย\nสถานะ รอตรวจสอบ",
     }]);
+    expect(backgroundTasks).toHaveLength(1);
+    expect(processedEvidenceIds).toEqual([]);
+    await backgroundTasks[0]();
+    expect(processedEvidenceIds).toEqual(["evidence-1"]);
   });
 
   it("replies with retry text when evidence storage fails", async () => {
@@ -135,6 +150,7 @@ describe("WebhookService image messages", () => {
       evidenceIngestor: {
         async ingest() {
           return {
+            evidenceId: "evidence-2",
             status: "STORAGE_FAILED",
             storagePath: "private/path.jpg",
             sha256: "b".repeat(64),

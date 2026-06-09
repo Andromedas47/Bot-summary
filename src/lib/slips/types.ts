@@ -15,6 +15,7 @@ export interface SlipEvidenceInput {
 }
 
 export interface SlipEvidenceResult {
+  evidenceId: string | null;
   status: SlipEvidenceStatus;
   storagePath: string;
   sha256: string;

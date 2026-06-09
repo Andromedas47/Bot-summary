@@ -18,6 +18,8 @@ export type LineMessageType  =
 export type ParseErrorType   =
   | "format_error" | "validation_error" | "unknown_format"
   | "parser_crash" | "timeout" | "unsupported_type";
+export type SlipEvidenceStatus =
+  | "RECEIVED" | "DOWNLOAD_FAILED" | "STORAGE_FAILED";
 
 // ─── Database schema ──────────────────────────────────────────────────
 export interface Database {
@@ -307,6 +309,61 @@ export interface Database {
         };
         Relationships: [];
       };
+
+      slip_evidences: {
+        Row: {
+          id:              string;
+          raw_message_id:  string;
+          line_message_id: string;
+          source_id:       string;
+          source_type:     string;
+          line_user_id:    string | null;
+          storage_bucket:  string;
+          storage_path:    string;
+          mime_type:       string | null;
+          byte_size:       number | null;
+          sha256:          string;
+          status:          SlipEvidenceStatus;
+          received_at:     string;
+          created_at:      string;
+          updated_at:      string;
+        };
+        Insert: {
+          id?:              string;
+          raw_message_id:   string;
+          line_message_id:  string;
+          source_id:        string;
+          source_type:      string;
+          line_user_id?:    string | null;
+          storage_bucket?:  string;
+          storage_path:     string;
+          mime_type?:       string | null;
+          byte_size?:       number | null;
+          sha256:           string;
+          status?:          SlipEvidenceStatus;
+          received_at?:     string;
+          created_at?:      string;
+          updated_at?:      string;
+        };
+        Update: {
+          id?:              string;
+          raw_message_id?:  string;
+          line_message_id?: string;
+          source_id?:       string;
+          source_type?:     string;
+          line_user_id?:    string | null;
+          storage_bucket?:  string;
+          storage_path?:    string;
+          mime_type?:       string | null;
+          byte_size?:       number | null;
+          sha256?:          string;
+          status?:          SlipEvidenceStatus;
+          received_at?:     string;
+          created_at?:      string;
+          updated_at?:      string;
+        };
+        Relationships: [];
+      };
     };
     Views: {
       produce_transactions: {
@@ -355,3 +412,4 @@ export type ProduceSessionRow  = Database["public"]["Tables"]["produce_sessions"
 export type ProduceItemRow     = Database["public"]["Tables"]["produce_items"]["Row"];
 export type DailySummaryRow      = Database["public"]["Tables"]["daily_summaries"]["Row"];
 export type ImportedSessionRow   = Database["public"]["Tables"]["imported_sessions"]["Row"];
+export type SlipEvidenceRow       = Database["public"]["Tables"]["slip_evidences"]["Row"];

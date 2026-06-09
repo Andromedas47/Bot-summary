@@ -1,5 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { LineEvent, LineMessageEvent, LineMessage, LineTextMessage } from "@/lib/line/types";
+import type {
+  LineEvent,
+  LineImageMessage,
+  LineMessageEvent,
+  LineMessage,
+  LineTextMessage,
+} from "@/lib/line/types";
 import type { Database, LineMessageType } from "@/types/database";
 import { getSourceId, getUserId } from "@/lib/line/verify";
 import { parserRegistry } from "@/lib/parsers/registry";
@@ -12,9 +18,25 @@ import { DailySummaryService } from "@/lib/line/daily-summary-service";
 import { SessionDedupService, computeItemHash } from "@/lib/line/session-dedup-service";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 import { bangkokBusinessDateNow } from "@/lib/business-date";
+import { SlipEvidenceService } from "@/lib/slips/evidence-service";
+import type { SlipEvidenceIngestor } from "@/lib/slips/types";
 
 type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
+type ReplyLineMessage = (replyToken: string, text: string) => Promise<void>;
+
+const EVIDENCE_RECEIVED_REPLY = [
+  "รับรูปหลักฐานแล้ว",
+  "ระบบบันทึกรูปไว้เรียบร้อย",
+  "สถานะ รอตรวจสอบ",
+].join("\n");
+
+const EVIDENCE_FAILED_REPLY = "รับรูปไม่สำเร็จ กรุณาส่งใหม่อีกครั้ง";
+
+interface WebhookServiceDependencies {
+  evidenceIngestor?: SlipEvidenceIngestor;
+  replyMessage?: ReplyLineMessage;
+}
 
 export interface WebhookProcessResult {
   eventId:   string;
@@ -60,7 +82,17 @@ export function normalizeText(text: string): string {
 // ── Service ───────────────────────────────────────────────────────────────────
 
 export class WebhookService {
-  constructor(private readonly supabase: Supabase) {}
+  private readonly evidenceIngestor: SlipEvidenceIngestor;
+  private readonly replyMessage: ReplyLineMessage;
+
+  constructor(
+    private readonly supabase: Supabase,
+    dependencies: WebhookServiceDependencies = {},
+  ) {
+    this.evidenceIngestor =
+      dependencies.evidenceIngestor ?? new SlipEvidenceService(supabase);
+    this.replyMessage = dependencies.replyMessage ?? replyLineMessage;
+  }
 
   async processEvents(events: LineEvent[], destination: string): Promise<WebhookProcessResult[]> {
     const sorted = [...events].sort((a, b) => a.timestamp - b.timestamp);
@@ -100,6 +132,16 @@ export class WebhookService {
 
     const msgEvent = event as LineMessageEvent;
     const message  = msgEvent.message;
+
+    if (message.type === "image") {
+      return this.processImageMessage(
+        msgEvent,
+        message as LineImageMessage,
+        rawMessageId,
+        eventId,
+        log,
+      );
+    }
 
     if (message.type !== "text") {
       log.debug("non-text message — skipping parse", { messageType: message.type });
@@ -196,6 +238,69 @@ export class WebhookService {
       log.debug("no parser matched text message — left unprocessed");
     }
     return { eventId, eventType: event.type, status: "saved", parsed: false };
+  }
+
+  // Image evidence is processed independently from the text-session parser.
+  private async processImageMessage(
+    event: LineMessageEvent,
+    message: LineImageMessage,
+    rawMessageId: string,
+    eventId: string,
+    log: ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    try {
+      const result = await this.evidenceIngestor.ingest({
+        rawMessageId,
+        lineMessageId: message.id,
+        sourceId: getSourceId(event.source),
+        sourceType: event.source.type,
+        lineUserId: getUserId(event.source),
+        eventTimestamp: event.timestamp,
+      });
+
+      const replyText =
+        result.status === "RECEIVED" ? EVIDENCE_RECEIVED_REPLY : EVIDENCE_FAILED_REPLY;
+
+      if (event.replyToken) {
+        try {
+          await this.replyMessage(event.replyToken, replyText);
+        } catch (error) {
+          log.error("slip evidence reply failed", {
+            evidenceStatus: result.status,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      return {
+        eventId,
+        eventType: event.type,
+        status: "saved",
+        parsed: false,
+        error: result.status === "RECEIVED" ? undefined : result.status,
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error("slip evidence ingestion failed", { error: errorMessage });
+
+      if (event.replyToken) {
+        try {
+          await this.replyMessage(event.replyToken, EVIDENCE_FAILED_REPLY);
+        } catch (replyError) {
+          log.error("slip evidence failure reply failed", {
+            error: replyError instanceof Error ? replyError.message : String(replyError),
+          });
+        }
+      }
+
+      return {
+        eventId,
+        eventType: event.type,
+        status: "saved",
+        parsed: false,
+        error: errorMessage,
+      };
+    }
   }
 
   // ── Finalize accumulated multi-message session ────────────────────────────

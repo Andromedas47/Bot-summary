@@ -3,10 +3,6 @@
     {
       "path": "/api/cron/daily-summary",
       "schedule": "58 20 * * *"
-    },
-    {
-      "path": "/api/cron/finalize-slip-batches",
-      "schedule": "* * * * *"
     }
   ]
 }

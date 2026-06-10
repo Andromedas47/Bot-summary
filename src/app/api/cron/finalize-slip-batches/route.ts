@@ -20,8 +20,12 @@ export async function GET(req: NextRequest) {
   }
 
   const supabase = createServiceClient();
-  const batchesFinalized = await finalizeDueSlipBatches(supabase);
+  const finalizedCount = await finalizeDueSlipBatches(supabase);
 
-  logger.info("finalize-slip-batches cron completed", { batchesFinalized });
-  return NextResponse.json({ ok: true, batchesFinalized });
+  logger.info("finalize-slip-batches completed", { finalizedCount });
+  return NextResponse.json({
+    ok: true,
+    finalizedCount,
+    triggeredAt: new Date().toISOString(),
+  });
 }

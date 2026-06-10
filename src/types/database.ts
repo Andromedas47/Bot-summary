@@ -526,6 +526,15 @@ export interface Database {
         Args: { p_batch_id: string; p_evidence_id: string };
         Returns: number;
       };
+      get_or_create_slip_batch: {
+        Args: {
+          p_source_id:     string;
+          p_source_type:   string;
+          p_sender_id:     string | null;
+          p_quiet_seconds?: number;
+        };
+        Returns: Array<{ batch_id: string; is_new_batch: boolean }>;
+      };
     };
     CompositeTypes: { [_ in never]: never };
     Enums: {

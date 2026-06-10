@@ -4,96 +4,162 @@ import { SlipBatchService } from "./batch-service";
 import { buildBatchSummaryMessage } from "./batch-finalizer";
 import type { Database } from "@/types/database";
 
-// ── SlipBatchService ────────────────────────────────────────────────────────
+// ── RPC fake helpers ────────────────────────────────────────────────────────
 
-function makeChain(finalValue: unknown) {
-  const chain: Record<string, unknown> = {};
-  const methods = ["eq", "neq", "gte", "lte", "is", "order", "limit", "in"];
-  for (const m of methods) {
-    chain[m] = () => chain;
-  }
-  chain["maybeSingle"] = async () => ({ data: finalValue, error: null });
-  chain["single"]      = async () => ({ data: finalValue, error: null });
-  return chain;
-}
+type RpcResponse = { data: unknown; error: { message: string } | null };
 
-function makeSupabase(options: {
-  findResult?: { id: string } | null;
-  newBatchId?: string;
-  rpcError?: string;
-}) {
-  const { findResult = null, newBatchId = "batch-new", rpcError } = options;
-  const inserts: unknown[] = [];
-  const rpcCalls: Array<{ fn: string; args: unknown }> = [];
+function makeRpcSupabase(
+  handler: (fn: string, args: unknown) => RpcResponse,
+) {
+  const calls: Array<{ fn: string; args: unknown }> = [];
 
   const client = {
-    from(table: string) {
-      if (table === "slip_batches") {
-        return {
-          select: () => makeChain(findResult),
-          insert(row: unknown) {
-            inserts.push(row);
-            return {
-              select: () => ({ single: async () => ({ data: { id: newBatchId }, error: null }) }),
-            };
-          },
-        };
-      }
-      throw new Error(`Unexpected table: ${table}`);
-    },
     async rpc(fn: string, args: unknown) {
-      rpcCalls.push({ fn, args });
-      return { data: 1, error: rpcError ? { message: rpcError } : null };
+      calls.push({ fn, args });
+      return handler(fn, args);
     },
-    _inserts: inserts,
-    _rpcCalls: rpcCalls,
+    _calls: calls,
   };
 
   return client as unknown as SupabaseClient<Database> & {
-    _inserts: unknown[];
-    _rpcCalls: Array<{ fn: string; args: unknown }>;
+    _calls: Array<{ fn: string; args: unknown }>;
   };
 }
 
+function batchRow(batchId: string, isNew: boolean) {
+  return [{ batch_id: batchId, is_new_batch: isNew }];
+}
+
+// ── SlipBatchService.getOrCreateBatch ──────────────────────────────────────
+
 describe("SlipBatchService.getOrCreateBatch", () => {
-  it("creates a new batch and returns isNewBatch=true when no active batch exists", async () => {
-    const supabase = makeSupabase({ findResult: null, newBatchId: "batch-created" });
+  it("creates a new batch when the RPC returns is_new_batch=true", async () => {
+    const supabase = makeRpcSupabase(() => ({
+      data: batchRow("batch-new", true),
+      error: null,
+    }));
     const service = new SlipBatchService(supabase);
 
     const result = await service.getOrCreateBatch("group-1", "group", "user-1");
 
     expect(result.isNewBatch).toBe(true);
-    expect(result.batchId).toBe("batch-created");
-    expect(supabase._inserts).toHaveLength(1);
+    expect(result.batchId).toBe("batch-new");
   });
 
-  it("returns existing batch and isNewBatch=false when active batch exists within quiet window", async () => {
-    const supabase = makeSupabase({ findResult: { id: "batch-existing" } });
+  it("returns existing batch when the RPC returns is_new_batch=false", async () => {
+    const supabase = makeRpcSupabase(() => ({
+      data: batchRow("batch-existing", false),
+      error: null,
+    }));
     const service = new SlipBatchService(supabase);
 
     const result = await service.getOrCreateBatch("group-1", "group", "user-1");
 
     expect(result.isNewBatch).toBe(false);
     expect(result.batchId).toBe("batch-existing");
-    expect(supabase._inserts).toHaveLength(0);
+  });
+
+  it("passes all arguments to the RPC", async () => {
+    const supabase = makeRpcSupabase(() => ({
+      data: batchRow("batch-x", true),
+      error: null,
+    }));
+    const service = new SlipBatchService(supabase);
+
+    await service.getOrCreateBatch("src-abc", "group", "user-xyz");
+
+    expect(supabase._calls[0]).toMatchObject({
+      fn: "get_or_create_slip_batch",
+      args: {
+        p_source_id:   "src-abc",
+        p_source_type: "group",
+        p_sender_id:   "user-xyz",
+        p_quiet_seconds: 20,
+      },
+    });
+  });
+
+  it("passes null sender_id through to the RPC (room / anonymous)", async () => {
+    const supabase = makeRpcSupabase(() => ({
+      data: batchRow("batch-room", true),
+      error: null,
+    }));
+    const service = new SlipBatchService(supabase);
+
+    const result = await service.getOrCreateBatch("room-1", "room", null);
+
+    expect(supabase._calls[0]).toMatchObject({
+      fn: "get_or_create_slip_batch",
+      args: { p_sender_id: null },
+    });
+    expect(result.isNewBatch).toBe(true);
+  });
+
+  it("throws when the RPC returns an error", async () => {
+    const supabase = makeRpcSupabase(() => ({
+      data: null,
+      error: { message: "db unavailable" },
+    }));
+    const service = new SlipBatchService(supabase);
+
+    await expect(
+      service.getOrCreateBatch("group-1", "group", "user-1"),
+    ).rejects.toThrow("get_or_create_slip_batch failed");
+  });
+
+  it("throws when the RPC returns an empty array", async () => {
+    const supabase = makeRpcSupabase(() => ({ data: [], error: null }));
+    const service = new SlipBatchService(supabase);
+
+    await expect(
+      service.getOrCreateBatch("group-1", "group", "user-1"),
+    ).rejects.toThrow("returned no row");
+  });
+
+  // Simulates what the DB-level advisory lock guarantees:
+  // two concurrent TS calls for the same source/sender will get serialized
+  // by the RPC so only one sees is_new_batch=true.
+  it("concurrent calls receive at most one isNewBatch=true (DB lock simulation)", async () => {
+    let callIndex = 0;
+    const supabase = makeRpcSupabase(() => {
+      callIndex += 1;
+      // First call: batch created. Second call: existing batch found.
+      return { data: batchRow("batch-shared", callIndex === 1), error: null };
+    });
+    const service = new SlipBatchService(supabase);
+
+    const [r1, r2] = await Promise.all([
+      service.getOrCreateBatch("group-1", "group", "user-1"),
+      service.getOrCreateBatch("group-1", "group", "user-1"),
+    ]);
+
+    const ackCount = [r1, r2].filter((r) => r.isNewBatch).length;
+    expect(ackCount).toBe(1);
+    expect(r1.batchId).toBe("batch-shared");
+    expect(r2.batchId).toBe("batch-shared");
   });
 });
 
+// ── SlipBatchService.attachEvidence ────────────────────────────────────────
+
 describe("SlipBatchService.attachEvidence", () => {
-  it("calls the attach_evidence_to_slip_batch RPC with correct arguments", async () => {
-    const supabase = makeSupabase({});
+  it("calls attach_evidence_to_slip_batch RPC with correct arguments", async () => {
+    const supabase = makeRpcSupabase(() => ({ data: 1, error: null }));
     const service = new SlipBatchService(supabase);
 
     await service.attachEvidence("batch-1", "evidence-1");
 
-    expect(supabase._rpcCalls).toEqual([{
+    expect(supabase._calls).toEqual([{
       fn: "attach_evidence_to_slip_batch",
       args: { p_batch_id: "batch-1", p_evidence_id: "evidence-1" },
     }]);
   });
 
   it("throws when the RPC returns an error", async () => {
-    const supabase = makeSupabase({ rpcError: "batch not found" });
+    const supabase = makeRpcSupabase(() => ({
+      data: null,
+      error: { message: "batch not found" },
+    }));
     const service = new SlipBatchService(supabase);
 
     await expect(service.attachEvidence("batch-x", "ev-x")).rejects.toThrow(

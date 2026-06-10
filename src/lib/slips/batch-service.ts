@@ -22,35 +22,28 @@ export interface SlipBatchIngestor {
 export class SlipBatchService implements SlipBatchIngestor {
   constructor(private readonly supabase: Supabase) {}
 
+  // Delegates to a single Postgres RPC that holds pg_advisory_xact_lock for
+  // the duration of the transaction.  This prevents two concurrent webhook
+  // requests for the same source/sender from both creating a new batch and
+  // both sending the first-image acknowledgement.
   async getOrCreateBatch(
     sourceId: string,
     sourceType: string,
     senderId: string | null,
   ): Promise<BatchResult> {
-    const cutoff = new Date(Date.now() - SLIP_BATCH_QUIET_SECONDS * 1000).toISOString();
+    const { data, error } = await this.supabase.rpc("get_or_create_slip_batch", {
+      p_source_id:     sourceId,
+      p_source_type:   sourceType,
+      p_sender_id:     senderId,
+      p_quiet_seconds: SLIP_BATCH_QUIET_SECONDS,
+    });
 
-    const existing = await this.findActiveBatch(sourceId, senderId, cutoff);
-    if (existing) {
-      return { batchId: existing.id, isNewBatch: false };
-    }
+    if (error) throw new Error(`get_or_create_slip_batch failed: ${error.message}`);
 
-    const now = new Date().toISOString();
-    const { data, error } = await this.supabase
-      .from("slip_batches")
-      .insert({
-        source_id:     sourceId,
-        source_type:   sourceType,
-        sender_id:     senderId,
-        status:        "collecting",
-        first_image_at: now,
-        last_image_at:  now,
-        image_count:   0,
-      })
-      .select("id")
-      .single();
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!row?.batch_id) throw new Error("get_or_create_slip_batch returned no row");
 
-    if (error || !data) throw new Error("Failed to create slip batch");
-    return { batchId: data.id, isNewBatch: true };
+    return { batchId: row.batch_id, isNewBatch: row.is_new_batch };
   }
 
   async attachEvidence(batchId: string, evidenceId: string): Promise<void> {
@@ -59,38 +52,5 @@ export class SlipBatchService implements SlipBatchIngestor {
       p_evidence_id: evidenceId,
     });
     if (error) throw new Error(`Failed to attach evidence to batch: ${error.message}`);
-  }
-
-  private async findActiveBatch(
-    sourceId: string,
-    senderId: string | null,
-    cutoff: string,
-  ): Promise<{ id: string } | null> {
-    // Two branches to keep type safety — `.is(null)` and `.eq(value)` differ.
-    if (senderId !== null) {
-      const { data } = await this.supabase
-        .from("slip_batches")
-        .select("id")
-        .eq("source_id", sourceId)
-        .eq("status", "collecting")
-        .eq("sender_id", senderId)
-        .gte("last_image_at", cutoff)
-        .order("last_image_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      return data ?? null;
-    }
-
-    const { data } = await this.supabase
-      .from("slip_batches")
-      .select("id")
-      .eq("source_id", sourceId)
-      .eq("status", "collecting")
-      .is("sender_id", null)
-      .gte("last_image_at", cutoff)
-      .order("last_image_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    return data ?? null;
   }
 }

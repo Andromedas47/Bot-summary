@@ -2,7 +2,15 @@
   "permissions": {
     "allow": [
       "PowerShell(bun --version)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Read(//d/Github/bot-summary-hotfix/src/app/api/admin/resend-daily-summary/**)",
+      "Read(//d/Github/bot-summary-final/src/app/api/admin/**)",
+      "Bash(git -C \"D:/Github/bot-summary-final\" diff --cached --binary HEAD)",
+      "Bash(echo \"staged patch exit: $?\")",
+      "Bash(git worktree *)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(git branch *)",
+      "Bash(bun test *)"
     ]
   }
 }

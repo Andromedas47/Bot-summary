@@ -3,7 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { WebhookService } from "./webhook-service";
 import type { LineMessageEvent } from "./types";
 import type { SlipEvidenceInput } from "@/lib/slips/types";
-import type { SlipBatchIngestor } from "@/lib/slips/batch-service";
+import type { SlipSessionIngestor } from "@/lib/slips/slip-session-service";
 import type { Database } from "@/types/database";
 
 function createWebhookSupabase() {
@@ -71,12 +71,14 @@ function imageEvent(id: string): LineMessageEvent {
   };
 }
 
-function newBatchService(): SlipBatchIngestor {
+function newSessionService(): SlipSessionIngestor {
   return {
-    async getOrCreateBatch() {
-      return { batchId: "batch-1", isNewBatch: true };
+    async findActiveSession() {
+      return { batchId: "batch-1", imageCount: 0, headerText: null, sellerName: null, marketName: null, slipDate: null };
     },
-    async attachEvidence() {},
+    async openSession() {
+      return { opened: true, batchId: "batch-1" };
+    },
   };
 }
 
@@ -104,7 +106,8 @@ describe("WebhookService image messages", () => {
           processedEvidenceIds.push(evidenceId);
         },
       },
-      batchService: newBatchService(),
+      slipSessionService: newSessionService(),
+      batchService: { async attachEvidence() {} },
       async replyMessage(token, text) {
         replies.push({ token, text });
       },
@@ -146,7 +149,7 @@ describe("WebhookService image messages", () => {
     expect(fake.getParseErrorInserts()).toBe(0);
     expect(replies).toEqual([{
       token: "reply-line-message-1",
-      text: "รับรูปหลักฐานแล้วครับ\nถ้ามีหลายใบ ส่งต่อได้เลย\nระบบจะสรุปหลังจากหยุดส่งประมาณ 20 วินาที",
+      text: "รับรูปหลักฐานแล้วครับ\nถ้ามีหลายใบ ส่งต่อได้เลย\nพิมพ์ \"จบสลิป\" เมื่อส่งครบ",
     }]);
     expect(backgroundTasks).toHaveLength(1);
     expect(processedEvidenceIds).toEqual([]);

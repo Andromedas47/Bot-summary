@@ -333,6 +333,12 @@ export interface Database {
           summary_sent_at: string | null;
           created_at:      string;
           updated_at:      string;
+          header_text:     string | null;
+          seller_name:     string | null;
+          market_name:     string | null;
+          slip_date:       string | null;
+          batch_type:      string;
+          finalized_at:    string | null;
         };
         Insert: {
           id?:              string;
@@ -348,6 +354,12 @@ export interface Database {
           summary_sent_at?: string | null;
           created_at?:      string;
           updated_at?:      string;
+          header_text?:     string | null;
+          seller_name?:     string | null;
+          market_name?:     string | null;
+          slip_date?:       string | null;
+          batch_type?:      string;
+          finalized_at?:    string | null;
         };
         Update: {
           id?:              string;
@@ -363,6 +375,12 @@ export interface Database {
           summary_sent_at?: string | null;
           created_at?:      string;
           updated_at?:      string;
+          header_text?:     string | null;
+          seller_name?:     string | null;
+          market_name?:     string | null;
+          slip_date?:       string | null;
+          batch_type?:      string;
+          finalized_at?:    string | null;
         };
         Relationships: [];
       };

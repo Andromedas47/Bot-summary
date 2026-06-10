@@ -7,6 +7,7 @@ import {
 } from "@/lib/slips/extraction-schema";
 import {
   OpenAiSlipExtractor,
+  ExtractionHttpError,
   type SlipExtractor,
 } from "@/lib/slips/extractor";
 import { buildSlipLineSummary } from "@/lib/slips/line-summary";
@@ -33,6 +34,8 @@ export class SlipCheckService implements SlipCheckProcessor {
     // per-image LINE push (the batch finalizer sends a single summary instead).
     let isInBatch = false;
 
+    let imageSizeBytes = 0;
+
     try {
       const evidence = await this.loadEvidence(evidenceId);
       isInBatch = evidence.batch_id !== null;
@@ -41,6 +44,7 @@ export class SlipCheckService implements SlipCheckProcessor {
         evidence.storage_bucket,
         evidence.storage_path,
       );
+      imageSizeBytes = bytes.length;
       const extraction = await this.extractor.extract({
         bytes,
         mimeType: evidence.mime_type ?? "image/jpeg",
@@ -88,7 +92,21 @@ export class SlipCheckService implements SlipCheckProcessor {
       }
     } catch (error) {
       const failureReason = safeFailureReason(error);
-      log.error("slip extraction failed", { checkId, reason: failureReason });
+
+      if (error instanceof ExtractionHttpError) {
+        log.error("slip extraction failed", {
+          checkId,
+          reason:          failureReason,
+          httpStatus:      error.httpStatus,
+          failureCode:     error.failureCode,
+          retryable:       error.retryable,
+          responseSnippet: error.responseSnippet,
+          durationMs:      error.durationMs,
+          imageSizeBytes,
+        });
+      } else {
+        log.error("slip extraction failed", { checkId, reason: failureReason });
+      }
 
       if (checkId) {
         const { error: updateError } = await this.supabase
@@ -193,6 +211,11 @@ const emptyExtraction = {
 };
 
 function safeFailureReason(error: unknown): string {
+  // Specific HTTP error with a classified failure code — most useful for diagnostics.
+  if (error instanceof ExtractionHttpError) {
+    return `extractor_http_${error.failureCode}`;
+  }
+
   if (!(error instanceof Error)) return "unknown_extraction_failure";
 
   const knownMessages: Record<string, string> = {
@@ -208,6 +231,7 @@ function safeFailureReason(error: unknown): string {
   };
 
   if (knownMessages[error.message]) return knownMessages[error.message];
+  // Fallback for any HTTP error that bypassed ExtractionHttpError (shouldn't happen).
   if (error.message.startsWith("Image extraction provider returned HTTP ")) {
     return "extractor_http_error";
   }

@@ -3,9 +3,41 @@ import {
   SLIP_EXTRACTION_JSON_SCHEMA,
   type SlipExtraction,
 } from "@/lib/slips/extraction-schema";
+import { logger } from "@/lib/logger";
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const DEFAULT_MODEL = "gpt-4o-mini";
+const PROVIDER = "openai";
+
+// Retryable status codes and the delay to wait before the second attempt.
+const RETRY_DELAY_MS: Partial<Record<ExtractionFailureCode, number>> = {
+  rate_limit:     2000,
+  upstream_error: 1000,
+  timeout:        1000,
+};
+
+export type ExtractionFailureCode =
+  | "bad_request"
+  | "auth_error"
+  | "not_found"
+  | "payload_too_large"
+  | "rate_limit"
+  | "upstream_error"
+  | "timeout"
+  | "unknown_http_error";
+
+export class ExtractionHttpError extends Error {
+  constructor(
+    public readonly httpStatus: number,
+    public readonly failureCode: ExtractionFailureCode,
+    public readonly retryable: boolean,
+    public readonly responseSnippet: string,
+    public readonly durationMs: number,
+  ) {
+    super(`Image extraction provider returned HTTP ${httpStatus}`);
+    this.name = "ExtractionHttpError";
+  }
+}
 
 export interface SlipExtractionInput {
   bytes: Uint8Array;
@@ -21,48 +53,100 @@ export class OpenAiSlipExtractor implements SlipExtractor {
     private readonly apiKey = process.env.OPENAI_API_KEY,
     private readonly model = process.env.SLIP_EXTRACTION_MODEL ?? DEFAULT_MODEL,
     private readonly fetchImpl: typeof fetch = fetch,
+    private readonly sleepImpl: (ms: number) => Promise<void> = sleep,
   ) {}
 
   async extract(input: SlipExtractionInput): Promise<SlipExtraction> {
     if (!this.apiKey) throw new Error("OPENAI_API_KEY is not configured");
 
-    const response = await this.fetchImpl(OPENAI_RESPONSES_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: this.model,
-        input: [{
-          role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: EXTRACTION_PROMPT,
-            },
-            {
-              type: "input_image",
-              image_url: `data:${input.mimeType};base64,${Buffer.from(input.bytes).toString("base64")}`,
-              detail: "high",
-            },
-          ],
-        }],
-        text: {
-          format: {
-            type: "json_schema",
-            name: "slip_extraction",
-            strict: true,
-            schema: SLIP_EXTRACTION_JSON_SCHEMA,
-          },
+    // One retry for retryable failures (429, 5xx, timeout).
+    // Non-retryable failures (400, 401, 403, 404, 413) throw immediately.
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        return await this.attemptExtraction(input, attempt);
+      } catch (err) {
+        if (
+          err instanceof ExtractionHttpError &&
+          err.retryable &&
+          attempt === 1
+        ) {
+          const delay = RETRY_DELAY_MS[err.failureCode] ?? 1000;
+          logger.warn("slip extraction retrying after transient error", {
+            provider:   PROVIDER,
+            model:      this.model,
+            failureCode: err.failureCode,
+            httpStatus: err.httpStatus,
+            retryDelayMs: delay,
+          });
+          await this.sleepImpl(delay);
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    // Unreachable — loop always throws or returns.
+    throw new Error("Extraction loop exited without result");
+  }
+
+  private async attemptExtraction(
+    input: SlipExtractionInput,
+    attempt: number,
+  ): Promise<SlipExtraction> {
+    const start = Date.now();
+    let response: Response;
+
+    try {
+      response = await this.fetchImpl(OPENAI_RESPONSES_URL, {
+        method: "POST",
+        headers: {
+          // Authorization header is intentionally never logged.
+          Authorization: `Bearer ${this.apiKey}`,
+          "Content-Type": "application/json",
         },
-        max_output_tokens: 1200,
-        store: false,
-      }),
-    });
+        body: buildRequestBody(this.model, input),
+      });
+    } catch (fetchError) {
+      const durationMs = Date.now() - start;
+      const snippet = fetchError instanceof Error ? fetchError.message.slice(0, 500) : String(fetchError).slice(0, 500);
+      logger.warn("slip extraction network error", {
+        provider:       PROVIDER,
+        model:          this.model,
+        failureCode:    "timeout",
+        retryable:      true,
+        responseSnippet: snippet,
+        durationMs,
+        imageSizeBytes: input.bytes.length,
+        attempt,
+      });
+      throw new ExtractionHttpError(0, "timeout", true, snippet, durationMs);
+    }
+
+    const durationMs = Date.now() - start;
 
     if (!response.ok) {
-      throw new Error(`Image extraction provider returned HTTP ${response.status}`);
+      const snippet = await safeReadBody(response);
+      const { failureCode, retryable } = classifyHttpStatus(response.status);
+
+      logger.warn("slip extraction HTTP error", {
+        provider:        PROVIDER,
+        model:           this.model,
+        httpStatus:      response.status,
+        failureCode,
+        retryable,
+        responseSnippet: snippet,
+        durationMs,
+        imageSizeBytes:  input.bytes.length,
+        attempt,
+      });
+
+      throw new ExtractionHttpError(
+        response.status,
+        failureCode,
+        retryable,
+        snippet,
+        durationMs,
+      );
     }
 
     const payload = await response.json() as unknown;
@@ -78,6 +162,65 @@ export class OpenAiSlipExtractor implements SlipExtractor {
 
     return parseSlipExtraction(parsed);
   }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function classifyHttpStatus(status: number): {
+  failureCode: ExtractionFailureCode;
+  retryable: boolean;
+} {
+  if (status === 400) return { failureCode: "bad_request",       retryable: false };
+  if (status === 401 || status === 403) return { failureCode: "auth_error",  retryable: false };
+  if (status === 404) return { failureCode: "not_found",         retryable: false };
+  if (status === 413) return { failureCode: "payload_too_large", retryable: false };
+  if (status === 429) return { failureCode: "rate_limit",        retryable: true  };
+  if (status >= 500)  return { failureCode: "upstream_error",    retryable: true  };
+  return               { failureCode: "unknown_http_error",      retryable: false };
+}
+
+async function safeReadBody(response: Response): Promise<string> {
+  try {
+    const text = await response.text();
+    return text.slice(0, 500);
+  } catch {
+    return "(body unreadable)";
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function buildRequestBody(model: string, input: SlipExtractionInput): string {
+  return JSON.stringify({
+    model,
+    input: [{
+      role: "user",
+      content: [
+        {
+          type: "input_text",
+          text: EXTRACTION_PROMPT,
+        },
+        {
+          type:      "input_image",
+          // Inline base64 data URI — never logged by this module.
+          image_url: `data:${input.mimeType};base64,${Buffer.from(input.bytes).toString("base64")}`,
+          detail:    "high",
+        },
+      ],
+    }],
+    text: {
+      format: {
+        type:   "json_schema",
+        name:   "slip_extraction",
+        strict: true,
+        schema: SLIP_EXTRACTION_JSON_SCHEMA,
+      },
+    },
+    max_output_tokens: 1200,
+    store: false,
+  });
 }
 
 const EXTRACTION_PROMPT = `

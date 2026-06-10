@@ -11,11 +11,6 @@ export interface BatchResult {
 }
 
 export interface SlipBatchIngestor {
-  getOrCreateBatch(
-    sourceId: string,
-    sourceType: string,
-    senderId: string | null,
-  ): Promise<BatchResult>;
   attachEvidence(batchId: string, evidenceId: string): Promise<void>;
 }
 

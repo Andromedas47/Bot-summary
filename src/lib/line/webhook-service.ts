@@ -25,6 +25,14 @@ import {
   type SlipCheckProcessor,
 } from "@/lib/slips/check-service";
 import { SlipBatchService, type SlipBatchIngestor } from "@/lib/slips/batch-service";
+import {
+  SlipSessionService,
+  parseSlipSessionHeader,
+  isSlipCloseCommand,
+  type SlipSessionIngestor,
+  type SlipSessionHeader,
+} from "@/lib/slips/slip-session-service";
+import { finalizeSlipBatch } from "@/lib/slips/batch-finalizer";
 
 type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
@@ -34,15 +42,34 @@ type ScheduleBackgroundTask = (task: () => Promise<void>) => void;
 const BATCH_FIRST_IMAGE_REPLY = [
   "รับรูปหลักฐานแล้วครับ",
   "ถ้ามีหลายใบ ส่งต่อได้เลย",
-  "ระบบจะสรุปหลังจากหยุดส่งประมาณ 20 วินาที",
+  `พิมพ์ "จบสลิป" เมื่อส่งครบ`,
 ].join("\n");
 
 const EVIDENCE_FAILED_REPLY = "รับรูปไม่สำเร็จ กรุณาส่งใหม่อีกครั้ง";
+
+const NO_SESSION_IMAGE_REPLY = [
+  "กรุณาพิมพ์หัวชุดสลิปก่อนส่งรูป เช่น",
+  "กี้ วัดทุ่งลานนา สลิปเงินโอน 9/6/2569",
+].join("\n");
+
+const NO_ACTIVE_BATCH_REPLY = [
+  "ยังไม่มีชุดสลิปที่เปิดอยู่",
+  "กรุณาพิมพ์หัวชุดก่อน เช่น:",
+  "กี้ วัดทุ่งลานนา สลิปเงินโอน 9/6/2569",
+].join("\n");
+
+const SESSION_ALREADY_OPEN_REPLY = [
+  "มีชุดสลิปที่เปิดอยู่แล้ว",
+  `กรุณาพิมพ์ "จบสลิป" ก่อน เพื่อปิดชุดสลิปปัจจุบัน`,
+].join("\n");
+
+const ALREADY_FINALIZED_REPLY = "ชุดสลิปนี้สรุปไปแล้ว";
 
 interface WebhookServiceDependencies {
   evidenceIngestor?: SlipEvidenceIngestor;
   checkProcessor?: SlipCheckProcessor;
   batchService?: SlipBatchIngestor;
+  slipSessionService?: SlipSessionIngestor;
   replyMessage?: ReplyLineMessage;
   scheduleBackgroundTask?: ScheduleBackgroundTask;
 }
@@ -94,6 +121,7 @@ export class WebhookService {
   private readonly evidenceIngestor: SlipEvidenceIngestor;
   private readonly checkProcessor: SlipCheckProcessor;
   private readonly batchService: SlipBatchIngestor;
+  private readonly slipSessionService: SlipSessionIngestor;
   private readonly replyMessage: ReplyLineMessage;
   private readonly scheduleBackgroundTask: ScheduleBackgroundTask;
 
@@ -107,6 +135,8 @@ export class WebhookService {
       dependencies.checkProcessor ?? new SlipCheckService(supabase);
     this.batchService =
       dependencies.batchService ?? new SlipBatchService(supabase);
+    this.slipSessionService =
+      dependencies.slipSessionService ?? new SlipSessionService(supabase);
     this.replyMessage = dependencies.replyMessage ?? replyLineMessage;
     this.scheduleBackgroundTask =
       dependencies.scheduleBackgroundTask
@@ -191,6 +221,16 @@ export class WebhookService {
       console.log("test reply triggered");
       if (replyToken) await replyLineMessage(replyToken, "Bot รับข้อความได้แล้ว ✅");
       return { eventId, eventType: event.type, status: "saved", parsed: false };
+    }
+
+    // ── 3.5. Slip session commands (checked before produce session logic) ─────
+    if (isSlipCloseCommand(text)) {
+      return this.processSlipClose(msgEvent, eventId, event.type, log);
+    }
+
+    const slipOpenHeader = parseSlipSessionHeader(text);
+    if (slipOpenHeader !== null) {
+      return this.processSlipOpen(msgEvent, slipOpenHeader, eventId, event.type, log);
     }
 
     // ── 4. Pending session flow ───────────────────────────────────────────────
@@ -291,24 +331,51 @@ export class WebhookService {
       if (result.status === "RECEIVED" && result.evidenceId) {
         const evidenceId = result.evidenceId;
 
-        // Batch logic: attach evidence to an active batch and only reply for
-        // the first image in a new batch. Falls back to a plain ack if the
-        // batch service fails so the webhook never goes silent.
         let shouldReply = false;
+        // Only schedule OCR after evidence is successfully attached to a batch.
+        // If attachEvidence throws, the evidence row exists but has no batch_id;
+        // running OCR on it would produce a floating result with no parent.
+        let scheduleOcr = false;
+
         try {
-          const { batchId, isNewBatch } = await this.batchService.getOrCreateBatch(
-            sourceId,
-            event.source.type,
-            senderId,
-          );
-          await this.batchService.attachEvidence(batchId, evidenceId);
-          shouldReply = isNewBatch;
-          log.debug("slip evidence attached to batch", { batchId, isNewBatch });
+          const activeSession = await this.slipSessionService.findActiveSession(sourceId);
+
+          if (!activeSession) {
+            // No open session — instruct user to open one first.
+            // Evidence is saved but not processed; no OCR scheduled.
+            log.info("image received but no active slip session", { sourceId });
+            if (event.replyToken) {
+              try {
+                await this.replyMessage(event.replyToken, NO_SESSION_IMAGE_REPLY);
+              } catch (replyErr) {
+                log.error("no-session reply failed", {
+                  error: replyErr instanceof Error ? replyErr.message : String(replyErr),
+                });
+              }
+            }
+            return {
+              eventId,
+              eventType: event.type,
+              status: "saved",
+              parsed: false,
+            };
+          }
+
+          await this.batchService.attachEvidence(activeSession.batchId, evidenceId);
+          shouldReply = activeSession.imageCount === 0; // first image in this session
+          scheduleOcr = true; // attach succeeded — safe to process
+          log.info("image attached to active slip session", {
+            batchId:     activeSession.batchId,
+            imageCount:  activeSession.imageCount + 1,
+            isFirstImage: shouldReply,
+          });
+
         } catch (batchError) {
-          log.error("batch attachment failed — sending plain ack", {
+          log.error("slip session lookup/attach failed — sending plain ack", {
             error: batchError instanceof Error ? batchError.message : String(batchError),
           });
-          shouldReply = true; // fallback: always reply so sender is not left silent
+          shouldReply = true;
+          // scheduleOcr stays false — do NOT process an unattached evidence
         }
 
         if (shouldReply && event.replyToken) {
@@ -321,12 +388,11 @@ export class WebhookService {
           }
         }
 
-        // Schedule per-image OCR regardless of batch — results are aggregated
-        // by the finalizer. check-service suppresses per-image LINE pushes when
-        // the evidence belongs to a batch.
-        this.scheduleBackgroundTask(
-          () => this.checkProcessor.processEvidence(evidenceId),
-        );
+        if (scheduleOcr) {
+          this.scheduleBackgroundTask(
+            () => this.checkProcessor.processEvidence(evidenceId),
+          );
+        }
       } else {
         // Ingest failed — reply with error so sender knows to retry.
         if (event.replyToken) {
@@ -369,6 +435,132 @@ export class WebhookService {
         parsed: false,
         error: errorMessage,
       };
+    }
+  }
+
+  // ── Slip session: open ────────────────────────────────────────────────────
+  private async processSlipOpen(
+    event:     LineMessageEvent,
+    header:    SlipSessionHeader,
+    eventId:   string,
+    eventType: string,
+    log:       ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const sourceId  = getSourceId(event.source);
+    const senderId  = getUserId(event.source);
+    const replyToken = event.replyToken;
+
+    log.info("slip session open command received", {
+      sourceId,
+      sellerName: header.sellerName,
+      marketName: header.marketName,
+      slipDate:   header.slipDate,
+    });
+
+    try {
+      const result = await this.slipSessionService.openSession(
+        sourceId, event.source.type, senderId, header,
+      );
+
+      if (!result.opened) {
+        log.info("slip open: session already open", { existingBatchId: result.existingBatchId });
+        if (replyToken) await this.replyMessage(replyToken, SESSION_ALREADY_OPEN_REPLY);
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      const dateStr = header.slipDate ?? "ไม่ระบุวันที่";
+      const confirmText = [
+        "เปิดชุดสลิปเงินโอนแล้ว",
+        `${header.sellerName} — ${header.marketName} — ${dateStr}`,
+        "",
+        "ส่งรูปสลิปต่อได้เลย",
+        `พิมพ์ "จบสลิป" เมื่อส่งครบ`,
+      ].join("\n");
+
+      if (replyToken) await this.replyMessage(replyToken, confirmText);
+
+      log.info("slip session opened", { batchId: result.batchId });
+      return { eventId, eventType, status: "saved", parsed: false };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("slip session open failed", { error: errorMessage });
+      if (replyToken) {
+        try {
+          await this.replyMessage(replyToken, "เปิดชุดสลิปไม่สำเร็จ กรุณาลองอีกครั้ง");
+        } catch (replyErr) {
+          log.error("slip open error reply failed", {
+            error: replyErr instanceof Error ? replyErr.message : String(replyErr),
+          });
+        }
+      }
+      return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
+    }
+  }
+
+  // ── Slip session: close ───────────────────────────────────────────────────
+  private async processSlipClose(
+    event:     LineMessageEvent,
+    eventId:   string,
+    eventType: string,
+    log:       ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const sourceId   = getSourceId(event.source);
+    const replyToken = event.replyToken;
+
+    log.info("slip close command received", { sourceId });
+
+    try {
+      const active = await this.slipSessionService.findActiveSession(sourceId);
+
+      if (!active) {
+        log.info("slip close: no active batch found", { sourceId });
+        if (replyToken) await this.replyMessage(replyToken, NO_ACTIVE_BATCH_REPLY);
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      // Atomic claim: collecting → processing (prevents concurrent double-finalize)
+      const { data: claimed, error: claimError } = await this.supabase
+        .from("slip_batches")
+        .update({ status: "processing" })
+        .eq("id", active.batchId)
+        .eq("status", "collecting")
+        .select("id")
+        .single();
+
+      if (claimError || !claimed) {
+        log.info("slip close: batch already being processed", { batchId: active.batchId });
+        if (replyToken) await this.replyMessage(replyToken, ALREADY_FINALIZED_REPLY);
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      log.info("finalizing active slip batch", {
+        batchId:    active.batchId,
+        imageCount: active.imageCount,
+      });
+
+      await finalizeSlipBatch(
+        this.supabase,
+        active.batchId,
+        async (text) => {
+          if (replyToken) await this.replyMessage(replyToken, text);
+        },
+      );
+
+      log.info("slip summary sent", { batchId: active.batchId });
+      return { eventId, eventType, status: "saved", parsed: false };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("slip session close failed", { error: errorMessage });
+      if (replyToken) {
+        try {
+          await this.replyMessage(replyToken, "เกิดข้อผิดพลาดในการสรุปสลิป กรุณาลองอีกครั้ง");
+        } catch (replyErr) {
+          log.error("slip close error reply failed", {
+            error: replyErr instanceof Error ? replyErr.message : String(replyErr),
+          });
+        }
+      }
+      return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
     }
   }
 

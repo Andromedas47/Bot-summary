@@ -1,38 +1,58 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Database, SlipCheckStatus } from "@/types/database";
+import type { Database, SlipCheckStatus, SlipBatchRow } from "@/types/database";
 import { pushLineMessage } from "@/lib/line/reply";
 import { logger } from "@/lib/logger";
-import { SLIP_BATCH_QUIET_SECONDS } from "@/lib/slips/batch-service";
+
+/**
+ * Parses SLIP_ABANDONED_SESSION_MINUTES env-var safely.
+ * Returns 60 for any invalid, empty, NaN, zero, or negative value.
+ * parseInt("", 10) returns NaN; Math.max(1, NaN) also returns NaN — hence the
+ * explicit isFinite guard.
+ */
+export function parseAbandonedMinutes(value: string | undefined): number {
+  if (!value) return 60;
+  const parsed = parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 60;
+  return Math.max(1, parsed);
+}
+
+// How long a collecting batch must be idle before the fallback finalizer
+// treats it as abandoned.  Env var is in minutes; default 60.
+// "จบสลิป" still closes sessions immediately regardless of this value.
+const SLIP_ABANDONED_SESSION_MINUTES = parseAbandonedMinutes(
+  process.env.SLIP_ABANDONED_SESSION_MINUTES,
+);
 
 type Supabase = SupabaseClient<Database>;
 type PushMessage = (to: string, text: string) => Promise<void>;
 
 interface EvidenceWithCheck {
-  id: string;
-  batchIndex: number | null;
-  checkStatus: SlipCheckStatus | null;
+  id:             string;
+  batchIndex:     number | null;
+  checkStatus:    SlipCheckStatus | null;
   transferAmount: number | null;
-  paidAmount: number | null;
-  failureReason: string | null;
+  paidAmount:     number | null;
+  failureReason:  string | null;
 }
 
 /**
- * Claims and finalizes all slip_batches that have been collecting for at least
- * SLIP_BATCH_QUIET_SECONDS without a new image.  Returns the number of batches
- * that were finalized in this run.
+ * Claims and finalizes collecting slip_batches that have been idle for longer
+ * than SLIP_ABANDONED_SESSION_MINUTES (default 60 min, env-configurable).
+ * This is a safety-net for sessions the user never explicitly closed.
+ * "จบสลิป" closes sessions immediately and independently of this timeout.
  *
- * Safe to call from concurrent workers: the collecting→processing status
- * transition is done in a single UPDATE so only one caller can claim each batch.
+ * Safe to call from concurrent workers: the collecting→processing transition
+ * is a single UPDATE so only one caller can claim each batch.
  */
 export async function finalizeDueSlipBatches(
   supabase: Supabase,
   push: PushMessage = pushLineMessage,
+  abandonedMinutes: number = SLIP_ABANDONED_SESSION_MINUTES,
 ): Promise<number> {
   const cutoff = new Date(
-    Date.now() - SLIP_BATCH_QUIET_SECONDS * 1000,
+    Date.now() - abandonedMinutes * 60 * 1000,
   ).toISOString();
 
-  // Atomic claim: flip status collecting → processing for all due batches.
   const { data: claimed, error } = await supabase
     .from("slip_batches")
     .update({ status: "processing" })
@@ -47,53 +67,128 @@ export async function finalizeDueSlipBatches(
 
   const batches = claimed ?? [];
   for (const batch of batches) {
-    await finalizeBatch(supabase, batch.id, batch.source_id, push);
+    await finalizeSlipBatch(supabase, batch.id, (text) => push(batch.source_id, text));
   }
   return batches.length;
 }
 
-async function finalizeBatch(
+/**
+ * Finalizes a single slip batch that has already been claimed (status=processing).
+ * Loads evidences, builds a summary, calls sendMessage, then updates the batch status.
+ *
+ * Used by both the cron finalizer and the "จบสลิป" webhook command.
+ * The caller controls where the message goes (push vs reply).
+ */
+export async function finalizeSlipBatch(
   supabase: Supabase,
-  batchId: string,
-  sourceId: string,
-  push: PushMessage,
+  batchId:  string,
+  sendMessage: (text: string) => Promise<void>,
 ): Promise<void> {
   const log = logger.child({ batchId });
+  // Tracks whether LINE has already received the message.
+  // Used in the catch block to decide between reverting (pre-send failure,
+  // user can retry "จบสลิป") vs logging-only (post-send failure, summary
+  // was delivered so reverting would cause a duplicate).
+  let messageSent = false;
 
   try {
-    const evidences = await loadBatchEvidences(supabase, batchId);
+    const [batchRow, evidences] = await Promise.all([
+      loadBatchRow(supabase, batchId),
+      loadBatchEvidences(supabase, batchId),
+    ]);
 
-    if (evidences.length === 0) {
-      log.warn("finalize-slip-batches: batch has no evidences — marking failed");
-      await supabase.from("slip_batches").update({ status: "failed" }).eq("id", batchId);
+    // Idempotency guard: if summary_sent_at is already set, another worker
+    // (or a previous retry) already delivered the summary — skip silently.
+    if (batchRow?.summary_sent_at) {
+      log.warn("finalizeSlipBatch: summary already sent — skipping", {
+        summarySetAt: batchRow.summary_sent_at,
+      });
       return;
     }
 
-    const message = buildBatchSummaryMessage(evidences);
-    await push(sourceId, message);
+    log.info("finalizing active slip batch", { evidenceCount: evidences.length });
+
+    if (evidences.length === 0) {
+      log.warn("finalizeSlipBatch: no evidences — marking failed");
+      await sendMessage("ยังไม่มีรูปในชุดสลิปนี้");
+      messageSent = true;
+      const { error: emptyErr } = await supabase.from("slip_batches").update({
+        status:          "failed",
+        finalized_at:    new Date().toISOString(),
+        summary_sent_at: new Date().toISOString(),
+      }).eq("id", batchId);
+      if (emptyErr) {
+        log.error("finalizeSlipBatch: DB update failed after empty-batch message", {
+          reason: emptyErr.message,
+        });
+      }
+      return;
+    }
+
+    const title   = buildSessionTitle(batchRow);
+    const message = buildBatchSummaryMessage(evidences, { title });
+
+    await sendMessage(message);
+    messageSent = true;
 
     const successCount = evidences.filter(
       (e) => e.checkStatus === "EXTRACTED" || e.checkStatus === "PARTIAL_EXTRACTED",
     ).length;
     const failedCount = evidences.length - successCount;
+    const now = new Date().toISOString();
 
-    await supabase.from("slip_batches").update({
+    const { error: updateError } = await supabase.from("slip_batches").update({
       status:          successCount === 0 ? "failed" : failedCount > 0 ? "review_needed" : "completed",
       success_count:   successCount,
       failed_count:    failedCount,
-      summary_sent_at: new Date().toISOString(),
+      finalized_at:    now,
+      summary_sent_at: now,
     }).eq("id", batchId);
 
-    log.info("finalize-slip-batches: batch finalized", {
-      imageCount: evidences.length,
+    if (updateError) {
+      // LINE already received the summary — don't throw (would revert to collecting),
+      // just log so an operator can patch the row if needed.
+      log.error("finalizeSlipBatch: DB update failed after LINE success — summary was sent", {
+        reason: updateError.message,
+      });
+      return;
+    }
+
+    log.info("finalizeSlipBatch: batch finalized", {
+      evidenceCount: evidences.length,
       successCount,
       failedCount,
+      summaryTitle:  title ?? "default",
     });
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    log.error("finalize-slip-batches: finalize failed", { reason });
-    await supabase.from("slip_batches").update({ status: "failed" }).eq("id", batchId);
+    log.error("finalizeSlipBatch: finalize failed", { reason, messageSent });
+
+    if (!messageSent) {
+      // Pre-send failure: revert to collecting so the user can retry "จบสลิป"
+      // with a fresh replyToken.
+      const { error: revertErr } = await supabase
+        .from("slip_batches")
+        .update({ status: "collecting" })
+        .eq("id", batchId);
+      if (revertErr) {
+        log.error("finalizeSlipBatch: revert to collecting failed", { reason: revertErr.message });
+      }
+    }
+    // Post-send failure (messageSent=true): don't revert — summary was delivered.
+    // The batch stays in 'processing'; operator must manually complete or the
+    // next cron call will skip it via the idempotency guard (summary_sent_at set).
+    throw err;
   }
+}
+
+async function loadBatchRow(supabase: Supabase, batchId: string): Promise<SlipBatchRow | null> {
+  const { data } = await supabase
+    .from("slip_batches")
+    .select("*")
+    .eq("id", batchId)
+    .maybeSingle();
+  return data ?? null;
 }
 
 async function loadBatchEvidences(
@@ -138,7 +233,17 @@ async function loadBatchEvidences(
   });
 }
 
-export function buildBatchSummaryMessage(evidences: EvidenceWithCheck[]): string {
+function buildSessionTitle(batch: SlipBatchRow | null): string | undefined {
+  if (!batch) return undefined;
+  if (!batch.seller_name && !batch.market_name) return undefined;
+  const parts = [batch.seller_name, batch.market_name, batch.slip_date].filter(Boolean);
+  return `สรุปชุดสลิปเงินโอน ${parts.join(" — ")}`;
+}
+
+export function buildBatchSummaryMessage(
+  evidences: EvidenceWithCheck[],
+  options?: { title?: string },
+): string {
   const total = evidences.length;
   if (total === 0) return "";
 
@@ -150,6 +255,9 @@ export function buildBatchSummaryMessage(evidences: EvidenceWithCheck[]): string
   );
 
   if (successful.length === 0) {
+    if (options?.title) {
+      return `${options.title}\n\nรับทั้งหมด: ${total} รูป แต่ระบบอ่านข้อมูลไม่ครบ กรุณาให้แอดมินตรวจมือ`;
+    }
     return `รับรูปหลักฐานแล้วทั้งหมด ${total} รูป แต่ระบบอ่านข้อมูลไม่ครบ กรุณาให้แอดมินตรวจมือ`;
   }
 
@@ -159,7 +267,7 @@ export function buildBatchSummaryMessage(evidences: EvidenceWithCheck[]): string
   );
 
   const lines: string[] = [
-    "สรุปรูปหลักฐานรอบนี้",
+    options?.title ?? "สรุปรูปหลักฐานรอบนี้",
     `รับทั้งหมด: ${total} รูป`,
     `อ่านครบ: ${successful.length} รูป`,
     `รอตรวจมือ: ${needsReview.length} รูป`,
@@ -191,6 +299,5 @@ function describeReviewReason(e: EvidenceWithCheck): string {
     return "อ่านข้อมูลไม่ครบ";
   }
   if (e.checkStatus === "NEED_REVIEW") return "ไม่พบข้อมูลครบถ้วน";
-  // PROCESSING or null — OCR still running at finalization time
   return "ยังไม่ได้ตรวจสอบ";
 }

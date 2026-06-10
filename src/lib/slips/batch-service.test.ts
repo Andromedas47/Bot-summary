@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { SlipBatchService } from "./batch-service";
-import { buildBatchSummaryMessage } from "./batch-finalizer";
+import { buildBatchSummaryMessage, finalizeDueSlipBatches } from "./batch-finalizer";
 import type { Database } from "@/types/database";
 
 // ── RPC fake helpers ────────────────────────────────────────────────────────
@@ -236,5 +236,79 @@ describe("buildBatchSummaryMessage", () => {
       { id: "e2", batchIndex: 2, checkStatus: "PROCESSING", transferAmount: null, paidAmount: null, failureReason: null },
     ]);
     expect(msg).toContain("#2 ยังไม่ได้ตรวจสอบ");
+  });
+});
+
+// ── finalizeDueSlipBatches: abandoned-session cutoff ──────────────────────
+
+describe("finalizeDueSlipBatches abandoned-session cutoff", () => {
+  function makeClaimSupabase(capturedUpdates: Array<Record<string, unknown>>) {
+    return {
+      from(table: string) {
+        if (table === "slip_batches") {
+          return {
+            update(values: Record<string, unknown>) {
+              capturedUpdates.push(values);
+              return {
+                eq(_c: string, _v: unknown) {
+                  return {
+                    lte(_col: string, cutoff: string) {
+                      capturedUpdates.push({ _lte_cutoff: cutoff });
+                      return {
+                        select() {
+                          return Promise.resolve({ data: [], error: null });
+                        },
+                      };
+                    },
+                  };
+                },
+              };
+            },
+          };
+        }
+        throw new Error(`Unexpected table: ${table}`);
+      },
+    } as unknown as SupabaseClient<Database>;
+  }
+
+  it("uses 60-minute default cutoff (no override)", async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const supabase = makeClaimSupabase(updates);
+    const before = Date.now();
+    await finalizeDueSlipBatches(supabase);
+    const after = Date.now();
+
+    const cutoffEntry = updates.find((u) => "_lte_cutoff" in u);
+    expect(cutoffEntry).toBeDefined();
+    const cutoffMs = new Date(cutoffEntry!._lte_cutoff as string).getTime();
+    // cutoff should be ~60 min before now
+    expect(before - cutoffMs).toBeGreaterThanOrEqual(60 * 60 * 1000 - 100);
+    expect(after - cutoffMs).toBeLessThan(61 * 60 * 1000 + 100);
+  });
+
+  it("respects injected abandonedMinutes override (30 min)", async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const supabase = makeClaimSupabase(updates);
+    const before = Date.now();
+    await finalizeDueSlipBatches(supabase, undefined, 30);
+    const after = Date.now();
+
+    const cutoffEntry = updates.find((u) => "_lte_cutoff" in u);
+    expect(cutoffEntry).toBeDefined();
+    const cutoffMs = new Date(cutoffEntry!._lte_cutoff as string).getTime();
+    expect(before - cutoffMs).toBeGreaterThanOrEqual(30 * 60 * 1000 - 100);
+    expect(after - cutoffMs).toBeLessThan(31 * 60 * 1000 + 100);
+  });
+
+  it("does NOT claim batches idle for only 20 seconds (old quiet-window)", async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const supabase = makeClaimSupabase(updates);
+    await finalizeDueSlipBatches(supabase);
+
+    const cutoffEntry = updates.find((u) => "_lte_cutoff" in u);
+    const cutoffMs = new Date(cutoffEntry!._lte_cutoff as string).getTime();
+    const twentySecondsAgo = Date.now() - 20 * 1000;
+    // cutoff must be well before 20 seconds ago — a batch idle only 20s is NOT abandoned
+    expect(cutoffMs).toBeLessThan(twentySecondsAgo);
   });
 });

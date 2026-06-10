@@ -38,6 +38,7 @@ type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
 type ReplyLineMessage = (replyToken: string, text: string) => Promise<void>;
 type ScheduleBackgroundTask = (task: () => Promise<void>) => void;
+type Sleep = (ms: number) => Promise<void>;
 
 const BATCH_FIRST_IMAGE_REPLY = [
   "รับรูปหลักฐานแล้วครับ",
@@ -72,6 +73,8 @@ interface WebhookServiceDependencies {
   slipSessionService?: SlipSessionIngestor;
   replyMessage?: ReplyLineMessage;
   scheduleBackgroundTask?: ScheduleBackgroundTask;
+  sleep?: Sleep;
+  produceEndSettleMs?: number;
 }
 
 export interface WebhookProcessResult {
@@ -80,6 +83,7 @@ export interface WebhookProcessResult {
   status:    "saved" | "duplicate" | "error";
   parsed?:   boolean;
   error?:    string;
+  pendingSessionClosed?: boolean;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -124,6 +128,8 @@ export class WebhookService {
   private readonly slipSessionService: SlipSessionIngestor;
   private readonly replyMessage: ReplyLineMessage;
   private readonly scheduleBackgroundTask: ScheduleBackgroundTask;
+  private readonly sleep: Sleep;
+  private readonly produceEndSettleMs: number;
 
   constructor(
     private readonly supabase: Supabase,
@@ -147,22 +153,34 @@ export class WebhookService {
           });
         });
       });
+    this.sleep = dependencies.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.produceEndSettleMs = dependencies.produceEndSettleMs ?? 750;
   }
 
   async processEvents(events: LineEvent[], destination: string): Promise<WebhookProcessResult[]> {
     const sorted = [...events].sort((a, b) => a.timestamp - b.timestamp);
     const results: WebhookProcessResult[] = [];
 
-    for (const event of sorted) {
-      results.push(await this.processOne(event, destination));
+    for (const [eventIndex, event] of sorted.entries()) {
+      results.push(await this.processOne(event, destination, eventIndex, sorted.length));
     }
 
     return results;
   }
 
-  private async processOne(event: LineEvent, destination: string): Promise<WebhookProcessResult> {
+  private async processOne(
+    event: LineEvent,
+    destination: string,
+    eventIndex: number,
+    eventCount: number,
+  ): Promise<WebhookProcessResult> {
     const eventId = event.webhookEventId;
-    const log     = logger.child({ eventId, eventType: event.type });
+    const log     = logger.child({
+      eventId,
+      eventType: event.type,
+      eventIndex,
+      eventCount,
+    });
 
     log.info("processing event");
 
@@ -235,28 +253,93 @@ export class WebhookService {
 
     // ── 4. Pending session flow ───────────────────────────────────────────────
     const pendingService = new PendingSessionService(this.supabase);
-    console.log("pending session lookup started", sessionKey);
-    let pending = await pendingService.get(sessionKey);
-    console.log("pending session found:", !!pending, pending ? `key=${pending.session_key}` : "");
+    const lookup = await pendingService.lookup(sessionKey);
+    const pending = lookup.session;
+    const expired = pending ? pendingService.isExpired(pending) : false;
+    log.info("pending session lookup completed", {
+      sessionKey,
+      sessionFound: Boolean(pending),
+      reason: lookup.reason,
+      sessionStatus: pending ? (expired ? "stale_active" : "active") : null,
+      expiresAt: pending ? pendingService.expiresAt(pending) : null,
+      error: lookup.error,
+    });
 
-    if (pending && pendingService.isExpired(pending)) {
-      log.info("pending session expired — resetting", { sessionKey });
-      await pendingService.delete(sessionKey);
-      pending = null;
+    if (lookup.reason === "db_error") {
+      return {
+        eventId,
+        eventType: event.type,
+        status: "error",
+        parsed: false,
+        error: lookup.error ?? "pending session lookup failed",
+      };
     }
 
     if (pending) {
       // Append raw text so the parser can extract senderName from TIME_PREFIX
-      const updated = await pendingService.append(sessionKey, text, replyToken);
+      let updated;
+      try {
+        updated = await pendingService.append(sessionKey, text, replyToken);
+        const appendParse = parseWeighSession(updated.accumulated_text, bangkokToday());
+        log.info("pending session append succeeded", {
+          sessionKey,
+          appendSuccess: true,
+          parsedItemCount: appendParse.items.length,
+          parseErrorCount: appendParse.parse_errors.length,
+        });
+        for (const parseError of appendParse.parse_errors) {
+          log.warn("pending session parse error after append", {
+            sessionKey,
+            rawLine: parseError,
+          });
+        }
+      } catch (appendError) {
+        const errorMessage = appendError instanceof Error
+          ? appendError.message
+          : String(appendError);
+        log.error("pending session append failed", {
+          sessionKey,
+          appendSuccess: false,
+          error: errorMessage,
+        });
+        return {
+          eventId,
+          eventType: event.type,
+          status: "error",
+          parsed: false,
+          error: errorMessage,
+        };
+      }
 
       if (hasSessionEnd(normalizedText)) {
-        console.log("session end detected — finalizing accumulated session", sessionKey);
-        log.info("session end detected — finalizing accumulated session", { sessionKey });
+        log.info("pending session end command received", {
+          sessionKey,
+          endCommandReceived: true,
+          settleMs: this.produceEndSettleMs,
+        });
+        if (this.produceEndSettleMs > 0) {
+          await this.sleep(this.produceEndSettleMs);
+        }
+
+        let finalText = updated.accumulated_text;
+        try {
+          finalText = await pendingService.rebuildForFinalization(
+            sessionKey,
+            updated,
+            event.timestamp,
+          );
+        } catch (rebuildError) {
+          log.error("pending session raw-message rebuild failed", {
+            sessionKey,
+            error: rebuildError instanceof Error ? rebuildError.message : String(rebuildError),
+          });
+        }
+
         // Fallback time for sessions sent without LINE export format (no TIME_PREFIX).
         // LINE export messages carry their own prefix so parser extracts time directly.
         const fallbackTime = bangkokTimeFromTimestamp(new Date(updated.created_at).getTime());
         const result = await this.finalizeAccumulated(
-          updated.accumulated_text,
+          finalText,
           updated.latest_reply_token,
           updated.line_user_id,
           rawMessageId,
@@ -265,7 +348,15 @@ export class WebhookService {
           log,
           fallbackTime,
         );
-        await pendingService.delete(sessionKey);
+        if (result.pendingSessionClosed) {
+          await pendingService.delete(sessionKey);
+          log.info("pending session closed", { sessionKey, sessionStatus: "closed" });
+        } else {
+          log.warn("pending session kept active after unsuccessful finalization", {
+            sessionKey,
+            sessionStatus: "active",
+          });
+        }
         return result;
       }
 
@@ -582,6 +673,9 @@ export class WebhookService {
 
       if (parsed.parse_errors.length > 0) {
         log.warn("finalized with parse errors", { errors: parsed.parse_errors });
+        for (const parseError of parsed.parse_errors) {
+          log.warn("produce session parse error", { rawLine: parseError });
+        }
       }
 
       // Fix 2: guard empty parse
@@ -594,7 +688,13 @@ export class WebhookService {
             log.error("reply failed", { error: String(e) });
           }
         }
-        return { eventId, eventType, status: "saved", parsed: false };
+        return {
+          eventId,
+          eventType,
+          status: "saved",
+          parsed: false,
+          pendingSessionClosed: false,
+        };
       }
 
       // Fix 3: dedup check. Old failures may have reserved a hash before any
@@ -618,8 +718,19 @@ export class WebhookService {
             log.error("duplicate reply failed", { error: replyMsg });
           }
         }
-        return { eventId, eventType, status: "saved", parsed: false };
+        return {
+          eventId,
+          eventType,
+          status: "saved",
+          parsed: false,
+          pendingSessionClosed: true,
+        };
       }
+
+      log.info("produce session final item count", {
+        finalItemCount: parsed.items.length,
+        parseErrorCount: parsed.parse_errors.length,
+      });
 
       // Persist session
       const { data: session, error: sessionErr } = await this.supabase
@@ -667,7 +778,13 @@ export class WebhookService {
         await this.supabase.from("produce_sessions").delete().eq("id", session.id);
         log.info("duplicate session recorded concurrently — removed current insert");
         if (replyToken) await replyLineMessage(replyToken, "รายการนี้เคยบันทึกแล้ว");
-        return { eventId, eventType, status: "saved", parsed: false };
+        return {
+          eventId,
+          eventType,
+          status: "saved",
+          parsed: false,
+          pendingSessionClosed: true,
+        };
       }
 
       await this.supabase
@@ -697,7 +814,13 @@ export class WebhookService {
         }
       }
 
-      return { eventId, eventType, status: "saved", parsed: true };
+      return {
+        eventId,
+        eventType,
+        status: "saved",
+        parsed: true,
+        pendingSessionClosed: true,
+      };
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       log.error("finalize accumulated session failed", { error: errorMessage });
@@ -710,7 +833,14 @@ export class WebhookService {
         }
       }
 
-      return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
+      return {
+        eventId,
+        eventType,
+        status: "saved",
+        parsed: false,
+        error: errorMessage,
+        pendingSessionClosed: false,
+      };
     }
   }
 

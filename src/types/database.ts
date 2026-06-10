@@ -26,6 +26,8 @@ export type SlipCheckStatus =
 export type SlipType =
   | "BANK_SLIP_QR" | "BANK_SLIP_NO_QR" | "THAI_HELP_THAI"
   | "GWALLET" | "NUMBERS_ONLY" | "WHITE_PAPER" | "UNKNOWN";
+export type SlipBatchStatus =
+  | "collecting" | "processing" | "completed" | "review_needed" | "failed";
 
 // ─── Database schema ──────────────────────────────────────────────────
 export interface Database {
@@ -316,6 +318,55 @@ export interface Database {
         Relationships: [];
       };
 
+      slip_batches: {
+        Row: {
+          id:              string;
+          source_id:       string;
+          source_type:     string | null;
+          sender_id:       string | null;
+          status:          SlipBatchStatus;
+          first_image_at:  string;
+          last_image_at:   string;
+          image_count:     number;
+          success_count:   number;
+          failed_count:    number;
+          summary_sent_at: string | null;
+          created_at:      string;
+          updated_at:      string;
+        };
+        Insert: {
+          id?:              string;
+          source_id:        string;
+          source_type?:     string | null;
+          sender_id?:       string | null;
+          status?:          SlipBatchStatus;
+          first_image_at?:  string;
+          last_image_at?:   string;
+          image_count?:     number;
+          success_count?:   number;
+          failed_count?:    number;
+          summary_sent_at?: string | null;
+          created_at?:      string;
+          updated_at?:      string;
+        };
+        Update: {
+          id?:              string;
+          source_id?:       string;
+          source_type?:     string | null;
+          sender_id?:       string | null;
+          status?:          SlipBatchStatus;
+          first_image_at?:  string;
+          last_image_at?:   string;
+          image_count?:     number;
+          success_count?:   number;
+          failed_count?:    number;
+          summary_sent_at?: string | null;
+          created_at?:      string;
+          updated_at?:      string;
+        };
+        Relationships: [];
+      };
+
       slip_evidences: {
         Row: {
           id:              string;
@@ -333,6 +384,8 @@ export interface Database {
           received_at:     string;
           created_at:      string;
           updated_at:      string;
+          batch_id:        string | null;
+          batch_index:     number | null;
         };
         Insert: {
           id?:              string;
@@ -350,6 +403,8 @@ export interface Database {
           received_at?:     string;
           created_at?:      string;
           updated_at?:      string;
+          batch_id?:        string | null;
+          batch_index?:     number | null;
         };
         Update: {
           id?:              string;
@@ -367,6 +422,8 @@ export interface Database {
           received_at?:     string;
           created_at?:      string;
           updated_at?:      string;
+          batch_id?:        string | null;
+          batch_index?:     number | null;
         };
         Relationships: [];
       };
@@ -464,7 +521,12 @@ export interface Database {
         Relationships: [];
       };
     };
-    Functions:      { [_ in never]: never };
+    Functions: {
+      attach_evidence_to_slip_batch: {
+        Args: { p_batch_id: string; p_evidence_id: string };
+        Returns: number;
+      };
+    };
     CompositeTypes: { [_ in never]: never };
     Enums: {
       line_source_type:   LineSourceType;
@@ -484,3 +546,4 @@ export type DailySummaryRow      = Database["public"]["Tables"]["daily_summaries
 export type ImportedSessionRow   = Database["public"]["Tables"]["imported_sessions"]["Row"];
 export type SlipEvidenceRow       = Database["public"]["Tables"]["slip_evidences"]["Row"];
 export type SlipCheckRow          = Database["public"]["Tables"]["slip_checks"]["Row"];
+export type SlipBatchRow          = Database["public"]["Tables"]["slip_batches"]["Row"];

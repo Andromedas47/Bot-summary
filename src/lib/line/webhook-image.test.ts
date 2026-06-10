@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { WebhookService } from "./webhook-service";
 import type { LineMessageEvent } from "./types";
 import type { SlipEvidenceInput } from "@/lib/slips/types";
+import type { SlipBatchIngestor } from "@/lib/slips/batch-service";
 import type { Database } from "@/types/database";
 
 function createWebhookSupabase() {
@@ -70,6 +71,15 @@ function imageEvent(id: string): LineMessageEvent {
   };
 }
 
+function newBatchService(): SlipBatchIngestor {
+  return {
+    async getOrCreateBatch() {
+      return { batchId: "batch-1", isNewBatch: true };
+    },
+    async attachEvidence() {},
+  };
+}
+
 describe("WebhookService image messages", () => {
   it("persists raw event, ingests evidence, acknowledges, and skips unsupported error", async () => {
     const fake = createWebhookSupabase();
@@ -94,6 +104,7 @@ describe("WebhookService image messages", () => {
           processedEvidenceIds.push(evidenceId);
         },
       },
+      batchService: newBatchService(),
       async replyMessage(token, text) {
         replies.push({ token, text });
       },
@@ -135,7 +146,7 @@ describe("WebhookService image messages", () => {
     expect(fake.getParseErrorInserts()).toBe(0);
     expect(replies).toEqual([{
       token: "reply-line-message-1",
-      text: "รับรูปหลักฐานแล้ว\nระบบบันทึกรูปไว้เรียบร้อย\nสถานะ รอตรวจสอบ",
+      text: "รับรูปหลักฐานแล้วครับ\nถ้ามีหลายใบ ส่งต่อได้เลย\nระบบจะสรุปหลังจากหยุดส่งประมาณ 20 วินาที",
     }]);
     expect(backgroundTasks).toHaveLength(1);
     expect(processedEvidenceIds).toEqual([]);

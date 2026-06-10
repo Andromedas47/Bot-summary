@@ -29,9 +29,13 @@ export class SlipCheckService implements SlipCheckProcessor {
   async processEvidence(evidenceId: string): Promise<void> {
     const log = logger.child({ evidenceId });
     let checkId: string | null = null;
+    // Track whether this evidence belongs to a batch so we can suppress the
+    // per-image LINE push (the batch finalizer sends a single summary instead).
+    let isInBatch = false;
 
     try {
       const evidence = await this.loadEvidence(evidenceId);
+      isInBatch = evidence.batch_id !== null;
       checkId = await this.createProcessingCheck(evidenceId);
       const bytes = await this.downloadEvidence(
         evidence.storage_bucket,
@@ -70,13 +74,18 @@ export class SlipCheckService implements SlipCheckProcessor {
         status,
         slipType: extraction.slipType,
         confidence: extraction.confidence,
+        isInBatch,
       });
 
-      await this.pushSummary(
-        evidence.source_id,
-        buildSlipLineSummary(extraction, status),
-        log,
-      );
+      // Skip per-image LINE push when the evidence is part of a batch.
+      // The batch finalizer will aggregate results and send one summary.
+      if (!isInBatch) {
+        await this.pushSummary(
+          evidence.source_id,
+          buildSlipLineSummary(extraction, status),
+          log,
+        );
+      }
     } catch (error) {
       const failureReason = safeFailureReason(error);
       log.error("slip extraction failed", { checkId, reason: failureReason });
@@ -97,13 +106,15 @@ export class SlipCheckService implements SlipCheckProcessor {
         }
       }
 
-      const sourceId = await this.findSourceId(evidenceId);
-      if (sourceId) {
-        await this.pushSummary(
-          sourceId,
-          buildSlipLineSummary(emptyExtraction, "FAILED"),
-          log,
-        );
+      if (!isInBatch) {
+        const sourceId = await this.findSourceId(evidenceId);
+        if (sourceId) {
+          await this.pushSummary(
+            sourceId,
+            buildSlipLineSummary(emptyExtraction, "FAILED"),
+            log,
+          );
+        }
       }
     }
   }
@@ -111,7 +122,7 @@ export class SlipCheckService implements SlipCheckProcessor {
   private async loadEvidence(evidenceId: string) {
     const { data, error } = await this.supabase
       .from("slip_evidences")
-      .select("id, source_id, storage_bucket, storage_path, mime_type, status")
+      .select("id, source_id, storage_bucket, storage_path, mime_type, status, batch_id")
       .eq("id", evidenceId)
       .single();
 

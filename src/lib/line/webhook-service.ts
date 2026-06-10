@@ -24,16 +24,17 @@ import {
   SlipCheckService,
   type SlipCheckProcessor,
 } from "@/lib/slips/check-service";
+import { SlipBatchService, type SlipBatchIngestor } from "@/lib/slips/batch-service";
 
 type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
 type ReplyLineMessage = (replyToken: string, text: string) => Promise<void>;
 type ScheduleBackgroundTask = (task: () => Promise<void>) => void;
 
-const EVIDENCE_RECEIVED_REPLY = [
-  "รับรูปหลักฐานแล้ว",
-  "ระบบบันทึกรูปไว้เรียบร้อย",
-  "สถานะ รอตรวจสอบ",
+const BATCH_FIRST_IMAGE_REPLY = [
+  "รับรูปหลักฐานแล้วครับ",
+  "ถ้ามีหลายใบ ส่งต่อได้เลย",
+  "ระบบจะสรุปหลังจากหยุดส่งประมาณ 20 วินาที",
 ].join("\n");
 
 const EVIDENCE_FAILED_REPLY = "รับรูปไม่สำเร็จ กรุณาส่งใหม่อีกครั้ง";
@@ -41,6 +42,7 @@ const EVIDENCE_FAILED_REPLY = "รับรูปไม่สำเร็จ ก
 interface WebhookServiceDependencies {
   evidenceIngestor?: SlipEvidenceIngestor;
   checkProcessor?: SlipCheckProcessor;
+  batchService?: SlipBatchIngestor;
   replyMessage?: ReplyLineMessage;
   scheduleBackgroundTask?: ScheduleBackgroundTask;
 }
@@ -91,6 +93,7 @@ export function normalizeText(text: string): string {
 export class WebhookService {
   private readonly evidenceIngestor: SlipEvidenceIngestor;
   private readonly checkProcessor: SlipCheckProcessor;
+  private readonly batchService: SlipBatchIngestor;
   private readonly replyMessage: ReplyLineMessage;
   private readonly scheduleBackgroundTask: ScheduleBackgroundTask;
 
@@ -102,6 +105,8 @@ export class WebhookService {
       dependencies.evidenceIngestor ?? new SlipEvidenceService(supabase);
     this.checkProcessor =
       dependencies.checkProcessor ?? new SlipCheckService(supabase);
+    this.batchService =
+      dependencies.batchService ?? new SlipBatchService(supabase);
     this.replyMessage = dependencies.replyMessage ?? replyLineMessage;
     this.scheduleBackgroundTask =
       dependencies.scheduleBackgroundTask
@@ -261,6 +266,8 @@ export class WebhookService {
   }
 
   // Image evidence is processed independently from the text-session parser.
+  // Multiple images from the same source within SLIP_BATCH_QUIET_SECONDS are
+  // grouped into a batch; only the first image triggers a reply.
   private async processImageMessage(
     event: LineMessageEvent,
     message: LineImageMessage,
@@ -268,35 +275,70 @@ export class WebhookService {
     eventId: string,
     log: ChildLogger,
   ): Promise<WebhookProcessResult> {
+    const sourceId = getSourceId(event.source);
+    const senderId = getUserId(event.source);
+
     try {
       const result = await this.evidenceIngestor.ingest({
         rawMessageId,
         lineMessageId: message.id,
-        sourceId: getSourceId(event.source),
+        sourceId,
         sourceType: event.source.type,
-        lineUserId: getUserId(event.source),
+        lineUserId: senderId,
         eventTimestamp: event.timestamp,
       });
 
-      const replyText =
-        result.status === "RECEIVED" ? EVIDENCE_RECEIVED_REPLY : EVIDENCE_FAILED_REPLY;
-
-      if (event.replyToken) {
-        try {
-          await this.replyMessage(event.replyToken, replyText);
-        } catch (error) {
-          log.error("slip evidence reply failed", {
-            evidenceStatus: result.status,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
-
       if (result.status === "RECEIVED" && result.evidenceId) {
         const evidenceId = result.evidenceId;
+
+        // Batch logic: attach evidence to an active batch and only reply for
+        // the first image in a new batch. Falls back to a plain ack if the
+        // batch service fails so the webhook never goes silent.
+        let shouldReply = false;
+        try {
+          const { batchId, isNewBatch } = await this.batchService.getOrCreateBatch(
+            sourceId,
+            event.source.type,
+            senderId,
+          );
+          await this.batchService.attachEvidence(batchId, evidenceId);
+          shouldReply = isNewBatch;
+          log.debug("slip evidence attached to batch", { batchId, isNewBatch });
+        } catch (batchError) {
+          log.error("batch attachment failed — sending plain ack", {
+            error: batchError instanceof Error ? batchError.message : String(batchError),
+          });
+          shouldReply = true; // fallback: always reply so sender is not left silent
+        }
+
+        if (shouldReply && event.replyToken) {
+          try {
+            await this.replyMessage(event.replyToken, BATCH_FIRST_IMAGE_REPLY);
+          } catch (error) {
+            log.error("slip evidence reply failed", {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+
+        // Schedule per-image OCR regardless of batch — results are aggregated
+        // by the finalizer. check-service suppresses per-image LINE pushes when
+        // the evidence belongs to a batch.
         this.scheduleBackgroundTask(
           () => this.checkProcessor.processEvidence(evidenceId),
         );
+      } else {
+        // Ingest failed — reply with error so sender knows to retry.
+        if (event.replyToken) {
+          try {
+            await this.replyMessage(event.replyToken, EVIDENCE_FAILED_REPLY);
+          } catch (error) {
+            log.error("slip evidence reply failed", {
+              evidenceStatus: result.status,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
       }
 
       return {

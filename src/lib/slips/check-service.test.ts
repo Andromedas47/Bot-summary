@@ -39,6 +39,7 @@ function createFakeSupabase() {
                         storage_path: "slips/2026-06-06/group-1/message.jpg",
                         mime_type: "image/jpeg",
                         status: "RECEIVED",
+                        batch_id: null,
                       },
                       error: null,
                     };

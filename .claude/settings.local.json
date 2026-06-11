@@ -10,7 +10,10 @@
       "Bash(git worktree *)",
       "Bash(echo \"exit: $?\")",
       "Bash(git branch *)",
-      "Bash(bun test *)"
+      "Bash(bun test *)",
+      "Bash(bun run *)",
+      "Bash(git commit *)",
+      "Bash(npm run *)"
     ]
   }
 }

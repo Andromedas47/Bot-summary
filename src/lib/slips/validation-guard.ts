@@ -1,0 +1,201 @@
+import type { SlipCheckStatus, SlipType } from "@/types/database";
+
+export type ValidationReason =
+  | "ยอดเงินสูงผิดปกติ"
+  | "วันที่รายการไม่ตรงกับรอบ"
+  | "วันที่รายการไม่ถูกต้อง"
+  | "ไม่พบวันที่รายการ"
+  | "ข้อมูลไม่ครบ";
+
+export interface EvidenceFlags {
+  effectiveAmount: number | null;
+  flagged:         boolean;
+  flagReasons:     ValidationReason[];
+}
+
+const BANGKOK_OFFSET_MS      = 7 * 60 * 60 * 1000;
+const OUTLIER_MIN_BATCH_SIZE = 5;
+const OUTLIER_MIN_AMOUNT_THB = 5000;
+const OUTLIER_RATIO          = 10;
+const DATE_TOLERANCE_DAYS    = 1;
+
+/**
+ * Parses a slip_date string into a Gregorian "YYYY-MM-DD" string or null.
+ *
+ * Accepts two formats:
+ *   • D/M/BBBB or DD/MM/BBBB  — Thai Buddhist Era. Converts by BBBB − 543.
+ *     Example: "10/6/2569" → 2026 → "2026-06-10"
+ *   • YYYY-MM-DD              — ISO 8601 (passed through after strict validation)
+ *
+ * Returns null for invalid, out-of-range, or calendar-invalid inputs.
+ */
+export function parseBatchDate(slipDate: string | null | undefined): string | null {
+  if (!slipDate) return null;
+
+  // ISO YYYY-MM-DD — validate strictly to catch Feb-30 etc.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(slipDate)) {
+    const [y, m, d] = slipDate.split("-").map(Number);
+    const date = new Date(`${slipDate}T00:00:00Z`);
+    if (
+      !Number.isFinite(date.getTime()) ||
+      date.getUTCFullYear() !== y       ||
+      date.getUTCMonth() + 1 !== m      ||
+      date.getUTCDate() !== d
+    ) return null;
+    return slipDate;
+  }
+
+  // Thai Buddhist D/M/BBBB or DD/MM/BBBB
+  const match = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(slipDate);
+  if (!match) return null;
+
+  const day   = parseInt(match[1], 10);
+  const month = parseInt(match[2], 10);
+  const bYear = parseInt(match[3], 10);
+  const year  = bYear - 543; // Buddhist Era → Gregorian
+
+  if (month < 1 || month > 12)    return null;
+  if (day   < 1)                  return null;
+  if (year < 1900 || year > 2200) return null;
+
+  const iso  = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  const date = new Date(`${iso}T00:00:00Z`);
+
+  if (
+    !Number.isFinite(date.getTime()) ||
+    date.getUTCFullYear() !== year   ||
+    date.getUTCMonth() + 1 !== month ||
+    date.getUTCDate() !== day
+  ) return null;
+
+  return iso;
+}
+
+/**
+ * Returns the payable effective amount for a slip based on its type.
+ *
+ * GWALLET / THAI_HELP_THAI  → paid_amount
+ * BANK_SLIP_QR / _NO_QR    → transfer_amount
+ * Any other type            → null (item goes to manual review)
+ *
+ * Rejects null, NaN, Infinity, zero, and negative values.
+ */
+export function selectEffectiveAmount(
+  slipType:       SlipType | null | undefined,
+  transferAmount: number | null,
+  paidAmount:     number | null,
+): number | null {
+  let raw: number | null;
+  if      (slipType === "GWALLET" || slipType === "THAI_HELP_THAI")        raw = paidAmount;
+  else if (slipType === "BANK_SLIP_QR" || slipType === "BANK_SLIP_NO_QR") raw = transferAmount;
+  else return null;
+  if (raw === null || !Number.isFinite(raw) || raw <= 0) return null;
+  return raw;
+}
+
+/**
+ * Returns the median of `values`. Returns 0 for an empty array.
+ * A fresh sorted copy is made; the original array is not mutated.
+ */
+export function computeMedian(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid    = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid];
+}
+
+/**
+ * Applies the outlier and date guards to a batch of evidences.
+ *
+ * `batchDateStr` must be an ISO "YYYY-MM-DD" Gregorian string or null.
+ * Use `parseBatchDate` to normalize Buddhist D/M/BBBB values before calling.
+ *
+ * Outlier guard (batch-wide):
+ *   Fires only when the batch has ≥ 5 valid extracted amounts.
+ *   An item is flagged when amount ≥ 5,000 THB AND amount ≥ 10 × median.
+ *
+ * Date guard (per-item, runs only when batchDateStr is non-null):
+ *   Missing transactionTime  → "ไม่พบวันที่รายการ"
+ *   Unparseable timestamp    → "วันที่รายการไม่ถูกต้อง"
+ *   Date differs > 1 day     → "วันที่รายการไม่ตรงกับรอบ"  (Bangkok UTC+7)
+ *
+ * Only EXTRACTED and PARTIAL_EXTRACTED items are candidates for flagging.
+ * Terminal items with no effective amount are flagged as "ข้อมูลไม่ครบ".
+ *
+ * Returns one EvidenceFlags entry per input evidence in the same order.
+ */
+export function computeValidationFlags(
+  evidences: ReadonlyArray<{
+    checkStatus:     SlipCheckStatus | null;
+    slipType:        SlipType | null;
+    transferAmount:  number | null;
+    paidAmount:      number | null;
+    transactionTime: string | null;
+  }>,
+  batchDateStr: string | null,
+): EvidenceFlags[] {
+  const effectiveAmounts = evidences.map((e) =>
+    selectEffectiveAmount(e.slipType, e.transferAmount, e.paidAmount),
+  );
+
+  // Collect valid amounts from terminal evidences to compute the batch median.
+  const validAmounts: number[] = [];
+  evidences.forEach((e, i) => {
+    const a = effectiveAmounts[i];
+    if (a !== null && (e.checkStatus === "EXTRACTED" || e.checkStatus === "PARTIAL_EXTRACTED")) {
+      validAmounts.push(a);
+    }
+  });
+
+  const median          = computeMedian(validAmounts);
+  const canApplyOutlier = validAmounts.length >= OUTLIER_MIN_BATCH_SIZE;
+
+  return evidences.map((e, i) => {
+    const amount     = effectiveAmounts[i];
+    const reasons: ValidationReason[] = [];
+    const isTerminal = e.checkStatus === "EXTRACTED" || e.checkStatus === "PARTIAL_EXTRACTED";
+
+    if (isTerminal) {
+      // Amount guard
+      if (amount === null) {
+        reasons.push("ข้อมูลไม่ครบ");
+      } else if (
+        canApplyOutlier &&
+        amount >= OUTLIER_MIN_AMOUNT_THB &&
+        median > 0 &&
+        amount >= OUTLIER_RATIO * median
+      ) {
+        reasons.push("ยอดเงินสูงผิดปกติ");
+      }
+
+      // Date guard — independent of amount; only when batchDateStr is known
+      if (batchDateStr) {
+        if (!e.transactionTime) {
+          reasons.push("ไม่พบวันที่รายการ");
+        } else {
+          const txMs = Date.parse(e.transactionTime);
+          if (!Number.isFinite(txMs)) {
+            reasons.push("วันที่รายการไม่ถูกต้อง");
+          } else {
+            const txDateStr = new Date(txMs + BANGKOK_OFFSET_MS).toISOString().slice(0, 10);
+            const diffDays  =
+              Math.abs(
+                new Date(txDateStr).getTime() - new Date(batchDateStr).getTime(),
+              ) / (1000 * 60 * 60 * 24);
+            if (diffDays > DATE_TOLERANCE_DAYS) {
+              reasons.push("วันที่รายการไม่ตรงกับรอบ");
+            }
+          }
+        }
+      }
+    }
+
+    return {
+      effectiveAmount: amount,
+      flagged:         reasons.length > 0,
+      flagReasons:     reasons,
+    };
+  });
+}

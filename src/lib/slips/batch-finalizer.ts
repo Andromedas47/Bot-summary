@@ -1,7 +1,13 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Database, SlipCheckStatus, SlipBatchRow } from "@/types/database";
+import type { Database, SlipCheckStatus, SlipBatchRow, SlipType } from "@/types/database";
 import { pushLineMessage } from "@/lib/line/reply";
 import { logger } from "@/lib/logger";
+import {
+  computeValidationFlags,
+  parseBatchDate,
+  type EvidenceFlags,
+  type ValidationReason,
+} from "./validation-guard";
 
 /**
  * Parses SLIP_ABANDONED_SESSION_MINUTES env-var safely.
@@ -72,12 +78,14 @@ export type FinalizeResult =
   | { delivered: true; persisted: false; persistError: string };
 
 interface EvidenceWithCheck {
-  id:             string;
-  batchIndex:     number | null;
-  checkStatus:    SlipCheckStatus | null;
-  transferAmount: number | null;
-  paidAmount:     number | null;
-  failureReason:  string | null;
+  id:              string;
+  batchIndex:      number | null;
+  checkStatus:     SlipCheckStatus | null;
+  slipType:        SlipType | null;
+  transferAmount:  number | null;
+  paidAmount:      number | null;
+  transactionTime: string | null;
+  failureReason:   string | null;
 }
 
 /**
@@ -310,14 +318,23 @@ export async function finalizeSlipBatch(
       return { delivered: true, persisted: true };
     }
 
-    const title   = buildSessionTitle(batchRow);
-    const message = buildBatchSummaryMessage(evidences, { title, isTimeout: isTimeoutForced });
+    const title    = buildSessionTitle(batchRow);
+    const slipDate = parseBatchDate(batchRow?.slip_date ?? null);
+    const message  = buildBatchSummaryMessage(evidences, {
+      title,
+      isTimeout: isTimeoutForced,
+      slipDate,
+    });
 
     await sendMessage(message);
     messageSent = true;
 
+    // Derive counts from the same validation guard used by the summary.
+    const validationFlags = computeValidationFlags(evidences, slipDate);
     const successCount = evidences.filter(
-      (e) => e.checkStatus === "EXTRACTED" || e.checkStatus === "PARTIAL_EXTRACTED",
+      (e, i) =>
+        (e.checkStatus === "EXTRACTED" || e.checkStatus === "PARTIAL_EXTRACTED") &&
+        !validationFlags[i].flagged,
     ).length;
     const failedCount = evidences.length - successCount;
     const now = new Date().toISOString();
@@ -400,7 +417,7 @@ async function loadBatchEvidences(
 
   const { data: checkData, error: checkError } = await supabase
     .from("slip_checks")
-    .select("evidence_id, status, transfer_amount, paid_amount, failure_reason")
+    .select("evidence_id, status, slip_type, transfer_amount, paid_amount, transaction_time, failure_reason")
     .in("evidence_id", evidenceIds);
 
   if (checkError) throw new Error(`loadBatchEvidences checks: ${checkError.message}`);
@@ -413,12 +430,14 @@ async function loadBatchEvidences(
   return evidenceRows.map((ev) => {
     const check = checkByEvidenceId.get(ev.id);
     return {
-      id:             ev.id,
-      batchIndex:     ev.batch_index,
-      checkStatus:    (check?.status ?? null) as SlipCheckStatus | null,
-      transferAmount: check?.transfer_amount ?? null,
-      paidAmount:     check?.paid_amount ?? null,
-      failureReason:  check?.failure_reason ?? null,
+      id:              ev.id,
+      batchIndex:      ev.batch_index,
+      checkStatus:     (check?.status ?? null) as SlipCheckStatus | null,
+      slipType:        (check?.slip_type ?? null) as SlipType | null,
+      transferAmount:  check?.transfer_amount ?? null,
+      paidAmount:      check?.paid_amount ?? null,
+      transactionTime: check?.transaction_time ?? null,
+      failureReason:   check?.failure_reason ?? null,
     };
   });
 }
@@ -430,37 +449,56 @@ function buildSessionTitle(batch: SlipBatchRow | null): string | undefined {
   return `สรุปชุดสลิปเงินโอน ${parts.join(" — ")}`;
 }
 
+// Reasons that represent amount-level problems (not date-only).
+// Only these count toward "ยอดที่ถูกระงับ"; date-only exclusions are not suspicious amounts.
+const AMOUNT_FLAG_REASONS = new Set<ValidationReason>(["ยอดเงินสูงผิดปกติ", "ข้อมูลไม่ครบ"]);
+
 /**
  * Builds the LINE summary message for a finalized batch.
  *
- * When isTimeout=true (max closing timeout reached), shows a detailed
- * per-category breakdown so operators know exactly how many slips are in each
- * state rather than a single generic "ยังอ่านไม่ครบ":
+ * Applies two validation guards before computing the trusted total:
  *
- *   completed extractions  → EXTRACTED | PARTIAL_EXTRACTED
- *   failed extractions     → FAILED
- *   manual-review items    → NEED_REVIEW
- *   pending/processing     → null check row (OCR not started) | PROCESSING
+ *   Outlier guard — flags an extracted amount when:
+ *     • The batch has ≥ 5 valid extracted amounts, AND
+ *     • The amount is ≥ 5,000 THB, AND
+ *     • The amount is ≥ 10 × the batch median.
+ *
+ *   Date guard — flags an extracted item when its transaction date
+ *     differs from slipDate by more than 1 calendar day (Bangkok time).
+ *
+ * Flagged items are moved to manual review and excluded from the trusted total.
+ * GPT extraction data is never overwritten; the guard operates on display only.
+ *
+ * When isTimeout=true (max closing timeout reached), shows a detailed
+ * per-category breakdown (completed / failed / manual-review / pending).
  */
 export function buildBatchSummaryMessage(
   evidences: EvidenceWithCheck[],
-  options?: { title?: string; isTimeout?: boolean },
+  options?: { title?: string; isTimeout?: boolean; slipDate?: string | null },
 ): string {
   const total = evidences.length;
   if (total === 0) return "";
 
-  const completed  = evidences.filter(
-    (e) => e.checkStatus === "EXTRACTED" || e.checkStatus === "PARTIAL_EXTRACTED",
-  );
-  const failedEvs  = evidences.filter((e) => e.checkStatus === "FAILED");
-  const needReview = evidences.filter((e) => e.checkStatus === "NEED_REVIEW");
-  const pending    = evidences.filter(
+  const flags = computeValidationFlags(evidences, parseBatchDate(options?.slipDate ?? null));
+
+  type Enriched = EvidenceWithCheck & { flags: EvidenceFlags };
+  const enriched: Enriched[] = evidences.map((e, i) => ({ ...e, flags: flags[i] }));
+
+  const isTerminal = (e: Enriched) =>
+    e.checkStatus === "EXTRACTED" || e.checkStatus === "PARTIAL_EXTRACTED";
+
+  const trusted    = enriched.filter((e) =>  isTerminal(e) && !e.flags.flagged);
+  const flagged    = enriched.filter((e) =>  isTerminal(e) &&  e.flags.flagged);
+  const failedEvs  = enriched.filter((e) => e.checkStatus === "FAILED");
+  const needReview = enriched.filter((e) => e.checkStatus === "NEED_REVIEW");
+  const pending    = enriched.filter(
     (e) => e.checkStatus === null || e.checkStatus === "PROCESSING",
   );
-  const incomplete = [...failedEvs, ...needReview, ...pending];
+  // Flagged completed items are treated as manual review.
+  const incomplete = [...failedEvs, ...needReview, ...pending, ...flagged];
 
-  const totalAmount = completed.reduce(
-    (sum, e) => sum + (e.transferAmount ?? e.paidAmount ?? 0),
+  const trustedTotal = trusted.reduce(
+    (sum, e) => sum + (e.flags.effectiveAmount ?? 0),
     0,
   );
 
@@ -469,29 +507,38 @@ export function buildBatchSummaryMessage(
     const lines: string[] = [
       options.title ?? "สรุปรูปหลักฐานรอบนี้ (หมดเวลา)",
       `รับทั้งหมด: ${total} รูป`,
-      `อ่านครบ: ${completed.length} รูป`,
+      `อ่านครบ: ${trusted.length} รูป`,
     ];
-    if (failedEvs.length > 0)  lines.push(`อ่านไม่สำเร็จ: ${failedEvs.length} รูป`);
-    if (needReview.length > 0) lines.push(`รอตรวจมือ: ${needReview.length} รูป`);
-    if (pending.length > 0)    lines.push(`รอประมวลผล: ${pending.length} รูป`);
-    if (totalAmount > 0) {
+    if (failedEvs.length > 0)
+      lines.push(`อ่านไม่สำเร็จ: ${failedEvs.length} รูป`);
+    if ((needReview.length + flagged.length) > 0)
+      lines.push(`รอตรวจมือ: ${needReview.length + flagged.length} รูป`);
+    if (pending.length > 0)
+      lines.push(`รอประมวลผล: ${pending.length} รูป`);
+    if (trustedTotal > 0) {
       lines.push(
-        `ยอดรวมที่อ่านได้: ${totalAmount.toLocaleString("th-TH", { maximumFractionDigits: 2 })} บาท`,
+        `ยอดรวมที่อ่านได้: ${trustedTotal.toLocaleString("th-TH", { maximumFractionDigits: 2 })} บาท`,
       );
+    }
+    const amountFlaggedCountTimeout = flagged.filter(
+      (e) => e.flags.flagReasons.some((r) => AMOUNT_FLAG_REASONS.has(r as ValidationReason)),
+    ).length;
+    if (amountFlaggedCountTimeout > 0) {
+      lines.push(`ยอดที่ถูกระงับ: ${amountFlaggedCountTimeout} รายการ`);
     }
     if (incomplete.length > 0) {
       lines.push("");
       lines.push("รูปที่ยังไม่ครบ:");
       for (const e of incomplete) {
         const idx = e.batchIndex ?? "?";
-        lines.push(`#${idx} ${describeReviewReason(e)}`);
+        lines.push(`#${idx} ${describeIncompleteReason(e)}`);
       }
     }
     return lines.join("\n");
   }
 
   // ── Normal (non-timeout) rendering ──────────────────────────────────────────
-  if (completed.length === 0) {
+  if (trusted.length === 0 && flagged.length === 0) {
     if (options?.title) {
       return `${options.title}\n\nรับทั้งหมด: ${total} รูป แต่ระบบอ่านข้อมูลไม่ครบ กรุณาให้แอดมินตรวจมือ`;
     }
@@ -501,14 +548,20 @@ export function buildBatchSummaryMessage(
   const lines: string[] = [
     options?.title ?? "สรุปรูปหลักฐานรอบนี้",
     `รับทั้งหมด: ${total} รูป`,
-    `อ่านครบ: ${completed.length} รูป`,
+    `อ่านครบ: ${trusted.length} รูป`,
     `รอตรวจมือ: ${incomplete.length} รูป`,
   ];
 
-  if (totalAmount > 0) {
+  if (trustedTotal > 0) {
     lines.push(
-      `ยอดรวมที่อ่านได้: ${totalAmount.toLocaleString("th-TH", { maximumFractionDigits: 2 })} บาท`,
+      `ยอดรวมที่อ่านได้: ${trustedTotal.toLocaleString("th-TH", { maximumFractionDigits: 2 })} บาท`,
     );
+  }
+  const amountFlaggedCount = flagged.filter(
+    (e) => e.flags.flagReasons.some((r) => AMOUNT_FLAG_REASONS.has(r as ValidationReason)),
+  ).length;
+  if (amountFlaggedCount > 0) {
+    lines.push(`ยอดที่ถูกระงับ: ${amountFlaggedCount} รายการ`);
   }
 
   if (incomplete.length > 0) {
@@ -516,11 +569,20 @@ export function buildBatchSummaryMessage(
     lines.push("รูปที่ต้องตรวจมือ:");
     for (const e of incomplete) {
       const idx = e.batchIndex ?? "?";
-      lines.push(`#${idx} ${describeReviewReason(e)}`);
+      lines.push(`#${idx} ${describeIncompleteReason(e)}`);
     }
   }
 
   return lines.join("\n");
+}
+
+type EnrichedEvidence = EvidenceWithCheck & { flags: EvidenceFlags };
+
+function describeIncompleteReason(e: EnrichedEvidence): string {
+  if (e.flags.flagged && e.flags.flagReasons.length > 0) {
+    return e.flags.flagReasons.join(", ");
+  }
+  return describeReviewReason(e);
 }
 
 function describeReviewReason(e: EvidenceWithCheck): string {

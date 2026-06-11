@@ -253,6 +253,104 @@ describe("finalizeSlipBatch delivery state", () => {
   });
 });
 
+// ── finalizeSlipBatch: validation-guard-derived counters ──────────────────
+
+describe("finalizeSlipBatch: success_count and failed_count use validation-guard results", () => {
+  function makeFinalizerWithEvidences(
+    items: Array<{ transferAmount: number; transactionTime?: string | null }>,
+    capturedUpdates: Array<Record<string, unknown>>,
+  ): SupabaseClient<Database> {
+    const evidenceRows = items.map((_, i) => ({ id: `ev-${i + 1}`, batch_index: i + 1 }));
+    const checkRows = items.map((item, i) => ({
+      evidence_id:      `ev-${i + 1}`,
+      status:           "EXTRACTED" as const,
+      slip_type:        "BANK_SLIP_QR" as const,
+      transfer_amount:  item.transferAmount,
+      paid_amount:      null,
+      transaction_time: item.transactionTime ?? null,
+      failure_reason:   null,
+    }));
+
+    return {
+      from(table: string) {
+        if (table === "slip_batches") {
+          return {
+            select() {
+              return {
+                eq(_c: string, _v: unknown) {
+                  return {
+                    async maybeSingle() {
+                      return { data: { id: "batch-1", summary_sent_at: null, slip_date: null }, error: null };
+                    },
+                  };
+                },
+              };
+            },
+            update(values: Record<string, unknown>) {
+              capturedUpdates.push(values);
+              return {
+                eq(_c: string, _v: unknown) {
+                  return Promise.resolve({ data: null, error: null });
+                },
+              };
+            },
+          };
+        }
+        if (table === "slip_evidences") {
+          return {
+            select() {
+              return {
+                eq(_c: string, _v: unknown) {
+                  return {
+                    order(_c2: string, _opts: unknown) {
+                      return Promise.resolve({ data: evidenceRows, error: null });
+                    },
+                  };
+                },
+              };
+            },
+          };
+        }
+        if (table === "slip_checks") {
+          return {
+            select() {
+              return {
+                in(_c: string, _vals: unknown[]) {
+                  return Promise.resolve({ data: checkRows, error: null });
+                },
+              };
+            },
+          };
+        }
+        throw new Error(`Unexpected table: ${table}`);
+      },
+    } as unknown as SupabaseClient<Database>;
+  }
+
+  it("success_count reflects guard-filtered trusted count, not raw EXTRACTED count", async () => {
+    const capturedUpdates: Array<Record<string, unknown>> = [];
+    const supabase = makeFinalizerWithEvidences(
+      [
+        { transferAmount: 100 },
+        { transferAmount: 100 },
+        { transferAmount: 100 },
+        { transferAmount: 100 },
+        { transferAmount: 100 },
+        { transferAmount: 50000 }, // outlier: >= 5000 and >= 10x median(100)
+      ],
+      capturedUpdates,
+    );
+
+    await finalizeSlipBatch(supabase, "batch-1", async () => {});
+
+    const dbUpdate = capturedUpdates.find((u) => "success_count" in u);
+    // Raw EXTRACTED count would be 6; validation-guard count is 5 (outlier excluded).
+    expect(dbUpdate?.success_count).toBe(5);
+    expect(dbUpdate?.failed_count).toBe(1);
+    expect(dbUpdate?.status).toBe("review_needed");
+  });
+});
+
 // ── buildBatchSummaryMessage — timeout breakdown ──────────────────────────
 
 describe("buildBatchSummaryMessage timeout breakdown", () => {
@@ -260,12 +358,14 @@ describe("buildBatchSummaryMessage timeout breakdown", () => {
     status: import("@/types/database").SlipCheckStatus | null,
     idx: number,
   ) => ({
-    id:             `ev-${idx}`,
-    batchIndex:     idx,
-    checkStatus:    status,
-    transferAmount: status === "EXTRACTED" ? 1000 : null,
-    paidAmount:     null,
-    failureReason:  null,
+    id:              `ev-${idx}`,
+    batchIndex:      idx,
+    checkStatus:     status,
+    slipType:        "BANK_SLIP_QR" as const,
+    transferAmount:  (status === "EXTRACTED" || status === "PARTIAL_EXTRACTED") ? 1000 : null,
+    paidAmount:      null,
+    transactionTime: null,
+    failureReason:   null,
   });
 
   it("shows completed / failed / pending separately when isTimeout=true", () => {

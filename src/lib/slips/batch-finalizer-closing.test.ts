@@ -249,12 +249,11 @@ describe("finalizeClosingSlipBatches — atomic claim orchestration", () => {
 // ── vercel.json cron schedule ─────────────────────────────────────────────────
 
 describe("vercel.json cron schedule", () => {
-  it("finalize-slip-batches is scheduled in vercel.json", async () => {
+  it("finalize-slip-batches is NOT scheduled in vercel.json (Hobby plan: per-minute crons not allowed)", async () => {
     const file = await import("../../../vercel.json", { with: { type: "json" } });
     const config = file.default as { crons?: Array<{ path: string; schedule: string }> };
     const entry = config.crons?.find((c) => c.path === "/api/cron/finalize-slip-batches");
-    expect(entry).toBeDefined();
-    expect(entry?.schedule).toBe("* * * * *");
+    expect(entry).toBeUndefined();
   });
 
   it("daily-summary cron schedule is preserved", async () => {

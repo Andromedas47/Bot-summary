@@ -136,7 +136,7 @@ export class SlipSessionService implements SlipSessionIngestor {
       .from("slip_batches")
       .select("id, image_count, header_text, seller_name, market_name, slip_date")
       .eq("source_id", sourceId)
-      .eq("status", "collecting")
+      .in("status", ["collecting", "closing"])
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();

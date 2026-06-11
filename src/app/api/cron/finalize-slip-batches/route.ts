@@ -1,7 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { logger } from "@/lib/logger";
-import { finalizeDueSlipBatches, parseAbandonedMinutes } from "@/lib/slips/batch-finalizer";
+import {
+  finalizeDueSlipBatches,
+  finalizeClosingSlipBatches,
+  parseAbandonedMinutes,
+  parseCloseSeconds,
+} from "@/lib/slips/batch-finalizer";
 import { checkCronAuth } from "./auth";
 
 export const runtime = "nodejs";
@@ -30,14 +35,30 @@ export async function GET(req: NextRequest) {
   }
 
   const supabase = createServiceClient();
-  const finalizedCount = await finalizeDueSlipBatches(supabase);
+  const [abandonedCount, closedCount] = await Promise.all([
+    finalizeDueSlipBatches(supabase),
+    finalizeClosingSlipBatches(supabase),
+  ]);
 
-  const abandonedMinutes = parseAbandonedMinutes(process.env.SLIP_ABANDONED_SESSION_MINUTES);
-  logger.info("finalize-slip-batches completed", { finalizedCount, abandonedMinutes });
+  const abandonedMinutes  = parseAbandonedMinutes(process.env.SLIP_ABANDONED_SESSION_MINUTES);
+  const closeQuietSeconds = parseCloseSeconds(process.env.SLIP_CLOSE_QUIET_SECONDS, 10);
+  const closeMaxSeconds   = parseCloseSeconds(process.env.SLIP_CLOSE_MAX_SECONDS, 120);
+
+  logger.info("finalize-slip-batches completed", {
+    abandonedCount,
+    closedCount,
+    abandonedMinutes,
+    closeQuietSeconds,
+    closeMaxSeconds,
+  });
   return NextResponse.json({
     ok: true,
-    finalizedCount,
+    abandonedCount,
+    closedCount,
+    finalizedCount: abandonedCount + closedCount,
     abandonedSessionMinutes: abandonedMinutes,
+    closeQuietSeconds,
+    closeMaxSeconds,
     triggeredAt: new Date().toISOString(),
   });
 }

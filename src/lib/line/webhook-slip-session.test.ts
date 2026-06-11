@@ -262,7 +262,7 @@ describe("WebhookService slip session close", () => {
     },
   );
 
-  it("replies already-finalized when claim fails (concurrent close)", async () => {
+  it("replies already-closing when claim fails (batch is already in closing state)", async () => {
     const replies: string[] = [];
 
     const slipSessionService: SlipSessionIngestor = {
@@ -280,7 +280,7 @@ describe("WebhookService slip session close", () => {
     await service.processEvents([textEvent("จบสลิป")], "dest");
 
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toBe("ชุดสลิปนี้สรุปไปแล้ว");
+    expect(replies[0]).toBe("รับทราบแล้ว กำลังสรุปสลิปอยู่ กรุณารอสักครู่");
   });
 
   it("produce session text does not trigger slip close", async () => {

@@ -245,4 +245,69 @@ describe("WebhookService batch slip flow", () => {
 
     expect(replies).toEqual(["รับรูปไม่สำเร็จ กรุณาส่งใหม่อีกครั้ง"]);
   });
+
+  // ── Fix 2: Late-image rejection when finalizer has already claimed the batch ──
+
+  it("attachment loses to finalizer: replies with rejection message, no OCR scheduled", async () => {
+    const replies: string[] = [];
+    const bgTasks: Array<() => Promise<void>> = [];
+
+    const slipSessionService: SlipSessionIngestor = {
+      // findActiveSession returns the batch (it's closing or processing from finder's perspective)
+      async findActiveSession() { return activeSession(2); },
+      async openSession() { return { opened: true, batchId: "batch-1" }; },
+    };
+
+    const service = new WebhookService(createRawMessageSupabase("raw-late"), {
+      evidenceIngestor: stubIngestor("RECEIVED", "ev-late"),
+      checkProcessor: stubCheckProcessor,
+      slipSessionService,
+      batchService: {
+        async attachEvidence() {
+          // Simulates the RPC exception from migration 0024 when batch is processing
+          throw new Error(
+            "Failed to attach evidence to batch: slip_batch batch-1 not found or not in collecting/closing status",
+          );
+        },
+      },
+      async replyMessage(_, text) { replies.push(text); },
+      scheduleBackgroundTask(task) { bgTasks.push(task); },
+    });
+
+    await service.processEvents([imageEvent("msg-late")], "dest");
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toBe(
+      "รูปนี้ไม่ถูกรวมในชุดสลิป เนื่องจากระบบเริ่มสรุปแล้ว กรุณาเปิดชุดใหม่ก่อนส่งรูป",
+    );
+    // No OCR — evidence is not part of the finalized batch
+    expect(bgTasks).toHaveLength(0);
+  });
+
+  it("image with no open session still replies with open-session instruction (not rejection)", async () => {
+    const replies: string[] = [];
+    const bgTasks: Array<() => Promise<void>> = [];
+
+    const slipSessionService: SlipSessionIngestor = {
+      async findActiveSession() { return null; },
+      async openSession() { return { opened: true, batchId: "batch-1" }; },
+    };
+
+    const service = new WebhookService(createRawMessageSupabase("raw-nosession"), {
+      evidenceIngestor: stubIngestor("RECEIVED", "ev-nosession"),
+      checkProcessor: stubCheckProcessor,
+      slipSessionService,
+      batchService: { async attachEvidence() {} },
+      async replyMessage(_, text) { replies.push(text); },
+      scheduleBackgroundTask(task) { bgTasks.push(task); },
+    });
+
+    await service.processEvents([imageEvent("msg-nosession2")], "dest");
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("กรุณาพิมพ์หัวชุดสลิปก่อนส่งรูป");
+    // Must NOT show the finalizer-rejection message
+    expect(replies[0]).not.toContain("เนื่องจากระบบเริ่มสรุปแล้ว");
+    expect(bgTasks).toHaveLength(0);
+  });
 });

@@ -98,23 +98,25 @@ function makeSessionSupabase(
         select() {
           return {
             eq(_col: string, _val: unknown) {
-              return {
-                eq(_col2: string, _val2: unknown) {
+              // findActiveSession: .eq("source_id", x).in("status", [...])
+              const innerBuilder = {
+                order() {
                   return {
-                    order() {
+                    limit() {
                       return {
-                        limit() {
-                          return {
-                            async maybeSingle() {
-                              calls.push({ method: "findActiveSession", args: table });
-                              return findActiveReturns;
-                            },
-                          };
+                        async maybeSingle() {
+                          calls.push({ method: "findActiveSession", args: table });
+                          return findActiveReturns;
                         },
                       };
                     },
                   };
                 },
+              };
+              return {
+                in : (_col2: string, _vals: unknown[]) => innerBuilder,
+                // Keep eq as alias for tests that were written before the .in() change
+                eq : (_col2: string, _val2: unknown) => innerBuilder,
               };
             },
           };

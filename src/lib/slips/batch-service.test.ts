@@ -235,7 +235,7 @@ describe("buildBatchSummaryMessage", () => {
       { id: "e1", batchIndex: 1, checkStatus: "EXTRACTED",  transferAmount: 500, paidAmount: null, failureReason: null },
       { id: "e2", batchIndex: 2, checkStatus: "PROCESSING", transferAmount: null, paidAmount: null, failureReason: null },
     ]);
-    expect(msg).toContain("#2 ยังไม่ได้ตรวจสอบ");
+    expect(msg).toContain("#2 รอผลการตรวจสอบ");
   });
 });
 

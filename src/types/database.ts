@@ -27,7 +27,7 @@ export type SlipType =
   | "BANK_SLIP_QR" | "BANK_SLIP_NO_QR" | "THAI_HELP_THAI"
   | "GWALLET" | "NUMBERS_ONLY" | "WHITE_PAPER" | "UNKNOWN";
 export type SlipBatchStatus =
-  | "collecting" | "processing" | "completed" | "review_needed" | "failed";
+  | "collecting" | "closing" | "processing" | "completed" | "review_needed" | "failed";
 
 // ─── Database schema ──────────────────────────────────────────────────
 export interface Database {
@@ -339,6 +339,7 @@ export interface Database {
           slip_date:       string | null;
           batch_type:      string;
           finalized_at:    string | null;
+          closing_at:      string | null;
         };
         Insert: {
           id?:              string;
@@ -360,6 +361,7 @@ export interface Database {
           slip_date?:       string | null;
           batch_type?:      string;
           finalized_at?:    string | null;
+          closing_at?:      string | null;
         };
         Update: {
           id?:              string;
@@ -381,6 +383,7 @@ export interface Database {
           slip_date?:       string | null;
           batch_type?:      string;
           finalized_at?:    string | null;
+          closing_at?:      string | null;
         };
         Relationships: [];
       };
@@ -543,6 +546,18 @@ export interface Database {
       attach_evidence_to_slip_batch: {
         Args: { p_batch_id: string; p_evidence_id: string };
         Returns: number;
+      };
+      claim_closing_slip_batch: {
+        Args: {
+          p_batch_id:      string;
+          p_quiet_seconds: number;
+          p_max_seconds:   number;
+        };
+        Returns: Array<{
+          claimed_id:        string;
+          claimed_source_id: string;
+          was_timeout:       boolean;
+        }>;
       };
       get_or_create_slip_batch: {
         Args: {

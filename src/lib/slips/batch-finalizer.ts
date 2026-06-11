@@ -16,15 +16,60 @@ export function parseAbandonedMinutes(value: string | undefined): number {
   return Math.max(1, parsed);
 }
 
+/**
+ * Parses a closing-window seconds env-var (SLIP_CLOSE_QUIET_SECONDS or
+ * SLIP_CLOSE_MAX_SECONDS).  Returns `defaultValue` for invalid / missing input.
+ */
+export function parseCloseSeconds(value: string | undefined, defaultValue: number): number {
+  if (!value) return defaultValue;
+  const parsed = parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return defaultValue;
+  return Math.max(1, parsed);
+}
+
 // How long a collecting batch must be idle before the fallback finalizer
 // treats it as abandoned.  Env var is in minutes; default 60.
-// "จบสลิป" still closes sessions immediately regardless of this value.
 const SLIP_ABANDONED_SESSION_MINUTES = parseAbandonedMinutes(
   process.env.SLIP_ABANDONED_SESSION_MINUTES,
 );
 
+// After "จบสลิป" (closing state): wait this long after the last image before
+// considering the batch quiet enough to finalize.  Default 10 s gives late-
+// arriving LINE webhooks time to deliver.
+const CLOSE_QUIET_SECONDS = parseCloseSeconds(
+  process.env.SLIP_CLOSE_QUIET_SECONDS,
+  10,
+);
+
+// Hard upper limit on how long a closing batch can wait before the finalizer
+// gives up waiting for PROCESSING checks and sends the summary anyway.
+const CLOSE_MAX_SECONDS = parseCloseSeconds(
+  process.env.SLIP_CLOSE_MAX_SECONDS,
+  120,
+);
+
 type Supabase = SupabaseClient<Database>;
-type PushMessage = (to: string, text: string) => Promise<void>;
+
+// retryKey is the batch UUID passed as X-Line-Retry-Key for idempotent push.
+type PushMessage = (to: string, text: string, retryKey?: string) => Promise<void>;
+
+/**
+ * Structured outcome from finalizeSlipBatch.
+ *
+ * delivered=true  persisted=true  — LINE delivered + DB updated; fully finalized.
+ * delivered=true  persisted=false — LINE delivered (or already accepted) but the
+ *                                   final DB update failed.  summary_sent_at is
+ *                                   still null; a subsequent retry with the same
+ *                                   batch-id retry key will skip LINE (409) and
+ *                                   attempt the DB update again.
+ *
+ * void (undefined) is returned when the idempotency guard fires (summary_sent_at
+ * already set by a previous call); callers that need to distinguish this case
+ * should query summary_sent_at before calling.
+ */
+export type FinalizeResult =
+  | { delivered: true; persisted: true }
+  | { delivered: true; persisted: false; persistError: string };
 
 interface EvidenceWithCheck {
   id:             string;
@@ -44,9 +89,13 @@ interface EvidenceWithCheck {
  * Safe to call from concurrent workers: the collecting→processing transition
  * is a single UPDATE so only one caller can claim each batch.
  */
+const defaultPush: PushMessage = async (to, text, retryKey) => {
+  await pushLineMessage(to, text, retryKey);
+};
+
 export async function finalizeDueSlipBatches(
   supabase: Supabase,
-  push: PushMessage = pushLineMessage,
+  push: PushMessage = defaultPush,
   abandonedMinutes: number = SLIP_ABANDONED_SESSION_MINUTES,
 ): Promise<number> {
   const cutoff = new Date(
@@ -67,28 +116,163 @@ export async function finalizeDueSlipBatches(
 
   const batches = claimed ?? [];
   for (const batch of batches) {
-    await finalizeSlipBatch(supabase, batch.id, (text) => push(batch.source_id, text));
+    await finalizeSlipBatch(supabase, batch.id, (text) => push(batch.source_id, text, batch.id));
   }
   return batches.length;
 }
+
+// ── Closing-batch atomic claim ────────────────────────────────────────────────
+
+/**
+ * Result from a successful atomic claim; null means not yet ready or already
+ * claimed by a concurrent worker.
+ */
+interface ClaimResult {
+  id:         string;
+  source_id:  string;
+  wasTimeout: boolean;
+}
+
+/**
+ * Injectable claim function used by finalizeClosingSlipBatches.
+ * Default implementation delegates to the claim_closing_slip_batch SQL RPC
+ * which atomically locks the batch row, re-evaluates readiness while holding
+ * the lock, and transitions status closing→processing if conditions are met.
+ *
+ * Serializes against attach_evidence_to_slip_batch because both operations
+ * UPDATE the same slip_batches row (acquiring the same row-level lock).
+ */
+export type ClaimFn = (
+  supabase:     Supabase,
+  batchId:      string,
+  quietSeconds: number,
+  maxSeconds:   number,
+) => Promise<ClaimResult | null>;
+
+async function defaultAtomicClaim(
+  supabase:     Supabase,
+  batchId:      string,
+  quietSeconds: number,
+  maxSeconds:   number,
+): Promise<ClaimResult | null> {
+  const { data, error } = await supabase.rpc("claim_closing_slip_batch", {
+    p_batch_id:      batchId,
+    p_quiet_seconds: quietSeconds,
+    p_max_seconds:   maxSeconds,
+  });
+
+  if (error) {
+    logger.error("claim_closing_slip_batch RPC failed", { batchId, reason: error.message });
+    return null;
+  }
+
+  const rows = data as Array<{ claimed_id: string; claimed_source_id: string; was_timeout: boolean }> | null;
+  if (!rows || rows.length === 0) return null;
+  return {
+    id:         rows[0].claimed_id,
+    source_id:  rows[0].claimed_source_id,
+    wasTimeout: rows[0].was_timeout,
+  };
+}
+
+/**
+ * Finds every slip batch in 'closing' status and finalizes those that are ready.
+ *
+ * Readiness is evaluated inside claim_closing_slip_batch (SQL RPC) while
+ * holding a row-level lock on the batch.  This prevents the following race:
+ *
+ *   • If a late image arrives and updates last_image_at before the claim locks
+ *     the row, the RPC reads the fresh last_image_at and returns no rows
+ *     (quiet period not yet elapsed) — image attachment wins.
+ *   • If the claim locks the row first and transitions status to 'processing',
+ *     attach_evidence_to_slip_batch's WHERE status IN ('collecting','closing')
+ *     fails and raises an exception — finalizer wins, late image is rejected.
+ *
+ * Safe to call from concurrent workers: closing→processing transition is
+ * inside the RPC and protected by the row-level lock.
+ */
+type FinalizeFn = (
+  supabase:    Supabase,
+  batchId:     string,
+  sendMessage: (text: string) => Promise<void>,
+  options?:    { isTimeoutForced?: boolean },
+) => Promise<FinalizeResult | void>;
+
+export async function finalizeClosingSlipBatches(
+  supabase:     Supabase,
+  push:         PushMessage = defaultPush,
+  quietSeconds: number = CLOSE_QUIET_SECONDS,
+  maxSeconds:   number = CLOSE_MAX_SECONDS,
+  _finalize:    FinalizeFn = finalizeSlipBatch,
+  _claim:       ClaimFn = defaultAtomicClaim,
+): Promise<number> {
+  const { data: closingBatches, error } = await supabase
+    .from("slip_batches")
+    .select("id, source_id")
+    .eq("status", "closing");
+
+  if (error) {
+    logger.error("finalizeClosingSlipBatches: fetch failed", { reason: error.message });
+    return 0;
+  }
+
+  let count = 0;
+  for (const batch of closingBatches ?? []) {
+    const claimed = await _claim(supabase, batch.id, quietSeconds, maxSeconds);
+    if (!claimed) continue;
+
+    await _finalize(
+      supabase,
+      claimed.id,
+      (text) => push(claimed.source_id, text, claimed.id),
+      { isTimeoutForced: claimed.wasTimeout },
+    );
+    count++;
+  }
+
+  return count;
+}
+
+// ── Single-batch finalization ─────────────────────────────────────────────────
 
 /**
  * Finalizes a single slip batch that has already been claimed (status=processing).
  * Loads evidences, builds a summary, calls sendMessage, then updates the batch status.
  *
- * Used by both the cron finalizer and the "จบสลิป" webhook command.
- * The caller controls where the message goes (push vs reply).
+ * Used by both the cron finalizer and the abandoned-session path.
+ *
+ * DELIVERY LIFECYCLE (in order):
+ *   1. [done by caller] Atomic claim: closing/collecting → processing
+ *   2. Load batch row + evidences
+ *   3. Build summary text
+ *   4. LINE Push  (X-Line-Retry-Key set by the sendMessage closure in the caller)
+ *   5. Persist delivery result: summary_sent_at, final status
+ *
+ * FAILURE HANDLING:
+ *   Pre-send failure (messageSent=false): the batch stays in 'processing' with
+ *   summary_sent_at=null.  It is NOT reverted to 'collecting' — reverting would
+ *   re-open image collection on a batch the user already closed.  The operator
+ *   can manually re-trigger via a protected admin endpoint.  Because the caller
+ *   passes the batch ID as X-Line-Retry-Key, a safe re-send will not duplicate.
+ *
+ *   Post-send DB failure (messageSent=true): the summary was delivered.  We log
+ *   the error and return without throwing so the caller does not revert state.
+ *   The batch stays in 'processing'; the summary_sent_at idempotency guard in
+ *   subsequent runs prevents duplicate sends.
+ *
+ *   Repeated cron executions: the summary_sent_at guard at the top of this
+ *   function causes early-return if the summary was already delivered — no
+ *   duplicate sends during normal operation.
  */
 export async function finalizeSlipBatch(
-  supabase: Supabase,
-  batchId:  string,
+  supabase:    Supabase,
+  batchId:     string,
   sendMessage: (text: string) => Promise<void>,
-): Promise<void> {
+  options?:    { isTimeoutForced?: boolean },
+): Promise<FinalizeResult | void> {
   const log = logger.child({ batchId });
+  const isTimeoutForced = options?.isTimeoutForced ?? false;
   // Tracks whether LINE has already received the message.
-  // Used in the catch block to decide between reverting (pre-send failure,
-  // user can retry "จบสลิป") vs logging-only (post-send failure, summary
-  // was delivered so reverting would cause a duplicate).
   let messageSent = false;
 
   try {
@@ -106,7 +290,7 @@ export async function finalizeSlipBatch(
       return;
     }
 
-    log.info("finalizing active slip batch", { evidenceCount: evidences.length });
+    log.info("finalizing active slip batch", { evidenceCount: evidences.length, isTimeoutForced });
 
     if (evidences.length === 0) {
       log.warn("finalizeSlipBatch: no evidences — marking failed");
@@ -121,12 +305,13 @@ export async function finalizeSlipBatch(
         log.error("finalizeSlipBatch: DB update failed after empty-batch message", {
           reason: emptyErr.message,
         });
+        return { delivered: true, persisted: false, persistError: emptyErr.message };
       }
-      return;
+      return { delivered: true, persisted: true };
     }
 
     const title   = buildSessionTitle(batchRow);
-    const message = buildBatchSummaryMessage(evidences, { title });
+    const message = buildBatchSummaryMessage(evidences, { title, isTimeout: isTimeoutForced });
 
     await sendMessage(message);
     messageSent = true;
@@ -146,12 +331,15 @@ export async function finalizeSlipBatch(
     }).eq("id", batchId);
 
     if (updateError) {
-      // LINE already received the summary — don't throw (would revert to collecting),
-      // just log so an operator can patch the row if needed.
+      // LINE already delivered the summary but the DB update failed.
+      // Return a structured failure so the caller can surface it correctly.
+      // The batch stays in processing with summary_sent_at=null so a subsequent
+      // recovery call can retry the DB update using the same batch-id retry key
+      // (LINE will return 409 already_accepted; no duplicate message is sent).
       log.error("finalizeSlipBatch: DB update failed after LINE success — summary was sent", {
         reason: updateError.message,
       });
-      return;
+      return { delivered: true, persisted: false, persistError: updateError.message };
     }
 
     log.info("finalizeSlipBatch: batch finalized", {
@@ -159,25 +347,27 @@ export async function finalizeSlipBatch(
       successCount,
       failedCount,
       summaryTitle:  title ?? "default",
+      isTimeoutForced,
     });
+    return { delivered: true, persisted: true };
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     log.error("finalizeSlipBatch: finalize failed", { reason, messageSent });
 
     if (!messageSent) {
-      // Pre-send failure: revert to collecting so the user can retry "จบสลิป"
-      // with a fresh replyToken.
-      const { error: revertErr } = await supabase
-        .from("slip_batches")
-        .update({ status: "collecting" })
-        .eq("id", batchId);
-      if (revertErr) {
-        log.error("finalizeSlipBatch: revert to collecting failed", { reason: revertErr.message });
-      }
+      // Pre-send failure: do NOT revert to 'collecting'.
+      // Reverting would re-open image collection on a closed batch, which must
+      // never happen after finalization starts.  The batch stays in 'processing'
+      // so it is invisible to the cron (which only handles 'closing' batches).
+      // An operator can manually re-trigger delivery via a protected admin endpoint.
+      log.error(
+        "finalizeSlipBatch: pre-send failure — batch stays in processing, requires manual retry",
+        { batchId },
+      );
     }
-    // Post-send failure (messageSent=true): don't revert — summary was delivered.
-    // The batch stays in 'processing'; operator must manually complete or the
-    // next cron call will skip it via the idempotency guard (summary_sent_at set).
+    // Post-send failure (messageSent=true): summary was delivered.
+    // The batch stays in 'processing'; the idempotency guard (summary_sent_at)
+    // prevents duplicate sends on subsequent cron executions.
     throw err;
   }
 }
@@ -240,37 +430,79 @@ function buildSessionTitle(batch: SlipBatchRow | null): string | undefined {
   return `สรุปชุดสลิปเงินโอน ${parts.join(" — ")}`;
 }
 
+/**
+ * Builds the LINE summary message for a finalized batch.
+ *
+ * When isTimeout=true (max closing timeout reached), shows a detailed
+ * per-category breakdown so operators know exactly how many slips are in each
+ * state rather than a single generic "ยังอ่านไม่ครบ":
+ *
+ *   completed extractions  → EXTRACTED | PARTIAL_EXTRACTED
+ *   failed extractions     → FAILED
+ *   manual-review items    → NEED_REVIEW
+ *   pending/processing     → null check row (OCR not started) | PROCESSING
+ */
 export function buildBatchSummaryMessage(
   evidences: EvidenceWithCheck[],
-  options?: { title?: string },
+  options?: { title?: string; isTimeout?: boolean },
 ): string {
   const total = evidences.length;
   if (total === 0) return "";
 
-  const successful = evidences.filter(
+  const completed  = evidences.filter(
     (e) => e.checkStatus === "EXTRACTED" || e.checkStatus === "PARTIAL_EXTRACTED",
   );
-  const needsReview = evidences.filter(
-    (e) => e.checkStatus !== "EXTRACTED" && e.checkStatus !== "PARTIAL_EXTRACTED",
+  const failedEvs  = evidences.filter((e) => e.checkStatus === "FAILED");
+  const needReview = evidences.filter((e) => e.checkStatus === "NEED_REVIEW");
+  const pending    = evidences.filter(
+    (e) => e.checkStatus === null || e.checkStatus === "PROCESSING",
+  );
+  const incomplete = [...failedEvs, ...needReview, ...pending];
+
+  const totalAmount = completed.reduce(
+    (sum, e) => sum + (e.transferAmount ?? e.paidAmount ?? 0),
+    0,
   );
 
-  if (successful.length === 0) {
+  // ── Timeout forced: detailed breakdown ──────────────────────────────────────
+  if (options?.isTimeout && (pending.length > 0 || failedEvs.length > 0)) {
+    const lines: string[] = [
+      options.title ?? "สรุปรูปหลักฐานรอบนี้ (หมดเวลา)",
+      `รับทั้งหมด: ${total} รูป`,
+      `อ่านครบ: ${completed.length} รูป`,
+    ];
+    if (failedEvs.length > 0)  lines.push(`อ่านไม่สำเร็จ: ${failedEvs.length} รูป`);
+    if (needReview.length > 0) lines.push(`รอตรวจมือ: ${needReview.length} รูป`);
+    if (pending.length > 0)    lines.push(`รอประมวลผล: ${pending.length} รูป`);
+    if (totalAmount > 0) {
+      lines.push(
+        `ยอดรวมที่อ่านได้: ${totalAmount.toLocaleString("th-TH", { maximumFractionDigits: 2 })} บาท`,
+      );
+    }
+    if (incomplete.length > 0) {
+      lines.push("");
+      lines.push("รูปที่ยังไม่ครบ:");
+      for (const e of incomplete) {
+        const idx = e.batchIndex ?? "?";
+        lines.push(`#${idx} ${describeReviewReason(e)}`);
+      }
+    }
+    return lines.join("\n");
+  }
+
+  // ── Normal (non-timeout) rendering ──────────────────────────────────────────
+  if (completed.length === 0) {
     if (options?.title) {
       return `${options.title}\n\nรับทั้งหมด: ${total} รูป แต่ระบบอ่านข้อมูลไม่ครบ กรุณาให้แอดมินตรวจมือ`;
     }
     return `รับรูปหลักฐานแล้วทั้งหมด ${total} รูป แต่ระบบอ่านข้อมูลไม่ครบ กรุณาให้แอดมินตรวจมือ`;
   }
 
-  const totalAmount = successful.reduce(
-    (sum, e) => sum + (e.transferAmount ?? e.paidAmount ?? 0),
-    0,
-  );
-
   const lines: string[] = [
     options?.title ?? "สรุปรูปหลักฐานรอบนี้",
     `รับทั้งหมด: ${total} รูป`,
-    `อ่านครบ: ${successful.length} รูป`,
-    `รอตรวจมือ: ${needsReview.length} รูป`,
+    `อ่านครบ: ${completed.length} รูป`,
+    `รอตรวจมือ: ${incomplete.length} รูป`,
   ];
 
   if (totalAmount > 0) {
@@ -279,10 +511,10 @@ export function buildBatchSummaryMessage(
     );
   }
 
-  if (needsReview.length > 0) {
+  if (incomplete.length > 0) {
     lines.push("");
     lines.push("รูปที่ต้องตรวจมือ:");
-    for (const e of needsReview) {
+    for (const e of incomplete) {
       const idx = e.batchIndex ?? "?";
       lines.push(`#${idx} ${describeReviewReason(e)}`);
     }
@@ -292,6 +524,8 @@ export function buildBatchSummaryMessage(
 }
 
 function describeReviewReason(e: EvidenceWithCheck): string {
+  if (e.checkStatus === "PROCESSING") return "รอผลการตรวจสอบ";
+  if (e.checkStatus === null)         return "ยังไม่ได้ตรวจสอบ";
   if (e.checkStatus === "FAILED") {
     if (e.failureReason === "evidence_load_failed")     return "โหลดรูปไม่สำเร็จ";
     if (e.failureReason === "evidence_download_failed") return "ดาวน์โหลดรูปไม่สำเร็จ";

@@ -32,7 +32,6 @@ import {
   type SlipSessionIngestor,
   type SlipSessionHeader,
 } from "@/lib/slips/slip-session-service";
-import { finalizeSlipBatch } from "@/lib/slips/batch-finalizer";
 
 type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
@@ -47,6 +46,9 @@ const BATCH_FIRST_IMAGE_REPLY = [
 ].join("\n");
 
 const EVIDENCE_FAILED_REPLY = "รับรูปไม่สำเร็จ กรุณาส่งใหม่อีกครั้ง";
+
+const BATCH_FINALIZED_LATE_IMAGE_REPLY =
+  "รูปนี้ไม่ถูกรวมในชุดสลิป เนื่องจากระบบเริ่มสรุปแล้ว กรุณาเปิดชุดใหม่ก่อนส่งรูป";
 
 const NO_SESSION_IMAGE_REPLY = [
   "กรุณาพิมพ์หัวชุดสลิปก่อนส่งรูป เช่น",
@@ -65,6 +67,11 @@ const SESSION_ALREADY_OPEN_REPLY = [
 ].join("\n");
 
 const ALREADY_FINALIZED_REPLY = "ชุดสลิปนี้สรุปไปแล้ว";
+
+const SLIP_CLOSE_ACKNOWLEDGED_REPLY =
+  "รับคำสั่งจบชุดแล้ว กำลังตรวจสอบสลิปทั้งหมด กรุณารอสรุปผล";
+
+const ALREADY_CLOSING_REPLY = "รับทราบแล้ว กำลังสรุปสลิปอยู่ กรุณารอสักครู่";
 
 interface WebhookServiceDependencies {
   evidenceIngestor?: SlipEvidenceIngestor;
@@ -452,17 +459,57 @@ export class WebhookService {
             };
           }
 
-          await this.batchService.attachEvidence(activeSession.batchId, evidenceId);
-          shouldReply = activeSession.imageCount === 0; // first image in this session
-          scheduleOcr = true; // attach succeeded — safe to process
-          log.info("image attached to active slip session", {
-            batchId:     activeSession.batchId,
-            imageCount:  activeSession.imageCount + 1,
-            isFirstImage: shouldReply,
-          });
+          try {
+            await this.batchService.attachEvidence(activeSession.batchId, evidenceId);
+            shouldReply = activeSession.imageCount === 0; // first image in this session
+            scheduleOcr = true; // attach succeeded — safe to process
+            log.info("image attached to active slip session", {
+              batchId:      activeSession.batchId,
+              imageCount:   activeSession.imageCount + 1,
+              isFirstImage: shouldReply,
+            });
+          } catch (attachError) {
+            const errMsg = attachError instanceof Error ? attachError.message : String(attachError);
+            const isBatchFinalized = errMsg.includes("not in collecting/closing status");
+
+            if (isBatchFinalized) {
+              // Finalizer claimed the batch before this image arrived.
+              // The evidence row exists (traceable) but is not part of the batch.
+              // Do NOT schedule OCR; reply with an explicit rejection.
+              log.info("image rejected: batch already processing/finalized", {
+                batchId:         activeSession.batchId,
+                evidenceId,
+                rejectionReason: "batch_already_processing",
+              });
+              if (event.replyToken) {
+                try {
+                  await this.replyMessage(event.replyToken, BATCH_FINALIZED_LATE_IMAGE_REPLY);
+                } catch (replyErr) {
+                  log.error("batch-finalized rejection reply failed", {
+                    error: replyErr instanceof Error ? replyErr.message : String(replyErr),
+                  });
+                }
+              }
+              return {
+                eventId,
+                eventType: event.type,
+                status: "saved",
+                parsed: false,
+              };
+            }
+
+            // Other attach failure (network, unexpected DB error): fall back to
+            // plain ack so the sender knows the image was received.
+            log.error("slip evidence attach failed — sending plain ack", {
+              error: errMsg,
+            });
+            shouldReply = true;
+            // scheduleOcr stays false — do NOT process an unattached evidence
+          }
 
         } catch (batchError) {
-          log.error("slip session lookup/attach failed — sending plain ack", {
+          // findActiveSession threw
+          log.error("slip session lookup failed — sending plain ack", {
             error: batchError instanceof Error ? batchError.message : String(batchError),
           });
           shouldReply = true;
@@ -589,6 +636,10 @@ export class WebhookService {
   }
 
   // ── Slip session: close ───────────────────────────────────────────────────
+  //
+  // Transitions the batch to 'closing' and immediately replies with an ack.
+  // The actual summary is sent by the cron finalizer once the quiet period
+  // has elapsed and all OCR checks have reached a terminal state.
   private async processSlipClose(
     event:     LineMessageEvent,
     eventId:   string,
@@ -601,6 +652,7 @@ export class WebhookService {
     log.info("slip close command received", { sourceId });
 
     try {
+      // findActiveSession returns collecting OR closing batches.
       const active = await this.slipSessionService.findActiveSession(sourceId);
 
       if (!active) {
@@ -609,35 +661,32 @@ export class WebhookService {
         return { eventId, eventType, status: "saved", parsed: false };
       }
 
-      // Atomic claim: collecting → processing (prevents concurrent double-finalize)
+      // Atomic claim: collecting → closing.
+      // If the batch is already closing, the WHERE status='collecting' predicate
+      // fails and claimed is null — we reply with the already-closing message.
       const { data: claimed, error: claimError } = await this.supabase
         .from("slip_batches")
-        .update({ status: "processing" })
+        .update({ status: "closing", closing_at: new Date().toISOString() })
         .eq("id", active.batchId)
         .eq("status", "collecting")
         .select("id")
         .single();
 
       if (claimError || !claimed) {
-        log.info("slip close: batch already being processed", { batchId: active.batchId });
-        if (replyToken) await this.replyMessage(replyToken, ALREADY_FINALIZED_REPLY);
+        // Batch is already closing (a previous "จบสลิป" was accepted).
+        log.info("slip close: batch already closing", { batchId: active.batchId });
+        if (replyToken) await this.replyMessage(replyToken, ALREADY_CLOSING_REPLY);
         return { eventId, eventType, status: "saved", parsed: false };
       }
 
-      log.info("finalizing active slip batch", {
+      log.info("slip batch transitioned to closing", {
         batchId:    active.batchId,
         imageCount: active.imageCount,
       });
 
-      await finalizeSlipBatch(
-        this.supabase,
-        active.batchId,
-        async (text) => {
-          if (replyToken) await this.replyMessage(replyToken, text);
-        },
-      );
+      // Immediate ack — summary will arrive via the cron finalizer.
+      if (replyToken) await this.replyMessage(replyToken, SLIP_CLOSE_ACKNOWLEDGED_REPLY);
 
-      log.info("slip summary sent", { batchId: active.batchId });
       return { eventId, eventType, status: "saved", parsed: false };
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);

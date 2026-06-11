@@ -34,15 +34,30 @@ export async function replyLineMessage(replyToken: string, text: string): Promis
   }
 }
 
-export async function pushLineMessage(to: string, text: string): Promise<void> {
+export type PushResult = { status: "delivered" | "already_accepted" };
+
+// LINE Messaging API supports X-Line-Retry-Key for push idempotency.
+// Passing the same UUID on a retry causes LINE to return 409 without
+// re-delivering if the original request was already processed — safe for
+// both definite rejections (message was never sent) and ambiguous failures
+// (network error where delivery status is unknown).
+//
+// Returns:
+//   { status: "delivered" }       — HTTP 2xx, message delivered now
+//   { status: "already_accepted" } — HTTP 409 + retryKey, idempotent re-send
+// Throws on any other non-2xx status or network error.
+export async function pushLineMessage(to: string, text: string, retryKey?: string): Promise<PushResult> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+    "Content-Type": "application/json",
+  };
+  if (retryKey) headers["X-Line-Retry-Key"] = retryKey;
+
   let res: Response;
   try {
     res = await fetch("https://api.line.me/v2/bot/message/push", {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
-        "Content-Type": "application/json",
-      },
+      headers,
       body: JSON.stringify({
         to,
         messages: [{ type: "text", text }],
@@ -56,14 +71,27 @@ export async function pushLineMessage(to: string, text: string): Promise<void> {
     throw new Error("LINE push network error");
   }
 
-  if (!res.ok) {
-    logger.error("LINE API request failed", {
-      operation: "push",
-      status: res.status,
-      category: lineHttpErrorCategory(res.status),
-    });
-    throw new Error(`LINE push HTTP ${res.status}`);
+  if (res.ok) {
+    return { status: "delivered" };
   }
+
+  // 409 with a retry key: LINE already accepted a previous request with the
+  // same key — idempotent delivery, treat as success.
+  // 409 without a retry key is an unrelated conflict — fail normally.
+  if (res.status === 409 && retryKey) {
+    logger.warn("LINE push 409 — already accepted (retry key match)", {
+      operation: "push",
+      retryKey,
+    });
+    return { status: "already_accepted" };
+  }
+
+  logger.error("LINE API request failed", {
+    operation: "push",
+    status: res.status,
+    category: lineHttpErrorCategory(res.status),
+  });
+  throw new Error(`LINE push HTTP ${res.status}`);
 }
 
 function lineHttpErrorCategory(status: number): string {

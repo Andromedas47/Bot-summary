@@ -141,6 +141,88 @@ describe("buildWeighSessionSummary — header", () => {
   });
 });
 
+describe("pushLineMessage — X-Line-Retry-Key and 409 handling", () => {
+  it("transmits X-Line-Retry-Key header when retryKey is provided", async () => {
+    let capturedHeaders: Record<string, string> = {};
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      capturedHeaders = Object.fromEntries(
+        Object.entries((init?.headers ?? {}) as Record<string, string>),
+      );
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await pushLineMessage("group-id", "hello", "retry-uuid-123");
+
+    expect(capturedHeaders["X-Line-Retry-Key"]).toBe("retry-uuid-123");
+  });
+
+  it("does NOT transmit X-Line-Retry-Key when retryKey is omitted", async () => {
+    let capturedHeaders: Record<string, string> = {};
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      capturedHeaders = Object.fromEntries(
+        Object.entries((init?.headers ?? {}) as Record<string, string>),
+      );
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await pushLineMessage("group-id", "hello");
+
+    expect(capturedHeaders["X-Line-Retry-Key"]).toBeUndefined();
+  });
+
+  it("2xx returns { status: 'delivered' }", async () => {
+    globalThis.fetch = (async () =>
+      new Response("{}", { status: 200 })) as unknown as typeof fetch;
+
+    const result = await pushLineMessage("group-id", "hello", "retry-key");
+    expect(result).toEqual({ status: "delivered" });
+  });
+
+  it("409 with retry key returns { status: 'already_accepted' } and does not throw", async () => {
+    globalThis.fetch = (async () =>
+      new Response("{}", { status: 409 })) as unknown as typeof fetch;
+
+    const result = await pushLineMessage("group-id", "hello", "retry-key");
+    expect(result).toEqual({ status: "already_accepted" });
+  });
+
+  it("409 without retry key throws (not treated as already_accepted)", async () => {
+    globalThis.fetch = (async () =>
+      new Response("{}", { status: 409 })) as unknown as typeof fetch;
+
+    await expect(pushLineMessage("group-id", "hello")).rejects.toThrow(
+      "LINE push HTTP 409",
+    );
+  });
+
+  it("400 remains a failure", async () => {
+    globalThis.fetch = (async () =>
+      new Response("{}", { status: 400 })) as unknown as typeof fetch;
+
+    await expect(pushLineMessage("group-id", "hello", "retry-key")).rejects.toThrow(
+      "LINE push HTTP 400",
+    );
+  });
+
+  it("401 remains a failure", async () => {
+    globalThis.fetch = (async () =>
+      new Response("{}", { status: 401 })) as unknown as typeof fetch;
+
+    await expect(pushLineMessage("group-id", "hello", "retry-key")).rejects.toThrow(
+      "LINE push HTTP 401",
+    );
+  });
+
+  it("500 remains a failure", async () => {
+    globalThis.fetch = (async () =>
+      new Response("{}", { status: 500 })) as unknown as typeof fetch;
+
+    await expect(pushLineMessage("group-id", "hello", "retry-key")).rejects.toThrow(
+      "LINE push HTTP 500",
+    );
+  });
+});
+
 describe("LINE API error logging", () => {
   it("does not log or throw the LINE reply response body", async () => {
     const sensitiveBody = '{"message":"sensitive LINE detail"}';

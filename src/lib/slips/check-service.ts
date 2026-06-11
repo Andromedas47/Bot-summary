@@ -16,6 +16,10 @@ import type { Database } from "@/types/database";
 type Supabase = SupabaseClient<Database>;
 type PushMessage = (to: string, text: string) => Promise<void>;
 
+const defaultPushMessage: PushMessage = async (to, text) => {
+  await pushLineMessage(to, text);
+};
+
 export interface SlipCheckProcessor {
   processEvidence(evidenceId: string): Promise<void>;
 }
@@ -24,7 +28,7 @@ export class SlipCheckService implements SlipCheckProcessor {
   constructor(
     private readonly supabase: Supabase,
     private readonly extractor: SlipExtractor = new OpenAiSlipExtractor(),
-    private readonly pushMessage: PushMessage = pushLineMessage,
+    private readonly pushMessage: PushMessage = defaultPushMessage,
   ) {}
 
   async processEvidence(evidenceId: string): Promise<void> {

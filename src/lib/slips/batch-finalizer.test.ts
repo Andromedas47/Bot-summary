@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { finalizeSlipBatch, parseAbandonedMinutes } from "./batch-finalizer";
+import {
+  finalizeSlipBatch,
+  buildBatchSummaryMessage,
+  parseAbandonedMinutes,
+} from "./batch-finalizer";
 import type { Database } from "@/types/database";
 
 // ── parseAbandonedMinutes ──────────────────────────────────────────────────
@@ -141,11 +145,12 @@ describe("finalizeSlipBatch delivery state", () => {
     expect(statusUpdates).toHaveLength(0);
   });
 
-  it("reverts batch to collecting when LINE fails before send (user can retry)", async () => {
+  // ── Fix 3: LINE failure handling ───────────────────────────────────────────
+
+  it("does NOT revert to collecting when LINE push fails before send", async () => {
     const statusUpdates: Array<Record<string, unknown>> = [];
     const supabase = makeFinalizerSupabase({
       batchData: { id: "batch-1", summary_sent_at: null },
-      // updateError=null so the revert itself succeeds
       statusUpdates,
     });
 
@@ -156,16 +161,59 @@ describe("finalizeSlipBatch delivery state", () => {
       }),
     ).rejects.toThrow("LINE API error");
 
-    // Must revert to collecting so user can retry "จบสลิป"
+    // Must NOT revert to collecting — that would re-open image collection on a
+    // closed batch (batch was already transitioned from closing→processing by caller)
     const revert = statusUpdates.find((u) => u.status === "collecting");
-    expect(revert).toBeDefined();
+    expect(revert).toBeUndefined();
 
-    // Must NOT permanently mark as failed (that would block retry)
+    // Must NOT permanently mark as failed (that would block manual retry)
     const permanentFail = statusUpdates.find((u) => u.status === "failed");
     expect(permanentFail).toBeUndefined();
+
+    // Batch must stay in 'processing' (no status update at all)
+    const anyStatusUpdate = statusUpdates.find((u) => "status" in u);
+    expect(anyStatusUpdate).toBeUndefined();
   });
 
-  it("does not throw or revert when DB update fails after successful LINE send", async () => {
+  it("definite LINE rejection (4xx): batch stays in processing for manual retry", async () => {
+    const statusUpdates: Array<Record<string, unknown>> = [];
+    const supabase = makeFinalizerSupabase({
+      batchData: { id: "batch-1", summary_sent_at: null },
+      statusUpdates,
+    });
+
+    // Simulates LINE returning HTTP 400 (definite rejection — message not sent)
+    await expect(
+      finalizeSlipBatch(supabase, "batch-1", async () => {
+        throw new Error("LINE push HTTP 400");
+      }),
+    ).rejects.toThrow("LINE push HTTP 400");
+
+    // Batch must stay in processing (summary_sent_at is still null)
+    expect(statusUpdates.find((u) => u.status === "collecting")).toBeUndefined();
+    expect(statusUpdates.find((u) => u.status === "failed")).toBeUndefined();
+  });
+
+  it("ambiguous network failure: batch stays in processing, no revert, no duplicate path", async () => {
+    const statusUpdates: Array<Record<string, unknown>> = [];
+    const supabase = makeFinalizerSupabase({
+      batchData: { id: "batch-1", summary_sent_at: null },
+      statusUpdates,
+    });
+
+    // Simulates a network error where delivery status is unknown
+    await expect(
+      finalizeSlipBatch(supabase, "batch-1", async () => {
+        throw new Error("LINE push network error");
+      }),
+    ).rejects.toThrow("LINE push network error");
+
+    // Batch stays in processing — cron will not auto-retry (only handles closing)
+    // No revert to collecting — uncontrolled duplicate sends prevented
+    expect(statusUpdates.find((u) => u.status === "collecting")).toBeUndefined();
+  });
+
+  it("returns persistence_failed result when DB update fails after successful LINE send", async () => {
     const statusUpdates: Array<Record<string, unknown>> = [];
     const supabase = makeFinalizerSupabase({
       batchData: { id: "batch-1", summary_sent_at: null },
@@ -176,17 +224,126 @@ describe("finalizeSlipBatch delivery state", () => {
     let sendCalled = false;
 
     // sendMessage succeeds (messageSent=true), then the DB update fails.
-    // The function should resolve — not throw — because the summary was delivered.
-    await expect(
-      finalizeSlipBatch(supabase, "batch-1", async () => { sendCalled = true; }),
-    ).resolves.toBeUndefined();
+    // The function must NOT throw — LINE already delivered the message.
+    // Instead it returns a structured { delivered:true, persisted:false } result
+    // so the caller (recovery endpoint) can surface the failure correctly.
+    const result = await finalizeSlipBatch(supabase, "batch-1", async () => { sendCalled = true; });
 
     expect(sendCalled).toBe(true);
+    expect(result).toMatchObject({ delivered: true, persisted: false });
+    expect((result as { persistError?: string })?.persistError).toContain("db connection lost");
 
     // Update was attempted (the failed one)
     expect(statusUpdates.length).toBeGreaterThan(0);
     // No revert to collecting — summary already delivered, reverting would allow duplicate send
     const revert = statusUpdates.find((u) => u.status === "collecting");
     expect(revert).toBeUndefined();
+  });
+
+  it("repeated cron execution does not send duplicate summary (idempotency guard)", async () => {
+    // Simulates a second cron call on a batch that was already summarized.
+    const sendCalls: string[] = [];
+    const supabase = makeFinalizerSupabase({
+      batchData: { id: "batch-1", summary_sent_at: "2026-01-01T00:00:00Z" },
+    });
+
+    await finalizeSlipBatch(supabase, "batch-1", async (text) => { sendCalls.push(text); });
+
+    expect(sendCalls).toHaveLength(0);
+  });
+});
+
+// ── buildBatchSummaryMessage — timeout breakdown ──────────────────────────
+
+describe("buildBatchSummaryMessage timeout breakdown", () => {
+  const makeEvidence = (
+    status: import("@/types/database").SlipCheckStatus | null,
+    idx: number,
+  ) => ({
+    id:             `ev-${idx}`,
+    batchIndex:     idx,
+    checkStatus:    status,
+    transferAmount: status === "EXTRACTED" ? 1000 : null,
+    paidAmount:     null,
+    failureReason:  null,
+  });
+
+  it("shows completed / failed / pending separately when isTimeout=true", () => {
+    const evidences = [
+      makeEvidence("EXTRACTED",         1),
+      makeEvidence("PARTIAL_EXTRACTED", 2),
+      makeEvidence("FAILED",            3),
+      makeEvidence("NEED_REVIEW",       4),
+      makeEvidence("PROCESSING",        5),
+      makeEvidence(null,                6), // no check row yet
+    ];
+    const msg = buildBatchSummaryMessage(evidences, { isTimeout: true });
+
+    expect(msg).toContain("รับทั้งหมด: 6 รูป");
+    expect(msg).toContain("อ่านครบ: 2 รูป");
+    expect(msg).toContain("อ่านไม่สำเร็จ: 1 รูป");
+    expect(msg).toContain("รอตรวจมือ: 1 รูป");
+    expect(msg).toContain("รอประมวลผล: 2 รูป");
+  });
+
+  it("PROCESSING counts as pending (not completed)", () => {
+    const evidences = [makeEvidence("PROCESSING", 1)];
+    const msg = buildBatchSummaryMessage(evidences, { isTimeout: true });
+    expect(msg).toContain("อ่านครบ: 0 รูป");
+    expect(msg).toContain("รอประมวลผล: 1 รูป");
+  });
+
+  it("null check row (OCR not started) counts as pending", () => {
+    const evidences = [makeEvidence(null, 1)];
+    const msg = buildBatchSummaryMessage(evidences, { isTimeout: true });
+    expect(msg).toContain("รอประมวลผล: 1 รูป");
+  });
+
+  it("FAILED counts as failed extraction (not pending)", () => {
+    const evidences = [makeEvidence("FAILED", 1)];
+    const msg = buildBatchSummaryMessage(evidences, { isTimeout: true });
+    expect(msg).toContain("อ่านไม่สำเร็จ: 1 รูป");
+    expect(msg).not.toContain("รอประมวลผล: 1 รูป");
+  });
+
+  it("uses (หมดเวลา) label for timeout summary with no title", () => {
+    const evidences = [makeEvidence("PROCESSING", 1), makeEvidence("EXTRACTED", 2)];
+    const msg = buildBatchSummaryMessage(evidences, { isTimeout: true });
+    expect(msg).toContain("หมดเวลา");
+  });
+
+  it("uses custom title when provided with timeout and shows detailed breakdown", () => {
+    const evidences = [makeEvidence("PROCESSING", 1)];
+    const msg = buildBatchSummaryMessage(evidences, {
+      title: "สรุปชุดสลิปเงินโอน กี้ — วัดทุ่งลานนา",
+      isTimeout: true,
+    });
+    expect(msg).toContain("กี้");
+    // Custom title is used as-is; breakdown must still be present
+    expect(msg).toContain("รอประมวลผล: 1 รูป");
+    expect(msg).toContain("อ่านครบ: 0 รูป");
+  });
+
+  it("falls back to normal rendering when isTimeout=true but all checks terminal (no pending/failed)", () => {
+    // All completed — no reason to show timeout breakdown
+    const evidences = [makeEvidence("EXTRACTED", 1), makeEvidence("NEED_REVIEW", 2)];
+    const msg = buildBatchSummaryMessage(evidences, { isTimeout: true });
+    // Normal rendering: "รอตรวจมือ" not "รอประมวลผล" / "อ่านไม่สำเร็จ"
+    expect(msg).toContain("อ่านครบ: 1 รูป");
+    expect(msg).toContain("รอตรวจมือ: 1 รูป");
+    expect(msg).not.toContain("รอประมวลผล");
+  });
+
+  it("non-timeout rendering is unchanged", () => {
+    const evidences = [
+      makeEvidence("EXTRACTED",   1),
+      makeEvidence("NEED_REVIEW", 2),
+    ];
+    const msg = buildBatchSummaryMessage(evidences);
+    expect(msg).toContain("รับทั้งหมด: 2 รูป");
+    expect(msg).toContain("อ่านครบ: 1 รูป");
+    expect(msg).toContain("รอตรวจมือ: 1 รูป");
+    expect(msg).not.toContain("รอประมวลผล");
+    expect(msg).not.toContain("อ่านไม่สำเร็จ");
   });
 });

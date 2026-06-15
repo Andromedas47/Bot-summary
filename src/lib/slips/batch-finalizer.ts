@@ -526,6 +526,7 @@ export function buildBatchSummaryMessage(
     if (amountFlaggedCountTimeout > 0) {
       lines.push(`ยอดที่ถูกระงับ: ${amountFlaggedCountTimeout} รายการ`);
     }
+    appendTrustedEvidenceLines(lines, trusted);
     if (incomplete.length > 0) {
       lines.push("");
       lines.push("รูปที่ยังไม่ครบ:");
@@ -564,6 +565,8 @@ export function buildBatchSummaryMessage(
     lines.push(`ยอดที่ถูกระงับ: ${amountFlaggedCount} รายการ`);
   }
 
+  appendTrustedEvidenceLines(lines, trusted);
+
   if (incomplete.length > 0) {
     lines.push("");
     lines.push("รูปที่ต้องตรวจมือ:");
@@ -577,6 +580,22 @@ export function buildBatchSummaryMessage(
 }
 
 type EnrichedEvidence = EvidenceWithCheck & { flags: EvidenceFlags };
+
+function appendTrustedEvidenceLines(lines: string[], trusted: EnrichedEvidence[]): void {
+  if (trusted.length === 0) return;
+  lines.push("");
+  lines.push("รูปที่ตรวจผ่าน:");
+  for (const e of trusted) {
+    const idx    = e.batchIndex ?? "?";
+    const amount = e.flags.effectiveAmount;
+    if (amount !== null && amount > 0) {
+      const formatted = amount.toLocaleString("th-TH", { maximumFractionDigits: 2 });
+      lines.push(`#${idx} เช็คได้ ${formatted} บาท`);
+    } else {
+      lines.push(`#${idx} เช็คได้`);
+    }
+  }
+}
 
 function describeIncompleteReason(e: EnrichedEvidence): string {
   if (e.flags.flagged && e.flags.flagReasons.length > 0) {

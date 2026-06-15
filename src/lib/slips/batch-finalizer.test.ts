@@ -447,3 +447,113 @@ describe("buildBatchSummaryMessage timeout breakdown", () => {
     expect(msg).not.toContain("อ่านไม่สำเร็จ");
   });
 });
+
+// ── buildBatchSummaryMessage — trusted slip lines ───────────────────────────
+
+describe("buildBatchSummaryMessage trusted slip lines", () => {
+  const makeEvidence = (
+    status: import("@/types/database").SlipCheckStatus | null,
+    idx: number,
+    options?: { transactionTime?: string | null; transferAmount?: number },
+  ) => ({
+    id:              `ev-${idx}`,
+    batchIndex:      idx,
+    checkStatus:     status,
+    slipType:        "BANK_SLIP_QR" as const,
+    transferAmount:  options?.transferAmount ?? (
+      (status === "EXTRACTED" || status === "PARTIAL_EXTRACTED") ? 1000 : null
+    ),
+    paidAmount:      null,
+    transactionTime: options?.transactionTime ?? "2026-06-10T10:00:00Z",
+    failureReason:   null,
+  });
+
+  it("lists trusted slips with เช็คได้ in normal summary", () => {
+    const evidences = [
+      makeEvidence("EXTRACTED",         2),
+      makeEvidence("PARTIAL_EXTRACTED", 5),
+      makeEvidence("NEED_REVIEW",       9),
+    ];
+    const msg = buildBatchSummaryMessage(evidences, { slipDate: "10/6/2569" });
+
+    expect(msg).toContain("รูปที่ตรวจผ่าน:");
+    expect(msg).toContain("#2 เช็คได้ 1,000 บาท");
+    expect(msg).toContain("#5 เช็คได้ 1,000 บาท");
+    expect(msg).toContain("รูปที่ต้องตรวจมือ:");
+    expect(msg).toContain("#9 ไม่พบข้อมูลครบถ้วน");
+    expect(msg.indexOf("รูปที่ตรวจผ่าน:")).toBeLessThan(msg.indexOf("รูปที่ต้องตรวจมือ:"));
+  });
+
+  it("omits trusted section when no slips pass validation", () => {
+    const evidences = [
+      makeEvidence("NEED_REVIEW", 1),
+      makeEvidence("FAILED",      2),
+    ];
+    const msg = buildBatchSummaryMessage(evidences);
+
+    expect(msg).not.toContain("รูปที่ตรวจผ่าน:");
+    expect(msg).not.toContain("เช็คได้");
+  });
+
+  it("lists trusted slips in timeout summary before incomplete section", () => {
+    const evidences = [
+      makeEvidence("EXTRACTED",   36, { transactionTime: "2026-06-10T12:00:00Z" }),
+      makeEvidence("PROCESSING",  5),
+    ];
+    const msg = buildBatchSummaryMessage(evidences, {
+      isTimeout: true,
+      slipDate:  "10/6/2569",
+    });
+
+    expect(msg).toContain("รูปที่ตรวจผ่าน:");
+    expect(msg).toContain("#36 เช็คได้ 1,000 บาท");
+    expect(msg).toContain("รูปที่ยังไม่ครบ:");
+    expect(msg).toContain("#5 รอผลการตรวจสอบ");
+  });
+
+  it("does not list guard-flagged slips as เช็คได้", () => {
+    const evidences = [
+      makeEvidence("EXTRACTED", 1, { transactionTime: "2026-06-10T10:00:00Z" }),
+      makeEvidence("EXTRACTED", 4, { transactionTime: "2026-06-08T10:00:00Z" }),
+    ];
+    const msg = buildBatchSummaryMessage(evidences, { slipDate: "10/6/2569" });
+
+    expect(msg).toContain("#1 เช็คได้");
+    expect(msg).not.toContain("#4 เช็คได้");
+    expect(msg).toContain("#4 วันที่รายการไม่ตรงกับรอบ");
+  });
+
+  it("shows the per-slip amount next to เช็คได้ for trusted slips", () => {
+    const evidences = [
+      makeEvidence("EXTRACTED",         2, { transferAmount: 1117.8 }),
+      makeEvidence("PARTIAL_EXTRACTED", 7, { transferAmount: 250 }),
+    ];
+    const msg = buildBatchSummaryMessage(evidences, { slipDate: "10/6/2569" });
+
+    expect(msg).toContain("#2 เช็คได้ 1,117.8 บาท");
+    expect(msg).toContain("#7 เช็คได้ 250 บาท");
+  });
+
+  it("falls back to plain เช็คได้ when a trusted slip has no effective amount", () => {
+    // GWALLET resolves effective amount from paid_amount; transfer_amount alone
+    // is not enough, so effectiveAmount is null and we omit the amount suffix.
+    const evidences = [
+      {
+        id:              "ev-3",
+        batchIndex:      3,
+        checkStatus:     "EXTRACTED" as const,
+        slipType:        "GWALLET" as const,
+        transferAmount:  500,
+        paidAmount:      null,
+        transactionTime: "2026-06-10T10:00:00Z",
+        failureReason:   null,
+      },
+    ];
+    const msg = buildBatchSummaryMessage(evidences, { slipDate: "10/6/2569" });
+
+    // GWALLET with no paid_amount → no effective amount → flagged as ข้อมูลไม่ครบ,
+    // so it never appears in the trusted section. Guard against a regression where
+    // a null-amount trusted slip would render "เช็คได้ undefined บาท".
+    expect(msg).not.toContain("undefined");
+  });
+});

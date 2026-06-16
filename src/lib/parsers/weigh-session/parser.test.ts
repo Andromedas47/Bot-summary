@@ -291,6 +291,47 @@ describe("real message: short withdraw header followed by return section", () =>
 });
 
 describe("edge cases", () => {
+  it("replaces an earlier zero-quantity row when the same product and price is later sent with a valid pack quantity", () => {
+    const result = parseWeighSession(`\
+18:53 เสือ รายการชั่งเบิก
+22.มะเขือลาย20บาท
+0แพค
+22มะเขือลาย20บาท
+9.แพค
+18:53 เสือ จบรายการเบิก`);
+
+    const items = result.items.filter((item) => item.product_name === "มะเขือลาย");
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      item_number: 22,
+      product_name: "มะเขือลาย",
+      price_per_unit: 20,
+      quantity: 9,
+      unit: "แพค",
+    });
+    expect((items[0].price_per_unit ?? 0) * (items[0].quantity ?? 0)).toBe(180);
+  });
+
+  it("parses exact raw มะเขือลาย input as one valid pack row with no zero duplicate", () => {
+    const result = parseWeighSession(`\
+รายการชั่งเบิก
+22มะเขือลาย20บาท
+
+9.แพค`);
+
+    const items = result.items.filter((item) => item.product_name === "มะเขือลาย");
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      product_name: "มะเขือลาย",
+      quantity: 9,
+      unit: "แพค",
+      price_per_unit: 20,
+    });
+    expect((items[0].price_per_unit ?? 0) * (items[0].quantity ?? 0)).toBe(180);
+    expect(items.some((item) => item.quantity === 0)).toBe(false);
+    expect(result.items).toHaveLength(1);
+  });
+
   it("saves item with null quantity when weight line is missing", () => {
     const result = parseWeighSession(`\
 18:53 เสือ รายการชั่งคืน
@@ -578,7 +619,9 @@ describe("RE.QUANTITY", () => {
     ["13.กล่อง",  13,   "กล่อง"],
     ["12.กล่อง",  12,   "กล่อง"],
     ["20.แพค",    20,   "แพค"],
+    ["9.แพค",      9,   "แพค"],
     ["5แพค",       5,   "แพค"],
+    ["9 แพค",      9,   "แพค"],
     ["1แพ็ค",      1,    "แพ็ค"],
     ["1แพ็ก",      1,    "แพ็ก"],
     ["1เเพ็ค",     1,    "เเพ็ค"],

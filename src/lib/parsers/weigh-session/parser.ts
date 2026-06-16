@@ -72,8 +72,8 @@ export function parseWeighSession(
       console.log("[TRACE][parseWeighSession] SESSION_END detected, pendingItem:", JSON.stringify(pendingItem));
       if (pendingItem?.product_name) {
         const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
-        console.log("[TRACE][parseWeighSession] PUSH_ITEM(session-end):", JSON.stringify(finalizedItem), "items_total_after:", items.length + 1);
-        items.push(finalizedItem);
+        pushOrMergeItem(items, finalizedItem);
+        console.log("[TRACE][parseWeighSession] PUSH_ITEM(session-end):", JSON.stringify(finalizedItem), "items_total_after:", items.length);
         pendingItem = null;
       }
       currentSection = "main";
@@ -113,8 +113,8 @@ export function parseWeighSession(
           pendingItem.quantity = parseFloat(qm[1]);
           pendingItem.unit     = qm[2] as ProduceUnit;
           const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
-          console.log("[TRACE][parseWeighSession] PUSH_ITEM(quantity):", JSON.stringify(finalizedItem), "items_total_after:", items.length + 1);
-          items.push(finalizedItem);
+          pushOrMergeItem(items, finalizedItem);
+          console.log("[TRACE][parseWeighSession] PUSH_ITEM(quantity):", JSON.stringify(finalizedItem), "items_total_after:", items.length);
           pendingItem = null;
         } else {
           parseErrors.push(`quantity with no preceding item: "${line}"`);
@@ -125,8 +125,8 @@ export function parseWeighSession(
           // Item line sent without LINE export timestamp (direct typed message)
           if (pendingItem?.product_name) {
             const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
-            console.log("[TRACE][parseWeighSession] PUSH_ITEM(displaced):", JSON.stringify(finalizedItem), "items_total_after:", items.length + 1);
-            items.push(finalizedItem);
+            pushOrMergeItem(items, finalizedItem);
+            console.log("[TRACE][parseWeighSession] PUSH_ITEM(displaced):", JSON.stringify(finalizedItem), "items_total_after:", items.length);
           }
           pendingItem = {
             item_number:    parseInt(im[1], 10),
@@ -140,8 +140,8 @@ export function parseWeighSession(
           // Non-item bare line → section / transaction-type marker
           if (pendingItem?.product_name) {
             const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
-            console.log("[TRACE][parseWeighSession] PUSH_ITEM(section-change):", JSON.stringify(finalizedItem), "items_total_after:", items.length + 1);
-            items.push(finalizedItem);
+            pushOrMergeItem(items, finalizedItem);
+            console.log("[TRACE][parseWeighSession] PUSH_ITEM(section-change):", JSON.stringify(finalizedItem), "items_total_after:", items.length);
             pendingItem = null;
           }
           const nextTxType = detectTxType(content);
@@ -161,7 +161,7 @@ export function parseWeighSession(
     const itemMatch = content.match(RE.ITEM);
     if (itemMatch) {
       if (pendingItem?.product_name) {
-        items.push(finalize(pendingItem, currentSection, currentTxType));
+        pushOrMergeItem(items, finalize(pendingItem, currentSection, currentTxType));
       }
       pendingItem = {
         item_number:    parseInt(itemMatch[1], 10),
@@ -175,7 +175,7 @@ export function parseWeighSession(
 
     // Staff-prefixed non-item line → section / transaction-type marker
     if (pendingItem?.product_name) {
-      items.push(finalize(pendingItem, currentSection, currentTxType));
+      pushOrMergeItem(items, finalize(pendingItem, currentSection, currentTxType));
       pendingItem = null;
     }
     const nextTxType = detectTxType(content);
@@ -190,8 +190,8 @@ export function parseWeighSession(
   // Trailing pending item (missing session-end marker)
   if (pendingItem?.product_name) {
     const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
-    console.log("[TRACE][parseWeighSession] PUSH_ITEM(trailing):", JSON.stringify(finalizedItem), "items_total_after:", items.length + 1);
-    items.push(finalizedItem);
+    pushOrMergeItem(items, finalizedItem);
+    console.log("[TRACE][parseWeighSession] PUSH_ITEM(trailing):", JSON.stringify(finalizedItem), "items_total_after:", items.length);
   }
   console.log("[TRACE][parseWeighSession] final_items_count:", items.length);
 
@@ -222,6 +222,46 @@ function finalize(
     section,
     transaction_type: txType,
   };
+}
+
+function pushOrMergeItem(items: WeighSessionItem[], item: WeighSessionItem): void {
+  const existingIndex = items.findIndex((existing) =>
+    sameProductAndPrice(existing, item) && isMissingQuantity(existing.quantity),
+  );
+
+  if (existingIndex === -1) {
+    items.push(item);
+    return;
+  }
+
+  if (hasValidQuantity(item)) {
+    items[existingIndex] = {
+      ...item,
+      item_number: items[existingIndex].item_number,
+      section: items[existingIndex].section,
+      transaction_type: items[existingIndex].transaction_type,
+    };
+    return;
+  }
+
+  // Avoid appending repeated zero/null placeholders for the same product+price.
+}
+
+function sameProductAndPrice(a: WeighSessionItem, b: WeighSessionItem): boolean {
+  return normalizeProductName(a.product_name) === normalizeProductName(b.product_name)
+    && a.price_per_unit === b.price_per_unit;
+}
+
+function normalizeProductName(name: string): string {
+  return name.replace(/\s+/g, "").trim();
+}
+
+function isMissingQuantity(quantity: number | null): boolean {
+  return quantity === null || quantity === 0;
+}
+
+function hasValidQuantity(item: WeighSessionItem): boolean {
+  return item.quantity !== null && Number.isFinite(item.quantity) && item.quantity > 0 && item.unit !== null;
 }
 
 function normalizeUnit(unit: ProduceUnit | "แพ็ค" | "แพ็ก" | "เเพ็ค" | null | undefined): ProduceUnit | null {

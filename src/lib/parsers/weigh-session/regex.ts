@@ -21,14 +21,19 @@ export const RE = {
   // Captures: [1]=item_number, [2]=product_name, [3]=price
   ITEM: new RegExp(`^(\\d+)\\.?([${TH}][${TH}\\s]*?)(\\d+(?:\\.\\d+)?)\\s*บาท\\s*$`),
 
+  // Item line without an item number. Used for short correction messages.
+  // Captures: [1]=product_name, [2]=price
+  ITEM_NO_INDEX: new RegExp(`^([${TH}][${TH}\\s]*?)(\\d+(?:\\.\\d+)?)\\s*บาท\\s*$`),
+
   // Quantity with unit — trailing dot before unit is optional (scale output format):
   //   "38โล"  "18.5โล"  "38.1.โล"  "28.โล"
   //   "9ลูก"  "23.ลูก"  "6.ลูก"
   //   "13.กล่อง"  "20.แพค"  "5แพค"  "1แพ็ค"  "1แพ็ก"  "1เเพ็ค"
+  //   Common typo variants: "แพต" "แพ็ด" "เเพค" "แผค"
   //   "3กำ"  "2มัด"  "5ถุง"  "16หัว"  "1แพ็ค"  "4หวี"
   //   "1เครือ"  "2เข่ง"  "3พวง"  "5ลัง"
   // Captures: [1]=amount, [2]=unit
-  QUANTITY: /^(\d+(?:\.\d+)?)\.?\s*(โล|ลูก|กล่อง|แพค|แพ็ค|แพ็ก|เเพ็ค|กำ|มัด|ถุง|หัว|หวี|เครือ|เข่ง|พวง|ลัง)\s*$/,
+  QUANTITY: /^(\d+(?:\.\d+)?)\.?\s*(โล|ลูก|กล่อง|แพค|แพ็ค|แพ็ก|เเพ็ค|เเพค|แพต|แพ็ด|แผค|กำ|มัด|ถุง|หัว|หวี|เครือ|เข่ง|พวง|ลัง)\s*$/,
 
   // Full-line date (anchored to avoid false matches inside item lines):
   //   "25/5/69"   → short Buddhist year 2569 → Gregorian 2026

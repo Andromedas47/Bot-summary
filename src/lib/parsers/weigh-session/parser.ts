@@ -83,6 +83,13 @@ export function parseWeighSession(
     // ── Header state: wait for session title ───────────────────────────────
     if (state === "header") {
       // Accept both prefixed (LINE export) and bare (direct typed) header lines.
+      const headerItem = parseItemLine(content, nextItemNumber(items, pendingItem));
+      if (headerItem) {
+        pendingItem = headerItem;
+        state = "items";
+        console.log("[TRACE][parseWeighSession] SET_PENDING_ITEM:", JSON.stringify(pendingItem));
+        continue;
+      }
 
       // Try "พี่ดำ-วิหาร เบิก ..." format first
       const smMatch = content.match(RE.SELLER_MARKET);
@@ -120,21 +127,15 @@ export function parseWeighSession(
           parseErrors.push(`quantity with no preceding item: "${line}"`);
         }
       } else {
-        const im = content.match(RE.ITEM);
-        if (im) {
+        const parsedItem = parseItemLine(content, nextItemNumber(items, pendingItem));
+        if (parsedItem) {
           // Item line sent without LINE export timestamp (direct typed message)
           if (pendingItem?.product_name) {
             const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
             pushOrMergeItem(items, finalizedItem);
             console.log("[TRACE][parseWeighSession] PUSH_ITEM(displaced):", JSON.stringify(finalizedItem), "items_total_after:", items.length);
           }
-          pendingItem = {
-            item_number:    parseInt(im[1], 10),
-            product_name:   im[2].trim(),
-            price_per_unit: parseFloat(im[3]),
-            quantity:       null,
-            unit:           null,
-          };
+          pendingItem = parsedItem;
           console.log("[TRACE][parseWeighSession] SET_PENDING_ITEM:", JSON.stringify(pendingItem));
         } else if (content.length > 0) {
           // Non-item bare line → section / transaction-type marker
@@ -158,18 +159,12 @@ export function parseWeighSession(
     }
 
     // Staff-prefixed line: try item pattern first
-    const itemMatch = content.match(RE.ITEM);
-    if (itemMatch) {
+    const parsedItem = parseItemLine(content, nextItemNumber(items, pendingItem));
+    if (parsedItem) {
       if (pendingItem?.product_name) {
         pushOrMergeItem(items, finalize(pendingItem, currentSection, currentTxType));
       }
-      pendingItem = {
-        item_number:    parseInt(itemMatch[1], 10),
-        product_name:   itemMatch[2].trim(),
-        price_per_unit: parseFloat(itemMatch[3]),
-        quantity:       null,
-        unit:           null,
-      };
+      pendingItem = parsedItem;
       continue;
     }
 
@@ -225,9 +220,7 @@ function finalize(
 }
 
 function pushOrMergeItem(items: WeighSessionItem[], item: WeighSessionItem): void {
-  const existingIndex = items.findIndex((existing) =>
-    sameProductAndPrice(existing, item) && isMissingQuantity(existing.quantity),
-  );
+  const existingIndex = findMergeCandidateIndex(items, item);
 
   if (existingIndex === -1) {
     items.push(item);
@@ -247,6 +240,54 @@ function pushOrMergeItem(items: WeighSessionItem[], item: WeighSessionItem): voi
   // Avoid appending repeated zero/null placeholders for the same product+price.
 }
 
+function parseItemLine(content: string, fallbackItemNumber: number): Partial<WeighSessionItem> | null {
+  const indexed = content.match(RE.ITEM);
+  if (indexed) {
+    return {
+      item_number:    parseInt(indexed[1], 10),
+      product_name:   indexed[2].trim(),
+      price_per_unit: parseFloat(indexed[3]),
+      quantity:       null,
+      unit:           null,
+    };
+  }
+
+  const unindexed = content.match(RE.ITEM_NO_INDEX);
+  if (unindexed) {
+    return {
+      item_number:    fallbackItemNumber,
+      product_name:   unindexed[1].trim(),
+      price_per_unit: parseFloat(unindexed[2]),
+      quantity:       null,
+      unit:           null,
+    };
+  }
+
+  return null;
+}
+
+function nextItemNumber(
+  items: WeighSessionItem[],
+  pendingItem: Partial<WeighSessionItem> | null,
+): number {
+  const maxExisting = items.reduce((max, item) => Math.max(max, item.item_number), 0);
+  return Math.max(maxExisting, pendingItem?.item_number ?? 0) + 1;
+}
+
+function findMergeCandidateIndex(items: WeighSessionItem[], item: WeighSessionItem): number {
+  if (hasValidQuantity(item)) {
+    const sameIndex = items.findIndex((existing) =>
+      existing.item_number === item.item_number &&
+      (isIncompleteItem(existing) || sameProductAndPrice(existing, item)),
+    );
+    if (sameIndex !== -1) return sameIndex;
+  }
+
+  return items.findIndex((existing) =>
+    sameProductAndPrice(existing, item) && isIncompleteItem(existing),
+  );
+}
+
 function sameProductAndPrice(a: WeighSessionItem, b: WeighSessionItem): boolean {
   return normalizeProductName(a.product_name) === normalizeProductName(b.product_name)
     && a.price_per_unit === b.price_per_unit;
@@ -260,12 +301,26 @@ function isMissingQuantity(quantity: number | null): boolean {
   return quantity === null || quantity === 0;
 }
 
+function isIncompleteItem(item: WeighSessionItem): boolean {
+  return isMissingQuantity(item.quantity) || item.unit === null;
+}
+
 function hasValidQuantity(item: WeighSessionItem): boolean {
   return item.quantity !== null && Number.isFinite(item.quantity) && item.quantity > 0 && item.unit !== null;
 }
 
-function normalizeUnit(unit: ProduceUnit | "แพ็ค" | "แพ็ก" | "เเพ็ค" | null | undefined): ProduceUnit | null {
-  if (unit === "แพ็ค" || unit === "แพ็ก" || unit === "เเพ็ค") return "แพค";
+function normalizeUnit(
+  unit: ProduceUnit | "แพ็ค" | "แพ็ก" | "เเพ็ค" | "เเพค" | "แพต" | "แพ็ด" | "แผค" | null | undefined,
+): ProduceUnit | null {
+  if (
+    unit === "แพ็ค" ||
+    unit === "แพ็ก" ||
+    unit === "เเพ็ค" ||
+    unit === "เเพค" ||
+    unit === "แพต" ||
+    unit === "แพ็ด" ||
+    unit === "แผค"
+  ) return "แพค";
   return unit ?? null;
 }
 

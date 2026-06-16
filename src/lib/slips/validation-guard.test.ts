@@ -17,12 +17,27 @@ describe("selectEffectiveAmount", () => {
   it("BANK_SLIP_NO_QR returns transfer_amount", () => {
     expect(selectEffectiveAmount("BANK_SLIP_NO_QR", 400, 300)).toBe(400);
   });
-  it("GWALLET returns paid_amount", () => {
-    expect(selectEffectiveAmount("GWALLET", 500, 300)).toBe(300);
+
+  // ── subsidy slips: prefer gross_amount for summary ───────────────────────────
+  it("GWALLET with gross_amount uses gross (total sale 60 not customer paid 24)", () => {
+    // total 60, subsidy 36, customer paid 24 => summary must be 60
+    expect(selectEffectiveAmount("GWALLET", null, 24, 60, 36)).toBe(60);
   });
-  it("THAI_HELP_THAI returns paid_amount", () => {
-    expect(selectEffectiveAmount("THAI_HELP_THAI", 500, 200)).toBe(200);
+  it("THAI_HELP_THAI with gross_amount uses gross (total 100, subsidy 60, paid 40)", () => {
+    // total 100, subsidy 60, customer paid 40 => summary must be 100
+    expect(selectEffectiveAmount("THAI_HELP_THAI", null, 40, 100, 60)).toBe(100);
   });
+  it("GWALLET without gross but with paid+subsidy derives gross (paid+subsidy)", () => {
+    // gross not visible, paid=24, subsidy=36 => derived gross=60
+    expect(selectEffectiveAmount("GWALLET", null, 24, null, 36)).toBe(60);
+  });
+  it("GWALLET with no gross and no subsidy falls back to paid_amount (legacy)", () => {
+    expect(selectEffectiveAmount("GWALLET", null, 300)).toBe(300);
+  });
+  it("THAI_HELP_THAI with no gross and no subsidy falls back to paid_amount (legacy)", () => {
+    expect(selectEffectiveAmount("THAI_HELP_THAI", null, 200)).toBe(200);
+  });
+
   it("NUMBERS_ONLY returns null", () => {
     expect(selectEffectiveAmount("NUMBERS_ONLY", 500, 300)).toBeNull();
   });
@@ -46,7 +61,7 @@ describe("selectEffectiveAmount", () => {
   it("Infinity transfer_amount returns null", () => {
     expect(selectEffectiveAmount("BANK_SLIP_QR", Infinity, null)).toBeNull();
   });
-  it("zero paid_amount returns null for GWALLET", () => {
+  it("zero paid_amount returns null for GWALLET with no gross", () => {
     expect(selectEffectiveAmount("GWALLET", null, 0)).toBeNull();
   });
 });
@@ -285,8 +300,11 @@ describe("NEED_REVIEW items remain excluded from trusted total", () => {
 
   it("NEED_REVIEW items are counted as manual review in summary, not as trusted", () => {
     const evidences = [
-      { ...makeExtracted(500, 1), transactionTime: null },
+      { id: "ev-1", batchIndex: 1, failureReason: null, ...makeExtracted(500, 1), transactionTime: null },
       {
+        id:              "ev-2",
+        batchIndex:      2,
+        failureReason:   null,
         checkStatus:     "NEED_REVIEW" as SlipCheckStatus,
         slipType:        "BANK_SLIP_QR" as SlipType,
         transferAmount:  500,
@@ -336,6 +354,8 @@ describe("Production batch fixture: n0i — wat takl0m — 10/6/2569", () => {
     batchIndex:      number;
     checkStatus:     SlipCheckStatus;
     slipType:        SlipType | null;
+    grossAmount:     number | null;
+    discountAmount:  number | null;
     transferAmount:  number | null;
     paidAmount:      number | null;
     transactionTime: string | null;
@@ -349,12 +369,16 @@ describe("Production batch fixture: n0i — wat takl0m — 10/6/2569", () => {
     transferAmount: number | null,
     paidAmount:     number | null,
     txTime:         string | null,
+    grossAmount:    number | null = null,
+    discountAmount: number | null = null,
   ): EvFields {
     return {
       id:              `ev-${idx}`,
       batchIndex:      idx,
       checkStatus:     status,
       slipType,
+      grossAmount,
+      discountAmount,
       transferAmount,
       paidAmount,
       transactionTime: txTime,

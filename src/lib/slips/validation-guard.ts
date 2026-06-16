@@ -72,25 +72,45 @@ export function parseBatchDate(slipDate: string | null | undefined): string | nu
 }
 
 /**
- * Returns the payable effective amount for a slip based on its type.
+ * Returns the summary-level effective amount for a slip based on its type.
  *
- * GWALLET / THAI_HELP_THAI  → paid_amount
+ * GWALLET / THAI_HELP_THAI  → gross_amount (total sale before subsidy)
+ *   Priority: 1) grossAmount  2) paidAmount + discountAmount  3) paidAmount (legacy)
  * BANK_SLIP_QR / _NO_QR    → transfer_amount
  * Any other type            → null (item goes to manual review)
  *
  * Rejects null, NaN, Infinity, zero, and negative values.
  */
 export function selectEffectiveAmount(
-  slipType:       SlipType | null | undefined,
-  transferAmount: number | null,
-  paidAmount:     number | null,
+  slipType:        SlipType | null | undefined,
+  transferAmount:  number | null,
+  paidAmount:      number | null,
+  grossAmount?:    number | null,
+  discountAmount?: number | null,
 ): number | null {
   let raw: number | null;
-  if      (slipType === "GWALLET" || slipType === "THAI_HELP_THAI")        raw = paidAmount;
-  else if (slipType === "BANK_SLIP_QR" || slipType === "BANK_SLIP_NO_QR") raw = transferAmount;
-  else return null;
+  if (slipType === "GWALLET" || slipType === "THAI_HELP_THAI") {
+    const validGross   = toFinitePositive(grossAmount);
+    const validPaid    = toFinitePositive(paidAmount);
+    const validSubsidy = toFinitePositive(discountAmount);
+    if (validGross !== null) {
+      raw = validGross;
+    } else if (validPaid !== null && validSubsidy !== null) {
+      raw = validPaid + validSubsidy;
+    } else {
+      raw = paidAmount; // fallback: gross and subsidy not visible
+    }
+  } else if (slipType === "BANK_SLIP_QR" || slipType === "BANK_SLIP_NO_QR") {
+    raw = transferAmount;
+  } else {
+    return null;
+  }
   if (raw === null || !Number.isFinite(raw) || raw <= 0) return null;
   return raw;
+}
+
+function toFinitePositive(v: number | null | undefined): number | null {
+  return v !== null && v !== undefined && Number.isFinite(v) && v > 0 ? v : null;
 }
 
 /**
@@ -128,16 +148,18 @@ export function computeMedian(values: number[]): number {
  */
 export function computeValidationFlags(
   evidences: ReadonlyArray<{
-    checkStatus:     SlipCheckStatus | null;
-    slipType:        SlipType | null;
-    transferAmount:  number | null;
-    paidAmount:      number | null;
-    transactionTime: string | null;
+    checkStatus:      SlipCheckStatus | null;
+    slipType:         SlipType | null;
+    transferAmount:   number | null;
+    paidAmount:       number | null;
+    grossAmount?:     number | null;
+    discountAmount?:  number | null;
+    transactionTime:  string | null;
   }>,
   batchDateStr: string | null,
 ): EvidenceFlags[] {
   const effectiveAmounts = evidences.map((e) =>
-    selectEffectiveAmount(e.slipType, e.transferAmount, e.paidAmount),
+    selectEffectiveAmount(e.slipType, e.transferAmount, e.paidAmount, e.grossAmount, e.discountAmount),
   );
 
   // Collect valid amounts from terminal evidences to compute the batch median.

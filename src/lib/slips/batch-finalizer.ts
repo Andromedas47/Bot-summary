@@ -84,6 +84,8 @@ interface EvidenceWithCheck {
   slipType:        SlipType | null;
   transferAmount:  number | null;
   paidAmount:      number | null;
+  grossAmount?:    number | null;
+  discountAmount?: number | null;
   transactionTime: string | null;
   failureReason:   string | null;
 }
@@ -417,7 +419,7 @@ async function loadBatchEvidences(
 
   const { data: checkData, error: checkError } = await supabase
     .from("slip_checks")
-    .select("evidence_id, status, slip_type, transfer_amount, paid_amount, transaction_time, failure_reason")
+    .select("evidence_id, status, slip_type, gross_amount, discount_amount, transfer_amount, paid_amount, transaction_time, failure_reason")
     .in("evidence_id", evidenceIds);
 
   if (checkError) throw new Error(`loadBatchEvidences checks: ${checkError.message}`);
@@ -434,6 +436,8 @@ async function loadBatchEvidences(
       batchIndex:      ev.batch_index,
       checkStatus:     (check?.status ?? null) as SlipCheckStatus | null,
       slipType:        (check?.slip_type ?? null) as SlipType | null,
+      grossAmount:     check?.gross_amount ?? null,
+      discountAmount:  check?.discount_amount ?? null,
       transferAmount:  check?.transfer_amount ?? null,
       paidAmount:      check?.paid_amount ?? null,
       transactionTime: check?.transaction_time ?? null,

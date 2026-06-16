@@ -45,4 +45,40 @@ describe("slip extraction validation", () => {
     expect(extraction.confidence).toBe(1);
     expect(determineSlipCheckStatus(extraction)).toBe("NEED_REVIEW");
   });
+
+  it("normalizes compact ISO transaction time with colonless offset", () => {
+    const extraction = parseSlipExtraction({
+      slip_type: "GWALLET",
+      gross_amount: 60,
+      discount_amount: 36,
+      paid_amount: 24,
+      transfer_amount: null,
+      reference_id: "abc",
+      transaction_time: "2026-06-15T105400+0700",
+      sender_name: null,
+      receiver_name: "ร้านค้า",
+      receiver_account_tail: "1234",
+      confidence: 0.9,
+    });
+
+    expect(extraction.transactionTime).toBe("2026-06-15T03:54:00.000Z");
+  });
+
+  it("parses Thai month text with Buddhist year to Gregorian timestamp", () => {
+    const extraction = parseSlipExtraction({
+      slip_type: "GWALLET",
+      gross_amount: 60,
+      discount_amount: 36,
+      paid_amount: 24,
+      transfer_amount: null,
+      reference_id: "abc",
+      transaction_time: "15 มิ.ย. 2569 1054 น.",
+      sender_name: null,
+      receiver_name: "ร้านค้า",
+      receiver_account_tail: "1234",
+      confidence: 0.9,
+    });
+
+    expect(extraction.transactionTime).toBe("2026-06-15T03:54:00.000Z");
+  });
 });

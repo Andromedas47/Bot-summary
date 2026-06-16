@@ -23,37 +23,41 @@ const DATE_TOLERANCE_DAYS    = 1;
  * Parses a slip_date string into a Gregorian "YYYY-MM-DD" string or null.
  *
  * Accepts two formats:
- *   • D/M/BBBB or DD/MM/BBBB  — Thai Buddhist Era. Converts by BBBB − 543.
+ *   • D/M/YYYY or DD/MM/YYYY  — Gregorian or Thai Buddhist Era.
  *     Example: "10/6/2569" → 2026 → "2026-06-10"
- *   • YYYY-MM-DD              — ISO 8601 (passed through after strict validation)
+ *   • YYYY-MM-DD              — Gregorian or Thai Buddhist Era ISO date.
  *
  * Returns null for invalid, out-of-range, or calendar-invalid inputs.
  */
 export function parseBatchDate(slipDate: string | null | undefined): string | null {
   if (!slipDate) return null;
+  const trimmed = slipDate.trim();
 
   // ISO YYYY-MM-DD — validate strictly to catch Feb-30 etc.
-  if (/^\d{4}-\d{2}-\d{2}$/.test(slipDate)) {
-    const [y, m, d] = slipDate.split("-").map(Number);
-    const date = new Date(`${slipDate}T00:00:00Z`);
-    if (
-      !Number.isFinite(date.getTime()) ||
-      date.getUTCFullYear() !== y       ||
-      date.getUTCMonth() + 1 !== m      ||
-      date.getUTCDate() !== d
-    ) return null;
-    return slipDate;
+  const isoMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (isoMatch) {
+    const year  = normalizeThaiYear(parseInt(isoMatch[1], 10));
+    const month = parseInt(isoMatch[2], 10);
+    const day   = parseInt(isoMatch[3], 10);
+    return formatValidGregorianDate(year, month, day);
   }
 
-  // Thai Buddhist D/M/BBBB or DD/MM/BBBB
-  const match = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(slipDate);
+  // D/M/YYYY or DD/MM/YYYY, accepting Gregorian and Thai Buddhist years.
+  const match = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(trimmed);
   if (!match) return null;
 
   const day   = parseInt(match[1], 10);
   const month = parseInt(match[2], 10);
-  const bYear = parseInt(match[3], 10);
-  const year  = bYear - 543; // Buddhist Era → Gregorian
+  const year  = normalizeThaiYear(parseInt(match[3], 10));
 
+  return formatValidGregorianDate(year, month, day);
+}
+
+function normalizeThaiYear(year: number): number {
+  return year > 2400 ? year - 543 : year;
+}
+
+function formatValidGregorianDate(year: number, month: number, day: number): string | null {
   if (month < 1 || month > 12)    return null;
   if (day   < 1)                  return null;
   if (year < 1900 || year > 2200) return null;

@@ -162,8 +162,115 @@ function parseNullableText(value: unknown): string | null {
 
 function parseNullableTimestamp(value: unknown): string | null {
   const text = parseNullableText(value);
-  if (!text || !Number.isFinite(Date.parse(text))) return null;
-  return new Date(text).toISOString();
+  if (!text) return null;
+
+  const normalized = normalizeVisibleThaiTimestamp(text);
+  const parsed = Date.parse(normalized);
+  if (!Number.isFinite(parsed)) return null;
+  return new Date(parsed).toISOString();
+}
+
+const THAI_MONTHS: Record<string, number> = {
+  "ม.ค.": 1,
+  "มกราคม": 1,
+  "ก.พ.": 2,
+  "กุมภาพันธ์": 2,
+  "มี.ค.": 3,
+  "มีนาคม": 3,
+  "เม.ย.": 4,
+  "เมษายน": 4,
+  "พ.ค.": 5,
+  "พฤษภาคม": 5,
+  "มิ.ย.": 6,
+  "มิถุนายน": 6,
+  "ก.ค.": 7,
+  "กรกฎาคม": 7,
+  "ส.ค.": 8,
+  "สิงหาคม": 8,
+  "ก.ย.": 9,
+  "กันยายน": 9,
+  "ต.ค.": 10,
+  "ตุลาคม": 10,
+  "พ.ย.": 11,
+  "พฤศจิกายน": 11,
+  "ธ.ค.": 12,
+  "ธันวาคม": 12,
+};
+
+function normalizeVisibleThaiTimestamp(text: string): string {
+  const trimmed = text.trim();
+
+  const thaiMonthMatch = /^(\d{1,2})\s+([\u0E00-\u0E7F.]+)\s+(\d{4})(?:\s+(\d{1,2})(?::?(\d{2}))?(?::?(\d{2}))?\s*(?:น\.?)?)?$/.exec(trimmed);
+  if (thaiMonthMatch) {
+    const day = parseInt(thaiMonthMatch[1], 10);
+    const month = THAI_MONTHS[thaiMonthMatch[2]];
+    const year = normalizeThaiYear(parseInt(thaiMonthMatch[3], 10));
+    const hour = parseInt(thaiMonthMatch[4] ?? "0", 10);
+    const minute = parseInt(thaiMonthMatch[5] ?? "0", 10);
+    const second = parseInt(thaiMonthMatch[6] ?? "0", 10);
+    if (month && isValidDateTimeParts(year, month, day, hour, minute, second)) {
+      return `${year}-${pad2(month)}-${pad2(day)}T${pad2(hour)}:${pad2(minute)}:${pad2(second)}+07:00`;
+    }
+  }
+
+  const compactIsoMatch = /^(\d{4})-(\d{2})-(\d{2})T(\d{2})(\d{2})(\d{2})(Z|[+-]\d{2}:?\d{2})$/.exec(trimmed);
+  if (compactIsoMatch) {
+    const year = normalizeThaiYear(parseInt(compactIsoMatch[1], 10));
+    const month = parseInt(compactIsoMatch[2], 10);
+    const day = parseInt(compactIsoMatch[3], 10);
+    const hour = parseInt(compactIsoMatch[4], 10);
+    const minute = parseInt(compactIsoMatch[5], 10);
+    const second = parseInt(compactIsoMatch[6], 10);
+    if (isValidDateTimeParts(year, month, day, hour, minute, second)) {
+      return `${year}-${pad2(month)}-${pad2(day)}T${pad2(hour)}:${pad2(minute)}:${pad2(second)}${normalizeOffset(compactIsoMatch[7])}`;
+    }
+  }
+
+  const isoMatch = /^(\d{4})-(\d{2})-(\d{2})(T.*)$/.exec(trimmed);
+  if (isoMatch) {
+    const year = normalizeThaiYear(parseInt(isoMatch[1], 10));
+    return `${year}-${isoMatch[2]}-${isoMatch[3]}${normalizeColonlessOffset(isoMatch[4])}`;
+  }
+
+  return normalizeColonlessOffset(trimmed);
+}
+
+function normalizeThaiYear(year: number): number {
+  return year > 2400 ? year - 543 : year;
+}
+
+function isValidDateTimeParts(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+): boolean {
+  if (year < 1900 || year > 2200) return false;
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) return false;
+  const date = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  return (
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() + 1 === month &&
+    date.getUTCDate() === day &&
+    date.getUTCHours() === hour &&
+    date.getUTCMinutes() === minute &&
+    date.getUTCSeconds() === second
+  );
+}
+
+function normalizeOffset(offset: string): string {
+  if (offset === "Z") return "Z";
+  return offset.includes(":") ? offset : `${offset.slice(0, 3)}:${offset.slice(3)}`;
+}
+
+function normalizeColonlessOffset(text: string): string {
+  return text.replace(/([+-]\d{2})(\d{2})$/, "$1:$2");
+}
+
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
 }
 
 function parseAccountTail(value: unknown): string | null {

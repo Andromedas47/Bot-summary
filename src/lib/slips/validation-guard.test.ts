@@ -6,6 +6,7 @@ import {
   parseBatchDate,
 } from "./validation-guard";
 import { buildBatchSummaryMessage } from "./batch-finalizer";
+import { parseSlipExtraction } from "./extraction-schema";
 import type { SlipCheckStatus, SlipType } from "@/types/database";
 
 // ── selectEffectiveAmount ─────────────────────────────────────────────────────
@@ -80,6 +81,12 @@ describe("parseBatchDate", () => {
   });
   it("passes through valid ISO YYYY-MM-DD unchanged", () => {
     expect(parseBatchDate("2026-06-10")).toBe("2026-06-10");
+  });
+  it("parses Gregorian D/M/YYYY without subtracting 543", () => {
+    expect(parseBatchDate("15/6/2026")).toBe("2026-06-15");
+  });
+  it("normalizes Buddhist ISO YYYY-MM-DD to Gregorian", () => {
+    expect(parseBatchDate("2569-06-15")).toBe("2026-06-15");
   });
   it("returns null for null input", () => {
     expect(parseBatchDate(null)).toBeNull();
@@ -277,6 +284,73 @@ describe("date guard", () => {
   it("null batchDateStr disables the date guard entirely", () => {
     const ev = makeExtractedWithTime(500, "2020-01-01T10:00:00+07:00");
     const [flag] = computeValidationFlags([ev], null);
+    expect(flag.flagged).toBe(false);
+  });
+
+  it("batch input date 15/6/2569 matches compact Bangkok transaction time on 2026-06-15", () => {
+    const tx = parseSlipExtraction({
+      slip_type: "GWALLET",
+      gross_amount: 60,
+      discount_amount: 36,
+      paid_amount: 24,
+      transfer_amount: null,
+      reference_id: "ref-1",
+      transaction_time: "2026-06-15T105400+0700",
+      sender_name: null,
+      receiver_name: "shop",
+      receiver_account_tail: "1234",
+      confidence: 0.9,
+    }).transactionTime;
+    const ev = makeExtractedWithTime(60, tx);
+    const [flag] = computeValidationFlags([ev], parseBatchDate("15/6/2569"));
+    expect(flag.flagged).toBe(false);
+  });
+
+  it("batch input date 15/6/2026 matches compact Bangkok transaction time on 2026-06-15", () => {
+    const tx = parseSlipExtraction({
+      slip_type: "GWALLET",
+      gross_amount: 60,
+      discount_amount: 36,
+      paid_amount: 24,
+      transfer_amount: null,
+      reference_id: "ref-1",
+      transaction_time: "2026-06-15T105400+0700",
+      sender_name: null,
+      receiver_name: "shop",
+      receiver_account_tail: "1234",
+      confidence: 0.9,
+    }).transactionTime;
+    const ev = makeExtractedWithTime(60, tx);
+    const [flag] = computeValidationFlags([ev], parseBatchDate("15/6/2026"));
+    expect(flag.flagged).toBe(false);
+  });
+
+  it("batch input date 9/6/2569 mismatches compact Bangkok transaction time on 2026-06-15", () => {
+    const tx = parseSlipExtraction({
+      slip_type: "GWALLET",
+      gross_amount: 60,
+      discount_amount: 36,
+      paid_amount: 24,
+      transfer_amount: null,
+      reference_id: "ref-1",
+      transaction_time: "2026-06-15T105400+0700",
+      sender_name: null,
+      receiver_name: "shop",
+      receiver_account_tail: "1234",
+      confidence: 0.9,
+    }).transactionTime;
+    const ev = makeExtractedWithTime(60, tx);
+    const [flag] = computeValidationFlags([ev], parseBatchDate("9/6/2569"));
+    expect(flag.flagged).toBe(true);
+    expect(flag.flagReasons).toContain("วันที่รายการไม่ตรงกับรอบ");
+  });
+
+  it("compares transaction date using Bangkok local calendar date, not UTC date", () => {
+    // 2026-06-13T17:30Z is 2026-06-14 in Bangkok.
+    // Against batch date 2026-06-15, Bangkok-local comparison is within the
+    // existing ±1 day tolerance; UTC-date comparison would be two days off.
+    const ev = makeExtractedWithTime(500, "2026-06-13T17:30:00Z");
+    const [flag] = computeValidationFlags([ev], "2026-06-15");
     expect(flag.flagged).toBe(false);
   });
 });

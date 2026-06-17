@@ -65,4 +65,11 @@ export const RE = {
   SELLER_MARKET: new RegExp(
     `^([${TH}\\s]+?)-([${MARKET}]+?)\\s+(เบิกเพิ่ม|เบิก|คืนเสีย|คืน)`,
   ),
+
+  // Manual slip session open: "ส่งสลิปมือ 17/06/2569"
+  // Captures: [1]=date string (DD/MM/YY or DD/MM/YYYY Buddhist)
+  MANUAL_SLIP_OPEN: /^ส่งสลิปมือ\s+(\d{1,2}\/\d{1,2}\/(?:25)?\d{2})\s*$/,
+
+  // Manual slip session close: "จบสลิปมือ"
+  MANUAL_SLIP_CLOSE: /^จบสลิปมือ\s*$/,
 } as const;

@@ -278,13 +278,16 @@ function findMergeCandidateIndex(items: WeighSessionItem[], item: WeighSessionIt
   if (hasValidQuantity(item)) {
     const sameIndex = items.findIndex((existing) =>
       existing.item_number === item.item_number &&
+      existing.transaction_type === item.transaction_type &&
       (isIncompleteItem(existing) || sameProductAndPrice(existing, item)),
     );
     if (sameIndex !== -1) return sameIndex;
   }
 
   return items.findIndex((existing) =>
-    sameProductAndPrice(existing, item) && isIncompleteItem(existing),
+    sameProductAndPrice(existing, item) &&
+    existing.transaction_type === item.transaction_type &&
+    isIncompleteItem(existing),
   );
 }
 
@@ -340,7 +343,7 @@ function detectTxType(text: string): TransactionType | null {
  * Converts a Thai Buddhist calendar date to an ISO 8601 string.
  * Accepts 2-digit short years (69 → 2569 BE) and 4-digit years (2568 BE).
  */
-function parseBuddhistDate(day: string, month: string, year: string): string {
+export function parseBuddhistDate(day: string, month: string, year: string): string {
   let buddhistYear = parseInt(year, 10);
   if (buddhistYear < 100) buddhistYear += 2500; // "69" → 2569
   const gregorianYear = buddhistYear - 543;

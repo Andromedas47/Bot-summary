@@ -28,6 +28,7 @@ export type SlipType =
   | "GWALLET" | "NUMBERS_ONLY" | "WHITE_PAPER" | "UNKNOWN";
 export type SlipBatchStatus =
   | "collecting" | "closing" | "processing" | "completed" | "review_needed" | "failed";
+export type ManualSlipSessionStatus = "open" | "closed";
 
 // ─── Database schema ──────────────────────────────────────────────────
 export interface Database {
@@ -284,6 +285,7 @@ export interface Database {
           expenses:        number;
           labor:           number;
           notes:           string;
+          source_id:       string | null;
           created_at:      string;
           updated_at:      string;
         };
@@ -298,6 +300,7 @@ export interface Database {
           expenses?:        number;
           labor?:           number;
           notes?:           string;
+          source_id?:       string | null;
           created_at?:      string;
           updated_at?:      string;
         };
@@ -312,8 +315,126 @@ export interface Database {
           expenses?:        number;
           labor?:           number;
           notes?:           string;
+          source_id?:       string | null;
           created_at?:      string;
           updated_at?:      string;
+        };
+        Relationships: [];
+      };
+
+      manual_slip_sessions: {
+        Row: {
+          id:                      string;
+          source_id:               string;
+          business_date:           string;
+          status:                  ManualSlipSessionStatus;
+          opened_at:               string;
+          closed_at:               string | null;
+          opened_by_line_user_id:  string | null;
+          closed_by_line_user_id:  string | null;
+          opened_line_message_id:  string | null;
+          closed_line_message_id:  string | null;
+        };
+        Insert: {
+          id?:                      string;
+          source_id:                string;
+          business_date:            string;
+          status?:                  ManualSlipSessionStatus;
+          opened_at?:               string;
+          closed_at?:               string | null;
+          opened_by_line_user_id?:  string | null;
+          closed_by_line_user_id?:  string | null;
+          opened_line_message_id?:  string | null;
+          closed_line_message_id?:  string | null;
+        };
+        Update: {
+          id?:                      string;
+          source_id?:               string;
+          business_date?:           string;
+          status?:                  ManualSlipSessionStatus;
+          opened_at?:               string;
+          closed_at?:               string | null;
+          opened_by_line_user_id?:  string | null;
+          closed_by_line_user_id?:  string | null;
+          opened_line_message_id?:  string | null;
+          closed_line_message_id?:  string | null;
+        };
+        Relationships: [];
+      };
+
+      manual_slip_entries: {
+        Row: {
+          id:              string;
+          session_id:      string;
+          sequence_no:     number;
+          raw_line:        string;
+          amount:          number;
+          line_message_id: string;
+          line_user_id:    string | null;
+          created_at:      string;
+        };
+        Insert: {
+          id?:              string;
+          session_id:       string;
+          sequence_no:      number;
+          raw_line:         string;
+          amount:           number;
+          line_message_id:  string;
+          line_user_id?:    string | null;
+          created_at?:      string;
+        };
+        Update: {
+          id?:              string;
+          session_id?:      string;
+          sequence_no?:     number;
+          raw_line?:        string;
+          amount?:          number;
+          line_message_id?: string;
+          line_user_id?:    string | null;
+          created_at?:      string;
+        };
+        Relationships: [];
+      };
+
+      transfer_reconciliations: {
+        Row: {
+          id:                        string;
+          source_id:                 string;
+          business_date:             string;
+          ai_verified_total:         number;
+          manual_slip_total:         number;
+          checked_slip_total:        number;
+          submitted_transfer_total:  number;
+          difference:                number;
+          matched:                   boolean;
+          created_at:                string;
+          updated_at:                string;
+        };
+        Insert: {
+          id?:                        string;
+          source_id:                  string;
+          business_date:              string;
+          ai_verified_total?:         number;
+          manual_slip_total?:         number;
+          checked_slip_total?:        number;
+          submitted_transfer_total?:  number;
+          difference?:                number;
+          matched?:                   boolean;
+          created_at?:                string;
+          updated_at?:                string;
+        };
+        Update: {
+          id?:                        string;
+          source_id?:                 string;
+          business_date?:             string;
+          ai_verified_total?:         number;
+          manual_slip_total?:         number;
+          checked_slip_total?:        number;
+          submitted_transfer_total?:  number;
+          difference?:                number;
+          matched?:                   boolean;
+          created_at?:                string;
+          updated_at?:                string;
         };
         Relationships: [];
       };
@@ -586,6 +707,9 @@ export type ProduceSessionRow  = Database["public"]["Tables"]["produce_sessions"
 export type ProduceItemRow     = Database["public"]["Tables"]["produce_items"]["Row"];
 export type DailySummaryRow      = Database["public"]["Tables"]["daily_summaries"]["Row"];
 export type ImportedSessionRow   = Database["public"]["Tables"]["imported_sessions"]["Row"];
-export type SlipEvidenceRow       = Database["public"]["Tables"]["slip_evidences"]["Row"];
-export type SlipCheckRow          = Database["public"]["Tables"]["slip_checks"]["Row"];
-export type SlipBatchRow          = Database["public"]["Tables"]["slip_batches"]["Row"];
+export type SlipEvidenceRow              = Database["public"]["Tables"]["slip_evidences"]["Row"];
+export type SlipCheckRow                 = Database["public"]["Tables"]["slip_checks"]["Row"];
+export type SlipBatchRow                 = Database["public"]["Tables"]["slip_batches"]["Row"];
+export type ManualSlipSessionRow         = Database["public"]["Tables"]["manual_slip_sessions"]["Row"];
+export type ManualSlipEntryRow           = Database["public"]["Tables"]["manual_slip_entries"]["Row"];
+export type TransferReconciliationRow    = Database["public"]["Tables"]["transfer_reconciliations"]["Row"];

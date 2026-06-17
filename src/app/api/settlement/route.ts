@@ -9,6 +9,7 @@ import {
   calculateSettlementTotals,
   emptyTransactionTotals,
 } from "@/lib/summary/transactions";
+import { reconcile } from "@/lib/reconciliation";
 
 function monthRange(month: string): { from: string; toExclusive: string } {
   const [y, m] = month.split("-").map(Number);
@@ -48,15 +49,55 @@ export async function POST(req: NextRequest) {
     labor?:           number;
     notes?:           string;
     notify_line?:     boolean;
+    source_id?:       string;
   };
 
   const { settlement_date, settlement_time = "", staff_name = "", market_name = "",
           money_transfer = 0, money_cash = 0, expenses = 0, labor = 0, notes = "",
-          notify_line = false } = body;
+          notify_line = false, source_id } = body;
 
   if (!settlement_date) return NextResponse.json({ error: "settlement_date required" }, { status: 400 });
 
   const supabase = await createServiceClient();
+
+  // If source_id provided, check for open manual slip sessions before saving.
+  if (source_id) {
+    const reconcileResult = await reconcile(supabase, source_id, settlement_date, money_transfer);
+    if (reconcileResult.blocked) {
+      return NextResponse.json({ error: reconcileResult.reason }, { status: 400 });
+    }
+
+    const { data, error } = await supabase
+      .from("settlement_entries")
+      .upsert(
+        { settlement_date, settlement_time, staff_name, market_name,
+          money_transfer, money_cash, expenses, labor, notes, source_id,
+          updated_at: new Date().toISOString() },
+        { onConflict: "settlement_date,settlement_time,staff_name,market_name" },
+      )
+      .select()
+      .single();
+
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+    let lineTargets = 0;
+    let lineError: string | null = null;
+
+    if (notify_line) {
+      ({ lineTargets, lineError } = await sendLineNotification(supabase, {
+        settlement_date, staff_name, market_name, money_transfer, money_cash, expenses, labor, notes,
+      }));
+    }
+
+    return NextResponse.json({
+      ...data,
+      lineTargets,
+      lineError,
+      reconciliation: reconcileResult.result,
+    });
+  }
+
+  // No source_id — existing behavior (backward compat, no reconciliation).
   const { data, error } = await supabase
     .from("settlement_entries")
     .upsert(
@@ -73,38 +114,58 @@ export async function POST(req: NextRequest) {
   let lineError: string | null = null;
 
   if (notify_line) {
-    try {
-      const { transactions, sourceIds } = await getSettlementContext(supabase, {
-        settlement_date,
-        staff_name,
-        market_name,
-      });
-      const settlement = calculateSettlementTotals({
-        ยอดส่ง: transactions.ยอดส่ง,
-        money_transfer,
-        money_cash,
-        expenses,
-        labor,
-      });
-      const message = buildSettlementLineMessage({
-        date: settlement_date,
-        staffName: staff_name,
-        marketName: market_name,
-        transactions,
-        settlement,
-        notes,
-      });
-
-      for (const sourceId of sourceIds) {
-        await pushLineMessage(sourceId, message);
-        lineTargets += 1;
-      }
-    } catch (err) {
-      lineError = err instanceof Error ? err.message : "LINE notification failed";
-    }
+    ({ lineTargets, lineError } = await sendLineNotification(supabase, {
+      settlement_date, staff_name, market_name, money_transfer, money_cash, expenses, labor, notes,
+    }));
   }
 
   return NextResponse.json({ ...data, lineTargets, lineError });
+}
+
+async function sendLineNotification(
+  supabase: Awaited<ReturnType<typeof createServiceClient>>,
+  params: {
+    settlement_date: string;
+    staff_name:      string;
+    market_name:     string;
+    money_transfer:  number;
+    money_cash:      number;
+    expenses:        number;
+    labor:           number;
+    notes:           string;
+  },
+): Promise<{ lineTargets: number; lineError: string | null }> {
+  let lineTargets = 0;
+  let lineError: string | null = null;
+  try {
+    const { transactions, sourceIds } = await getSettlementContext(supabase, {
+      settlement_date: params.settlement_date,
+      staff_name:      params.staff_name,
+      market_name:     params.market_name,
+    });
+    const settlement = calculateSettlementTotals({
+      ยอดส่ง:        transactions.ยอดส่ง,
+      money_transfer: params.money_transfer,
+      money_cash:     params.money_cash,
+      expenses:       params.expenses,
+      labor:          params.labor,
+    });
+    const message = buildSettlementLineMessage({
+      date:        params.settlement_date,
+      staffName:   params.staff_name,
+      marketName:  params.market_name,
+      transactions,
+      settlement,
+      notes:       params.notes,
+    });
+    for (const sourceId of sourceIds) {
+      await pushLineMessage(sourceId, message);
+      lineTargets += 1;
+    }
+  } catch (err) {
+    lineError = err instanceof Error ? err.message : "LINE notification failed";
+  }
+  return { lineTargets, lineError };
 }
 
 async function getSettlementContext(

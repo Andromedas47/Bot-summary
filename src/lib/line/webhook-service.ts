@@ -18,6 +18,9 @@ import { DailySummaryService } from "@/lib/line/daily-summary-service";
 import { SessionDedupService, computeItemHash } from "@/lib/line/session-dedup-service";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 import { bangkokBusinessDateNow } from "@/lib/business-date";
+import { parseManualSlipAmounts } from "@/lib/parsers/manual-slip-amount";
+import { parseBuddhistDate } from "@/lib/parsers/weigh-session/parser";
+import { ManualSlipSessionService } from "@/lib/line/manual-slip-session-service";
 import { SlipEvidenceService } from "@/lib/slips/evidence-service";
 import type { SlipEvidenceIngestor } from "@/lib/slips/types";
 import {
@@ -248,6 +251,23 @@ export class WebhookService {
       return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
 
+    // ── 3.3. Manual slip session commands ────────────────────────────────────
+    const manualOpenMatch = RE.MANUAL_SLIP_OPEN.exec(text.trim());
+    if (manualOpenMatch) {
+      return this.processManualSlipOpen(
+        msgEvent, manualOpenMatch[1], message.id, eventId, event.type, log,
+      );
+    }
+
+    if (RE.MANUAL_SLIP_CLOSE.test(text.trim())) {
+      return this.processManualSlipClose(msgEvent, message.id, eventId, event.type, log);
+    }
+
+    const manualEntryResult = await this.tryAppendManualSlipEntry(
+      msgEvent, text, message.id, eventId, event.type, log,
+    );
+    if (manualEntryResult !== null) return manualEntryResult;
+
     // ── 3.5. Slip session commands (checked before produce session logic) ─────
     if (isSlipCloseCommand(text)) {
       return this.processSlipClose(msgEvent, eventId, event.type, log);
@@ -401,6 +421,166 @@ export class WebhookService {
       log.debug("no parser matched text message — left unprocessed");
     }
     return { eventId, eventType: event.type, status: "saved", parsed: false };
+  }
+
+  // ── Manual slip session: open ─────────────────────────────────────────────
+  private async processManualSlipOpen(
+    event:         LineMessageEvent,
+    dateStr:       string,
+    lineMessageId: string,
+    eventId:       string,
+    eventType:     string,
+    log:           ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const sourceId    = getSourceId(event.source);
+    const lineUserId  = getUserId(event.source);
+    const replyToken  = event.replyToken;
+
+    // Parse Buddhist date from captured string e.g. "17/06/2569"
+    const parts = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/((?:25)?\d{2})$/);
+    if (!parts) {
+      log.warn("manual slip open: invalid date string", { dateStr });
+      if (replyToken) {
+        await this.replyMessage(replyToken, "รูปแบบวันที่ไม่ถูกต้อง เช่น ส่งสลิปมือ 17/06/2569");
+      }
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+    const businessDate = parseBuddhistDate(parts[1], parts[2], parts[3]);
+
+    log.info("manual slip open command", { sourceId, businessDate });
+
+    try {
+      const svc    = new ManualSlipSessionService(this.supabase);
+      const result = await svc.openSession({ sourceId, businessDate, lineUserId, lineMessageId });
+
+      if (!result.opened) {
+        log.info("manual slip open: session already exists", { sourceId, businessDate });
+        if (replyToken) {
+          await this.replyMessage(
+            replyToken,
+            `มีสลิปมือสำหรับวันที่ ${dateStr} อยู่แล้ว ไม่สามารถเปิดซ้ำได้`,
+          );
+        }
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      if (replyToken) {
+        await this.replyMessage(
+          replyToken,
+          `เปิดสลิปมือ ${dateStr} แล้ว\nส่งจำนวนเงินได้เลย เช่น\n1. 100 บาท\n2. 300 บาท\nพิมพ์ จบสลิปมือ เมื่อส่งครบ`,
+        );
+      }
+      return { eventId, eventType, status: "saved", parsed: false };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("manual slip open failed", { error: errorMessage });
+      if (replyToken) {
+        try {
+          await this.replyMessage(replyToken, "เปิดสลิปมือไม่สำเร็จ กรุณาลองอีกครั้ง");
+        } catch { /* ignore reply error */ }
+      }
+      return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
+    }
+  }
+
+  // ── Manual slip session: close ────────────────────────────────────────────
+  private async processManualSlipClose(
+    event:         LineMessageEvent,
+    lineMessageId: string,
+    eventId:       string,
+    eventType:     string,
+    log:           ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const sourceId   = getSourceId(event.source);
+    const lineUserId = getUserId(event.source);
+    const replyToken = event.replyToken;
+
+    log.info("manual slip close command", { sourceId });
+
+    try {
+      const svc    = new ManualSlipSessionService(this.supabase);
+      const session = await svc.findOpenSession(sourceId);
+
+      if (!session) {
+        log.info("manual slip close: no open session", { sourceId });
+        if (replyToken) {
+          await this.replyMessage(replyToken, "ไม่มีสลิปมือที่เปิดอยู่");
+        }
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      const { total, alreadyClosed } = await svc.closeSession({
+        sessionId: session.id, lineUserId, lineMessageId,
+      });
+
+      if (alreadyClosed) {
+        if (replyToken) await this.replyMessage(replyToken, "สลิปมือปิดไปแล้ว");
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      const dateStr = session.business_date;
+      if (replyToken) {
+        await this.replyMessage(
+          replyToken,
+          `จบสลิปมือ ${dateStr} แล้ว\nยอดรวมสลิปมือ: ${total.toLocaleString("th-TH")} บาท`,
+        );
+      }
+      log.info("manual slip session closed", { sessionId: session.id, total });
+      return { eventId, eventType, status: "saved", parsed: false };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("manual slip close failed", { error: errorMessage });
+      if (replyToken) {
+        try {
+          await this.replyMessage(replyToken, "ปิดสลิปมือไม่สำเร็จ กรุณาลองอีกครั้ง");
+        } catch { /* ignore reply error */ }
+      }
+      return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
+    }
+  }
+
+  // ── Manual slip session: append amount entries ────────────────────────────
+  // Returns null if no open session (caller falls through to existing handlers).
+  private async tryAppendManualSlipEntry(
+    event:         LineMessageEvent,
+    text:          string,
+    lineMessageId: string,
+    eventId:       string,
+    eventType:     string,
+    log:           ChildLogger,
+  ): Promise<WebhookProcessResult | null> {
+    const amounts = parseManualSlipAmounts(text);
+    if (amounts.length === 0) return null;
+
+    const sourceId   = getSourceId(event.source);
+    const lineUserId = getUserId(event.source);
+    const replyToken = event.replyToken;
+
+    const svc     = new ManualSlipSessionService(this.supabase);
+    const session = await svc.findOpenSession(sourceId);
+    if (!session) return null; // no open session — fall through
+
+    try {
+      await svc.appendEntries({ sessionId: session.id, entries: amounts, lineMessageId, lineUserId });
+      log.info("manual slip entries appended", {
+        sessionId: session.id,
+        count: amounts.length,
+        lineMessageId,
+      });
+
+      if (replyToken) {
+        const total = amounts.reduce((s, a) => s + a.amount, 0);
+        await this.replyMessage(
+          replyToken,
+          `รับ ${amounts.length} รายการ รวม ${total.toLocaleString("th-TH")} บาท`,
+        );
+      }
+      return { eventId, eventType, status: "saved", parsed: false };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("manual slip entry append failed", { error: errorMessage });
+      return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
+    }
   }
 
   // Image evidence is processed independently from the text-session parser.

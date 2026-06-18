@@ -28,6 +28,7 @@ import {
   type SlipCheckProcessor,
 } from "@/lib/slips/check-service";
 import { SlipBatchService, type SlipBatchIngestor } from "@/lib/slips/batch-service";
+import { tryFinalizeSettlement } from "@/lib/settlement-finalizer";
 import {
   SlipSessionService,
   parseSlipSessionHeader,
@@ -526,6 +527,9 @@ export class WebhookService {
         );
       }
       log.info("manual slip session closed", { sessionId: session.id, total });
+      tryFinalizeSettlement(this.supabase, sourceId, session.business_date).catch(
+        (err) => log.warn("tryFinalizeSettlement failed", { reason: err instanceof Error ? err.message : String(err) }),
+      );
       return { eventId, eventType, status: "saved", parsed: false };
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);

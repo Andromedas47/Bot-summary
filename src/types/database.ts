@@ -28,7 +28,8 @@ export type SlipType =
   | "GWALLET" | "NUMBERS_ONLY" | "WHITE_PAPER" | "UNKNOWN";
 export type SlipBatchStatus =
   | "collecting" | "closing" | "processing" | "completed" | "review_needed" | "failed";
-export type ManualSlipSessionStatus = "open" | "closed";
+export type ManualSlipSessionStatus      = "open" | "closed";
+export type SettlementFinalizationStatus = "pending" | "sending" | "sent" | "failed" | "ambiguous";
 
 // ─── Database schema ──────────────────────────────────────────────────
 export interface Database {
@@ -570,6 +571,46 @@ export interface Database {
         Relationships: [];
       };
 
+      settlement_finalizations: {
+        Row: {
+          id:              string;
+          source_id:       string;
+          business_date:   string;
+          status:          SettlementFinalizationStatus;
+          line_retry_key:  string;
+          finalized_at:    string;
+          claimed_at:      string | null;
+          message_sent_at: string | null;
+          last_error:      string | null;
+          updated_at:      string;
+        };
+        Insert: {
+          id?:              string;
+          source_id:        string;
+          business_date:    string;
+          status?:          SettlementFinalizationStatus;
+          line_retry_key?:  string;
+          finalized_at?:    string;
+          claimed_at?:      string | null;
+          message_sent_at?: string | null;
+          last_error?:      string | null;
+          updated_at?:      string;
+        };
+        Update: {
+          id?:              string;
+          source_id?:       string;
+          business_date?:   string;
+          status?:          SettlementFinalizationStatus;
+          line_retry_key?:  string;
+          finalized_at?:    string;
+          claimed_at?:      string | null;
+          message_sent_at?: string | null;
+          last_error?:      string | null;
+          updated_at?:      string;
+        };
+        Relationships: [];
+      };
+
       slip_checks: {
         Row: {
           id:                    string;
@@ -712,4 +753,5 @@ export type SlipCheckRow                 = Database["public"]["Tables"]["slip_ch
 export type SlipBatchRow                 = Database["public"]["Tables"]["slip_batches"]["Row"];
 export type ManualSlipSessionRow         = Database["public"]["Tables"]["manual_slip_sessions"]["Row"];
 export type ManualSlipEntryRow           = Database["public"]["Tables"]["manual_slip_entries"]["Row"];
-export type TransferReconciliationRow    = Database["public"]["Tables"]["transfer_reconciliations"]["Row"];
+export type TransferReconciliationRow      = Database["public"]["Tables"]["transfer_reconciliations"]["Row"];
+export type SettlementFinalizationRow      = Database["public"]["Tables"]["settlement_finalizations"]["Row"];

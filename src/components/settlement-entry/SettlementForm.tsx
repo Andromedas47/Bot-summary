@@ -96,18 +96,36 @@ export function SettlementForm({ initial }: { initial?: Partial<InitialValues> }
           ...(sourceId ? { source_id: sourceId } : {}),
         }),
       });
-      const json = await res.json() as { error?: string; lineError?: string | null; lineTargets?: number };
+      const json = await res.json() as {
+        error?:          string;
+        lineError?:      string | null;
+        lineTargets?:    number;
+        finalizeStatus?: string;
+      };
       if (!res.ok) {
         setSaveMsg(json.error ?? "บันทึกไม่สำเร็จ");
         setSaveStatus("error");
       } else {
-        setSaveMsg(
-          json.lineError
-            ? "บันทึกสำเร็จ แต่ส่ง LINE ไม่สำเร็จ"
-            : json.lineTargets === 0
-              ? "บันทึกสำเร็จ แต่ไม่พบกลุ่ม LINE สำหรับรายการนี้"
-              : "บันทึกสำเร็จและแจ้ง LINE แล้ว",
-        );
+        if (json.finalizeStatus !== undefined) {
+          // source_id path: finalizer result (LINE sent only when all evidence is ready)
+          const msgs: Record<string, string> = {
+            finalized:    "บันทึกสำเร็จ ส่งสรุปผลไปยัง LINE แล้ว",
+            already_done: "บันทึกสำเร็จ (ส่ง LINE ไปแล้วก่อนหน้า)",
+            not_ready:    "บันทึกสำเร็จ รอสลิปครบก่อนส่ง LINE",
+            ambiguous:    "บันทึกสำเร็จ แต่ไม่ส่ง LINE เพราะพบรายการซ้ำซ้อน",
+            failed:       "บันทึกสำเร็จ แต่ส่ง LINE ไม่สำเร็จ กรุณาตรวจสอบ",
+          };
+          setSaveMsg(msgs[json.finalizeStatus] ?? "บันทึกสำเร็จ");
+        } else {
+          // legacy path (no source_id): immediate LINE notification
+          setSaveMsg(
+            json.lineError
+              ? "บันทึกสำเร็จ แต่ส่ง LINE ไม่สำเร็จ"
+              : json.lineTargets === 0
+                ? "บันทึกสำเร็จ แต่ไม่พบกลุ่ม LINE สำหรับรายการนี้"
+                : "บันทึกสำเร็จและแจ้ง LINE แล้ว",
+          );
+        }
         setSaveStatus("saved");
       }
     });

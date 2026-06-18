@@ -2,6 +2,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, SlipCheckStatus, SlipBatchRow, SlipType } from "@/types/database";
 import { pushLineMessage } from "@/lib/line/reply";
 import { logger } from "@/lib/logger";
+import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
+import { tryFinalizeSettlement } from "@/lib/settlement-finalizer";
 import {
   computeValidationFlags,
   parseBatchDate,
@@ -368,6 +370,16 @@ export async function finalizeSlipBatch(
       summaryTitle:  title ?? "default",
       isTimeoutForced,
     });
+
+    const businessDate = bangkokBusinessDateFromTimestamp(
+      new Date(batchRow?.closing_at ?? batchRow?.last_image_at ?? "").getTime(),
+    );
+    if (businessDate) {
+      tryFinalizeSettlement(supabase, batchRow!.source_id, businessDate).catch(
+        (err) => log.warn("tryFinalizeSettlement failed", { reason: err instanceof Error ? err.message : String(err) }),
+      );
+    }
+
     return { delivered: true, persisted: true };
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);

@@ -10,6 +10,7 @@ import {
   emptyTransactionTotals,
 } from "@/lib/summary/transactions";
 import { reconcile } from "@/lib/reconciliation";
+import { tryFinalizeSettlement } from "@/lib/settlement-finalizer";
 
 function monthRange(month: string): { from: string; toExclusive: string } {
   const [y, m] = month.split("-").map(Number);
@@ -80,19 +81,11 @@ export async function POST(req: NextRequest) {
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-    let lineTargets = 0;
-    let lineError: string | null = null;
-
-    if (notify_line) {
-      ({ lineTargets, lineError } = await sendLineNotification(supabase, {
-        settlement_date, staff_name, market_name, money_transfer, money_cash, expenses, labor, notes,
-      }));
-    }
+    const finalizeStatus = await tryFinalizeSettlement(supabase, source_id, settlement_date);
 
     return NextResponse.json({
       ...data,
-      lineTargets,
-      lineError,
+      finalizeStatus,
       reconciliation: reconcileResult.result,
     });
   }

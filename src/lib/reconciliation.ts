@@ -13,7 +13,7 @@ export interface ReconciliationResult {
 }
 
 // business_date (ISO) 04:00 Bangkok = prev day 21:00 UTC.
-function businessDateToUtcRange(businessDate: string): { startUtc: string; endUtc: string } {
+export function businessDateToUtcRange(businessDate: string): { startUtc: string; endUtc: string } {
   const [y, m, d] = businessDate.split("-").map(Number);
   const prevDay = new Date(Date.UTC(y, m - 1, d) - 86_400_000).toISOString().slice(0, 10);
   return {

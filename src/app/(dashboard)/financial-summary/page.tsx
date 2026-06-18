@@ -48,7 +48,13 @@ type TxRow = {
   staff_name:       string;
   transaction_type: string;
   total_amount:     number | null;
+  raw_message_id:   string | null;
+  source_id?:       string | null;
 };
+
+function validSourceId(sourceId: string | null | undefined): string | null {
+  return sourceId && sourceId !== "unknown" ? sourceId : null;
+}
 
 function buildGroups(rows: TxRow[]): GroupRow[] {
   const map = new Map<string, GroupRow>();
@@ -68,6 +74,16 @@ function buildGroups(rows: TxRow[]): GroupRow[] {
     }
     const g = map.get(key)!;
     addTransactionAmount(g, { transaction_type: r.transaction_type, total_amount: amt });
+
+    const sourceId = validSourceId(r.source_id);
+    if (!sourceId) continue;
+
+    const existing = g.sourceId;
+    if (existing === undefined) {
+      g.sourceId = sourceId;
+    } else if (existing !== sourceId) {
+      g.sourceId = null;
+    }
   }
 
   return Array.from(map.values())
@@ -91,7 +107,7 @@ async function fetchAllTxRows(
   while (true) {
     const { data, error } = await supabase
       .from("produce_transactions")
-      .select("transaction_date, transaction_time, market_name, staff_name, transaction_type, total_amount")
+      .select("transaction_date, transaction_time, market_name, staff_name, transaction_type, total_amount, raw_message_id")
       .gte("transaction_date", from)
       .lt("transaction_date",  toExclusive)
       .in("transaction_type",  KNOWN_TX_TYPES as unknown as string[])
@@ -106,6 +122,32 @@ async function fetchAllTxRows(
   return all;
 }
 
+async function addSourceIds(
+  supabase: Awaited<ReturnType<typeof createServiceClient>>,
+  rows: TxRow[],
+): Promise<TxRow[]> {
+  const rawMessageIds = Array.from(new Set(
+    rows.map(row => row.raw_message_id).filter((id): id is string => Boolean(id)),
+  ));
+  if (rawMessageIds.length === 0) return rows;
+
+  const { data, error } = await supabase
+    .from("raw_messages")
+    .select("id, source_id")
+    .in("id", rawMessageIds);
+
+  if (error) throw new Error(error.message);
+
+  const sourceByRawMessageId = new Map(
+    (data ?? []).map(row => [row.id as string, row.source_id as string | null]),
+  );
+
+  return rows.map(row => ({
+    ...row,
+    source_id: row.raw_message_id ? sourceByRawMessageId.get(row.raw_message_id) ?? null : null,
+  }));
+}
+
 async function getPageData(month: string): Promise<{
   groups:      GroupRow[];
   settlements: SettlementEntry[];
@@ -114,7 +156,7 @@ async function getPageData(month: string): Promise<{
   const { from, toExclusive } = monthDateRange(month);
 
   const [txRows, settlResult] = await Promise.all([
-    fetchAllTxRows(supabase, from, toExclusive),
+    fetchAllTxRows(supabase, from, toExclusive).then(rows => addSourceIds(supabase, rows)),
     supabase
       .from("settlement_entries")
       .select("settlement_date, settlement_time, staff_name, market_name, money_transfer, money_cash, expenses, labor")

@@ -5,14 +5,15 @@ import { calculateSettlementTotals } from "@/lib/summary/transactions";
 import { displayMarketName } from "@/lib/market";
 
 export interface GroupRow {
-  date:    string;
-  time:    string | null;
-  seller:  string;
-  market:  string;
-  เบิก:    number;
-  คืน:     number;
-  คืนเสีย: number;
-  ยอดส่ง:  number;
+  date:     string;
+  time:     string | null;
+  seller:   string;
+  market:   string;
+  sourceId?: string | null;
+  เบิก:     number;
+  คืน:      number;
+  คืนเสีย:  number;
+  ยอดส่ง:   number;
 }
 
 export interface SettlementEntry {
@@ -155,6 +156,7 @@ export function FinancialTable({
           money_cash:      cur.money_cash,
           expenses:        cur.expenses,
           labor:           cur.labor,
+          ...(group.sourceId ? { source_id: group.sourceId } : {}),
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);

@@ -15,6 +15,7 @@ interface InitialValues {
   date:          string;
   market:        string;
   seller:        string;
+  sourceId?:     string;
   moneyTransfer: number;
   moneyCash:     number;
   expenses:      number;
@@ -69,6 +70,14 @@ export function SettlementForm({ initial }: { initial?: Partial<InitialValues> }
     if (!date) { setSaveMsg("กรุณาเลือกวันที่"); setSaveStatus("error"); return; }
     setSaveMsg("");
     setSaveStatus("idle");
+    const sourceId =
+      initial?.sourceId &&
+      date === initial.date &&
+      market === initial.market &&
+      seller === initial.seller
+        ? initial.sourceId
+        : undefined;
+
     startSave(async () => {
       const res = await fetch("/api/settlement", {
         method:  "POST",
@@ -84,6 +93,7 @@ export function SettlementForm({ initial }: { initial?: Partial<InitialValues> }
           labor,
           notes,
           notify_line:     true,
+          ...(sourceId ? { source_id: sourceId } : {}),
         }),
       });
       const json = await res.json() as { error?: string; lineError?: string | null; lineTargets?: number };

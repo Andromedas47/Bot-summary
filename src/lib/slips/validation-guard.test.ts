@@ -306,6 +306,49 @@ describe("date guard", () => {
     expect(flag.flagged).toBe(false);
   });
 
+  it("batch input date 17/6/2569 matches Thai short Buddhist year slip date 17 มิ.ย. 69", () => {
+    const tx = parseSlipExtraction({
+      slip_type: "BANK_SLIP_QR",
+      gross_amount: null,
+      discount_amount: null,
+      paid_amount: null,
+      transfer_amount: 130,
+      reference_id: "016168181620CTF05042",
+      transaction_time: "17 มิ.ย. 69 18:16",
+      sender_name: null,
+      receiver_name: "shop",
+      receiver_account_tail: "1234",
+      confidence: 0.96,
+    }).transactionTime;
+    expect(tx).toBe("2026-06-17T11:16:00.000Z");
+
+    const ev = makeExtractedWithTime(130, tx);
+    const [flag] = computeValidationFlags([ev], parseBatchDate("17/6/2569"));
+    expect(flag.flagged).toBe(false);
+  });
+
+  it("keeps genuinely wrong Thai short Buddhist year dates flagged", () => {
+    const tx = parseSlipExtraction({
+      slip_type: "BANK_SLIP_QR",
+      gross_amount: null,
+      discount_amount: null,
+      paid_amount: null,
+      transfer_amount: 130,
+      reference_id: "016168181620CTF05042",
+      transaction_time: "17 มิ.ย. 68 18:16",
+      sender_name: null,
+      receiver_name: "shop",
+      receiver_account_tail: "1234",
+      confidence: 0.96,
+    }).transactionTime;
+    expect(tx).toBe("2025-06-17T11:16:00.000Z");
+
+    const ev = makeExtractedWithTime(130, tx);
+    const [flag] = computeValidationFlags([ev], parseBatchDate("17/6/2569"));
+    expect(flag.flagged).toBe(true);
+    expect(flag.flagReasons).toContain("วันที่รายการไม่ตรงกับรอบ");
+  });
+
   it("batch input date 15/6/2026 matches compact Bangkok transaction time on 2026-06-15", () => {
     const tx = parseSlipExtraction({
       slip_type: "GWALLET",

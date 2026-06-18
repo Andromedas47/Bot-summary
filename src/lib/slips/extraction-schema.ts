@@ -200,7 +200,7 @@ const THAI_MONTHS: Record<string, number> = {
 function normalizeVisibleThaiTimestamp(text: string): string {
   const trimmed = text.trim();
 
-  const thaiMonthMatch = /^(\d{1,2})\s+([\u0E00-\u0E7F.]+)\s+(\d{4})(?:\s+(\d{1,2})(?::?(\d{2}))?(?::?(\d{2}))?\s*(?:น\.?)?)?$/.exec(trimmed);
+  const thaiMonthMatch = /^(\d{1,2})\s+([\u0E00-\u0E7F.]+)\s+(\d{2}|\d{4})(?:\s+(\d{1,2})(?::?(\d{2}))?(?::?(\d{2}))?\s*(?:น\.?)?)?$/.exec(trimmed);
   if (thaiMonthMatch) {
     const day = parseInt(thaiMonthMatch[1], 10);
     const month = THAI_MONTHS[thaiMonthMatch[2]];
@@ -236,7 +236,8 @@ function normalizeVisibleThaiTimestamp(text: string): string {
 }
 
 function normalizeThaiYear(year: number): number {
-  return year > 2400 ? year - 543 : year;
+  const fullYear = year < 100 ? year + 2500 : year;
+  return fullYear > 2400 ? fullYear - 543 : fullYear;
 }
 
 function isValidDateTimeParts(

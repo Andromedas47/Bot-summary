@@ -81,4 +81,22 @@ describe("slip extraction validation", () => {
 
     expect(extraction.transactionTime).toBe("2026-06-15T03:54:00.000Z");
   });
+
+  it("parses Thai month text with short Buddhist year to Gregorian timestamp", () => {
+    const extraction = parseSlipExtraction({
+      slip_type: "BANK_SLIP_QR",
+      gross_amount: null,
+      discount_amount: null,
+      paid_amount: null,
+      transfer_amount: 130,
+      reference_id: "016168181620CTF05042",
+      transaction_time: "17 มิ.ย. 69 18:16",
+      sender_name: null,
+      receiver_name: "ร้านค้า",
+      receiver_account_tail: "1234",
+      confidence: 0.96,
+    });
+
+    expect(extraction.transactionTime).toBe("2026-06-17T11:16:00.000Z");
+  });
 });

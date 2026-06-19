@@ -256,8 +256,14 @@ export class WebhookService {
     // Regex has no ^ anchor — matches even with a sender-name prefix on the line.
     const manualOpenMatch = RE.MANUAL_SLIP_OPEN.exec(text);
     if (manualOpenMatch) {
+      // Extract market label: text on the same line before ส่งสลิปมือ.
+      const matchStart  = manualOpenMatch.index;
+      const lineStart   = text.lastIndexOf("\n", matchStart - 1) + 1;
+      const labelRaw    = text.slice(lineStart, matchStart).trim();
+      const marketLabel = labelRaw || null;
+      const marketKey   = labelRaw.toLowerCase().trim() || "default";
       return this.processManualSlipOpen(
-        msgEvent, manualOpenMatch[1], text, message.id, eventId, event.type, log,
+        msgEvent, manualOpenMatch[1], marketLabel, marketKey, text, message.id, eventId, event.type, log,
       );
     }
 
@@ -429,6 +435,8 @@ export class WebhookService {
   private async processManualSlipOpen(
     event:         LineMessageEvent,
     dateStr:       string,
+    marketLabel:   string | null,
+    marketKey:     string,
     fullText:      string,
     lineMessageId: string,
     eventId:       string,
@@ -438,6 +446,7 @@ export class WebhookService {
     const sourceId    = getSourceId(event.source);
     const lineUserId  = getUserId(event.source);
     const replyToken  = event.replyToken;
+    const labelDisplay = marketLabel ?? "ไม่ระบุ";
 
     // Parse Buddhist date from captured string e.g. "17/06/2569"
     const parts = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/((?:25)?\d{2})$/);
@@ -450,56 +459,68 @@ export class WebhookService {
     }
     const businessDate = parseBuddhistDate(parts[1], parts[2], parts[3]);
 
-    log.info("manual slip open command", { sourceId, businessDate });
+    log.info("manual slip open command", { sourceId, businessDate, marketKey });
 
     try {
       const svc    = new ManualSlipSessionService(this.supabase);
-      const result = await svc.openSession({ sourceId, businessDate, lineUserId, lineMessageId });
+      const result = await svc.openSession({ sourceId, businessDate, marketKey, marketLabel, lineUserId, lineMessageId });
 
       if (!result.opened) {
-        log.info("manual slip open: session already exists", { sourceId, businessDate });
-        if (replyToken) {
-          await this.replyMessage(
-            replyToken,
-            `มีสลิปมือสำหรับวันที่ ${dateStr} อยู่แล้ว ไม่สามารถเปิดซ้ำได้`,
-          );
+        if (result.reason === "other_market_open") {
+          // Another market's session is still open — block with clear message.
+          const existingLabel = result.session?.market_label ?? result.session?.market_key ?? "ไม่ทราบ";
+          log.info("manual slip open: blocked by other open session", { sourceId, existingLabel });
+          if (replyToken) {
+            await this.replyMessage(
+              replyToken,
+              `ยังมีสลิปมือของ ${existingLabel} ที่ยังไม่จบ กรุณาพิมพ์ จบสลิปมือ ก่อนเปิดตลาดใหม่`,
+            );
+          }
+          return { eventId, eventType, status: "saved", parsed: false };
         }
+
+        // reason === "same_market_exists"
+        const session = result.session!;
+        log.info("manual slip open: session already exists", { sourceId, businessDate, marketKey, status: session.status });
+
+        if (session.status !== "open") {
+          // Closed session — can't reopen.
+          if (replyToken) {
+            await this.replyMessage(
+              replyToken,
+              `มีสลิปมือสำหรับวันที่ ${dateStr} ของ ${labelDisplay} อยู่แล้ว (ปิดแล้ว)`,
+            );
+          }
+          return { eventId, eventType, status: "saved", parsed: false };
+        }
+
+        // Existing open session — if this message carries amounts/close, reuse it.
+        const { amounts, hasClose } = this.extractBatchLines(fullText);
+        if (amounts.length === 0 && !hasClose) {
+          if (replyToken) {
+            await this.replyMessage(
+              replyToken,
+              `มีสลิปมือสำหรับวันที่ ${dateStr} ของ ${labelDisplay} อยู่แล้ว`,
+            );
+          }
+          return { eventId, eventType, status: "saved", parsed: false };
+        }
+
+        log.info("manual slip open: reusing existing open session", { sessionId: session.id });
+        await this.processSessionBatch(
+          svc, session.id, dateStr, amounts, hasClose,
+          sourceId, businessDate, lineMessageId, lineUserId, replyToken, false, log,
+        );
         return { eventId, eventType, status: "saved", parsed: false };
       }
 
-      const sessionId = result.session!.id as string;
-
-      // Detect batch: parse lines after the open command for amounts and/or close.
-      const lines    = fullText.split("\n");
-      const openIdx  = lines.findIndex(l => RE.MANUAL_SLIP_OPEN.test(l));
-      const afterLines = openIdx >= 0 ? lines.slice(openIdx + 1) : [];
-      const amounts  = parseManualSlipAmounts(afterLines.join("\n"));
-      const hasClose = afterLines.some(l => RE.MANUAL_SLIP_CLOSE.test(l.trim()));
-
-      if (amounts.length > 0) {
-        await svc.appendEntries({ sessionId, entries: amounts, lineMessageId, lineUserId });
-      }
-
-      if (hasClose) {
-        const { total } = await svc.closeSession({ sessionId, lineUserId, lineMessageId });
-        if (replyToken) {
-          await this.replyMessage(
-            replyToken,
-            `จบสลิปมือ ${dateStr} แล้ว\nรับ ${amounts.length} รายการ รวม ${total.toLocaleString("th-TH")} บาท`,
-          );
-        }
-        log.info("manual slip batch completed", { sessionId, total });
-        tryFinalizeSettlement(this.supabase, sourceId, businessDate).catch(
-          (err) => log.warn("tryFinalizeSettlement failed", { reason: err instanceof Error ? err.message : String(err) }),
+      // New session successfully opened.
+      const { amounts, hasClose } = this.extractBatchLines(fullText);
+      if (amounts.length > 0 || hasClose) {
+        await this.processSessionBatch(
+          svc, result.session!.id as string, dateStr, amounts, hasClose,
+          sourceId, businessDate, lineMessageId, lineUserId, replyToken, true, log,
         );
-      } else if (amounts.length > 0) {
-        const runTotal = amounts.reduce((s, a) => s + a.amount, 0);
-        if (replyToken) {
-          await this.replyMessage(
-            replyToken,
-            `เปิดสลิปมือ ${dateStr} แล้ว\nรับ ${amounts.length} รายการ รวม ${runTotal.toLocaleString("th-TH")} บาท\nพิมพ์ จบสลิปมือ เมื่อส่งครบ`,
-          );
-        }
       } else {
         if (replyToken) {
           await this.replyMessage(
@@ -518,6 +539,63 @@ export class WebhookService {
         } catch { /* ignore reply error */ }
       }
       return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
+    }
+  }
+
+  // Lines in fullText after the open-command line, parsed for amounts + close flag.
+  private extractBatchLines(fullText: string): {
+    amounts:  Array<{ rawLine: string; amount: number }>;
+    hasClose: boolean;
+  } {
+    const lines   = fullText.split("\n");
+    const openIdx = lines.findIndex(l => RE.MANUAL_SLIP_OPEN.test(l));
+    const after   = openIdx >= 0 ? lines.slice(openIdx + 1) : [];
+    return {
+      amounts:  parseManualSlipAmounts(after.join("\n")),
+      hasClose: after.some(l => RE.MANUAL_SLIP_CLOSE.test(l.trim())),
+    };
+  }
+
+  // Append amounts + close if requested, then send the reply.
+  // isNew: include "เปิดสลิปมือ…" prefix in the partial-amounts reply.
+  private async processSessionBatch(
+    svc:           ManualSlipSessionService,
+    sessionId:     string,
+    dateStr:       string,
+    amounts:       Array<{ rawLine: string; amount: number }>,
+    hasClose:      boolean,
+    sourceId:      string,
+    businessDate:  string,
+    lineMessageId: string,
+    lineUserId:    string | null,
+    replyToken:    string | undefined,
+    isNew:         boolean,
+    log:           ChildLogger,
+  ): Promise<void> {
+    if (amounts.length > 0) {
+      await svc.appendEntries({ sessionId, entries: amounts, lineMessageId, lineUserId });
+    }
+    if (hasClose) {
+      const { total } = await svc.closeSession({ sessionId, lineUserId, lineMessageId });
+      if (replyToken) {
+        await this.replyMessage(
+          replyToken,
+          `จบสลิปมือ ${dateStr} แล้ว\nรับ ${amounts.length} รายการ รวม ${total.toLocaleString("th-TH")} บาท`,
+        );
+      }
+      log.info("manual slip batch completed", { sessionId, total });
+      tryFinalizeSettlement(this.supabase, sourceId, businessDate).catch(
+        (err) => log.warn("tryFinalizeSettlement failed", { reason: err instanceof Error ? err.message : String(err) }),
+      );
+    } else if (amounts.length > 0) {
+      const runTotal = amounts.reduce((s, a) => s + a.amount, 0);
+      if (replyToken) {
+        const prefix = isNew ? `เปิดสลิปมือ ${dateStr} แล้ว\n` : "";
+        await this.replyMessage(
+          replyToken,
+          `${prefix}รับ ${amounts.length} รายการ รวม ${runTotal.toLocaleString("th-TH")} บาท\nพิมพ์ จบสลิปมือ เมื่อส่งครบ`,
+        );
+      }
     }
   }
 
@@ -556,11 +634,12 @@ export class WebhookService {
         return { eventId, eventType, status: "saved", parsed: false };
       }
 
-      const dateStr = session.business_date;
+      const dateStr   = session.business_date;
+      const labelPart = session.market_label ? ` (${session.market_label})` : "";
       if (replyToken) {
         await this.replyMessage(
           replyToken,
-          `จบสลิปมือ ${dateStr} แล้ว\nยอดรวมสลิปมือ: ${total.toLocaleString("th-TH")} บาท`,
+          `จบสลิปมือ ${dateStr}${labelPart} แล้ว\nยอดรวมสลิปมือ: ${total.toLocaleString("th-TH")} บาท`,
         );
       }
       log.info("manual slip session closed", { sessionId: session.id, total });

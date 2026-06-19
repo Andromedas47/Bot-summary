@@ -328,6 +328,8 @@ export interface Database {
           id:                      string;
           source_id:               string;
           business_date:           string;
+          market_label:            string | null;
+          market_key:              string;
           status:                  ManualSlipSessionStatus;
           opened_at:               string;
           closed_at:               string | null;
@@ -340,6 +342,8 @@ export interface Database {
           id?:                      string;
           source_id:                string;
           business_date:            string;
+          market_label?:            string | null;
+          market_key?:              string;
           status?:                  ManualSlipSessionStatus;
           opened_at?:               string;
           closed_at?:               string | null;
@@ -352,6 +356,8 @@ export interface Database {
           id?:                      string;
           source_id?:               string;
           business_date?:           string;
+          market_label?:            string | null;
+          market_key?:              string;
           status?:                  ManualSlipSessionStatus;
           opened_at?:               string;
           closed_at?:               string | null;

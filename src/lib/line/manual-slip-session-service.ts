@@ -8,17 +8,18 @@ export type { ManualSlipSessionRow };
 export class ManualSlipSessionService {
   constructor(private readonly supabase: Supabase) {}
 
-  async findSession(sourceId: string, businessDate: string): Promise<ManualSlipSessionRow | null> {
+  async findSession(sourceId: string, businessDate: string, marketKey: string): Promise<ManualSlipSessionRow | null> {
     const { data } = await this.supabase
       .from("manual_slip_sessions")
       .select("*")
       .eq("source_id", sourceId)
       .eq("business_date", businessDate)
+      .eq("market_key", marketKey)
       .maybeSingle();
     return data;
   }
 
-  // Returns null if no open session exists for this source.
+  // Returns the single open session for this source, if any.
   async findOpenSession(sourceId: string): Promise<ManualSlipSessionRow | null> {
     const { data } = await this.supabase
       .from("manual_slip_sessions")
@@ -30,21 +31,38 @@ export class ManualSlipSessionService {
   }
 
   async openSession(params: {
-    sourceId:        string;
-    businessDate:    string;
-    lineUserId:      string | null;
-    lineMessageId:   string;
-  }): Promise<{ opened: boolean; session: ManualSlipSessionRow | null; reason?: string }> {
-    const existing = await this.findSession(params.sourceId, params.businessDate);
+    sourceId:       string;
+    businessDate:   string;
+    marketKey:      string;
+    marketLabel:    string | null;
+    lineUserId:     string | null;
+    lineMessageId:  string;
+  }): Promise<{
+    opened:  boolean;
+    session: ManualSlipSessionRow | null;
+    reason?: "same_market_exists" | "other_market_open";
+  }> {
+    // 1. Same market + date already has a session (open or closed)?
+    const existing = await this.findSession(params.sourceId, params.businessDate, params.marketKey);
     if (existing) {
-      return { opened: false, session: existing, reason: "already_exists" };
+      return { opened: false, session: existing, reason: "same_market_exists" };
     }
 
+    // 2. Any other session currently open for this source (different market / date)?
+    //    Enforce max-one-open-at-a-time rule to avoid ambiguous amount routing.
+    const otherOpen = await this.findOpenSession(params.sourceId);
+    if (otherOpen) {
+      return { opened: false, session: otherOpen, reason: "other_market_open" };
+    }
+
+    // 3. All clear — create new session.
     const { data, error } = await this.supabase
       .from("manual_slip_sessions")
       .insert({
         source_id:               params.sourceId,
         business_date:           params.businessDate,
+        market_key:              params.marketKey,
+        market_label:            params.marketLabel,
         status:                  "open",
         opened_by_line_user_id:  params.lineUserId,
         opened_line_message_id:  params.lineMessageId,
@@ -68,10 +86,10 @@ export class ManualSlipSessionService {
   }
 
   async appendEntries(params: {
-    sessionId:       string;
-    entries:         Array<{ rawLine: string; amount: number }>;
-    lineMessageId:   string;
-    lineUserId:      string | null;
+    sessionId:      string;
+    entries:        Array<{ rawLine: string; amount: number }>;
+    lineMessageId:  string;
+    lineUserId:     string | null;
   }): Promise<void> {
     // Re-delivery check: if entries for this line_message_id already exist, skip.
     const { data: existing } = await this.supabase

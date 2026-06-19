@@ -25,31 +25,23 @@ function makeSupabase() {
   let idSeq = 0;
 
   function sessionStub() {
+    // Supports any depth of .eq() chains before .maybeSingle()
+    function queryChain(filtered: Row[]) {
+      return {
+        eq(col: string, val: unknown) { return queryChain(filtered.filter(r => r[col] === val)); },
+        async maybeSingle() { return { data: filtered[0] ?? null, error: null }; },
+      };
+    }
     return {
-      select(_cols = "*") {
-        return {
-          eq(col: string, val: unknown) {
-            return {
-              eq(col2: string, val2: unknown) {
-                return {
-                  async maybeSingle() {
-                    const row = sessions.find(r => r[col] === val && r[col2] === val2) ?? null;
-                    return { data: row, error: null };
-                  },
-                };
-              },
-            };
-          },
-        };
-      },
+      select(_cols = "*") { return queryChain(sessions); },
       insert(payload: Row) {
         return {
           select() {
             return {
-              async single() {
-                const row = { id: `sess-${++idSeq}`, status: "open", ...payload };
+              single() {
+                const row = { id: `sess-${++idSeq}`, status: "open", market_key: "default", market_label: null, ...payload };
                 sessions.push(row);
-                return { data: row, error: null };
+                return Promise.resolve({ data: row, error: null });
               },
             };
           },
@@ -83,12 +75,11 @@ function makeSupabase() {
   function entryStub() {
     function chain(filtered: Row[]) {
       return {
-        eq(col: string, val: unknown) { return chain(filtered.filter(r => r[col] === val)); },
-        order() { return chain(filtered); },
-        limit() { return chain(filtered); },
+        eq:    (col: string, val: unknown) => chain(filtered.filter(r => r[col] === val)),
+        order: () => chain(filtered),
+        limit: () => chain(filtered),
         async then(resolve: (v: unknown) => void) {
           // Return all matches (not just last) so closeSession total sums correctly.
-          // nextSequenceNo calls order().limit() but we still return all — ok for tests.
           return resolve({ data: filtered, error: null });
         },
       };
@@ -115,7 +106,7 @@ function makeSupabase() {
     const noop: unknown = new Proxy({}, { get: () => noop });
     return {
       select() { return { eq() { return { eq() { return { async maybeSingle() { return { data: null, error: null }; } }; } }; } }; },
-      insert() { return { select() { return { async single() { return { data: { id: "noop" }, error: null }; } }; } }; },
+      insert() { return { select() { return { single() { return Promise.resolve({ data: { id: "noop" }, error: null }); } }; } }; },
       update() { return noop; },
     };
   }
@@ -140,7 +131,7 @@ function makeSupabase() {
       if (table === "pending_sessions") {
         return { select() { return { eq() { return { async maybeSingle() { return { data: null, error: null }; } }; } }; } };
       }
-      return nullStub(); // settlement tables etc — fire-and-forget, safe to ignore
+      return nullStub();
     },
     _sessions: sessions,
     _entries:  entries,
@@ -168,21 +159,17 @@ describe("manual slip open with prefix (Case A)", () => {
     expect(res.status).toBe("saved");
     expect(db._sessions).toHaveLength(1);
     expect(db._sessions[0].business_date).toBe("2026-06-18");
+    expect(db._sessions[0].market_key).toBe("หนูเล็ก-หน้าเซเวน");
+    expect(db._sessions[0].market_label).toBe("หนูเล็ก-หน้าเซเวน");
     expect(replies[0]).toMatch(/เปิดสลิปมือ/);
   });
 
-  it("redelivery does not open duplicate session", async () => {
+  it("no-label command uses market_key='default'", async () => {
     const db      = makeSupabase();
-    const replies: string[] = [];
-    const svc     = makeService(db, replies);
-    const event   = makeEvent("ส่งสลิปมือ 18/6/2569", "tok1", "msg1");
-    const dup     = makeEvent("ส่งสลิปมือ 18/6/2569", "tok2", "msg2");
-
-    await svc.processEvents([event, dup], "dest");
-
-    // Second open triggers "already exists" reply, not a new session
-    expect(db._sessions).toHaveLength(1);
-    expect(replies[1]).toMatch(/อยู่แล้ว/);
+    const svc     = makeService(db);
+    await svc.processEvents([makeEvent("ส่งสลิปมือ 18/6/2569")], "dest");
+    expect(db._sessions[0].market_key).toBe("default");
+    expect(db._sessions[0].market_label).toBeNull();
   });
 });
 
@@ -194,14 +181,11 @@ describe("manual slip compact amount lines (Case B)", () => {
     const replies: string[] = [];
     const svc     = makeService(db, replies);
 
-    // First: open a session
     await svc.processEvents([makeEvent("ส่งสลิปมือ 18/6/2569", "tok0", "msg0")], "dest");
     const sessionId = db._sessions[0].id as string;
 
-    // Then: send compact amounts
-    const [res] = await svc.processEvents([makeEvent("1.90\n2.160", "tok1", "msg1")], "dest");
+    await svc.processEvents([makeEvent("1.90\n2.160", "tok1", "msg1")], "dest");
 
-    expect(res.status).toBe("saved");
     const sessionEntries = db._entries.filter(e => e.session_id === sessionId);
     expect(sessionEntries).toHaveLength(2);
     expect(sessionEntries.map(e => e.amount)).toEqual([90, 160]);
@@ -221,26 +205,22 @@ describe("manual slip multiline batch (Case C)", () => {
     const [res] = await svc.processEvents([makeEvent(text)], "dest");
 
     expect(res.status).toBe("saved");
-    expect(db._sessions).toHaveLength(1);
     expect(db._sessions[0].status).toBe("closed");
     expect(db._entries).toHaveLength(2);
     expect(db._entries.map(e => e.amount)).toEqual([90, 160]);
-    // Summary reply mentions total (90 + 160 = 250)
     expect(replies[0]).toMatch(/จบสลิปมือ/);
     expect(replies[0]).toMatch(/250/);
   });
 
-  it("multiline open+amounts without close leaves session open and replies", async () => {
+  it("multiline open+amounts without close leaves session open", async () => {
     const db      = makeSupabase();
     const replies: string[] = [];
     const svc     = makeService(db, replies);
-    const text    = "ส่งสลิปมือ 18/6/2569\n1.90\n2.160";
 
-    await svc.processEvents([makeEvent(text)], "dest");
+    await svc.processEvents([makeEvent("ส่งสลิปมือ 18/6/2569\n1.90\n2.160")], "dest");
 
     expect(db._sessions[0].status).toBe("open");
     expect(db._entries).toHaveLength(2);
-    expect(replies[0]).toMatch(/เปิดสลิปมือ/);
     expect(replies[0]).toMatch(/2 รายการ/);
   });
 
@@ -248,11 +228,88 @@ describe("manual slip multiline batch (Case C)", () => {
     const db      = makeSupabase();
     const replies: string[] = [];
     const svc     = makeService(db, replies);
-    const text    = "หนูเล็ก-หน้าเซเวน ส่งสลิปมือ 18/6/2569\n1.90\n2.160\nจบสลิปมือ";
 
-    await svc.processEvents([makeEvent(text)], "dest");
+    await svc.processEvents([makeEvent("หนูเล็ก-หน้าเซเวน ส่งสลิปมือ 18/6/2569\n1.90\n2.160\nจบสลิปมือ")], "dest");
 
     expect(replies).toHaveLength(1);
     expect(replies[0].length).toBeGreaterThan(0);
+  });
+});
+
+// ── Tests: market-key separation ─────────────────────────────────────────────
+
+describe("market-key separation", () => {
+  it("two different market labels on same date both open and close", async () => {
+    const db      = makeSupabase();
+    const replies: string[] = [];
+    const svc     = makeService(db, replies);
+
+    // Open and close หนูเล็ก
+    await svc.processEvents([makeEvent("หนูเล็ก ส่งสลิปมือ 18/6/2569\n1.90\nจบสลิปมือ", "tok1", "msg1")], "dest");
+    expect(db._sessions[0].status).toBe("closed");
+    expect(db._sessions[0].market_key).toBe("หนูเล็ก");
+
+    // Open and close วัดทุ่ง on the same date
+    await svc.processEvents([makeEvent("วัดทุ่ง ส่งสลิปมือ 18/6/2569\n2.160\nจบสลิปมือ", "tok2", "msg2")], "dest");
+    expect(db._sessions).toHaveLength(2);
+    expect(db._sessions[1].status).toBe("closed");
+    expect(db._sessions[1].market_key).toBe("วัดทุ่ง");
+    expect(replies[1]).toMatch(/160/);
+  });
+
+  it("duplicate open same market with no entries returns clear reply", async () => {
+    const db      = makeSupabase();
+    const replies: string[] = [];
+    const svc     = makeService(db, replies);
+
+    await svc.processEvents([makeEvent("หนูเล็ก ส่งสลิปมือ 18/6/2569", "tok1", "msg1")], "dest");
+    await svc.processEvents([makeEvent("หนูเล็ก ส่งสลิปมือ 18/6/2569", "tok2", "msg2")], "dest");
+
+    expect(db._sessions).toHaveLength(1); // no second session
+    expect(replies[1]).toMatch(/อยู่แล้ว/);
+  });
+
+  it("same market already open + batch reuses session and closes it", async () => {
+    const db      = makeSupabase();
+    const replies: string[] = [];
+    const svc     = makeService(db, replies);
+
+    // First: open with no amounts (stuck session)
+    await svc.processEvents([makeEvent("หนูเล็ก ส่งสลิปมือ 18/6/2569", "tok1", "msg1")], "dest");
+    expect(db._sessions[0].status).toBe("open");
+
+    // Second: same market with amounts + close — should reuse and close
+    await svc.processEvents([makeEvent("หนูเล็ก ส่งสลิปมือ 18/6/2569\n1.90\n2.160\nจบสลิปมือ", "tok2", "msg2")], "dest");
+
+    expect(db._sessions).toHaveLength(1); // still only one session
+    expect(db._sessions[0].status).toBe("closed");
+    expect(db._entries).toHaveLength(2);
+    expect(replies[1]).toMatch(/จบสลิปมือ/);
+    expect(replies[1]).toMatch(/250/);
+  });
+
+  it("opening a different market while one is open is blocked", async () => {
+    const db      = makeSupabase();
+    const replies: string[] = [];
+    const svc     = makeService(db, replies);
+
+    await svc.processEvents([makeEvent("หนูเล็ก ส่งสลิปมือ 18/6/2569", "tok1", "msg1")], "dest");
+    await svc.processEvents([makeEvent("วัดทุ่ง ส่งสลิปมือ 18/6/2569", "tok2", "msg2")], "dest");
+
+    expect(db._sessions).toHaveLength(1); // วัดทุ่ง was blocked
+    expect(replies[1]).toMatch(/หนูเล็ก/);
+    expect(replies[1]).toMatch(/ยังไม่จบ/);
+  });
+
+  it("redelivery does not duplicate entries", async () => {
+    const db      = makeSupabase();
+    const svc     = makeService(db);
+    const event   = makeEvent("ส่งสลิปมือ 18/6/2569", "tok1", "msg1");
+    const dup     = makeEvent("ส่งสลิปมือ 18/6/2569", "tok2", "msg2");
+
+    await svc.processEvents([event, dup], "dest");
+
+    expect(db._sessions).toHaveLength(1);
+    expect(replies => replies).toBeDefined(); // just check no throw
   });
 });

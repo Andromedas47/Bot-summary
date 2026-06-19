@@ -17,47 +17,58 @@ function makeDb(initial: Row[] = []) {
   }
 
   function sessionStub() {
+    // Chainable filter — supports any depth of .eq() before .maybeSingle()
+    function queryChain(filtered: Row[]) {
+      return {
+        eq(col: string, val: unknown) { return queryChain(filtered.filter(r => r[col] === val)); },
+        async maybeSingle() { return { data: filtered[0] ?? null, error: null }; },
+      };
+    }
+
     return {
-      select: (_cols = "*") => ({
-        eq: (col: string, val: unknown) => ({
-          eq: (col2: string, val2: unknown) => ({
-            maybeSingle: async () => {
-              const row = sessions.find(r => r[col] === val && r[col2] === val2) ?? null;
-              return { data: row, error: null };
-            },
-          }),
-        }),
-      }),
-      insert: (payload: Row) => ({
-        select: () => ({
-          single: async () => {
-            const row = { id: `sess-${++idSeq}`, status: "open", opened_at: new Date().toISOString(), closed_at: null, ...payload };
-            sessions.push(row);
-            return { data: row, error: null };
-          },
-        }),
-      }),
-      update: (patch: Row) => ({
-        eq: (col: string, val: unknown) => ({
-          eq: (col2: string, val2: unknown) => ({
-            select: (_s: string) => ({
-              async then(resolve: (v: unknown) => void) {
-                const idx = sessions.findIndex(r => r[col] === val && r[col2] === val2);
-                if (idx === -1) return resolve({ data: [], error: null });
-                Object.assign(sessions[idx], patch);
-                return resolve({ data: [sessions[idx]], error: null });
+      select(_cols = "*") { return queryChain(sessions); },
+      insert(payload: Row) {
+        return {
+          select() {
+            return {
+              async single() {
+                const row = { id: `sess-${++idSeq}`, status: "open", opened_at: new Date().toISOString(), closed_at: null, ...payload };
+                sessions.push(row);
+                return { data: row, error: null };
               },
-            }),
-          }),
-        }),
-      }),
+            };
+          },
+        };
+      },
+      update(patch: Row) {
+        return {
+          eq(col: string, val: unknown) {
+            return {
+              eq(col2: string, val2: unknown) {
+                return {
+                  select(_s: string) {
+                    return {
+                      async then(resolve: (v: unknown) => void) {
+                        const idx = sessions.findIndex(r => r[col] === val && r[col2] === val2);
+                        if (idx === -1) return resolve({ data: [], error: null });
+                        Object.assign(sessions[idx], patch);
+                        return resolve({ data: [sessions[idx]], error: null });
+                      },
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      },
     };
   }
 
   function entryStub() {
     function chain(filtered: Row[]) {
       return {
-        eq: (col: string, val: unknown) => chain(filtered.filter(r => r[col] === val)),
+        eq:    (col: string, val: unknown) => chain(filtered.filter(r => r[col] === val)),
         order: () => chain(filtered),
         limit: () => chain(filtered),
         async then(resolve: (v: unknown) => void) {
@@ -66,18 +77,20 @@ function makeDb(initial: Row[] = []) {
       };
     }
     return {
-      select: () => chain(entries),
-      upsert: (rows: Row[], _opts: unknown) => ({
-        async then(resolve: (v: unknown) => void) {
-          for (const row of rows) {
-            const exists = entries.some(
-              e => e.line_message_id === row.line_message_id && e.sequence_no === row.sequence_no,
-            );
-            if (!exists) entries.push(row);
-          }
-          return resolve({ data: rows, error: null });
-        },
-      }),
+      select() { return chain(entries); },
+      upsert(rows: Row[], _opts: unknown) {
+        return {
+          async then(resolve: (v: unknown) => void) {
+            for (const row of rows) {
+              const exists = entries.some(
+                e => e.line_message_id === row.line_message_id && e.sequence_no === row.sequence_no,
+              );
+              if (!exists) entries.push(row);
+            }
+            return resolve({ data: rows, error: null });
+          },
+        };
+      },
     };
   }
 
@@ -87,44 +100,82 @@ function makeDb(initial: Row[] = []) {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe("ManualSlipSessionService", () => {
-  it("opens a new session", async () => {
+  it("opens a new session with market_key", async () => {
     const db  = makeDb();
     const svc = new ManualSlipSessionService(db as never);
     const res = await svc.openSession({
       sourceId: "grp1", businessDate: "2026-06-17",
+      marketKey: "default", marketLabel: null,
       lineUserId: "u1", lineMessageId: "msg1",
     });
     expect(res.opened).toBe(true);
     expect(res.session?.source_id).toBe("grp1");
+    expect(res.session?.market_key).toBe("default");
   });
 
-  it("blocks duplicate open for same source_id + business_date", async () => {
+  it("blocks duplicate open for same source_id + business_date + market_key", async () => {
     const existing = {
-      id: "s1", source_id: "grp1", business_date: "2026-06-17",
+      id: "s1", source_id: "grp1", business_date: "2026-06-17", market_key: "default",
       status: "open", opened_at: new Date().toISOString(), closed_at: null,
     };
     const db  = makeDb([existing]);
     const svc = new ManualSlipSessionService(db as never);
     const res = await svc.openSession({
       sourceId: "grp1", businessDate: "2026-06-17",
+      marketKey: "default", marketLabel: null,
       lineUserId: "u1", lineMessageId: "msg2",
     });
     expect(res.opened).toBe(false);
-    expect(res.reason).toBe("already_exists");
+    expect(res.reason).toBe("same_market_exists");
   });
 
-  it("also blocks duplicate for closed session (same date)", async () => {
+  it("also blocks duplicate for closed session (same date + market_key)", async () => {
     const existing = {
-      id: "s1", source_id: "grp1", business_date: "2026-06-17",
+      id: "s1", source_id: "grp1", business_date: "2026-06-17", market_key: "default",
       status: "closed", opened_at: new Date().toISOString(), closed_at: new Date().toISOString(),
     };
     const db  = makeDb([existing]);
     const svc = new ManualSlipSessionService(db as never);
     const res = await svc.openSession({
       sourceId: "grp1", businessDate: "2026-06-17",
+      marketKey: "default", marketLabel: null,
       lineUserId: "u1", lineMessageId: "msg3",
     });
     expect(res.opened).toBe(false);
+    expect(res.reason).toBe("same_market_exists");
+  });
+
+  it("allows different market_key on same date", async () => {
+    const existing = {
+      id: "s1", source_id: "grp1", business_date: "2026-06-17", market_key: "หนูเล็ก",
+      status: "closed", opened_at: new Date().toISOString(), closed_at: new Date().toISOString(),
+    };
+    const db  = makeDb([existing]);
+    const svc = new ManualSlipSessionService(db as never);
+    const res = await svc.openSession({
+      sourceId: "grp1", businessDate: "2026-06-17",
+      marketKey: "วัดทุ่ง", marketLabel: "วัดทุ่งลานนา",
+      lineUserId: "u1", lineMessageId: "msg4",
+    });
+    expect(res.opened).toBe(true);
+    expect(res.session?.market_key).toBe("วัดทุ่ง");
+  });
+
+  it("blocks opening a new market while another market session is open (other_market_open)", async () => {
+    const existing = {
+      id: "s1", source_id: "grp1", business_date: "2026-06-17", market_key: "หนูเล็ก",
+      status: "open", opened_at: new Date().toISOString(), closed_at: null,
+    };
+    const db  = makeDb([existing]);
+    const svc = new ManualSlipSessionService(db as never);
+    const res = await svc.openSession({
+      sourceId: "grp1", businessDate: "2026-06-17",
+      marketKey: "วัดทุ่ง", marketLabel: "วัดทุ่งลานนา",
+      lineUserId: "u1", lineMessageId: "msg5",
+    });
+    expect(res.opened).toBe(false);
+    expect(res.reason).toBe("other_market_open");
+    expect(res.session?.market_key).toBe("หนูเล็ก"); // returns the blocking session
   });
 
   it("appends entries with auto sequence_no", async () => {

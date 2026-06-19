@@ -1,0 +1,258 @@
+import { describe, expect, it } from "bun:test";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { WebhookService } from "./webhook-service";
+import type { LineMessageEvent } from "./types";
+import type { Database } from "@/types/database";
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function makeEvent(text: string, replyToken = "tok1", messageId = "msg1"): LineMessageEvent {
+  return {
+    type:           "message",
+    webhookEventId: `evt-${messageId}`,
+    timestamp:      Date.now(),
+    replyToken,
+    source:         { type: "user", userId: "u1" },
+    message:        { type: "text", id: messageId, text },
+  } as unknown as LineMessageEvent;
+}
+
+type Row = Record<string, unknown>;
+
+function makeSupabase() {
+  const sessions: Row[] = [];
+  const entries:  Row[] = [];
+  let idSeq = 0;
+
+  function sessionStub() {
+    return {
+      select(_cols = "*") {
+        return {
+          eq(col: string, val: unknown) {
+            return {
+              eq(col2: string, val2: unknown) {
+                return {
+                  async maybeSingle() {
+                    const row = sessions.find(r => r[col] === val && r[col2] === val2) ?? null;
+                    return { data: row, error: null };
+                  },
+                };
+              },
+            };
+          },
+        };
+      },
+      insert(payload: Row) {
+        return {
+          select() {
+            return {
+              async single() {
+                const row = { id: `sess-${++idSeq}`, status: "open", ...payload };
+                sessions.push(row);
+                return { data: row, error: null };
+              },
+            };
+          },
+        };
+      },
+      update(patch: Row) {
+        return {
+          eq(col: string, val: unknown) {
+            return {
+              eq(col2: string, val2: unknown) {
+                return {
+                  select(_s = "") {
+                    return {
+                      async then(resolve: (v: unknown) => void) {
+                        const idx = sessions.findIndex(r => r[col] === val && r[col2] === val2);
+                        if (idx === -1) return resolve({ data: [], error: null });
+                        Object.assign(sessions[idx], patch);
+                        return resolve({ data: [sessions[idx]], error: null });
+                      },
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      },
+    };
+  }
+
+  function entryStub() {
+    function chain(filtered: Row[]) {
+      return {
+        eq(col: string, val: unknown) { return chain(filtered.filter(r => r[col] === val)); },
+        order() { return chain(filtered); },
+        limit() { return chain(filtered); },
+        async then(resolve: (v: unknown) => void) {
+          // Return all matches (not just last) so closeSession total sums correctly.
+          // nextSequenceNo calls order().limit() but we still return all — ok for tests.
+          return resolve({ data: filtered, error: null });
+        },
+      };
+    }
+    return {
+      select() { return chain(entries); },
+      upsert(rows: Row[], _opts: unknown) {
+        return {
+          async then(resolve: (v: unknown) => void) {
+            for (const row of rows) {
+              const exists = entries.some(
+                e => e.line_message_id === row.line_message_id && e.sequence_no === row.sequence_no,
+              );
+              if (!exists) entries.push(row);
+            }
+            return resolve({ data: rows, error: null });
+          },
+        };
+      },
+    };
+  }
+
+  function nullStub() {
+    const noop: unknown = new Proxy({}, { get: () => noop });
+    return {
+      select() { return { eq() { return { eq() { return { async maybeSingle() { return { data: null, error: null }; } }; } }; } }; },
+      insert() { return { select() { return { async single() { return { data: { id: "noop" }, error: null }; } }; } }; },
+      update() { return noop; },
+    };
+  }
+
+  return {
+    from(table: string) {
+      if (table === "raw_messages") {
+        return {
+          insert() {
+            return {
+              select() {
+                return {
+                  single() { return Promise.resolve({ data: { id: `raw-${++idSeq}` }, error: null }); },
+                };
+              },
+            };
+          },
+        };
+      }
+      if (table === "manual_slip_sessions") return sessionStub();
+      if (table === "manual_slip_entries")  return entryStub();
+      if (table === "pending_sessions") {
+        return { select() { return { eq() { return { async maybeSingle() { return { data: null, error: null }; } }; } }; } };
+      }
+      return nullStub(); // settlement tables etc — fire-and-forget, safe to ignore
+    },
+    _sessions: sessions,
+    _entries:  entries,
+  };
+}
+
+function makeService(db: ReturnType<typeof makeSupabase>, replies: string[] = []) {
+  return new WebhookService(db as unknown as SupabaseClient<Database>, {
+    replyMessage: async (_tok, text) => { replies.push(text); },
+    scheduleBackgroundTask: () => {},
+  });
+}
+
+// ── Tests: Case A — sender-name prefix before open command ───────────────────
+
+describe("manual slip open with prefix (Case A)", () => {
+  it("opens session when text is 'หนูเล็ก-หน้าเซเวน ส่งสลิปมือ 18/6/2569'", async () => {
+    const db      = makeSupabase();
+    const replies: string[] = [];
+    const svc     = makeService(db, replies);
+    const event   = makeEvent("หนูเล็ก-หน้าเซเวน ส่งสลิปมือ 18/6/2569");
+
+    const [res] = await svc.processEvents([event], "dest");
+
+    expect(res.status).toBe("saved");
+    expect(db._sessions).toHaveLength(1);
+    expect(db._sessions[0].business_date).toBe("2026-06-18");
+    expect(replies[0]).toMatch(/เปิดสลิปมือ/);
+  });
+
+  it("redelivery does not open duplicate session", async () => {
+    const db      = makeSupabase();
+    const replies: string[] = [];
+    const svc     = makeService(db, replies);
+    const event   = makeEvent("ส่งสลิปมือ 18/6/2569", "tok1", "msg1");
+    const dup     = makeEvent("ส่งสลิปมือ 18/6/2569", "tok2", "msg2");
+
+    await svc.processEvents([event, dup], "dest");
+
+    // Second open triggers "already exists" reply, not a new session
+    expect(db._sessions).toHaveLength(1);
+    expect(replies[1]).toMatch(/อยู่แล้ว/);
+  });
+});
+
+// ── Tests: Case B — compact amount format ────────────────────────────────────
+
+describe("manual slip compact amount lines (Case B)", () => {
+  it("appends entries from compact lines '1.90' and '2.160'", async () => {
+    const db      = makeSupabase();
+    const replies: string[] = [];
+    const svc     = makeService(db, replies);
+
+    // First: open a session
+    await svc.processEvents([makeEvent("ส่งสลิปมือ 18/6/2569", "tok0", "msg0")], "dest");
+    const sessionId = db._sessions[0].id as string;
+
+    // Then: send compact amounts
+    const [res] = await svc.processEvents([makeEvent("1.90\n2.160", "tok1", "msg1")], "dest");
+
+    expect(res.status).toBe("saved");
+    const sessionEntries = db._entries.filter(e => e.session_id === sessionId);
+    expect(sessionEntries).toHaveLength(2);
+    expect(sessionEntries.map(e => e.amount)).toEqual([90, 160]);
+    expect(replies[1]).toMatch(/2 รายการ/);
+  });
+});
+
+// ── Tests: Case C — multiline batch in one message ───────────────────────────
+
+describe("manual slip multiline batch (Case C)", () => {
+  it("opens, adds entries, closes in one message — replies with summary", async () => {
+    const db      = makeSupabase();
+    const replies: string[] = [];
+    const svc     = makeService(db, replies);
+    const text    = "หนูเล็ก-หน้าเซเวน ส่งสลิปมือ 18/6/2569\n1.90\n2.160\nจบสลิปมือ";
+
+    const [res] = await svc.processEvents([makeEvent(text)], "dest");
+
+    expect(res.status).toBe("saved");
+    expect(db._sessions).toHaveLength(1);
+    expect(db._sessions[0].status).toBe("closed");
+    expect(db._entries).toHaveLength(2);
+    expect(db._entries.map(e => e.amount)).toEqual([90, 160]);
+    // Summary reply mentions total (90 + 160 = 250)
+    expect(replies[0]).toMatch(/จบสลิปมือ/);
+    expect(replies[0]).toMatch(/250/);
+  });
+
+  it("multiline open+amounts without close leaves session open and replies", async () => {
+    const db      = makeSupabase();
+    const replies: string[] = [];
+    const svc     = makeService(db, replies);
+    const text    = "ส่งสลิปมือ 18/6/2569\n1.90\n2.160";
+
+    await svc.processEvents([makeEvent(text)], "dest");
+
+    expect(db._sessions[0].status).toBe("open");
+    expect(db._entries).toHaveLength(2);
+    expect(replies[0]).toMatch(/เปิดสลิปมือ/);
+    expect(replies[0]).toMatch(/2 รายการ/);
+  });
+
+  it("never silently fails — always sends a reply", async () => {
+    const db      = makeSupabase();
+    const replies: string[] = [];
+    const svc     = makeService(db, replies);
+    const text    = "หนูเล็ก-หน้าเซเวน ส่งสลิปมือ 18/6/2569\n1.90\n2.160\nจบสลิปมือ";
+
+    await svc.processEvents([makeEvent(text)], "dest");
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0].length).toBeGreaterThan(0);
+  });
+});

@@ -253,10 +253,11 @@ export class WebhookService {
     }
 
     // ── 3.3. Manual slip session commands ────────────────────────────────────
-    const manualOpenMatch = RE.MANUAL_SLIP_OPEN.exec(text.trim());
+    // Regex has no ^ anchor — matches even with a sender-name prefix on the line.
+    const manualOpenMatch = RE.MANUAL_SLIP_OPEN.exec(text);
     if (manualOpenMatch) {
       return this.processManualSlipOpen(
-        msgEvent, manualOpenMatch[1], message.id, eventId, event.type, log,
+        msgEvent, manualOpenMatch[1], text, message.id, eventId, event.type, log,
       );
     }
 
@@ -428,6 +429,7 @@ export class WebhookService {
   private async processManualSlipOpen(
     event:         LineMessageEvent,
     dateStr:       string,
+    fullText:      string,
     lineMessageId: string,
     eventId:       string,
     eventType:     string,
@@ -465,11 +467,46 @@ export class WebhookService {
         return { eventId, eventType, status: "saved", parsed: false };
       }
 
-      if (replyToken) {
-        await this.replyMessage(
-          replyToken,
-          `เปิดสลิปมือ ${dateStr} แล้ว\nส่งจำนวนเงินได้เลย เช่น\n1. 100 บาท\n2. 300 บาท\nพิมพ์ จบสลิปมือ เมื่อส่งครบ`,
+      const sessionId = result.session!.id as string;
+
+      // Detect batch: parse lines after the open command for amounts and/or close.
+      const lines    = fullText.split("\n");
+      const openIdx  = lines.findIndex(l => RE.MANUAL_SLIP_OPEN.test(l));
+      const afterLines = openIdx >= 0 ? lines.slice(openIdx + 1) : [];
+      const amounts  = parseManualSlipAmounts(afterLines.join("\n"));
+      const hasClose = afterLines.some(l => RE.MANUAL_SLIP_CLOSE.test(l.trim()));
+
+      if (amounts.length > 0) {
+        await svc.appendEntries({ sessionId, entries: amounts, lineMessageId, lineUserId });
+      }
+
+      if (hasClose) {
+        const { total } = await svc.closeSession({ sessionId, lineUserId, lineMessageId });
+        if (replyToken) {
+          await this.replyMessage(
+            replyToken,
+            `จบสลิปมือ ${dateStr} แล้ว\nรับ ${amounts.length} รายการ รวม ${total.toLocaleString("th-TH")} บาท`,
+          );
+        }
+        log.info("manual slip batch completed", { sessionId, total });
+        tryFinalizeSettlement(this.supabase, sourceId, businessDate).catch(
+          (err) => log.warn("tryFinalizeSettlement failed", { reason: err instanceof Error ? err.message : String(err) }),
         );
+      } else if (amounts.length > 0) {
+        const runTotal = amounts.reduce((s, a) => s + a.amount, 0);
+        if (replyToken) {
+          await this.replyMessage(
+            replyToken,
+            `เปิดสลิปมือ ${dateStr} แล้ว\nรับ ${amounts.length} รายการ รวม ${runTotal.toLocaleString("th-TH")} บาท\nพิมพ์ จบสลิปมือ เมื่อส่งครบ`,
+          );
+        }
+      } else {
+        if (replyToken) {
+          await this.replyMessage(
+            replyToken,
+            `เปิดสลิปมือ ${dateStr} แล้ว\nส่งจำนวนเงินได้เลย เช่น\n1. 100 บาท\n2. 300 บาท\nพิมพ์ จบสลิปมือ เมื่อส่งครบ`,
+          );
+        }
       }
       return { eventId, eventType, status: "saved", parsed: false };
     } catch (err) {

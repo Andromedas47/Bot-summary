@@ -67,8 +67,9 @@ export const RE = {
   ),
 
   // Manual slip session open: "ส่งสลิปมือ 17/06/2569"
+  // Anchored at ส่งสลิปมือ only — allows arbitrary prefix (e.g. sender name).
   // Captures: [1]=date string (DD/MM/YY or DD/MM/YYYY Buddhist)
-  MANUAL_SLIP_OPEN: /^ส่งสลิปมือ\s+(\d{1,2}\/\d{1,2}\/(?:25)?\d{2})\s*$/,
+  MANUAL_SLIP_OPEN: /ส่งสลิปมือ\s+(\d{1,2}\/\d{1,2}\/(?:25)?\d{2})/,
 
   // Manual slip session close: "จบสลิปมือ"
   MANUAL_SLIP_CLOSE: /^จบสลิปมือ\s*$/,

@@ -50,4 +50,30 @@ describe("parseManualSlipAmounts", () => {
     const result = parseManualSlipAmounts("2) 500 บาท");
     expect(result[0].rawLine).toBe("2) 500 บาท");
   });
+
+  // Compact indexed format: "1.90" = sequence 1, amount 90
+  it("parses compact indexed 1.90 as amount 90", () => {
+    expect(parseManualSlipAmounts("1.90")).toEqual([{ rawLine: "1.90", amount: 90 }]);
+  });
+
+  it("parses compact indexed 2.160 as amount 160", () => {
+    expect(parseManualSlipAmounts("2.160")).toEqual([{ rawLine: "2.160", amount: 160 }]);
+  });
+
+  it("parses compact indexed with บาท: 1.90 บาท → 90", () => {
+    expect(parseManualSlipAmounts("1.90 บาท")).toEqual([{ rawLine: "1.90 บาท", amount: 90 }]);
+  });
+
+  it("parses compact indexed with บาท: 2.160 บาท → 160", () => {
+    expect(parseManualSlipAmounts("2.160 บาท")).toEqual([{ rawLine: "2.160 บาท", amount: 160 }]);
+  });
+
+  it("does NOT treat 100.50 บาท as compact indexed — decimal wins", () => {
+    expect(parseManualSlipAmounts("100.50 บาท")).toEqual([{ rawLine: "100.50 บาท", amount: 100.5 }]);
+  });
+
+  it("parses multiline compact amounts", () => {
+    const result = parseManualSlipAmounts("1.90\n2.160");
+    expect(result.map(r => r.amount)).toEqual([90, 160]);
+  });
 });

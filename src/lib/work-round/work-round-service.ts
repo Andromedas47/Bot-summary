@@ -117,6 +117,19 @@ export class WorkRoundService {
     return { status: "ambiguous", candidates: rounds };
   }
 
+  /** Resolves the Work Round for a standalone "รายการเบิกเพิ่ม" marker. */
+  async resolveProduceAppendTarget(
+    sourceId:     string,
+    businessDate: string,
+  ): Promise<DisambiguationResult> {
+    const rounds = (await this.findOpenRounds(sourceId, businessDate)).filter(
+      (r) => r.seller_name.trim().length > 0 && r.market_name.trim().length > 0,
+    );
+    if (rounds.length === 0) return { status: "none" };
+    if (rounds.length === 1) return { status: "resolved", workRound: rounds[0] };
+    return { status: "ambiguous", candidates: rounds };
+  }
+
   // Returns all rounds for a group+date (any status).
   async findAllRounds(sourceId: string, businessDate: string): Promise<WorkRound[]> {
     const { data } = await this.supabase
@@ -255,5 +268,9 @@ export class WorkRoundService {
       "กรุณาส่งหัวรายการที่ระบุผู้ขายและตลาด เช่น:",
       "กี้-วัดทุ่งลานนา เบิก 24/06/2569",
     ].join("\n");
+  }
+
+  buildNoAppendRoundPrompt(): string {
+    return "ไม่พบรอบเบิกที่ยังเปิดอยู่สำหรับรายการเพิ่ม กรุณาเปิดหัวเบิกใหม่พร้อมชื่อและตลาด";
   }
 }

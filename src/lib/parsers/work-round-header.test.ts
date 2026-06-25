@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { classifyHeader, isIncompleteProduceHeader } from "./work-round-header";
+import { classifyHeader, isIncompleteProduceHeader, isProduceAppendLine } from "./work-round-header";
 
 describe("classifyHeader", () => {
   // ── Explicit headers ───────────────────────────────────────────────────────
@@ -89,6 +89,12 @@ describe("classifyHeader", () => {
     if (h?.type === "generic") expect(h.txIntent).toBe("เบิกเพิ่ม");
   });
 
+  it("classifies 'รายการเบิกเพิ่ม' as generic เบิกเพิ่ม", () => {
+    const h = classifyHeader("รายการเบิกเพิ่ม");
+    expect(h?.type).toBe("generic");
+    if (h?.type === "generic") expect(h.txIntent).toBe("เบิกเพิ่ม");
+  });
+
   // ── Non-headers ────────────────────────────────────────────────────────────
 
   it("returns null for a plain item line", () => {
@@ -105,6 +111,16 @@ describe("classifyHeader", () => {
 
   it("returns null for an empty line", () => {
     expect(classifyHeader("")).toBeNull();
+  });
+});
+
+describe("isProduceAppendLine", () => {
+  it("matches standalone รายการเบิกเพิ่ม", () => {
+    expect(isProduceAppendLine("รายการเบิกเพิ่ม")).toBe(true);
+  });
+
+  it("does not match explicit seller-market headers", () => {
+    expect(isProduceAppendLine("โอม-ตลาดพาซิโอ้ผลไม้ เบิกเพิ่ม")).toBe(false);
   });
 });
 

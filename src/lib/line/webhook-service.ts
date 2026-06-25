@@ -42,7 +42,7 @@ import {
   SETTLEMENT_ELIGIBLE_STATUSES,
   EVIDENCE_ELIGIBLE_STATUSES,
 } from "@/lib/work-round/work-round-service";
-import { classifyHeader, isIncompleteProduceHeader } from "@/lib/parsers/work-round-header";
+import { classifyHeader, isIncompleteProduceHeader, isProduceAppendLine } from "@/lib/parsers/work-round-header";
 import {
   SettlementIntakeService,
   parseSettlementCommand,
@@ -151,11 +151,18 @@ function hasItemLine(text: string): boolean {
 
 // SESSION_END lines like "จบรายการคืน" contain "คืน" which also matches SESSION_START.
 // Skip SESSION_END lines before testing so pure closing messages are never treated as headers.
+// Standalone "รายการเบิกเพิ่ม" is an append marker — not a new session header.
 export function hasSessionStart(text: string): boolean {
   return text.split("\n").some((l) => {
     const line = l.trim();
-    return !RE.SESSION_END.test(line) && RE.SESSION_START.test(line);
+    return !RE.SESSION_END.test(line)
+      && !isProduceAppendLine(line)
+      && RE.SESSION_START.test(line);
   });
+}
+
+export function hasProduceAppendStart(text: string): boolean {
+  return text.split("\n").some((l) => isProduceAppendLine(l.trim()));
 }
 
 // Strip LINE export prefix "HH:MM sender " or "HH.MM sender " from each line so that
@@ -412,6 +419,7 @@ export class WebhookService {
     }
 
     const firstLine = normalizedText.split("\n")[0] ?? "";
+    const appendStart = hasProduceAppendStart(normalizedText);
 
     if (hasSessionStart(normalizedText) && isIncompleteProduceHeader(firstLine)) {
       log.info("incomplete produce header rejected", { sessionKey, firstLine });
@@ -427,7 +435,7 @@ export class WebhookService {
     }
 
     if (pending) {
-      if (hasSessionStart(normalizedText)) {
+      if (hasSessionStart(normalizedText) && !appendStart) {
         const gate = await this.canCollectProduceHeader(firstLine, sessionKey, log);
         if (!gate.ok) {
           await pendingService.delete(sessionKey);
@@ -536,6 +544,40 @@ export class WebhookService {
     }
 
     // ── 5. No active pending session ──────────────────────────────────────────
+    if (appendStart) {
+      const appendGate = await this.canCollectProduceAppend(sessionKey, log);
+      if (!appendGate.ok) {
+        log.info("produce append blocked — no identifiable Work Round", { sessionKey });
+        if (replyToken) await this.replyMessage(replyToken, appendGate.reply);
+        return { eventId, eventType: event.type, status: "saved", parsed: false };
+      }
+
+      if (hasSessionEnd(normalizedText) || hasItemLine(normalizedText)) {
+        log.info("complete produce-append message — parsing directly", { sessionKey });
+        return this.finalizeAccumulated(
+          text,
+          replyToken,
+          lineUserId,
+          rawMessageId,
+          eventId,
+          event.type,
+          log,
+          bangkokTimeFromTimestamp(event.timestamp),
+          sessionKey,
+          bangkokToday(),
+        );
+      }
+
+      log.info("produce append marker — starting pending session", { sessionKey });
+      try {
+        await pendingService.create(sessionKey, text, replyToken, lineUserId);
+      } catch (createErr) {
+        const msg = createErr instanceof Error ? createErr.message : String(createErr);
+        log.error("pending session create failed for produce append", { sessionKey, error: msg });
+      }
+      return { eventId, eventType: event.type, status: "saved", parsed: false };
+    }
+
     if (hasSessionStart(normalizedText)) {
       if (hasSessionEnd(normalizedText) || hasItemLine(normalizedText)) {
         // Complete single-message: has SESSION_END or item lines → parse directly
@@ -1285,6 +1327,38 @@ export class WebhookService {
     }
   }
 
+  private async canCollectProduceAppend(
+    sessionKey: string,
+    log:        ChildLogger,
+  ): Promise<{ ok: true } | { ok: false; reply: string }> {
+    try {
+      const wrs    = new WorkRoundService(this.supabase);
+      const result = await wrs.resolveProduceAppendTarget(sessionKey, bangkokToday());
+      if (result.status === "none") {
+        log.info("produce append: no identifiable open Work Round", { sessionKey });
+        return { ok: false, reply: wrs.buildNoAppendRoundPrompt() };
+      }
+      if (result.status === "ambiguous") {
+        log.info("produce append: ambiguous Work Rounds", {
+          sessionKey, count: result.candidates.length,
+        });
+        return { ok: false, reply: wrs.buildDisambiguationPrompt(result.candidates) };
+      }
+      log.info("produce append: resolved to Work Round", {
+        sessionKey, workRoundId: result.workRound.id,
+      });
+      return { ok: true };
+    } catch (wrErr) {
+      log.warn("produce append Work Round lookup failed", {
+        error: wrErr instanceof Error ? wrErr.message : String(wrErr),
+      });
+      return {
+        ok:    false,
+        reply: new WorkRoundService(this.supabase).buildNoAppendRoundPrompt(),
+      };
+    }
+  }
+
   private async finalizePendingSession(
     pendingService:   PendingSessionService,
     updated:          import("@/lib/line/pending-session-service").PendingSession,
@@ -1308,12 +1382,33 @@ export class WebhookService {
     }
 
     let finalText = updated.accumulated_text;
+    const fallbackTime = bangkokTimeFromTimestamp(new Date(updated.created_at).getTime());
+    const accumulatedItemCount = parseWeighSession(
+      updated.accumulated_text,
+      bangkokToday(),
+      fallbackTime,
+    ).items.length;
+
     try {
-      finalText = await pendingService.rebuildForFinalization(
+      const rebuilt = await pendingService.rebuildForFinalization(
         sessionKey,
         updated,
         endEventTimestamp,
       );
+      const rebuiltItemCount = parseWeighSession(
+        rebuilt,
+        bangkokToday(),
+        fallbackTime,
+      ).items.length;
+      if (rebuiltItemCount >= accumulatedItemCount) {
+        finalText = rebuilt;
+      } else {
+        log.warn("pending session rebuild dropped items — keeping accumulated buffer", {
+          sessionKey,
+          accumulatedItemCount,
+          rebuiltItemCount,
+        });
+      }
     } catch (rebuildError) {
       log.error("pending session raw-message rebuild failed", {
         sessionKey,
@@ -1321,7 +1416,6 @@ export class WebhookService {
       });
     }
 
-    const fallbackTime = bangkokTimeFromTimestamp(new Date(updated.created_at).getTime());
     const result = await this.finalizeAccumulated(
       finalText,
       updated.latest_reply_token ?? replyToken,
@@ -1915,6 +2009,29 @@ export class WebhookService {
   // A NEW V2 session is NEVER stored with a null work_round_id, blank seller, or
   // generic market — unless the work_rounds table is absent (unmigrated legacy),
   // in which case it falls back to the legacy null-link persist.
+  private async enrichParsedFromWorkRound(
+    parsed:       WeighSession,
+    workRoundId:  string,
+  ): Promise<WeighSession> {
+    const { data } = await this.supabase
+      .from("work_rounds")
+      .select("seller_name, market_name")
+      .eq("id", workRoundId)
+      .maybeSingle();
+
+    if (!data) return parsed;
+
+    const titleHdr = parsed.session_title ? classifyHeader(parsed.session_title) : null;
+    const useRoundMarket = !parsed.session_title?.trim()
+      || titleHdr?.type === "generic";
+
+    return {
+      ...parsed,
+      staff_name:    parsed.staff_name?.trim() ? parsed.staff_name : String(data.seller_name),
+      session_title: useRoundMarket ? String(data.market_name) : parsed.session_title,
+    };
+  }
+
   private async persistProduceGated(params: {
     parsed:          WeighSession;
     accumulatedText: string;
@@ -1948,11 +2065,22 @@ export class WebhookService {
       target = { workRoundId: decision.workRoundId, isAppend: decision.isAppend };
     }
 
+    if (!target.workRoundId) {
+      log.warn("V2 produce blocked: unresolved work_round_id");
+      if (replyToken) {
+        try {
+          await replyLineMessage(replyToken, new WorkRoundService(this.supabase).buildNoRoundPrompt());
+        } catch (e) { log.error("reply failed", { error: String(e) }); }
+      }
+      return { eventId, eventType, status: "saved", parsed: false, pendingSessionClosed: true };
+    }
+
+    const persisted = await this.enrichParsedFromWorkRound(parsed, target.workRoundId);
     // 2. Dedup. Release ghost reservations from old failed inserts.
     const dedup     = new SessionDedupService(this.supabase);
-    let isDuplicate = await dedup.isDuplicate(parsed);
-    if (isDuplicate && !(await dedup.hasPersistedItems(parsed))) {
-      await dedup.release(parsed);
+    let isDuplicate = await dedup.isDuplicate(persisted);
+    if (isDuplicate && !(await dedup.hasPersistedItems(persisted))) {
+      await dedup.release(persisted);
       isDuplicate = false;
     }
     if (isDuplicate) {
@@ -1970,13 +2098,13 @@ export class WebhookService {
       .insert({
         raw_message_id:    rawMessageId,
         line_user_id:      lineUserId ?? undefined,
-        staff_name:        parsed.staff_name,
-        sender_name:       parsed.sender_name      ?? undefined,
-        transaction_time:  parsed.transaction_time ?? undefined,
-        session_date:      parsed.date             ?? undefined,
-        session_title:     parsed.session_title    ?? undefined,
-        total_items:       parsed.items.length,
-        parser_errors:     parsed.parse_errors.length > 0 ? parsed.parse_errors : null,
+        staff_name:        persisted.staff_name,
+        sender_name:       persisted.sender_name      ?? undefined,
+        transaction_time:  persisted.transaction_time ?? undefined,
+        session_date:      persisted.date             ?? undefined,
+        session_title:     persisted.session_title    ?? undefined,
+        total_items:       persisted.items.length,
+        parser_errors:     persisted.parse_errors.length > 0 ? persisted.parse_errors : null,
         work_round_id:     target.workRoundId,
         is_append_session: target.isAppend,
       })
@@ -1986,7 +2114,7 @@ export class WebhookService {
     if (sessionErr) throw new Error(`produce_session insert failed: ${sessionErr.message}`);
 
     try {
-      for (const item of parsed.items) {
+      for (const item of persisted.items) {
         const { error: itemErr } = await this.supabase.from("produce_items").insert({
           session_id:       session.id,
           item_number:      item.item_number,
@@ -1996,7 +2124,7 @@ export class WebhookService {
           unit:             item.unit     ?? undefined,
           section:          item.section,
           transaction_type: item.transaction_type,
-          item_hash:        computeItemHash(parsed, item),
+          item_hash:        computeItemHash(persisted, item),
         });
         if (itemErr) throw new Error(`produce_item insert failed for ${item.product_name}: ${itemErr.message}`);
       }
@@ -2005,7 +2133,7 @@ export class WebhookService {
       throw err;
     }
 
-    const duplicateAfterPersist = await dedup.record(parsed, accumulatedText);
+    const duplicateAfterPersist = await dedup.record(persisted, accumulatedText);
     if (duplicateAfterPersist) {
       await this.supabase.from("produce_sessions").delete().eq("id", session.id);
       log.info("duplicate session recorded concurrently — removed current insert");
@@ -2024,17 +2152,17 @@ export class WebhookService {
     }
 
     await new DailySummaryService(this.supabase).recalculate(
-      parsed.date ?? bangkokToday(),
-      parsed.staff_name,
-      parsed.session_title ?? null,
+      persisted.date ?? bangkokToday(),
+      persisted.staff_name,
+      persisted.session_title ?? null,
     );
 
     log.info("produce session persisted", {
-      items: parsed.items.length, workRoundId: target.workRoundId, isAppend: target.isAppend,
+      items: persisted.items.length, workRoundId: target.workRoundId, isAppend: target.isAppend,
     });
 
     if (replyToken) {
-      const summary = buildWeighSessionSummary(parsed);
+      const summary = buildWeighSessionSummary(persisted);
       try { await replyLineMessage(replyToken, summary); }
       catch (e) { log.error("reply failed", { error: String(e) }); }
     }
@@ -2072,8 +2200,34 @@ export class WebhookService {
 
     const firstLine = normalizeText(accumulatedText).split("\n")[0] ?? "";
     const hdr       = classifyHeader(firstLine);
-    const isAppend  = hdr?.txIntent === "ชั่งคืนเพิ่ม";
+    const isReturnAppend = hdr?.txIntent === "ชั่งคืนเพิ่ม";
+    const isProduceAppend = hdr?.txIntent === "เบิกเพิ่ม";
+    const isAppend  = isReturnAppend || isProduceAppend;
     const wrs       = new WorkRoundService(this.supabase);
+
+    const resolveAppendRound = async (
+      candidates: import("@/lib/work-round/types").WorkRound[],
+    ): Promise<
+      | { kind: "persist"; workRoundId: string; isAppend: boolean }
+      | { kind: "halt"; result: WebhookProcessResult }
+    > => {
+      const eligible = candidates.filter((r) => r.status !== "approved");
+      if (eligible.length === 0) {
+        log.warn("append produce blocked: no non-approved target round", { sourceId, businessDate });
+        if (replyToken) await replyLineMessage(replyToken, "รอบนี้อนุมัติแล้วหรือไม่พบรอบเดิม กรุณาให้ผู้ตรวจสอบเปิดเส้นทางแก้ไขก่อน");
+        return { kind: "halt", result: halt() };
+      }
+      if (eligible.length === 1) {
+        return { kind: "persist", workRoundId: eligible[0].id, isAppend: true };
+      }
+      const selectionCandidates = await wrs.buildCandidates(eligible);
+      await new WorkRoundSelectionService(this.supabase).create({
+        sourceId, lineUserId, businessDate, intent: "produce_attach", candidates: selectionCandidates,
+        payload: { rawMessageId, accumulatedText, isAppend: true, lineUserId },
+      });
+      if (replyToken) await replyLineMessage(replyToken, buildSelectionMessage("produce_attach", selectionCandidates));
+      return { kind: "halt", result: halt() };
+    };
 
     try {
       if (hdr?.type === "explicit") {
@@ -2082,22 +2236,7 @@ export class WebhookService {
           const matched = all.filter(
             (r) => r.seller_name === hdr.sellerName && r.market_name === hdr.marketName,
           );
-          const candidates = matched.filter((r) => r.status !== "approved");
-          if (candidates.length === 0) {
-            log.warn("append produce blocked: no non-approved target round", { sourceId, businessDate });
-            if (replyToken) await replyLineMessage(replyToken, "รอบนี้อนุมัติแล้วหรือไม่พบรอบเดิม กรุณาให้ผู้ตรวจสอบเปิดเส้นทางแก้ไขก่อน");
-            return { kind: "halt", result: halt() };
-          }
-          if (candidates.length === 1) {
-            return { kind: "persist", workRoundId: candidates[0].id, isAppend: true };
-          }
-          const selectionCandidates = await wrs.buildCandidates(candidates);
-          await new WorkRoundSelectionService(this.supabase).create({
-            sourceId, lineUserId, businessDate, intent: "produce_attach", candidates: selectionCandidates,
-            payload: { rawMessageId, accumulatedText, isAppend, lineUserId },
-          });
-          if (replyToken) await replyLineMessage(replyToken, buildSelectionMessage("produce_attach", selectionCandidates));
-          return { kind: "halt", result: halt() };
+          return resolveAppendRound(matched);
         }
 
         // Explicit headers always create/resolve their round (works for everyone).
@@ -2106,7 +2245,26 @@ export class WebhookService {
           sellerName: hdr.sellerName, marketName: hdr.marketName,
           sourceMeta: { rawFirstLine: firstLine },
         });
-        return { kind: "persist", workRoundId: workRound.id, isAppend };
+        return { kind: "persist", workRoundId: workRound.id, isAppend: false };
+      }
+
+      if (isProduceAppend) {
+        const appendTarget = await wrs.resolveProduceAppendTarget(sourceId, businessDate);
+        if (appendTarget.status === "resolved") {
+          return { kind: "persist", workRoundId: appendTarget.workRound.id, isAppend: true };
+        }
+        if (appendTarget.status === "none") {
+          log.warn("produce append finalize: no identifiable open Work Round", { sourceId });
+          if (replyToken) await replyLineMessage(replyToken, wrs.buildNoAppendRoundPrompt());
+          return { kind: "halt", result: halt() };
+        }
+        const selectionCandidates = await wrs.buildCandidates(appendTarget.candidates);
+        await new WorkRoundSelectionService(this.supabase).create({
+          sourceId, lineUserId, businessDate, intent: "produce_attach", candidates: selectionCandidates,
+          payload: { rawMessageId, accumulatedText, isAppend: true, lineUserId },
+        });
+        if (replyToken) await replyLineMessage(replyToken, buildSelectionMessage("produce_attach", selectionCandidates));
+        return { kind: "halt", result: halt() };
       }
 
       // Generic (or unrecognised) header → require a unique open Work Round.

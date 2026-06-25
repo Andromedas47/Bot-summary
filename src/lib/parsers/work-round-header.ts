@@ -99,3 +99,10 @@ export function isIncompleteProduceHeader(line: string): boolean {
   if (GENERIC_HEADER_START.test(content)) return false;
   return INCOMPLETE_SELLER_TX.test(content);
 }
+
+/** Standalone "รายการเบิกเพิ่ม" / "เบิกเพิ่ม" — continues an existing Work Round, not a new header. */
+export function isProduceAppendLine(line: string): boolean {
+  const content = headerContent(line);
+  if (!content || RE.SELLER_MARKET.test(content)) return false;
+  return RE.TX_TYPE_BEIK_PHERM.test(content);
+}

@@ -64,9 +64,14 @@ export default async function SettlementEntryPage({ searchParams }: PageProps) {
       <DashboardTopBar title="รายการส่งเงิน" />
 
       <div className="p-4 sm:p-6">
+        {/* V2 legacy banner — this page will be replaced by /work-rounds */}
+        <div className="mb-4 rounded-md border border-yellow-300 bg-yellow-50 px-4 py-3 text-sm text-yellow-800">
+          <strong>[Legacy]</strong> หน้านี้ใช้งานแบบเก่า (กรอกผู้ขาย/ตลาดด้วยตนเอง)
+          {" "}ในระบบ V2 กรุณาใช้ <a href="/work-rounds" className="underline">Work Rounds</a> แทน
+        </div>
         <Card>
           <CardHeader>
-            <CardTitle>รายการส่งเงิน</CardTitle>
+            <CardTitle>รายการส่งเงิน (Legacy)</CardTitle>
             <p className="text-sm text-slate-500 mt-0.5">
               กรอกยอดโอน เงินสด ค่าใช้จ่าย และค่าแรง แล้วกดบันทึกเพื่อแจ้ง LINE ของกลุ่มนั้น
             </p>

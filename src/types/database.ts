@@ -30,6 +30,12 @@ export type SlipBatchStatus =
   | "collecting" | "closing" | "processing" | "completed" | "review_needed" | "failed";
 export type ManualSlipSessionStatus      = "open" | "closed";
 export type SettlementFinalizationStatus = "pending" | "sending" | "sent" | "failed" | "ambiguous";
+export type WorkRoundStatus =
+  | "open" | "produce_complete" | "awaiting_settlement" | "awaiting_evidence"
+  | "variance_found" | "ready_for_review" | "approved" | "needs_correction";
+export type SettlementDraftStatus =
+  | "pending" | "awaiting_evidence" | "variance_found"
+  | "ready_for_review" | "approved" | "needs_correction";
 
 // ─── Database schema ──────────────────────────────────────────────────
 export interface Database {
@@ -123,43 +129,49 @@ export interface Database {
 
       produce_sessions: {
         Row: {
-          id:               string;
-          raw_message_id:   string;
-          line_user_id:     string | null;
-          staff_name:       string;
-          sender_name:      string | null;
-          transaction_time: string | null;
-          session_date:     string | null;
-          session_title:    string | null;
-          total_items:      number;
-          parser_errors:    Json | null;
-          created_at:       string;
+          id:                string;
+          raw_message_id:    string;
+          line_user_id:      string | null;
+          staff_name:        string;
+          sender_name:       string | null;
+          transaction_time:  string | null;
+          session_date:      string | null;
+          session_title:     string | null;
+          total_items:       number;
+          parser_errors:     Json | null;
+          work_round_id:     string | null;
+          is_append_session: boolean;
+          created_at:        string;
         };
         Insert: {
-          id?:               string;
-          raw_message_id:    string;
-          line_user_id?:     string | null;
-          staff_name:        string;
-          sender_name?:      string | null;
-          transaction_time?: string | null;
-          session_date?:     string | null;
-          session_title?:    string | null;
-          total_items?:      number;
-          parser_errors?:    Json | null;
-          created_at?:       string;
+          id?:                string;
+          raw_message_id:     string;
+          line_user_id?:      string | null;
+          staff_name:         string;
+          sender_name?:       string | null;
+          transaction_time?:  string | null;
+          session_date?:      string | null;
+          session_title?:     string | null;
+          total_items?:       number;
+          parser_errors?:     Json | null;
+          work_round_id?:     string | null;
+          is_append_session?: boolean;
+          created_at?:        string;
         };
         Update: {
-          id?:               string;
-          raw_message_id?:   string;
-          line_user_id?:     string | null;
-          staff_name?:       string;
-          sender_name?:      string | null;
-          transaction_time?: string | null;
-          session_date?:     string | null;
-          session_title?:    string | null;
-          total_items?:      number;
-          parser_errors?:    Json | null;
-          created_at?:       string;
+          id?:                string;
+          raw_message_id?:    string;
+          line_user_id?:      string | null;
+          staff_name?:        string;
+          sender_name?:       string | null;
+          transaction_time?:  string | null;
+          session_date?:      string | null;
+          session_title?:     string | null;
+          total_items?:       number;
+          parser_errors?:     Json | null;
+          work_round_id?:     string | null;
+          is_append_session?: boolean;
+          created_at?:        string;
         };
         Relationships: [];
       };
@@ -680,6 +692,156 @@ export interface Database {
         };
         Relationships: [];
       };
+      // ── V2 tables ────────────────────────────────────────────────────────
+
+      line_groups: {
+        Row: {
+          id:           string;
+          source_id:    string;
+          display_name: string | null;
+          active:       boolean;
+          created_at:   string;
+          updated_at:   string;
+        };
+        Insert: {
+          id?:           string;
+          source_id:     string;
+          display_name?: string | null;
+          active?:       boolean;
+          created_at?:   string;
+          updated_at?:   string;
+        };
+        Update: {
+          id?:           string;
+          source_id?:    string;
+          display_name?: string | null;
+          active?:       boolean;
+          created_at?:   string;
+          updated_at?:   string;
+        };
+        Relationships: [];
+      };
+
+      work_rounds: {
+        Row: {
+          id:            string;
+          source_id:     string;
+          business_date: string;
+          seller_name:   string;
+          market_name:   string;
+          round_seq:     number;
+          status:        WorkRoundStatus;
+          source_meta:   Json | null;
+          created_at:    string;
+          updated_at:    string;
+        };
+        Insert: {
+          id?:            string;
+          source_id:      string;
+          business_date:  string;
+          seller_name:    string;
+          market_name:    string;
+          round_seq?:     number;
+          status?:        WorkRoundStatus;
+          source_meta?:   Json | null;
+          created_at?:    string;
+          updated_at?:    string;
+        };
+        Update: {
+          id?:            string;
+          source_id?:     string;
+          business_date?: string;
+          seller_name?:   string;
+          market_name?:   string;
+          round_seq?:     number;
+          status?:        WorkRoundStatus;
+          source_meta?:   Json | null;
+          created_at?:    string;
+          updated_at?:    string;
+        };
+        Relationships: [];
+      };
+
+      settlement_drafts: {
+        Row: {
+          id:                       string;
+          work_round_id:            string;
+          declared_transfer:        number | null;
+          declared_cash:            number | null;
+          declared_expenses:        number | null;
+          declared_labor:           number | null;
+          notes:                    string | null;
+          status:                   SettlementDraftStatus;
+          declared_by_line_user_id: string | null;
+          declared_via:             "line" | "website";
+          white_bill_ref:           string | null;
+          approved_by:              string | null;
+          approved_at:              string | null;
+          version:                  number;
+          created_at:               string;
+          updated_at:               string;
+        };
+        Insert: {
+          id?:                       string;
+          work_round_id:             string;
+          declared_transfer?:        number | null;
+          declared_cash?:            number | null;
+          declared_expenses?:        number | null;
+          declared_labor?:           number | null;
+          notes?:                    string | null;
+          status?:                   SettlementDraftStatus;
+          declared_by_line_user_id?: string | null;
+          declared_via?:             "line" | "website";
+          white_bill_ref?:           string | null;
+          approved_by?:              string | null;
+          approved_at?:              string | null;
+          version?:                  number;
+          created_at?:               string;
+          updated_at?:               string;
+        };
+        Update: {
+          id?:                       string;
+          work_round_id?:            string;
+          declared_transfer?:        number | null;
+          declared_cash?:            number | null;
+          declared_expenses?:        number | null;
+          declared_labor?:           number | null;
+          notes?:                    string | null;
+          status?:                   SettlementDraftStatus;
+          declared_by_line_user_id?: string | null;
+          declared_via?:             "line" | "website";
+          white_bill_ref?:           string | null;
+          approved_by?:              string | null;
+          approved_at?:              string | null;
+          version?:                  number;
+          created_at?:               string;
+          updated_at?:               string;
+        };
+        Relationships: [];
+      };
+
+      settlement_draft_history: {
+        Row: {
+          id:            string;
+          draft_id:      string;
+          changed_by:    string | null;
+          change_type:   string;
+          previous_data: Json | null;
+          new_data:      Json | null;
+          changed_at:    string;
+        };
+        Insert: {
+          id?:            string;
+          draft_id:       string;
+          changed_by?:    string | null;
+          change_type:    string;
+          previous_data?: Json | null;
+          new_data?:      Json | null;
+          changed_at?:    string;
+        };
+        Update: never;
+        Relationships: [];
+      };
     };
     Views: {
       produce_transactions: {
@@ -761,3 +923,7 @@ export type ManualSlipSessionRow         = Database["public"]["Tables"]["manual_
 export type ManualSlipEntryRow           = Database["public"]["Tables"]["manual_slip_entries"]["Row"];
 export type TransferReconciliationRow      = Database["public"]["Tables"]["transfer_reconciliations"]["Row"];
 export type SettlementFinalizationRow      = Database["public"]["Tables"]["settlement_finalizations"]["Row"];
+export type LineGroupRow                   = Database["public"]["Tables"]["line_groups"]["Row"];
+export type WorkRoundRow                   = Database["public"]["Tables"]["work_rounds"]["Row"];
+export type SettlementDraftRow             = Database["public"]["Tables"]["settlement_drafts"]["Row"];
+export type SettlementDraftHistoryRow      = Database["public"]["Tables"]["settlement_draft_history"]["Row"];

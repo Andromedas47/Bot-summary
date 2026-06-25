@@ -36,6 +36,14 @@ import {
   type SlipSessionIngestor,
   type SlipSessionHeader,
 } from "@/lib/slips/slip-session-service";
+import { WorkRoundService } from "@/lib/work-round/work-round-service";
+import { classifyHeader } from "@/lib/parsers/work-round-header";
+import {
+  SettlementIntakeService,
+  parseSettlementCommand,
+  parseSettlementAmounts,
+  hasAnyAmount,
+} from "@/lib/line/settlement-intake-service";
 
 type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
@@ -252,6 +260,16 @@ export class WebhookService {
       return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
 
+    // ── 3.2. Settlement command (V2) ─────────────────────────────────────────
+    // "ส่งเงิน 24/06/2569" or "ปิดยอด 24/06/2569"
+    // Processed before manual slip commands to avoid confusion with amount lines.
+    const settlementDateStr = parseSettlementCommand(text);
+    if (settlementDateStr !== null) {
+      return this.processSettlementCommand(
+        msgEvent, text, settlementDateStr, eventId, event.type, log,
+      );
+    }
+
     // ── 3.3. Manual slip session commands ────────────────────────────────────
     // Regex has no ^ anchor — matches even with a sender-name prefix on the line.
     const manualOpenMatch = RE.MANUAL_SLIP_OPEN.exec(text);
@@ -382,6 +400,8 @@ export class WebhookService {
           event.type,
           log,
           fallbackTime,
+          sessionKey,
+          bangkokToday(),
         );
         if (result.pendingSessionClosed) {
           await pendingService.delete(sessionKey);
@@ -405,7 +425,39 @@ export class WebhookService {
         // Complete single-message: has SESSION_END or item lines → parse directly
         console.log("single complete message detected — parsing directly");
         log.info("single complete message detected (has SESSION_END or items), parsing directly");
-        return this.runParser(msgEvent, rawMessageId, eventId, event.type, log);
+        return this.runParser(msgEvent, rawMessageId, eventId, event.type, log, sessionKey, bangkokToday());
+      }
+
+      // ── V2: classify header before creating pending session ────────────────
+      // Generic headers require a unique open Work Round; ambiguous → reply & abort.
+      const firstLine  = normalizedText.split("\n")[0] ?? "";
+      const hdrClass   = classifyHeader(firstLine);
+      if (hdrClass?.type === "generic") {
+        try {
+          const wrs    = new WorkRoundService(this.supabase);
+          const result = await wrs.disambiguateGeneric(sessionKey, bangkokToday());
+          if (result.status === "none") {
+            log.info("generic header: no open Work Round — blocking pending session", { sessionKey });
+            if (replyToken) await replyLineMessage(replyToken, wrs.buildNoRoundPrompt());
+            return { eventId, eventType: event.type, status: "saved", parsed: false };
+          }
+          if (result.status === "ambiguous") {
+            log.info("generic header: ambiguous Work Rounds — blocking pending session", {
+              sessionKey, count: result.candidates.length,
+            });
+            if (replyToken) await replyLineMessage(replyToken, wrs.buildDisambiguationPrompt(result.candidates));
+            return { eventId, eventType: event.type, status: "saved", parsed: false };
+          }
+          // Exactly one open Work Round — allow accumulation to proceed.
+          log.info("generic header: resolved to one open Work Round", {
+            sessionKey, workRoundId: result.workRound.id,
+          });
+        } catch (wrErr) {
+          // Work Round table may not exist yet (pending migrations) — fall through.
+          log.warn("Work Round disambiguation failed (may need migration)", {
+            error: wrErr instanceof Error ? wrErr.message : String(wrErr),
+          });
+        }
       }
 
       // Header-only → start accumulating (store raw text so parser sees TIME_PREFIX sender)
@@ -1014,6 +1066,8 @@ export class WebhookService {
     eventType:        string,
     log:              ChildLogger,
     fallbackTime:     string | null = null,
+    sourceId:         string        = "",
+    businessDate:     string        = "",
   ): Promise<WebhookProcessResult> {
     try {
       console.log("[TRACE][finalizeAccumulated] accumulated_text_before_parse:\n" + accumulatedText);
@@ -1141,6 +1195,13 @@ export class WebhookService {
         .update({ is_processed: true })
         .eq("id", rawMessageId);
 
+      // ── V2: resolve Work Round and attach session ──────────────────────────
+      if (sourceId && businessDate) {
+        await this.attachSessionToWorkRound(
+          sourceId, businessDate, session.id, accumulatedText, parsed.staff_name, parsed.session_title, log,
+        );
+      }
+
       log.info("accumulated session finalized", { items: parsed.items.length, staff: parsed.staff_name });
 
       await new DailySummaryService(this.supabase).recalculate(
@@ -1200,6 +1261,8 @@ export class WebhookService {
     eventId:      string,
     eventType:    string,
     log:          ChildLogger,
+    sourceId:     string = "",
+    businessDate: string = "",
   ): Promise<WebhookProcessResult> {
     const parser     = parserRegistry.findParser(msgEvent);
     const replyToken = msgEvent.replyToken;
@@ -1284,6 +1347,23 @@ export class WebhookService {
         .update({ is_processed: true })
         .eq("id", rawMessageId);
 
+      // ── V2: resolve Work Round and attach session ──────────────────────────
+      if (parser.name === "weigh-session" && sourceId && businessDate && result.data) {
+        const ws = result.data as unknown as WeighSession;
+        // Find the session that was just persisted for this raw_message_id.
+        const { data: newSession } = await this.supabase
+          .from("produce_sessions")
+          .select("id")
+          .eq("raw_message_id", rawMessageId)
+          .maybeSingle();
+        if (newSession) {
+          const rawTxt = (msgEvent.message as LineTextMessage).text;
+          await this.attachSessionToWorkRound(
+            sourceId, businessDate, newSession.id as string, rawTxt, ws.staff_name, ws.session_title, log,
+          );
+        }
+      }
+
       log.info("parse succeeded", { parser: parser.name });
 
       if (parser.name === "weigh-session" && result.data) {
@@ -1334,6 +1414,134 @@ export class WebhookService {
       }
 
       return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
+    }
+  }
+
+  // ── V2: LINE-first settlement command ─────────────────────────────────────
+  // Handles "ส่งเงิน 24/06/2569" or "ปิดยอด 24/06/2569".
+  // Opens/finds a settlement draft tied to a Work Round.
+  // Declared amounts may appear in the same message on lines after the command.
+  private async processSettlementCommand(
+    event:        LineMessageEvent,
+    fullText:     string,
+    dateStr:      string,
+    eventId:      string,
+    eventType:    string,
+    log:          ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const sourceId   = getSourceId(event.source);
+    const lineUserId = getUserId(event.source);
+    const replyToken = event.replyToken;
+
+    const parts = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/((?:25)?\d{2})$/);
+    if (!parts) {
+      if (replyToken) await replyLineMessage(replyToken, "รูปแบบวันที่ไม่ถูกต้อง เช่น ส่งเงิน 24/06/2569");
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+    const businessDate = parseBuddhistDate(parts[1], parts[2], parts[3]);
+
+    log.info("settlement command received", { sourceId, businessDate, dateStr });
+
+    try {
+      const svc    = new SettlementIntakeService(this.supabase);
+      const rounds = await svc.findEligibleRounds(sourceId, businessDate);
+
+      if (rounds.length === 0) {
+        if (replyToken) await replyLineMessage(replyToken, svc.buildSelectionPrompt([], dateStr));
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      // Auto-select if exactly one eligible round.
+      // If multiple, for now use the first — a proper selection UI is a future iteration.
+      // ponytail: numbered reply selection is a follow-up; this unblocks the main flow.
+      const round = rounds[0];
+      if (rounds.length > 1) {
+        log.info("multiple eligible rounds for settlement — auto-selecting first", {
+          count: rounds.length, selectedId: round.id,
+        });
+      }
+
+      const { draft } = await svc.openDraft(round.id, lineUserId);
+
+      // Parse amounts from the same message if present.
+      const amounts = parseSettlementAmounts(fullText);
+      if (hasAnyAmount(fullText)) {
+        const updated = await svc.recordDeclared(draft.id, amounts, lineUserId);
+        if (replyToken) await replyLineMessage(replyToken, svc.buildSettlementConfirmReply(updated, round));
+        log.info("settlement draft updated with amounts", { draftId: draft.id, amounts });
+      } else {
+        // Prompt user for amounts.
+        const prompt = [
+          `เปิดรายการส่งเงินสำหรับ ${round.seller_name} — ${round.market_name}`,
+          "ส่งยอดในรูปแบบ:",
+          "โอน 730 สด 1420 ค่าใช้จ่าย 410 ค่าแรง 400",
+        ].join("\n");
+        if (replyToken) await replyLineMessage(replyToken, prompt);
+        log.info("settlement draft opened — waiting for amounts", { draftId: draft.id });
+      }
+      return { eventId, eventType, status: "saved", parsed: false };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("settlement command failed", { error: errorMessage });
+      if (replyToken) {
+        try { await replyLineMessage(replyToken, "เปิดรายการส่งเงินไม่สำเร็จ กรุณาลองอีกครั้ง"); } catch { /* ignore */ }
+      }
+      return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
+    }
+  }
+
+  // ── V2: Attach a produce session to its Work Round ────────────────────────
+  // Classifies the header as explicit or generic, then resolves/finds the round.
+  // Graceful: logs and returns without throwing if the work_rounds table is absent.
+  private async attachSessionToWorkRound(
+    sourceId:     string,
+    businessDate: string,
+    sessionId:    string,
+    headerText:   string,
+    staffName:    string,
+    sessionTitle: string | null,
+    log:          ChildLogger,
+  ): Promise<void> {
+    try {
+      const firstLine = headerText.split("\n")[0] ?? "";
+      const hdrClass  = classifyHeader(firstLine);
+      const wrs       = new WorkRoundService(this.supabase);
+
+      if (hdrClass?.type === "explicit") {
+        // Use parsed seller+market from the header.
+        const isAppend = hdrClass.txIntent === "ชั่งคืนเพิ่ม";
+        const { workRound, created } = await wrs.resolve({
+          sourceId,
+          businessDate,
+          sellerName:  hdrClass.sellerName,
+          marketName:  hdrClass.marketName,
+          sourceMeta:  { rawFirstLine: firstLine },
+        });
+        await wrs.attachProduceSession(workRound.id, sessionId, isAppend);
+        log.info("produce session attached to Work Round", {
+          workRoundId: workRound.id, created, isAppend,
+        });
+      } else {
+        // Generic header — try to find the one open Work Round.
+        const result = await wrs.disambiguateGeneric(sourceId, businessDate);
+        if (result.status === "resolved") {
+          const isAppend = hdrClass?.txIntent === "ชั่งคืนเพิ่ม";
+          await wrs.attachProduceSession(result.workRound.id, sessionId, isAppend);
+          log.info("produce session attached to Work Round (generic)", {
+            workRoundId: result.workRound.id, isAppend,
+          });
+        } else {
+          log.warn("could not resolve Work Round for generic session — session left unattached", {
+            sessionId, disambiguationStatus: result.status,
+          });
+        }
+      }
+    } catch (err) {
+      // Graceful: if work_rounds table doesn't exist yet, don't crash the webhook.
+      log.warn("Work Round attachment skipped", {
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 

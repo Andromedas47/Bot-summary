@@ -343,7 +343,7 @@ describe("WebhookService — space-format items and header-only acknowledgment (
     expect(db._rows("pending_sessions")).toHaveLength(0);
   });
 
-  it("header-only explicit borrow command replies with เปิดรอบเบิกแล้ว after pending session created", async () => {
+  it("header-only explicit borrow command replies with รับหัวเบิกแล้ว after pending session created", async () => {
     const db = memSupabase();
     const replies: string[] = [];
 
@@ -352,10 +352,9 @@ describe("WebhookService — space-format items and header-only acknowledgment (
     ], "dest");
 
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("เปิดรอบเบิกแล้ว");
+    expect(replies[0]).toContain("รับหัวเบิกแล้ว");
     expect(replies[0]).toContain("ทดสอบ");
     expect(replies[0]).toContain("ตลาดทดสอบ");
-    expect(replies[0]).toContain("มิถุนายน 2569");
     expect(db._rows("pending_sessions")).toHaveLength(1);
   });
 
@@ -409,7 +408,116 @@ describe("WebhookService — space-format items and header-only acknowledgment (
     ], "dest");
 
     // Header-only creates a pending session and replies
-    expect(replies.some((r) => r.includes("เปิดรอบเบิกแล้ว"))).toBe(true);
+    expect(replies.some((r) => r.includes("รับหัวเบิกแล้ว"))).toBe(true);
     expect(db._rows("pending_sessions")).toHaveLength(1);
+  });
+});
+
+describe("WebhookService — digit seller name regression (ทดสอบ2 incident)", () => {
+  const HEADER = "ทดสอบ2-ตลาดทดสอบ เบิก 27/6/2569";
+
+  // Test 1 — exact one-message reproduction
+  it("complete one-message batch with digit seller name persists Work Round and item", async () => {
+    const db = memSupabase();
+
+    await svc(db).processEvents([
+      textEvent(`${HEADER}\n1 หมอนทอง 129 บาท\n10 โล\nจบรายการเบิก`, { timestamp: 1000 }),
+    ], "dest");
+
+    expect(db._rows("work_rounds")).toHaveLength(1);
+    expect(db._rows("work_rounds")[0].seller_name).toBe("ทดสอบ2");
+    expect(db._rows("work_rounds")[0].market_name).toBe("ตลาดทดสอบ");
+    expect(db._rows("produce_sessions")).toHaveLength(1);
+    expect(db._rows("produce_items")).toHaveLength(1);
+    expect(db._rows("produce_items")[0].product_name).toBe("หมอนทอง");
+    expect(db._rows("pending_sessions")).toHaveLength(0);
+  });
+
+  // Test 2 — Mode B: header-only → items → close (digit seller name)
+  it("Mode B: header-only → separate items → close creates Work Round and item", async () => {
+    const db = memSupabase();
+    const replies: string[] = [];
+    const s = svc(db, replies);
+
+    await s.processEvents([textEvent(HEADER, { replyToken: "tok-hdr", timestamp: 1000 })], "dest");
+    expect(replies[0]).toContain("รับหัวเบิกแล้ว");
+    expect(db._rows("pending_sessions")).toHaveLength(1);
+
+    await s.processEvents([textEvent("1 หมอนทอง 129 บาท", { timestamp: 2000 })], "dest");
+    await s.processEvents([textEvent("10 โล", { timestamp: 3000 })], "dest");
+    await s.processEvents([textEvent("จบรายการเบิก", { replyToken: "tok-end", timestamp: 4000 })], "dest");
+
+    expect(db._rows("work_rounds")).toHaveLength(1);
+    expect(db._rows("work_rounds")[0].seller_name).toBe("ทดสอบ2");
+    expect(db._rows("produce_items")).toHaveLength(1);
+    expect(db._rows("produce_items")[0].product_name).toBe("หมอนทอง");
+    expect(db._rows("pending_sessions")).toHaveLength(0);
+  });
+
+  // Test 3 — header + complete items in one message, close marker arrives separately
+  it("header + complete items in one message is persisted; separate จบรายการ is a graceful no-op", async () => {
+    const db = memSupabase();
+    const s = svc(db);
+
+    // First message: header + item with price+quantity (complete — no จบรายการ)
+    await s.processEvents([
+      textEvent(`${HEADER}\n1 หมอนทอง 129 บาท\n10 โล`, { timestamp: 1000 }),
+    ], "dest");
+
+    expect(db._rows("produce_items")).toHaveLength(1);
+    expect(db._rows("pending_sessions")).toHaveLength(0);
+
+    // Second message: closing marker arrives after session already finalized
+    await s.processEvents([textEvent("จบรายการเบิก", { timestamp: 2000 })], "dest");
+
+    // No duplicate session or item
+    expect(db._rows("produce_sessions")).toHaveLength(1);
+    expect(db._rows("produce_items")).toHaveLength(1);
+  });
+
+  // Test 4 — malformed complete batch: no partial DB state
+  it("malformed complete batch with no parseable items leaves no Work Round or session", async () => {
+    const db = memSupabase();
+
+    await svc(db).processEvents([
+      textEvent(`${HEADER}\nไม่ใช่รายการ\nจบรายการเบิก`, { replyToken: "tok-bad" }),
+    ], "dest");
+
+    expect(db._rows("work_rounds")).toHaveLength(0);
+    expect(db._rows("pending_sessions")).toHaveLength(0);
+    expect(db._rows("produce_sessions")).toHaveLength(0);
+    expect(db._rows("produce_items")).toHaveLength(0);
+  });
+
+  // Test 5 — webhook retry: no duplicate Work Round / item / reply
+  it("webhook retry on one-message batch does not create duplicate Work Round or produce items", async () => {
+    const db = memSupabase();
+    const s = svc(db);
+    const event = textEvent(`${HEADER}\n1 หมอนทอง 129 บาท\n10 โล\nจบรายการเบิก`, {
+      replyToken: "tok-retry", timestamp: 1000,
+    });
+
+    await s.processEvents([event], "dest");
+    await s.processEvents([event], "dest"); // exact retry — same event object
+
+    expect(db._rows("work_rounds")).toHaveLength(1);
+    expect(db._rows("produce_sessions")).toHaveLength(1);
+    expect(db._rows("produce_items")).toHaveLength(1);
+  });
+
+  // Test 6 — incomplete digit seller header (no market separator) is still rejected
+  it("incomplete header 'ทดสอบ2 เบิก 27/6/2569' without market is rejected before any DB write", async () => {
+    const db = memSupabase();
+    const replies: string[] = [];
+
+    await svc(db, replies).processEvents([
+      textEvent("ทดสอบ2 เบิก 27/6/2569", { replyToken: "tok-inc" }),
+    ], "dest");
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("หัวเบิกยังขาดชื่อตลาด");
+    expect(db._rows("work_rounds")).toHaveLength(0);
+    expect(db._rows("pending_sessions")).toHaveLength(0);
+    expect(db._rows("produce_sessions")).toHaveLength(0);
   });
 });

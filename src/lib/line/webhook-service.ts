@@ -129,27 +129,13 @@ function allowedProduceStatusesForIntent(txIntent: TxIntent): WorkRoundStatus[] 
   return PRODUCE_APPEND_ELIGIBLE_STATUSES;
 }
 
-const THAI_MONTHS = [
-  "มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน",
-  "กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม",
-];
-
 function buildBorrowOpenedReply(firstLine: string): string {
   const hdr    = classifyHeader(firstLine);
   const seller = hdr?.type === "explicit" || hdr?.type === "seller_only" ? hdr.sellerName : "—";
   const market = hdr?.type === "explicit" ? hdr.marketName : "—";
-  const dm     = firstLine.match(RE.DATE_IN_TEXT);
-  let dateStr  = "";
-  if (dm) {
-    const month = parseInt(dm[2], 10);
-    const year  = dm[3].length === 2 ? `25${dm[3]}` : dm[3];
-    dateStr = `${dm[1]} ${THAI_MONTHS[month - 1] ?? ""} ${year}`;
-  }
   return [
-    "เปิดรอบเบิกแล้ว ✅",
+    "รับหัวเบิกแล้ว ✅",
     `${seller} — ${market}`,
-    `วันที่ ${dateStr}`,
-    "",
     "ส่งรายการสินค้าได้เลย",
     "ปิดรายการด้วย: จบรายการเบิก",
   ].join("\n");

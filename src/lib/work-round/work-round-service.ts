@@ -145,18 +145,19 @@ export class WorkRoundService {
   }
 
   // Returns Work Rounds still eligible for a standalone produce-append marker.
+  // businessDate is optional: when omitted, all dates are searched (for generic
+  // append headers that carry no date — the round's own date is authoritative).
   async findProduceAppendEligibleRounds(
-    sourceId:     string,
-    businessDate: string,
+    sourceId:      string,
+    businessDate?: string,
   ): Promise<WorkRound[]> {
-    const { data } = await this.supabase
+    let q = this.supabase
       .from("work_rounds")
       .select("*")
       .eq("source_id", sourceId)
-      .eq("business_date", businessDate)
-      .in("status", PRODUCE_APPEND_ELIGIBLE_STATUSES)
-      .order("round_seq", { ascending: true });
-
+      .in("status", PRODUCE_APPEND_ELIGIBLE_STATUSES);
+    if (businessDate) q = q.eq("business_date", businessDate);
+    const { data } = await q.order("round_seq", { ascending: true });
     return (data ?? []) as WorkRound[];
   }
 
@@ -198,8 +199,8 @@ export class WorkRoundService {
    * would change the locked borrow total, so ambiguity must surface to the user.
    */
   async resolveProduceAppendTarget(
-    sourceId:     string,
-    businessDate: string,
+    sourceId:      string,
+    businessDate?: string,
   ): Promise<DisambiguationResult> {
     const hasIdentity = (r: WorkRound) =>
       r.seller_name.trim().length > 0 && r.market_name.trim().length > 0;

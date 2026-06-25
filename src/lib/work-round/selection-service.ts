@@ -77,7 +77,7 @@ export class WorkRoundSelectionService {
 
     const rpc = (this.supabase as unknown as {
       rpc?: (fn: string, args: Record<string, unknown>) => Promise<{ data: unknown; error: { message: string } | null }>;
-    }).rpc;
+    }).rpc?.bind(this.supabase);
 
     if (rpc) {
       const { data, error } = await rpc("claim_work_round_selection", {

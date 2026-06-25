@@ -674,4 +674,101 @@ describe("WebhookService — ยืนยันปิดรอบ confirmation",
     expect(replies[0]).toContain("ส่งเงิน");
     expect(replies[0]).toContain("2569");
   });
+
+  it("rpc returning PGRST202 falls through to JS claim path and confirms successfully", async () => {
+    const replies: string[] = [];
+    const db = memSupabase({
+      work_rounds: [{ id: "wr-a", source_id: "group-1", business_date: MESSAGE_DATE, seller_name: "กี้", market_name: "A", round_seq: 1, status: "open" }],
+    });
+    // Simulate production: supabase has rpc but function doesn't exist (migration 0040 not applied).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (db as any).rpc = () => Promise.resolve({
+      data: null,
+      error: { message: "Could not find the function public.claim_work_round_selection(p_allowed_statuses, p_choice, p_line_user_id, p_selection_id, p_source_id) in the schema cache" },
+    });
+    const s = svcR(db, replies);
+    await s.processEvents([textEvent("ปิดรอบ 24/06/2569", "user-1", "reply-preview")], "dest");
+    replies.length = 0;
+    await s.processEvents([textEvent("ยืนยันปิดรอบ", "user-1", "reply-confirm")], "dest");
+    expect(db._rows("work_rounds")[0]?.status).toBe("awaiting_settlement");
+    expect(replies[0]).toContain("ปิดรอบเรียบร้อย");
+  });
+});
+
+describe("WebhookService — produce append with future business_date", () => {
+  function svcA(db: ReturnType<typeof memSupabase>, replies: string[]) {
+    return new WebhookService(db as never, {
+      produceEndSettleMs: 0,
+      replyMessage: async (_tok, text) => { replies.push(text); },
+    });
+  }
+
+  const FUTURE_DATE = "2026-06-28";
+
+  it("generic รายการเบิกเพิ่ม resolves to the single append-eligible round regardless of its business_date", async () => {
+    const replies: string[] = [];
+    const db = memSupabase({
+      work_rounds: [{ id: "wr-f", source_id: "group-1", business_date: FUTURE_DATE, seller_name: "ทดลองใหม่", market_name: "ตลาดจำลอง", round_seq: 1, status: "open" }],
+    });
+    const s = svcA(db, replies);
+    await s.processEvents([textEvent(
+      ["รายการเบิกเพิ่ม", "3 มังคุด 35 บาท", "2 โล", "จบรายการ"].join("\n"),
+      "user-1", "reply-1",
+    )], "dest");
+    expect(replies[0] ?? "").not.toContain("ไม่พบรอบ");
+    const sessions = db._rows("produce_sessions");
+    expect(sessions.some((s) => s.work_round_id === "wr-f" && s.is_append_session === true)).toBe(true);
+  });
+
+  it("generic append with no eligible round returns actionable error, no DB mutation", async () => {
+    const replies: string[] = [];
+    const db = memSupabase();
+    const s = svcA(db, replies);
+    await s.processEvents([textEvent(
+      ["รายการเบิกเพิ่ม", "3 มังคุด 35 บาท", "2 โล", "จบรายการ"].join("\n"),
+      "user-1", "reply-1",
+    )], "dest");
+    expect(replies[0]).toContain("ไม่พบรอบเบิก");
+    expect(db._rows("produce_sessions")).toHaveLength(0);
+  });
+
+  it("full E2E: explicit borrow on future date → append (no date) → close preview → confirm", async () => {
+    const replies: string[] = [];
+    const db = memSupabase();
+    const s = svcA(db, replies);
+
+    // 1. Open borrow with future business_date
+    await s.processEvents([textEvent(
+      ["ทดลองใหม่-ตลาดจำลอง เบิก 28/6/2569", "1 มังคุด 100 บาท", "10 โล", "จบรายการเบิก"].join("\n"),
+      "user-1", "reply-borrow",
+    )], "dest");
+    const wr = db._rows("work_rounds").find((r) => r.seller_name === "ทดลองใหม่");
+    expect(wr?.business_date).toBe(FUTURE_DATE);
+    expect(wr?.status).toBe("open");
+
+    // 2. Append (no date — must resolve by status, not date)
+    replies.length = 0;
+    await s.processEvents([textEvent(
+      ["รายการเบิกเพิ่ม", "2 แอปเปิ้ล 50 บาท", "3 ลูก", "จบรายการ"].join("\n"),
+      "user-1", "reply-append",
+    )], "dest");
+    expect(replies[0] ?? "").not.toContain("ไม่พบรอบ");
+    const appendSessions = db._rows("produce_sessions").filter((s) => s.is_append_session);
+    expect(appendSessions).toHaveLength(1);
+    expect(appendSessions[0]?.work_round_id).toBe(wr?.id);
+
+    // 3. Close preview
+    replies.length = 0;
+    await s.processEvents([textEvent("ปิดรอบ 28/6/2569", "user-1", "reply-preview")], "dest");
+    expect(replies[0]).toBeTruthy();
+    expect(db._rows("work_round_selections")[0]?.intent).toBe("close_round_confirm");
+
+    // 4. Confirm — must transition to awaiting_settlement
+    replies.length = 0;
+    await s.processEvents([textEvent("ยืนยันปิดรอบ", "user-1", "reply-confirm")], "dest");
+    expect(db._rows("work_rounds").find((r) => r.seller_name === "ทดลองใหม่")?.status).toBe("awaiting_settlement");
+    expect(replies[0]).toContain("ปิดรอบเรียบร้อย");
+    expect(replies[0]).toContain("ส่งเงิน");
+    expect(replies[0]).toContain("2569");
+  });
 });

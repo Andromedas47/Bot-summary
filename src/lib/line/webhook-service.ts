@@ -1430,7 +1430,7 @@ export class WebhookService {
   ): Promise<{ ok: true } | { ok: false; reply: string }> {
     try {
       const wrs    = new WorkRoundService(this.supabase);
-      const result = await wrs.resolveProduceAppendTarget(sessionKey, bangkokToday());
+      const result = await wrs.resolveProduceAppendTarget(sessionKey);
       if (result.status === "none") {
         log.info("produce append: no identifiable open Work Round", { sessionKey });
         return { ok: false, reply: wrs.buildNoAppendRoundPrompt() };
@@ -2489,7 +2489,7 @@ export class WebhookService {
       }
 
       if (isProduceAppend) {
-        const appendTarget = await wrs.resolveProduceAppendTarget(sourceId, businessDate);
+        const appendTarget = await wrs.resolveProduceAppendTarget(sourceId);
         if (appendTarget.status === "resolved") {
           return { kind: "persist", workRoundId: appendTarget.workRound.id, isAppend: true };
         }

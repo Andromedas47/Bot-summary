@@ -30,6 +30,7 @@ import {
 import { SlipBatchService, SLIP_BATCH_QUIET_SECONDS, type SlipBatchIngestor } from "@/lib/slips/batch-service";
 import { tryFinalizeSettlement } from "@/lib/settlement-finalizer";
 import { tryFinalizeWorkRound } from "@/lib/work-round/finalizer";
+import { computeRoundTotals } from "@/lib/work-round/expected-sales";
 import {
   SlipSessionService,
   parseSlipSessionHeader,
@@ -1763,11 +1764,11 @@ export class WebhookService {
     const replyToken = event.replyToken;
     const parts = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/((?:25)?\d{2})$/);
     if (!parts) {
-      if (replyToken) await replyLineMessage(replyToken, "รูปแบบวันที่ไม่ถูกต้อง เช่น ปิดรอบ 24/06/2569");
+      if (replyToken) await this.replyMessage(replyToken, "รูปแบบวันที่ไม่ถูกต้อง เช่น ปิดรอบ 24/06/2569");
       return { eventId, eventType, status: "saved", parsed: false };
     }
     if (!lineUserId) {
-      if (replyToken) await replyLineMessage(replyToken, "ยังระบุตัวผู้ส่งไม่ได้ กรุณาส่งคำสั่งจากบัญชี LINE ผู้ใช้ในกลุ่ม");
+      if (replyToken) await this.replyMessage(replyToken, "ยังระบุตัวผู้ส่งไม่ได้ กรุณาส่งคำสั่งจากบัญชี LINE ผู้ใช้ในกลุ่ม");
       return { eventId, eventType, status: "saved", parsed: false };
     }
 
@@ -1776,7 +1777,7 @@ export class WebhookService {
     try {
       const rounds = await wrs.findOpenRounds(sourceId, businessDate);
       if (rounds.length === 0) {
-        if (replyToken) await replyLineMessage(replyToken, `ไม่พบรอบที่เปิดอยู่สำหรับวันที่ ${dateStr}`);
+        if (replyToken) await this.replyMessage(replyToken, `ไม่พบรอบที่เปิดอยู่สำหรับวันที่ ${dateStr}`);
         return { eventId, eventType, status: "saved", parsed: false };
       }
       const candidates = await wrs.buildCandidates(rounds);
@@ -1785,15 +1786,15 @@ export class WebhookService {
           sourceId, lineUserId, businessDate, intent: "close_round", candidates,
           payload: { dateStr },
         });
-        if (replyToken) await replyLineMessage(replyToken, buildSelectionMessage("close_round", candidates));
+        if (replyToken) await this.replyMessage(replyToken, buildSelectionMessage("close_round", candidates));
         return { eventId, eventType, status: "saved", parsed: false };
       }
       await this.createCloseRoundConfirmation(sourceId, lineUserId, businessDate, candidates[0], dateStr);
-      if (replyToken) await replyLineMessage(replyToken, this.buildCloseRoundConfirmPrompt(rounds[0]));
+      if (replyToken) await this.replyMessage(replyToken, await this.buildCloseRoundConfirmPrompt(rounds[0]));
       return { eventId, eventType, status: "saved", parsed: false };
     } catch (err) {
       log.warn("close round command failed", { error: err instanceof Error ? err.message : String(err) });
-      if (replyToken) await replyLineMessage(replyToken, "ปิดรอบไม่ได้ชั่วคราว กรุณาลองใหม่อีกครั้ง");
+      if (replyToken) await this.replyMessage(replyToken, "ปิดรอบไม่ได้ชั่วคราว กรุณาลองใหม่อีกครั้ง");
       return { eventId, eventType, status: "saved", parsed: false };
     }
   }
@@ -1863,11 +1864,33 @@ export class WebhookService {
     });
   }
 
-  private buildCloseRoundConfirmPrompt(round: WorkRound): string {
+  private async buildCloseRoundConfirmPrompt(round: WorkRound): Promise<string> {
+    const totals = await computeRoundTotals(this.supabase, round.id);
     return [
-      `เลือกปิดรอบ ${round.seller_name} — ${round.market_name}`,
-      "พิมพ์ ยืนยันปิดรอบ เพื่อปิดรอบและเปิดให้ส่งเงิน",
+      `${round.seller_name} — ${round.market_name}`,
+      this.formatBusinessDateThai(round.business_date),
+      "",
+      `ยอดเบิก: ${this.formatBaht(totals.borrow)}`,
+      `ยอดชั่งคืน: ${this.formatBaht(totals.ret)}`,
+      `ยอดคืนเสีย: ${this.formatBaht(totals.badReturn)}`,
+      `ยอดที่ต้องขายได้: ${this.formatBaht(totals.expected)}`,
+      "",
+      "พิมพ์ “ยืนยันปิดรอบ” เพื่อดำเนินการต่อ",
     ].join("\n");
+  }
+
+  private formatBaht(amount: number): string {
+    return `${amount.toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} บาท`;
+  }
+
+  private formatBusinessDateThai(businessDate: string): string {
+    const [year, month, day] = businessDate.split("-").map((v) => Number(v));
+    const monthNames = [
+      "มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
+      "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม",
+    ];
+    if (!year || !month || !day || month < 1 || month > 12) return businessDate;
+    return `${day} ${monthNames[month - 1]} ${year + 543}`;
   }
 
   private async applySettlementFollowupForRound(
@@ -1991,7 +2014,7 @@ export class WebhookService {
         await this.createCloseRoundConfirmation(
           sourceId, lineUserId!, round.business_date, selected[0], String(payload.dateStr ?? round.business_date),
         );
-        if (replyToken) await replyLineMessage(replyToken, this.buildCloseRoundConfirmPrompt(round));
+        if (replyToken) await this.replyMessage(replyToken, await this.buildCloseRoundConfirmPrompt(round));
         return { eventId, eventType, status: "saved", parsed: false };
       }
       case "produce_attach":

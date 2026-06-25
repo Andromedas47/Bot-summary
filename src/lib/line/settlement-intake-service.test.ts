@@ -29,6 +29,14 @@ describe("parseSettlementCommand", () => {
   it("accepts short Buddhist year", () => {
     expect(parseSettlementCommand("ส่งเงิน 24/06/69")).toBe("24/06/69");
   });
+
+  it("accepts same-line transfer amount", () => {
+    expect(parseSettlementCommand("ส่งเงิน 24/06/2569 1925 บาท")).toBe("24/06/2569");
+  });
+
+  it("accepts a two-line command followed by a bare transfer amount", () => {
+    expect(parseSettlementCommand("ส่งเงิน 24/06/2569\n1925")).toBe("24/06/2569");
+  });
 });
 
 describe("parseSettlementAmounts", () => {
@@ -58,6 +66,24 @@ describe("parseSettlementAmounts", () => {
     expect(a.transfer).toBeNull();
     expect(a.cash).toBeNull();
   });
+
+  it("treats same-line command amount as transfer", () => {
+    const a = parseSettlementAmounts("ส่งเงิน 24/06/2569 1925 บาท");
+    expect(a.transfer).toBe(1925);
+    expect(a.cash).toBeNull();
+  });
+
+  it("treats a bare follow-up amount as transfer", () => {
+    const a = parseSettlementAmounts("1925");
+    expect(a.transfer).toBe(1925);
+    expect(a.cash).toBeNull();
+  });
+
+  it("treats a two-line command amount as transfer", () => {
+    const a = parseSettlementAmounts("ส่งเงิน 24/06/2569\n1925");
+    expect(a.transfer).toBe(1925);
+    expect(a.cash).toBeNull();
+  });
 });
 
 describe("hasAnyAmount", () => {
@@ -67,6 +93,14 @@ describe("hasAnyAmount", () => {
 
   it("returns true when ค่าแรง is present", () => {
     expect(hasAnyAmount("ค่าแรง 400")).toBe(true);
+  });
+
+  it("returns true for a bare transfer amount", () => {
+    expect(hasAnyAmount("1925")).toBe(true);
+  });
+
+  it("returns true for same-line command amount", () => {
+    expect(hasAnyAmount("ส่งเงิน 24/06/2569 1925 บาท")).toBe(true);
   });
 
   it("returns false for unrelated text", () => {

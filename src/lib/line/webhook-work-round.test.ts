@@ -28,7 +28,7 @@ function produceMsg(header: string): string {
 }
 
 let seq = 0;
-function textEvent(text: string, userId = "user-1"): LineMessageEvent {
+function textEvent(text: string, userId = "user-1", replyToken?: string): LineMessageEvent {
   seq += 1;
   return {
     type: "message",
@@ -37,7 +37,8 @@ function textEvent(text: string, userId = "user-1"): LineMessageEvent {
     timestamp: Date.now(),
     source: { type: "group", groupId: "group-1", userId },
     mode: "active",
-    // No replyToken → no network replies; we assert on DB state.
+    replyToken,
+    // Most tests omit replyToken → no network replies; assertions are made on DB state.
     message: { id: `msg-${seq}`, type: "text", text },
   } as unknown as LineMessageEvent;
 }
@@ -235,6 +236,68 @@ describe("WebhookService — ชั่งคืนเพิ่ม eligibility al
 });
 
 describe("WebhookService — settlement never auto-selects", () => {
+  it("close-round prompt shows borrow, return, bad return, and expected sales before confirmation", async () => {
+    const replies: string[] = [];
+    const db = memSupabase({
+      work_rounds: [
+        { id: "wr-a", source_id: "group-1", business_date: "2026-06-24", seller_name: "กี้", market_name: "A", round_seq: 1, status: "open" },
+      ],
+      produce_sessions: [
+        { id: "borrow-session", work_round_id: "wr-a" },
+        { id: "return-session", work_round_id: "wr-a" },
+        { id: "bad-return-session", work_round_id: "wr-a" },
+      ],
+      produce_items: [
+        { id: "i1", session_id: "borrow-session", transaction_type: "เบิก", product_name: "มะม่วง", quantity: 10, price_per_unit: 100 },
+        { id: "i2", session_id: "return-session", transaction_type: "คืน", product_name: "มะม่วง", quantity: 2, price_per_unit: 100 },
+        { id: "i3", session_id: "bad-return-session", transaction_type: "คืนเสีย", product_name: "มะม่วง", quantity: 1, price_per_unit: 100 },
+      ],
+    });
+    const s = new WebhookService(db as never, {
+      produceEndSettleMs: 0,
+      replyMessage: async (_replyToken, text) => { replies.push(text); },
+    });
+
+    await s.processEvents([textEvent("ปิดรอบ 24/06/2569", "user-1", "reply-1")], "dest");
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("กี้ — A");
+    expect(replies[0]).toContain("24 มิถุนายน 2569");
+    expect(replies[0]).toContain("ยอดเบิก: 1,000.00 บาท");
+    expect(replies[0]).toContain("ยอดชั่งคืน: 200.00 บาท");
+    expect(replies[0]).toContain("ยอดคืนเสีย: 100.00 บาท");
+    expect(replies[0]).toContain("ยอดที่ต้องขายได้: 700.00 บาท");
+    expect(replies[0]).toContain("ยืนยันปิดรอบ");
+    expect(replies[0]).not.toContain("เกิน");
+    expect(replies[0]).not.toContain("ขาด");
+  });
+
+  it("close-round prompt treats missing returns as zero", async () => {
+    const replies: string[] = [];
+    const db = memSupabase({
+      work_rounds: [
+        { id: "wr-a", source_id: "group-1", business_date: "2026-06-24", seller_name: "กี้", market_name: "A", round_seq: 1, status: "open" },
+      ],
+      produce_sessions: [
+        { id: "borrow-session", work_round_id: "wr-a" },
+      ],
+      produce_items: [
+        { id: "i1", session_id: "borrow-session", transaction_type: "เบิก", product_name: "มะม่วง", quantity: 10, price_per_unit: 100 },
+      ],
+    });
+    const s = new WebhookService(db as never, {
+      produceEndSettleMs: 0,
+      replyMessage: async (_replyToken, text) => { replies.push(text); },
+    });
+
+    await s.processEvents([textEvent("ปิดรอบ 24/06/2569", "user-1", "reply-1")], "dest");
+
+    expect(replies[0]).toContain("ยอดเบิก: 1,000.00 บาท");
+    expect(replies[0]).toContain("ยอดชั่งคืน: 0.00 บาท");
+    expect(replies[0]).toContain("ยอดคืนเสีย: 0.00 บาท");
+    expect(replies[0]).toContain("ยอดที่ต้องขายได้: 1,000.00 บาท");
+  });
+
   it("blocks settlement while the work round is still open", async () => {
     const db = memSupabase({
       work_rounds: [
@@ -365,6 +428,36 @@ describe("WebhookService — multi-message settlement", () => {
     expect(submitted.status).toBe("submitted");
     // round advanced to awaiting_slips
     expect(db._rows("work_rounds")[0].status).toBe("awaiting_slips");
+  });
+
+  it("records a same-line bare transfer amount without finalizing", async () => {
+    const db = memSupabase({
+      work_rounds: [
+        { id: "wr-a", source_id: "group-1", business_date: "2026-06-24", seller_name: "กี้", market_name: "A", round_seq: 1, status: "awaiting_settlement" },
+      ],
+    });
+
+    await svc(db).processEvents([textEvent("ส่งเงิน 24/06/2569 1925 บาท")], "dest");
+
+    const draft = db._rows("settlement_drafts")[0];
+    expect(draft.status).toBe("declared");
+    expect(draft.declared_transfer).toBe(1925);
+    expect(db._rows("settlement_finalizations")).toHaveLength(0);
+  });
+
+  it("records a two-line bare transfer amount without finalizing", async () => {
+    const db = memSupabase({
+      work_rounds: [
+        { id: "wr-a", source_id: "group-1", business_date: "2026-06-24", seller_name: "กี้", market_name: "A", round_seq: 1, status: "awaiting_settlement" },
+      ],
+    });
+
+    await svc(db).processEvents([textEvent("ส่งเงิน 24/06/2569\n1925")], "dest");
+
+    const draft = db._rows("settlement_drafts")[0];
+    expect(draft.status).toBe("declared");
+    expect(draft.declared_transfer).toBe(1925);
+    expect(db._rows("settlement_finalizations")).toHaveLength(0);
   });
 
   it("a different sender cannot declare amounts on someone else's draft", async () => {

@@ -2,7 +2,7 @@ export type WorkRoundStatus =
   | "open"
   | "produce_complete"
   | "awaiting_settlement"
-  | "awaiting_evidence"
+  | "awaiting_slips"
   | "variance_found"
   | "ready_for_review"
   | "approved"
@@ -23,11 +23,37 @@ export interface WorkRound {
 
 export type SettlementDraftStatus =
   | "pending"
-  | "awaiting_evidence"
+  | "declared"
+  | "submitted"
   | "variance_found"
   | "ready_for_review"
   | "approved"
   | "needs_correction";
+
+export type SelectionIntent = "settlement" | "produce_attach" | "slip" | "manual_slip";
+
+export interface SelectionCandidate {
+  work_round_id: string;
+  seller_name:   string;
+  market_name:   string;
+  round_seq:     number;
+  expected_sales: number;
+}
+
+export interface WorkRoundSelection {
+  id:                     string;
+  source_id:              string;
+  line_user_id:           string | null;
+  business_date:          string;
+  intent:                 SelectionIntent;
+  candidates:             SelectionCandidate[];
+  payload:                Record<string, unknown> | null;
+  status:                 "pending" | "resolved" | "expired";
+  resolved_work_round_id: string | null;
+  created_at:             string;
+  expires_at:             string;
+  resolved_at:            string | null;
+}
 
 export interface SettlementDraft {
   id:                       string;

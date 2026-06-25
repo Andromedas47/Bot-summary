@@ -31,11 +31,13 @@ export type SlipBatchStatus =
 export type ManualSlipSessionStatus      = "open" | "closed";
 export type SettlementFinalizationStatus = "pending" | "sending" | "sent" | "failed" | "ambiguous";
 export type WorkRoundStatus =
-  | "open" | "produce_complete" | "awaiting_settlement" | "awaiting_evidence"
+  | "open" | "produce_complete" | "awaiting_settlement" | "awaiting_slips"
   | "variance_found" | "ready_for_review" | "approved" | "needs_correction";
 export type SettlementDraftStatus =
-  | "pending" | "awaiting_evidence" | "variance_found"
+  | "pending" | "declared" | "submitted" | "variance_found"
   | "ready_for_review" | "approved" | "needs_correction";
+export type WorkRoundSelectionIntent = "settlement" | "produce_attach" | "slip" | "manual_slip";
+export type WorkRoundSelectionStatus  = "pending" | "resolved" | "expired";
 
 // ─── Database schema ──────────────────────────────────────────────────
 export interface Database {
@@ -349,6 +351,7 @@ export interface Database {
           closed_by_line_user_id:  string | null;
           opened_line_message_id:  string | null;
           closed_line_message_id:  string | null;
+          work_round_id:           string | null;
         };
         Insert: {
           id?:                      string;
@@ -363,6 +366,7 @@ export interface Database {
           closed_by_line_user_id?:  string | null;
           opened_line_message_id?:  string | null;
           closed_line_message_id?:  string | null;
+          work_round_id?:           string | null;
         };
         Update: {
           id?:                      string;
@@ -377,6 +381,7 @@ export interface Database {
           closed_by_line_user_id?:  string | null;
           opened_line_message_id?:  string | null;
           closed_line_message_id?:  string | null;
+          work_round_id?:           string | null;
         };
         Relationships: [];
       };
@@ -480,6 +485,7 @@ export interface Database {
           batch_type:      string;
           finalized_at:    string | null;
           closing_at:      string | null;
+          work_round_id:   string | null;
         };
         Insert: {
           id?:              string;
@@ -502,6 +508,7 @@ export interface Database {
           batch_type?:      string;
           finalized_at?:    string | null;
           closing_at?:      string | null;
+          work_round_id?:   string | null;
         };
         Update: {
           id?:              string;
@@ -524,6 +531,7 @@ export interface Database {
           batch_type?:      string;
           finalized_at?:    string | null;
           closing_at?:      string | null;
+          work_round_id?:   string | null;
         };
         Relationships: [];
       };
@@ -842,6 +850,52 @@ export interface Database {
         Update: never;
         Relationships: [];
       };
+
+      work_round_selections: {
+        Row: {
+          id:                     string;
+          source_id:              string;
+          line_user_id:           string | null;
+          business_date:          string;
+          intent:                 WorkRoundSelectionIntent;
+          candidates:             Json;
+          payload:                Json | null;
+          status:                 WorkRoundSelectionStatus;
+          resolved_work_round_id: string | null;
+          created_at:             string;
+          expires_at:             string;
+          resolved_at:            string | null;
+        };
+        Insert: {
+          id?:                     string;
+          source_id:               string;
+          line_user_id?:           string | null;
+          business_date:           string;
+          intent:                  WorkRoundSelectionIntent;
+          candidates:              Json;
+          payload?:                Json | null;
+          status?:                 WorkRoundSelectionStatus;
+          resolved_work_round_id?: string | null;
+          created_at?:             string;
+          expires_at:              string;
+          resolved_at?:            string | null;
+        };
+        Update: {
+          id?:                     string;
+          source_id?:              string;
+          line_user_id?:           string | null;
+          business_date?:          string;
+          intent?:                 WorkRoundSelectionIntent;
+          candidates?:             Json;
+          payload?:                Json | null;
+          status?:                 WorkRoundSelectionStatus;
+          resolved_work_round_id?: string | null;
+          created_at?:             string;
+          expires_at?:             string;
+          resolved_at?:            string | null;
+        };
+        Relationships: [];
+      };
     };
     Views: {
       produce_transactions: {
@@ -927,3 +981,4 @@ export type LineGroupRow                   = Database["public"]["Tables"]["line_
 export type WorkRoundRow                   = Database["public"]["Tables"]["work_rounds"]["Row"];
 export type SettlementDraftRow             = Database["public"]["Tables"]["settlement_drafts"]["Row"];
 export type SettlementDraftHistoryRow      = Database["public"]["Tables"]["settlement_draft_history"]["Row"];
+export type WorkRoundSelectionRow          = Database["public"]["Tables"]["work_round_selections"]["Row"];

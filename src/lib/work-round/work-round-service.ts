@@ -1,8 +1,20 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { WorkRound } from "./types";
+import type { WorkRound, SelectionCandidate, WorkRoundStatus } from "./types";
+import { computeRoundTotals } from "./expected-sales";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyClient = SupabaseClient<any>;
+
+// Statuses for which a round can still receive a settlement declaration.
+export const SETTLEMENT_ELIGIBLE_STATUSES: WorkRoundStatus[] = [
+  "open", "produce_complete", "awaiting_settlement", "awaiting_slips",
+  "variance_found", "needs_correction",
+];
+
+// Statuses for which a round can still receive slip / manual-slip evidence.
+export const EVIDENCE_ELIGIBLE_STATUSES: WorkRoundStatus[] = [
+  "open", "produce_complete", "awaiting_settlement", "awaiting_slips", "variance_found",
+];
 
 export interface ResolveParams {
   sourceId:     string;
@@ -21,6 +33,13 @@ export type DisambiguationResult =
   | { status: "resolved"; workRound: WorkRound }
   | { status: "none" }
   | { status: "ambiguous"; candidates: WorkRound[] };
+
+// Evidence (slip / manual slip) attachment decision.
+export type EvidenceResolution =
+  | { mode: "linked"; workRound: WorkRound }
+  | { mode: "select"; candidates: WorkRound[] }
+  | { mode: "blocked" }   // rounds exist for this date but none are eligible
+  | { mode: "legacy" };   // no rounds exist for this date — legacy/V1 path
 
 export class WorkRoundService {
   constructor(private readonly supabase: AnyClient) {}
@@ -95,6 +114,113 @@ export class WorkRoundService {
     if (rounds.length === 0) return { status: "none" };
     if (rounds.length === 1) return { status: "resolved", workRound: rounds[0] };
     return { status: "ambiguous", candidates: rounds };
+  }
+
+  // Returns all rounds for a group+date (any status).
+  async findAllRounds(sourceId: string, businessDate: string): Promise<WorkRound[]> {
+    const { data } = await this.supabase
+      .from("work_rounds")
+      .select("*")
+      .eq("source_id", sourceId)
+      .eq("business_date", businessDate)
+      .order("round_seq", { ascending: true });
+    return (data ?? []) as WorkRound[];
+  }
+
+  // Returns rounds eligible to receive a settlement declaration.
+  async findSettlementEligible(sourceId: string, businessDate: string): Promise<WorkRound[]> {
+    const all = await this.findAllRounds(sourceId, businessDate);
+    return all.filter((r) => SETTLEMENT_ELIGIBLE_STATUSES.includes(r.status));
+  }
+
+  /**
+   * Decides how slip / manual-slip evidence should attach to a Work Round.
+   *
+   *  - no rounds exist for the date      → "legacy" (preserve V1 path, null link)
+   *  - exactly one eligible (or a unique
+   *    seller+market match)              → "linked"
+   *  - more than one eligible            → "select" (caller opens pending selection)
+   *  - rounds exist but none eligible    → "blocked"
+   *
+   * Tolerant: if the work_rounds query throws (table missing / not migrated),
+   * returns "legacy" so the evidence flow degrades to current behavior.
+   */
+  async resolveForEvidence(
+    sourceId:     string,
+    businessDate: string,
+    opts:         { sellerName?: string; marketName?: string } = {},
+  ): Promise<EvidenceResolution> {
+    let all: WorkRound[];
+    try {
+      all = await this.findAllRounds(sourceId, businessDate);
+    } catch {
+      return { mode: "legacy" };
+    }
+
+    if (all.length === 0) return { mode: "legacy" };
+
+    const eligible = all.filter((r) => EVIDENCE_ELIGIBLE_STATUSES.includes(r.status));
+    if (eligible.length === 0) return { mode: "blocked" };
+
+    // Prefer a unique seller+market match among the eligible rounds.
+    if (opts.sellerName && opts.marketName) {
+      const matched = eligible.filter(
+        (r) => r.seller_name === opts.sellerName && r.market_name === opts.marketName,
+      );
+      if (matched.length === 1) return { mode: "linked", workRound: matched[0] };
+    }
+
+    if (eligible.length === 1) return { mode: "linked", workRound: eligible[0] };
+    return { mode: "select", candidates: eligible };
+  }
+
+  // Links a slip batch to a Work Round (best-effort; logs but never throws).
+  async linkSlipBatch(batchId: string, workRoundId: string): Promise<void> {
+    await this.supabase.from("slip_batches").update({ work_round_id: workRoundId }).eq("id", batchId);
+  }
+
+  // Links a manual slip session to a Work Round.
+  async linkManualSlipSession(sessionId: string, workRoundId: string): Promise<void> {
+    await this.supabase.from("manual_slip_sessions").update({ work_round_id: workRoundId }).eq("id", sessionId);
+  }
+
+  // Builds selection candidates with expected sales for a numbered prompt.
+  async buildCandidates(rounds: WorkRound[]): Promise<SelectionCandidate[]> {
+    const out: SelectionCandidate[] = [];
+    for (const r of rounds) {
+      let expected = 0;
+      try {
+        expected = (await computeRoundTotals(this.supabase, r.id)).expected;
+      } catch { /* expected sales is best-effort for the prompt */ }
+      out.push({
+        work_round_id: r.id,
+        seller_name:   r.seller_name,
+        market_name:   r.market_name,
+        round_seq:     r.round_seq,
+        expected_sales: expected,
+      });
+    }
+    return out;
+  }
+
+  // Re-validates a chosen candidate still exists, belongs to source+date, and is
+  // eligible for the given purpose. Returns the round or null.
+  async validateChoice(
+    workRoundId:  string,
+    sourceId:     string,
+    businessDate: string,
+    eligible:     WorkRoundStatus[],
+  ): Promise<WorkRound | null> {
+    const { data } = await this.supabase
+      .from("work_rounds")
+      .select("*")
+      .eq("id", workRoundId)
+      .maybeSingle();
+    if (!data) return null;
+    const r = data as WorkRound;
+    if (r.source_id !== sourceId || r.business_date !== businessDate) return null;
+    if (!eligible.includes(r.status)) return null;
+    return r;
   }
 
   // Attaches a produce_session to a Work Round after it has been persisted.

@@ -13,9 +13,14 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { SettlementDraft, WorkRound } from "@/lib/work-round/types";
+import { SETTLEMENT_ELIGIBLE_STATUSES } from "@/lib/work-round/work-round-service";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyClient = SupabaseClient<any>;
+
+// A draft this old (since last update) is considered stale and is not reused by
+// a bare follow-up amount message — prevents consuming unrelated later input.
+const DRAFT_STALE_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 // ── Regex ──────────────────────────────────────────────────────────────────────
 
@@ -23,6 +28,14 @@ type AnyClient = SupabaseClient<any>;
 // Captures [1] = date string (Buddhist, DD/MM/YY or DD/MM/YYYY).
 export const SETTLEMENT_CMD_RE =
   /^(?:ส่งเงิน|ปิดยอด)\s+(\d{1,2}\/\d{1,2}\/(?:25)?\d{2})\s*$/;
+
+// Confirmation command that submits a declared draft for review.
+export const SETTLEMENT_CONFIRM_RE = /^(?:ยืนยันส่งเงิน|ยืนยันยอด)\s*$/;
+
+/** True if the text is a settlement confirmation command. */
+export function isConfirmCommand(text: string): boolean {
+  return SETTLEMENT_CONFIRM_RE.test(text.trim());
+}
 
 // Named-amount pattern applied individually against the full message text.
 const TRANSFER_RE  = /โอน\s+(\d+(?:\.\d+)?)/;
@@ -81,7 +94,7 @@ export class SettlementIntakeService {
       .select("*")
       .eq("source_id", sourceId)
       .eq("business_date", businessDate)
-      .in("status", ["open", "produce_complete", "awaiting_settlement", "awaiting_evidence"])
+      .in("status", SETTLEMENT_ELIGIBLE_STATUSES)
       .order("round_seq", { ascending: true });
 
     return (data ?? []) as WorkRound[];
@@ -96,7 +109,7 @@ export class SettlementIntakeService {
       .from("settlement_drafts")
       .select("*")
       .eq("work_round_id", workRoundId)
-      .not("status", "in", "(\"approved\",\"needs_correction\")")
+      .in("status", ["pending", "declared"])
       .order("version", { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -107,6 +120,7 @@ export class SettlementIntakeService {
       .from("settlement_drafts")
       .insert({
         work_round_id:            workRoundId,
+        status:                   "pending",
         declared_via:             "line",
         declared_by_line_user_id: lineUserId,
       })
@@ -115,6 +129,75 @@ export class SettlementIntakeService {
 
     if (error) throw new Error(`settlement_draft insert failed: ${error.message}`);
     return { draft: created as SettlementDraft, created: true };
+  }
+
+  // Finds the open (pending/declared) draft for THIS sender in this group.
+  // Used to attach a follow-up amounts/confirm message to the right draft.
+  // Filters by declared_by_line_user_id so a different sender never touches it,
+  // and ignores stale drafts so old drafts don't consume unrelated input.
+  async findOpenDraftForSender(
+    sourceId:   string,
+    lineUserId: string | null,
+  ): Promise<{ draft: SettlementDraft; round: WorkRound } | null> {
+    // Rounds in this group still eligible for settlement.
+    const { data: rounds } = await this.supabase
+      .from("work_rounds")
+      .select("*")
+      .eq("source_id", sourceId)
+      .in("status", SETTLEMENT_ELIGIBLE_STATUSES);
+
+    const roundList = (rounds ?? []) as WorkRound[];
+    if (roundList.length === 0) return null;
+    const roundById = new Map(roundList.map((r) => [r.id, r]));
+
+    let q = this.supabase
+      .from("settlement_drafts")
+      .select("*")
+      .in("work_round_id", roundList.map((r) => r.id))
+      .in("status", ["pending", "declared"]);
+
+    q = lineUserId === null
+      ? q.is("declared_by_line_user_id", null)
+      : q.eq("declared_by_line_user_id", lineUserId);
+
+    const { data: drafts } = await q.order("updated_at", { ascending: false }).limit(1);
+    const draft = (drafts ?? [])[0] as SettlementDraft | undefined;
+    if (!draft) return null;
+
+    if (Date.now() - new Date(draft.updated_at).getTime() > DRAFT_STALE_MS) return null;
+
+    const round = roundById.get(draft.work_round_id);
+    if (!round) return null;
+    return { draft, round };
+  }
+
+  // Marks a declared draft submitted (user confirmed via ยืนยันส่งเงิน).
+  async confirmDraft(draftId: string, lineUserId: string | null): Promise<SettlementDraft> {
+    const { data: current } = await this.supabase
+      .from("settlement_drafts")
+      .select("*")
+      .eq("id", draftId)
+      .single();
+
+    if (current) {
+      await this.supabase.from("settlement_draft_history").insert({
+        draft_id:      draftId,
+        changed_by:    lineUserId,
+        change_type:   "submitted",
+        previous_data: current,
+        new_data:      { status: "submitted" },
+      });
+    }
+
+    const { data: updated, error } = await this.supabase
+      .from("settlement_drafts")
+      .update({ status: "submitted", updated_at: new Date().toISOString() })
+      .eq("id", draftId)
+      .select()
+      .single();
+
+    if (error) throw new Error(`settlement_draft confirm failed: ${error.message}`);
+    return updated as SettlementDraft;
   }
 
   // Records declared amounts onto an existing draft.
@@ -142,6 +225,8 @@ export class SettlementIntakeService {
 
     const patch: Record<string, unknown> = {
       declared_by_line_user_id: lineUserId,
+      status:                   "declared",
+      version:                  ((current?.version as number) ?? 1) + 1,
       updated_at:               new Date().toISOString(),
     };
     if (amounts.transfer  != null) patch.declared_transfer  = amounts.transfer;
@@ -174,27 +259,52 @@ export class SettlementIntakeService {
     return lines.join("\n");
   }
 
-  // Builds the settlement confirmation reply after amounts are recorded.
-  buildSettlementConfirmReply(
-    draft:  SettlementDraft,
-    round:  WorkRound,
-  ): string {
+  // Builds the prompt asking the user to send declared amounts.
+  buildAmountsPrompt(round: WorkRound): string {
+    return [
+      `เปิดรายการส่งเงิน ${round.seller_name} — ${round.market_name}`,
+      "ส่งยอด เช่น",
+      "โอน 730 สด 1420 ค่าใช้จ่าย 410 ค่าแรง 400",
+    ].join("\n");
+  }
+
+  private draftLines(draft: SettlementDraft): string[] {
     const total =
       (draft.declared_transfer ?? 0) +
       (draft.declared_cash     ?? 0) +
       (draft.declared_expenses ?? 0) +
       (draft.declared_labor    ?? 0);
-
-    const lines = [
-      `รับยอดส่งเงิน ${round.seller_name} — ${round.market_name}`,
+    return [
       `โอน: ${(draft.declared_transfer ?? 0).toLocaleString("th-TH")} บาท`,
       `สด: ${(draft.declared_cash ?? 0).toLocaleString("th-TH")} บาท`,
       `ค่าใช้จ่าย: ${(draft.declared_expenses ?? 0).toLocaleString("th-TH")} บาท`,
       `ค่าแรง: ${(draft.declared_labor ?? 0).toLocaleString("th-TH")} บาท`,
       `รวม: ${total.toLocaleString("th-TH")} บาท`,
-      "",
-      "รอการตรวจสอบจากเจ้าหน้าที่",
     ];
-    return lines.join("\n");
+  }
+
+  // Review summary after amounts recorded — asks the user to confirm.
+  buildReviewSummary(draft: SettlementDraft, round: WorkRound): string {
+    return [
+      `ยอดส่งเงิน ${round.seller_name} — ${round.market_name}`,
+      ...this.draftLines(draft),
+      "",
+      "พิมพ์ ยืนยันส่งเงิน เพื่อยืนยัน",
+    ].join("\n");
+  }
+
+  // Final reply once the user confirms the declared settlement.
+  buildSubmittedReply(draft: SettlementDraft, round: WorkRound): string {
+    return [
+      `ยืนยันส่งเงินแล้ว ${round.seller_name} — ${round.market_name}`,
+      ...this.draftLines(draft),
+      "",
+      "ส่งให้เจ้าหน้าที่ตรวจสอบแล้ว",
+    ].join("\n");
+  }
+
+  // Backward-compatible alias retained for existing callers/tests.
+  buildSettlementConfirmReply(draft: SettlementDraft, round: WorkRound): string {
+    return this.buildReviewSummary(draft, round);
   }
 }

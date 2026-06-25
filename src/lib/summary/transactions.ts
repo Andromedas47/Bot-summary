@@ -1,4 +1,4 @@
-export const KNOWN_TX_TYPES = ["เบิก", "เบิกเพิ่ม", "คืน", "คืนเสีย"] as const;
+export const KNOWN_TX_TYPES = ["เบิก", "เบิกเพิ่ม", "คืน", "คืนเสีย", "ชั่งคืนเพิ่ม"] as const;
 
 export type TransactionBucket = "เบิก" | "คืน" | "คืนเสีย";
 
@@ -30,7 +30,8 @@ export function emptyTransactionTotals(): TransactionTotals {
 
 export function transactionBucket(type: string): TransactionBucket | null {
   if (type === "เบิก" || type === "เบิกเพิ่ม") return "เบิก";
-  if (type === "คืน") return "คืน";
+  // ชั่งคืนเพิ่ม (append return) counts toward the return bucket.
+  if (type === "คืน" || type === "ชั่งคืนเพิ่ม") return "คืน";
   if (type === "คืนเสีย") return "คืนเสีย";
   return null;
 }

@@ -36,14 +36,26 @@ import {
   type SlipSessionIngestor,
   type SlipSessionHeader,
 } from "@/lib/slips/slip-session-service";
-import { WorkRoundService } from "@/lib/work-round/work-round-service";
+import {
+  WorkRoundService,
+  SETTLEMENT_ELIGIBLE_STATUSES,
+  EVIDENCE_ELIGIBLE_STATUSES,
+} from "@/lib/work-round/work-round-service";
 import { classifyHeader } from "@/lib/parsers/work-round-header";
 import {
   SettlementIntakeService,
   parseSettlementCommand,
   parseSettlementAmounts,
   hasAnyAmount,
+  isConfirmCommand,
 } from "@/lib/line/settlement-intake-service";
+import {
+  WorkRoundSelectionService,
+  parseNumericSelection,
+  buildSelectionMessage,
+} from "@/lib/work-round/selection-service";
+import { WorkRoundStatusService } from "@/lib/work-round/status";
+import type { SelectionCandidate, SelectionIntent } from "@/lib/work-round/types";
 
 type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
@@ -260,6 +272,18 @@ export class WebhookService {
       return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
 
+    // ── 3.1. Pending Work Round selection (numeric reply) ────────────────────
+    // A bare "1".."99" resolves an active numbered selection for THIS sender.
+    // Runs before all produce/slip/settlement logic so it always wins.
+    const selectionNum = parseNumericSelection(text);
+    if (selectionNum !== null) {
+      const handled = await this.tryResolveSelection(
+        msgEvent, selectionNum, eventId, event.type, log,
+      );
+      if (handled !== null) return handled;
+      // No active selection — fall through (numeric could be unrelated).
+    }
+
     // ── 3.2. Settlement command (V2) ─────────────────────────────────────────
     // "ส่งเงิน 24/06/2569" or "ปิดยอด 24/06/2569"
     // Processed before manual slip commands to avoid confusion with amount lines.
@@ -268,6 +292,15 @@ export class WebhookService {
       return this.processSettlementCommand(
         msgEvent, text, settlementDateStr, eventId, event.type, log,
       );
+    }
+
+    // ── 3.2b. Settlement follow-up (amounts / confirm in a later message) ────
+    // Only acts when THIS sender has an open draft; otherwise falls through.
+    if (isConfirmCommand(text) || hasAnyAmount(text)) {
+      const followup = await this.trySettlementFollowup(
+        msgEvent, text, eventId, event.type, log,
+      );
+      if (followup !== null) return followup;
     }
 
     // ── 3.3. Manual slip session commands ────────────────────────────────────
@@ -513,9 +546,34 @@ export class WebhookService {
 
     log.info("manual slip open command", { sourceId, businessDate, marketKey });
 
+    // ── V2: resolve which Work Round this manual-slip evidence belongs to ─────
+    const wrs      = new WorkRoundService(this.supabase);
+    const decision = await wrs.resolveForEvidence(sourceId, businessDate, {
+      marketName: marketLabel ?? undefined,
+    });
+
+    if (decision.mode === "blocked") {
+      log.info("manual slip open blocked: rounds exist but none eligible", { sourceId, businessDate });
+      if (replyToken) await this.replyMessage(replyToken, "ไม่พบงวดที่เปิดอยู่สำหรับวันนี้ กรุณาเปิดงวดก่อน");
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+
+    if (decision.mode === "select") {
+      const candidates = await wrs.buildCandidates(decision.candidates);
+      await new WorkRoundSelectionService(this.supabase).create({
+        sourceId, lineUserId, businessDate, intent: "manual_slip", candidates,
+        payload: { dateStr, marketLabel, marketKey, lineMessageId },
+      });
+      log.info("manual slip open: multiple eligible rounds — pending selection", { count: decision.candidates.length });
+      if (replyToken) await this.replyMessage(replyToken, buildSelectionMessage("manual_slip", candidates));
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+
+    const workRoundId = decision.mode === "linked" ? decision.workRound.id : null; // legacy → null
+
     try {
       const svc    = new ManualSlipSessionService(this.supabase);
-      const result = await svc.openSession({ sourceId, businessDate, marketKey, marketLabel, lineUserId, lineMessageId });
+      const result = await svc.openSession({ sourceId, businessDate, marketKey, marketLabel, lineUserId, lineMessageId, workRoundId });
 
       if (!result.opened) {
         if (result.reason === "other_market_open") {
@@ -928,6 +986,16 @@ export class WebhookService {
     }
   }
 
+  // Converts a slip header date ("9/6/2569") to an ISO business date.
+  // Falls back to today's Bangkok business date when the header has no date.
+  private slipHeaderBusinessDate(header: SlipSessionHeader): string {
+    if (header.slipDate) {
+      const m = header.slipDate.match(/^(\d{1,2})\/(\d{1,2})\/((?:25)?\d{2})$/);
+      if (m) return parseBuddhistDate(m[1], m[2], m[3]);
+    }
+    return bangkokToday();
+  }
+
   // ── Slip session: open ────────────────────────────────────────────────────
   private async processSlipOpen(
     event:     LineMessageEvent,
@@ -948,8 +1016,34 @@ export class WebhookService {
     });
 
     try {
+      // ── V2: resolve which Work Round this slip evidence belongs to ─────────
+      const businessDate = this.slipHeaderBusinessDate(header);
+      const wrs          = new WorkRoundService(this.supabase);
+      const decision     = await wrs.resolveForEvidence(sourceId, businessDate, {
+        sellerName: header.sellerName, marketName: header.marketName,
+      });
+
+      if (decision.mode === "blocked") {
+        log.info("slip open blocked: rounds exist but none eligible", { sourceId, businessDate });
+        if (replyToken) await this.replyMessage(replyToken, "ไม่พบงวดที่เปิดอยู่สำหรับวันนี้ กรุณาเปิดงวดก่อน");
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      if (decision.mode === "select") {
+        const candidates = await wrs.buildCandidates(decision.candidates);
+        await new WorkRoundSelectionService(this.supabase).create({
+          sourceId, lineUserId: senderId, businessDate, intent: "slip", candidates,
+          payload: { header, sourceType: event.source.type, senderId },
+        });
+        log.info("slip open: multiple eligible rounds — pending selection", { count: decision.candidates.length });
+        if (replyToken) await this.replyMessage(replyToken, buildSelectionMessage("slip", candidates));
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      const workRoundId = decision.mode === "linked" ? decision.workRound.id : null; // legacy → null
+
       const result = await this.slipSessionService.openSession(
-        sourceId, event.source.type, senderId, header,
+        sourceId, event.source.type, senderId, header, workRoundId,
       );
 
       if (!result.opened) {
@@ -957,6 +1051,8 @@ export class WebhookService {
         if (replyToken) await this.replyMessage(replyToken, SESSION_ALREADY_OPEN_REPLY);
         return { eventId, eventType, status: "saved", parsed: false };
       }
+
+      log.info("slip session opened", { batchId: result.batchId, workRoundId, mode: decision.mode });
 
       const dateStr = header.slipDate ?? "ไม่ระบุวันที่";
       const confirmText = [
@@ -1100,137 +1196,11 @@ export class WebhookService {
         };
       }
 
-      // Fix 3: dedup check. Old failures may have reserved a hash before any
-      // produce_items were inserted; release those ghost reservations.
-      const dedup       = new SessionDedupService(this.supabase);
-      let isDuplicate   = await dedup.isDuplicate(parsed);
-      if (isDuplicate && !(await dedup.hasPersistedItems(parsed))) {
-        await dedup.release(parsed);
-        isDuplicate = false;
-      }
-      if (isDuplicate) {
-        log.info("duplicate session — skipping insert");
-        if (replyToken) {
-          console.log("duplicate reply triggered");
-          try {
-            await replyLineMessage(replyToken, "รายการนี้เคยบันทึกแล้ว");
-            console.log("duplicate reply success");
-          } catch (replyErr) {
-            const replyMsg = replyErr instanceof Error ? replyErr.message : String(replyErr);
-            console.log("duplicate reply error:", replyMsg);
-            log.error("duplicate reply failed", { error: replyMsg });
-          }
-        }
-        return {
-          eventId,
-          eventType,
-          status: "saved",
-          parsed: false,
-          pendingSessionClosed: true,
-        };
-      }
-
-      log.info("produce session final item count", {
-        finalItemCount: parsed.items.length,
-        parseErrorCount: parsed.parse_errors.length,
+      // V2: gate on Work Round resolution, then dedup + persist.
+      return await this.persistProduceGated({
+        parsed, accumulatedText, rawMessageId, lineUserId, replyToken,
+        sourceId, businessDate, eventId, eventType, log,
       });
-
-      // Persist session
-      const { data: session, error: sessionErr } = await this.supabase
-        .from("produce_sessions")
-        .insert({
-          raw_message_id:   rawMessageId,
-          line_user_id:     lineUserId ?? undefined,
-          staff_name:       parsed.staff_name,
-          sender_name:      parsed.sender_name      ?? undefined,
-          transaction_time: parsed.transaction_time ?? undefined,
-          session_date:     parsed.date             ?? undefined,
-          session_title:    parsed.session_title    ?? undefined,
-          total_items:      parsed.items.length,
-          parser_errors:    parsed.parse_errors.length > 0 ? parsed.parse_errors : null,
-        })
-        .select("id")
-        .single();
-
-      if (sessionErr) throw new Error(`produce_session insert failed: ${sessionErr.message}`);
-
-      try {
-        for (const item of parsed.items) {
-          const { error: itemErr } = await this.supabase.from("produce_items").insert({
-            session_id:       session.id,
-            item_number:      item.item_number,
-            product_name:     item.product_name,
-            price_per_unit:   item.price_per_unit,
-            quantity:         item.quantity    ?? undefined,
-            unit:             item.unit        ?? undefined,
-            section:          item.section,
-            transaction_type: item.transaction_type,
-            item_hash:        computeItemHash(parsed, item),
-          });
-          if (itemErr) {
-            throw new Error(`produce_item insert failed for ${item.product_name}: ${itemErr.message}`);
-          }
-        }
-      } catch (err) {
-        await this.supabase.from("produce_sessions").delete().eq("id", session.id);
-        throw err;
-      }
-
-      const duplicateAfterPersist = await dedup.record(parsed, accumulatedText);
-      if (duplicateAfterPersist) {
-        await this.supabase.from("produce_sessions").delete().eq("id", session.id);
-        log.info("duplicate session recorded concurrently — removed current insert");
-        if (replyToken) await replyLineMessage(replyToken, "รายการนี้เคยบันทึกแล้ว");
-        return {
-          eventId,
-          eventType,
-          status: "saved",
-          parsed: false,
-          pendingSessionClosed: true,
-        };
-      }
-
-      await this.supabase
-        .from("raw_messages")
-        .update({ is_processed: true })
-        .eq("id", rawMessageId);
-
-      // ── V2: resolve Work Round and attach session ──────────────────────────
-      if (sourceId && businessDate) {
-        await this.attachSessionToWorkRound(
-          sourceId, businessDate, session.id, accumulatedText, parsed.staff_name, parsed.session_title, log,
-        );
-      }
-
-      log.info("accumulated session finalized", { items: parsed.items.length, staff: parsed.staff_name });
-
-      await new DailySummaryService(this.supabase).recalculate(
-        parsed.date ?? bangkokToday(),
-        parsed.staff_name,
-        parsed.session_title ?? null,
-      );
-
-      log.info("pending session finalized", { items: parsed.items.length, staff: parsed.staff_name });
-
-      if (replyToken) {
-        console.log("reply triggered for finalized session");
-        console.log("[TRACE][finalizeAccumulated] items_before_summary:", JSON.stringify(parsed.items.map(i => ({ item_number: i.item_number, product_name: i.product_name, price_per_unit: i.price_per_unit, quantity: i.quantity, unit: i.unit, transaction_type: i.transaction_type }))));
-        const summary = buildWeighSessionSummary(parsed);
-        console.log("[TRACE][finalizeAccumulated] summary_reply_payload:", summary);
-        try {
-          await replyLineMessage(replyToken, summary);
-        } catch (e) {
-          log.error("reply failed", { error: String(e) });
-        }
-      }
-
-      return {
-        eventId,
-        eventType,
-        status: "saved",
-        parsed: true,
-        pendingSessionClosed: true,
-      };
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       log.error("finalize accumulated session failed", { error: errorMessage });
@@ -1266,8 +1236,6 @@ export class WebhookService {
   ): Promise<WebhookProcessResult> {
     const parser     = parserRegistry.findParser(msgEvent);
     const replyToken = msgEvent.replyToken;
-    let weighSessionData: WeighSession | null = null;
-    let rawTextForDedup:  string | null       = null;
 
     if (!parser) {
       log.debug("no parser matched");
@@ -1280,12 +1248,12 @@ export class WebhookService {
       console.log("[TRACE][runParser] text_before_parse:", (msgEvent.message as import("@/lib/line/types").LineTextMessage).text);
       const result = await parser.parse(msgEvent);
 
-      // Fix 2 + 3: weigh-session specific guards before any DB writes
+      // V2: weigh-session is persisted through the Work-Round-gated path so a
+      // complete single-message generic session can NEVER persist unresolved.
       if (parser.name === "weigh-session" && result.data) {
         const ws = result.data as unknown as WeighSession;
         console.log("[TRACE][runParser] parser_output:", JSON.stringify({ date: ws.date, staff_name: ws.staff_name, items_count: ws.items.length, items: ws.items, parse_errors: ws.parse_errors }, null, 2));
 
-        // Fix 2: empty items guard
         if (ws.items.length === 0) {
           log.warn("parsed session has no items — aborting");
           if (replyToken) {
@@ -1298,98 +1266,30 @@ export class WebhookService {
           return { eventId, eventType, status: "saved", parsed: false };
         }
 
-        // Fix 3: dedup check. Old failures may have reserved a hash before any
-        // produce_items were inserted; release those ghost reservations.
-        const rawText   = (msgEvent.message as import("@/lib/line/types").LineTextMessage).text;
-        const dedup     = new SessionDedupService(this.supabase);
-        let isDuplicate = await dedup.isDuplicate(ws);
-        if (isDuplicate && !(await dedup.hasPersistedItems(ws))) {
-          await dedup.release(ws);
-          isDuplicate = false;
-        }
-        if (isDuplicate) {
-          log.info("duplicate session — skipping insert");
-          if (replyToken) {
-            try {
-              await replyLineMessage(replyToken, "รายการนี้เคยบันทึกแล้ว");
-            } catch (e) {
-              log.error("reply failed", { error: String(e) });
-            }
-          }
-          return { eventId, eventType, status: "saved", parsed: false };
-        }
-
-        weighSessionData = ws;
-        rawTextForDedup  = rawText;
+        const rawText = (msgEvent.message as LineTextMessage).text;
+        return await this.persistProduceGated({
+          parsed:          ws,
+          accumulatedText: rawText,
+          rawMessageId,
+          lineUserId:      getUserId(msgEvent.source),
+          replyToken:      replyToken ?? null,
+          sourceId,
+          businessDate,
+          eventId,
+          eventType,
+          log,
+        });
       }
 
-      // Fix 4: persist first, then mark processed
+      // Non-weigh parsers keep the legacy persist path.
       await result.persist(this.supabase, rawMessageId);
-
-      if (parser.name === "weigh-session" && weighSessionData) {
-        const dedup = new SessionDedupService(this.supabase);
-        const duplicateAfterPersist = await dedup.record(weighSessionData, rawTextForDedup ?? undefined);
-        if (duplicateAfterPersist) {
-          log.info("duplicate session recorded concurrently after persist");
-          if (replyToken) {
-            try {
-              await replyLineMessage(replyToken, "รายการนี้เคยบันทึกแล้ว");
-            } catch (e) {
-              log.error("reply failed", { error: String(e) });
-            }
-          }
-          return { eventId, eventType, status: "saved", parsed: false };
-        }
-      }
 
       await this.supabase
         .from("raw_messages")
         .update({ is_processed: true })
         .eq("id", rawMessageId);
 
-      // ── V2: resolve Work Round and attach session ──────────────────────────
-      if (parser.name === "weigh-session" && sourceId && businessDate && result.data) {
-        const ws = result.data as unknown as WeighSession;
-        // Find the session that was just persisted for this raw_message_id.
-        const { data: newSession } = await this.supabase
-          .from("produce_sessions")
-          .select("id")
-          .eq("raw_message_id", rawMessageId)
-          .maybeSingle();
-        if (newSession) {
-          const rawTxt = (msgEvent.message as LineTextMessage).text;
-          await this.attachSessionToWorkRound(
-            sourceId, businessDate, newSession.id as string, rawTxt, ws.staff_name, ws.session_title, log,
-          );
-        }
-      }
-
       log.info("parse succeeded", { parser: parser.name });
-
-      if (parser.name === "weigh-session" && result.data) {
-        const ws = result.data as unknown as WeighSession;
-        await new DailySummaryService(this.supabase).recalculate(
-          ws.date ?? bangkokToday(),
-          ws.staff_name,
-          ws.session_title ?? null,
-        );
-      }
-
-      if (replyToken && result.data) {
-        const summaryText = parser.name === "weigh-session"
-          ? buildWeighSessionSummary(result.data as unknown as WeighSession)
-          : null;
-
-        if (summaryText) {
-          console.log("[TRACE][runParser] items_before_summary:", JSON.stringify((result.data as unknown as WeighSession).items.map(i => ({ item_number: i.item_number, product_name: i.product_name, price_per_unit: i.price_per_unit, quantity: i.quantity, unit: i.unit, transaction_type: i.transaction_type }))));
-          console.log("[TRACE][runParser] summary_reply_payload:", summaryText);
-          try {
-            await replyLineMessage(replyToken, summaryText);
-          } catch (e) {
-            log.error("reply failed", { error: String(e) });
-          }
-        }
-      }
 
       return { eventId, eventType, status: "saved", parsed: true };
     } catch (err) {
@@ -1446,40 +1346,29 @@ export class WebhookService {
       const svc    = new SettlementIntakeService(this.supabase);
       const rounds = await svc.findEligibleRounds(sourceId, businessDate);
 
+      // P0: NEVER auto-select among multiple Work Rounds.
       if (rounds.length === 0) {
         if (replyToken) await replyLineMessage(replyToken, svc.buildSelectionPrompt([], dateStr));
         return { eventId, eventType, status: "saved", parsed: false };
       }
 
-      // Auto-select if exactly one eligible round.
-      // If multiple, for now use the first — a proper selection UI is a future iteration.
-      // ponytail: numbered reply selection is a follow-up; this unblocks the main flow.
-      const round = rounds[0];
       if (rounds.length > 1) {
-        log.info("multiple eligible rounds for settlement — auto-selecting first", {
-          count: rounds.length, selectedId: round.id,
+        // Record a durable pending selection and reply with numbered options.
+        const wrs        = new WorkRoundService(this.supabase);
+        const candidates = await wrs.buildCandidates(rounds);
+        await new WorkRoundSelectionService(this.supabase).create({
+          sourceId, lineUserId, businessDate, intent: "settlement", candidates,
+          payload: { fullText },
         });
+        log.info("multiple eligible rounds — pending settlement selection created", { count: rounds.length });
+        if (replyToken) await replyLineMessage(replyToken, buildSelectionMessage("settlement", candidates));
+        return { eventId, eventType, status: "saved", parsed: false };
       }
 
-      const { draft } = await svc.openDraft(round.id, lineUserId);
-
-      // Parse amounts from the same message if present.
-      const amounts = parseSettlementAmounts(fullText);
-      if (hasAnyAmount(fullText)) {
-        const updated = await svc.recordDeclared(draft.id, amounts, lineUserId);
-        if (replyToken) await replyLineMessage(replyToken, svc.buildSettlementConfirmReply(updated, round));
-        log.info("settlement draft updated with amounts", { draftId: draft.id, amounts });
-      } else {
-        // Prompt user for amounts.
-        const prompt = [
-          `เปิดรายการส่งเงินสำหรับ ${round.seller_name} — ${round.market_name}`,
-          "ส่งยอดในรูปแบบ:",
-          "โอน 730 สด 1420 ค่าใช้จ่าย 410 ค่าแรง 400",
-        ].join("\n");
-        if (replyToken) await replyLineMessage(replyToken, prompt);
-        log.info("settlement draft opened — waiting for amounts", { draftId: draft.id });
-      }
-      return { eventId, eventType, status: "saved", parsed: false };
+      // Exactly one eligible round — proceed.
+      return await this.openSettlementForRound(
+        rounds[0], fullText, lineUserId, replyToken, eventId, eventType, log,
+      );
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       log.error("settlement command failed", { error: errorMessage });
@@ -1490,59 +1379,450 @@ export class WebhookService {
     }
   }
 
-  // ── V2: Attach a produce session to its Work Round ────────────────────────
-  // Classifies the header as explicit or generic, then resolves/finds the round.
-  // Graceful: logs and returns without throwing if the work_rounds table is absent.
-  private async attachSessionToWorkRound(
-    sourceId:     string,
-    businessDate: string,
-    sessionId:    string,
-    headerText:   string,
-    staffName:    string,
-    sessionTitle: string | null,
-    log:          ChildLogger,
-  ): Promise<void> {
-    try {
-      const firstLine = headerText.split("\n")[0] ?? "";
-      const hdrClass  = classifyHeader(firstLine);
-      const wrs       = new WorkRoundService(this.supabase);
+  // Opens/reuses a settlement draft for a specific Work Round, records any
+  // same-message amounts, advances round status, and replies.
+  private async openSettlementForRound(
+    round:      import("@/lib/work-round/types").WorkRound,
+    fullText:   string,
+    lineUserId: string | null,
+    replyToken: string | undefined,
+    eventId:    string,
+    eventType:  string,
+    log:        ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const svc    = new SettlementIntakeService(this.supabase);
+    const status = new WorkRoundStatusService(this.supabase);
+    const wr     = round;
 
-      if (hdrClass?.type === "explicit") {
-        // Use parsed seller+market from the header.
-        const isAppend = hdrClass.txIntent === "ชั่งคืนเพิ่ม";
-        const { workRound, created } = await wrs.resolve({
-          sourceId,
-          businessDate,
-          sellerName:  hdrClass.sellerName,
-          marketName:  hdrClass.marketName,
-          sourceMeta:  { rawFirstLine: firstLine },
-        });
-        await wrs.attachProduceSession(workRound.id, sessionId, isAppend);
-        log.info("produce session attached to Work Round", {
-          workRoundId: workRound.id, created, isAppend,
-        });
-      } else {
-        // Generic header — try to find the one open Work Round.
-        const result = await wrs.disambiguateGeneric(sourceId, businessDate);
-        if (result.status === "resolved") {
-          const isAppend = hdrClass?.txIntent === "ชั่งคืนเพิ่ม";
-          await wrs.attachProduceSession(result.workRound.id, sessionId, isAppend);
-          log.info("produce session attached to Work Round (generic)", {
-            workRoundId: result.workRound.id, isAppend,
-          });
-        } else {
-          log.warn("could not resolve Work Round for generic session — session left unattached", {
-            sessionId, disambiguationStatus: result.status,
-          });
-        }
-      }
+    await status.applyEvent(round.id, "settlement_opened");
+
+    const { draft } = await svc.openDraft(round.id, lineUserId);
+
+    if (hasAnyAmount(fullText)) {
+      const amounts = parseSettlementAmounts(fullText);
+      const updated = await svc.recordDeclared(draft.id, amounts, lineUserId);
+      if (replyToken) await replyLineMessage(replyToken, svc.buildReviewSummary(updated, wr));
+      log.info("settlement draft declared (same message)", { draftId: draft.id });
+    } else {
+      if (replyToken) await replyLineMessage(replyToken, svc.buildAmountsPrompt(wr));
+      log.info("settlement draft opened — awaiting amounts", { draftId: draft.id });
+    }
+    return { eventId, eventType, status: "saved", parsed: false };
+  }
+
+  // ── V2: settlement follow-up (amounts or ยืนยันส่งเงิน in a later message) ──
+  // Returns null if no open draft for this sender, so the caller falls through.
+  private async trySettlementFollowup(
+    event:     LineMessageEvent,
+    text:      string,
+    eventId:   string,
+    eventType: string,
+    log:       ChildLogger,
+  ): Promise<WebhookProcessResult | null> {
+    const sourceId   = getSourceId(event.source);
+    const lineUserId = getUserId(event.source);
+    const replyToken = event.replyToken;
+
+    let found: Awaited<ReturnType<SettlementIntakeService["findOpenDraftForSender"]>>;
+    try {
+      const svc = new SettlementIntakeService(this.supabase);
+      found = await svc.findOpenDraftForSender(sourceId, lineUserId);
     } catch (err) {
-      // Graceful: if work_rounds table doesn't exist yet, don't crash the webhook.
-      log.warn("Work Round attachment skipped", {
-        sessionId,
+      // work_rounds/settlement_drafts not migrated — let other handlers run.
+      log.warn("settlement followup lookup skipped", {
         error: err instanceof Error ? err.message : String(err),
       });
+      return null;
     }
+
+    if (!found) return null; // wrong sender / no open draft / stale — fall through
+
+    const svc    = new SettlementIntakeService(this.supabase);
+    const status = new WorkRoundStatusService(this.supabase);
+    const { draft, round } = found;
+
+    if (isConfirmCommand(text)) {
+      const submitted = await svc.confirmDraft(draft.id, lineUserId);
+      await status.applyEvent(round.id, "settlement_confirmed");
+      if (replyToken) await replyLineMessage(replyToken, svc.buildSubmittedReply(submitted, round));
+      log.info("settlement draft confirmed/submitted", { draftId: draft.id, workRoundId: round.id });
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+
+    // Amounts present — record a new immutable history version and ask to confirm.
+    const amounts = parseSettlementAmounts(text);
+    const updated = await svc.recordDeclared(draft.id, amounts, lineUserId);
+    if (replyToken) await replyLineMessage(replyToken, svc.buildReviewSummary(updated, round));
+    log.info("settlement draft declared (follow-up)", { draftId: draft.id, workRoundId: round.id });
+    return { eventId, eventType, status: "saved", parsed: false };
+  }
+
+  // ── V2: resolve a pending numbered selection ──────────────────────────────
+  // Returns null if there is no active selection for this sender (caller falls through).
+  private async tryResolveSelection(
+    event:     LineMessageEvent,
+    choice:    number,
+    eventId:   string,
+    eventType: string,
+    log:       ChildLogger,
+  ): Promise<WebhookProcessResult | null> {
+    const sourceId   = getSourceId(event.source);
+    const lineUserId = getUserId(event.source);
+    const replyToken = event.replyToken;
+
+    let selection;
+    try {
+      selection = await new WorkRoundSelectionService(this.supabase).findActive(sourceId, lineUserId);
+    } catch (err) {
+      log.warn("selection lookup skipped", { error: err instanceof Error ? err.message : String(err) });
+      return null;
+    }
+    if (!selection) return null;
+
+    const selSvc  = new WorkRoundSelectionService(this.supabase);
+    const wrs     = new WorkRoundService(this.supabase);
+    const candidates = selection.candidates as SelectionCandidate[];
+    const idx     = choice - 1;
+
+    if (idx < 0 || idx >= candidates.length) {
+      if (replyToken) await replyLineMessage(replyToken, `กรุณาเลือกหมายเลข 1-${candidates.length}`);
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+
+    const candidate = candidates[idx];
+    const eligible  = selection.intent === "settlement"
+      ? SETTLEMENT_ELIGIBLE_STATUSES
+      : EVIDENCE_ELIGIBLE_STATUSES;
+
+    // Re-validate: round must still exist, belong to this source/date, be eligible.
+    const round = await wrs.validateChoice(
+      candidate.work_round_id, sourceId, selection.business_date, eligible,
+    );
+    if (!round) {
+      await selSvc.expire(selection.id);
+      if (replyToken) await replyLineMessage(replyToken, "ตัวเลือกหมดอายุหรือใช้ไม่ได้แล้ว กรุณาเริ่มใหม่");
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+
+    await selSvc.resolve(selection.id, round.id);
+    log.info("selection resolved", { intent: selection.intent, workRoundId: round.id, choice });
+
+    const payload = (selection.payload ?? {}) as Record<string, unknown>;
+    switch (selection.intent as SelectionIntent) {
+      case "settlement":
+        return this.openSettlementForRound(
+          round, (payload.fullText as string) ?? "", lineUserId, replyToken, eventId, eventType, log,
+        );
+      case "produce_attach":
+        return this.resumeProduceAttach(event, round, payload, eventId, eventType, log);
+      case "slip":
+        return this.resumeSlipOpen(event, round, payload, eventId, eventType, log);
+      case "manual_slip":
+        return this.resumeManualSlipOpen(event, round, payload, eventId, eventType, log);
+      default:
+        return { eventId, eventType, status: "saved", parsed: false };
+    }
+  }
+
+  // ── V2: Work-Round-gated produce persist ──────────────────────────────────
+  //
+  // Resolves the target Work Round for a parsed produce session, then persists.
+  // A NEW V2 session is NEVER stored with a null work_round_id, blank seller, or
+  // generic market — unless the work_rounds table is absent (unmigrated legacy),
+  // in which case it falls back to the legacy null-link persist.
+  private async persistProduceGated(params: {
+    parsed:          WeighSession;
+    accumulatedText: string;
+    rawMessageId:    string;
+    lineUserId:      string | null;
+    replyToken:      string | null;
+    sourceId:        string;
+    businessDate:    string;
+    eventId:         string;
+    eventType:       string;
+    log:             ChildLogger;
+    forced?:         { workRoundId: string; isAppend: boolean };
+  }): Promise<WebhookProcessResult> {
+    const {
+      parsed, accumulatedText, rawMessageId, lineUserId, replyToken,
+      sourceId, businessDate, eventId, eventType, log, forced,
+    } = params;
+
+    // 1. Decide the target Work Round (unless a selection already forced one).
+    let target: { workRoundId: string | null; isAppend: boolean };
+    if (forced) {
+      target = { workRoundId: forced.workRoundId, isAppend: forced.isAppend };
+    } else {
+      const decision = await this.resolveProduceTarget(
+        parsed, accumulatedText, rawMessageId, lineUserId, replyToken,
+        sourceId, businessDate, eventId, eventType, log,
+      );
+      if (decision.kind === "halt") return decision.result;
+      target = { workRoundId: decision.workRoundId, isAppend: decision.isAppend };
+    }
+
+    // 2. Dedup. Release ghost reservations from old failed inserts.
+    const dedup     = new SessionDedupService(this.supabase);
+    let isDuplicate = await dedup.isDuplicate(parsed);
+    if (isDuplicate && !(await dedup.hasPersistedItems(parsed))) {
+      await dedup.release(parsed);
+      isDuplicate = false;
+    }
+    if (isDuplicate) {
+      log.info("duplicate session — skipping insert");
+      if (replyToken) {
+        try { await replyLineMessage(replyToken, "รายการนี้เคยบันทึกแล้ว"); }
+        catch (e) { log.error("duplicate reply failed", { error: String(e) }); }
+      }
+      return { eventId, eventType, status: "saved", parsed: false, pendingSessionClosed: true };
+    }
+
+    // 3. Insert the session WITH its Work Round link + append flag.
+    const { data: session, error: sessionErr } = await this.supabase
+      .from("produce_sessions")
+      .insert({
+        raw_message_id:    rawMessageId,
+        line_user_id:      lineUserId ?? undefined,
+        staff_name:        parsed.staff_name,
+        sender_name:       parsed.sender_name      ?? undefined,
+        transaction_time:  parsed.transaction_time ?? undefined,
+        session_date:      parsed.date             ?? undefined,
+        session_title:     parsed.session_title    ?? undefined,
+        total_items:       parsed.items.length,
+        parser_errors:     parsed.parse_errors.length > 0 ? parsed.parse_errors : null,
+        work_round_id:     target.workRoundId,
+        is_append_session: target.isAppend,
+      })
+      .select("id")
+      .single();
+
+    if (sessionErr) throw new Error(`produce_session insert failed: ${sessionErr.message}`);
+
+    try {
+      for (const item of parsed.items) {
+        const { error: itemErr } = await this.supabase.from("produce_items").insert({
+          session_id:       session.id,
+          item_number:      item.item_number,
+          product_name:     item.product_name,
+          price_per_unit:   item.price_per_unit,
+          quantity:         item.quantity ?? undefined,
+          unit:             item.unit     ?? undefined,
+          section:          item.section,
+          transaction_type: item.transaction_type,
+          item_hash:        computeItemHash(parsed, item),
+        });
+        if (itemErr) throw new Error(`produce_item insert failed for ${item.product_name}: ${itemErr.message}`);
+      }
+    } catch (err) {
+      await this.supabase.from("produce_sessions").delete().eq("id", session.id);
+      throw err;
+    }
+
+    const duplicateAfterPersist = await dedup.record(parsed, accumulatedText);
+    if (duplicateAfterPersist) {
+      await this.supabase.from("produce_sessions").delete().eq("id", session.id);
+      log.info("duplicate session recorded concurrently — removed current insert");
+      if (replyToken) await replyLineMessage(replyToken, "รายการนี้เคยบันทึกแล้ว");
+      return { eventId, eventType, status: "saved", parsed: false, pendingSessionClosed: true };
+    }
+
+    await this.supabase.from("raw_messages").update({ is_processed: true }).eq("id", rawMessageId);
+
+    // 4. Advance Work Round status (produce_attached keeps it open).
+    if (target.workRoundId) {
+      await new WorkRoundStatusService(this.supabase).applyEvent(target.workRoundId, "produce_attached");
+    }
+
+    await new DailySummaryService(this.supabase).recalculate(
+      parsed.date ?? bangkokToday(),
+      parsed.staff_name,
+      parsed.session_title ?? null,
+    );
+
+    log.info("produce session persisted", {
+      items: parsed.items.length, workRoundId: target.workRoundId, isAppend: target.isAppend,
+    });
+
+    if (replyToken) {
+      const summary = buildWeighSessionSummary(parsed);
+      try { await replyLineMessage(replyToken, summary); }
+      catch (e) { log.error("reply failed", { error: String(e) }); }
+    }
+
+    return { eventId, eventType, status: "saved", parsed: true, pendingSessionClosed: true };
+  }
+
+  // Decides which Work Round a parsed produce session attaches to.
+  // Returns a target work_round_id (possibly null = legacy/unmigrated) to persist,
+  // OR halts with an already-sent reply (no produce data is persisted).
+  private async resolveProduceTarget(
+    parsed:          WeighSession,
+    accumulatedText: string,
+    rawMessageId:    string,
+    lineUserId:      string | null,
+    replyToken:      string | null,
+    sourceId:        string,
+    businessDate:    string,
+    eventId:         string,
+    eventType:       string,
+    log:             ChildLogger,
+  ): Promise<
+    | { kind: "persist"; workRoundId: string | null; isAppend: boolean }
+    | { kind: "halt"; result: WebhookProcessResult }
+  > {
+    const halt = (): WebhookProcessResult => ({
+      eventId, eventType, status: "saved", parsed: false, pendingSessionClosed: false,
+    });
+
+    if (!sourceId || !businessDate) {
+      // No routing context — legacy persist with null link.
+      return { kind: "persist", workRoundId: null, isAppend: false };
+    }
+
+    const firstLine = normalizeText(accumulatedText).split("\n")[0] ?? "";
+    const hdr       = classifyHeader(firstLine);
+    const isAppend  = hdr?.txIntent === "ชั่งคืนเพิ่ม";
+    const wrs       = new WorkRoundService(this.supabase);
+
+    try {
+      if (hdr?.type === "explicit") {
+        // Explicit headers always create/resolve their round (works for everyone).
+        const { workRound } = await wrs.resolve({
+          sourceId, businessDate,
+          sellerName: hdr.sellerName, marketName: hdr.marketName,
+          sourceMeta: { rawFirstLine: firstLine },
+        });
+        return { kind: "persist", workRoundId: workRound.id, isAppend };
+      }
+
+      // Generic (or unrecognised) header → require a unique open Work Round.
+      const dis = await wrs.disambiguateGeneric(sourceId, businessDate);
+      if (dis.status === "resolved") {
+        return { kind: "persist", workRoundId: dis.workRound.id, isAppend };
+      }
+      if (dis.status === "none") {
+        log.warn("generic complete session: no open Work Round — not persisting", { sourceId });
+        if (replyToken) await replyLineMessage(replyToken, wrs.buildNoRoundPrompt());
+        return { kind: "halt", result: halt() };
+      }
+      // Ambiguous → open a durable produce_attach selection; persist nothing.
+      const candidates = await wrs.buildCandidates(dis.candidates);
+      await new WorkRoundSelectionService(this.supabase).create({
+        sourceId, lineUserId, businessDate, intent: "produce_attach", candidates,
+        payload: { rawMessageId, accumulatedText, isAppend, lineUserId },
+      });
+      log.warn("generic complete session: ambiguous Work Round — pending selection", {
+        count: dis.candidates.length,
+      });
+      if (replyToken) await replyLineMessage(replyToken, buildSelectionMessage("produce_attach", candidates));
+      return { kind: "halt", result: halt() };
+    } catch (err) {
+      // work_rounds table absent / not migrated → legacy null-link persist.
+      log.warn("Work Round resolution unavailable — legacy persist", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return { kind: "persist", workRoundId: null, isAppend };
+    }
+  }
+
+  // ── V2: selection resume — produce attach ─────────────────────────────────
+  private async resumeProduceAttach(
+    event:     LineMessageEvent,
+    round:     import("@/lib/work-round/types").WorkRound,
+    payload:   Record<string, unknown>,
+    eventId:   string,
+    eventType: string,
+    log:       ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const replyToken      = event.replyToken ?? null;
+    const rawMessageId    = payload.rawMessageId    as string;
+    const accumulatedText = payload.accumulatedText as string;
+    const isAppend        = Boolean(payload.isAppend);
+    const lineUserId      = (payload.lineUserId as string | null) ?? getUserId(event.source);
+
+    const parsed = parseWeighSession(accumulatedText, round.business_date);
+    if (parsed.items.length === 0) {
+      if (replyToken) await replyLineMessage(replyToken, "อ่านรายการไม่สำเร็จ กรุณาส่งใหม่");
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+
+    return this.persistProduceGated({
+      parsed, accumulatedText, rawMessageId, lineUserId, replyToken,
+      sourceId: round.source_id, businessDate: round.business_date,
+      eventId, eventType, log,
+      forced: { workRoundId: round.id, isAppend },
+    });
+  }
+
+  // ── V2: selection resume — slip session open ──────────────────────────────
+  private async resumeSlipOpen(
+    event:     LineMessageEvent,
+    round:     import("@/lib/work-round/types").WorkRound,
+    payload:   Record<string, unknown>,
+    eventId:   string,
+    eventType: string,
+    log:       ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const replyToken = event.replyToken;
+    const header     = payload.header     as SlipSessionHeader;
+    const sourceType = payload.sourceType as string;
+    const senderId   = (payload.senderId as string | null) ?? null;
+    const sourceId   = getSourceId(event.source);
+
+    const result = await this.slipSessionService.openSession(
+      sourceId, sourceType, senderId, header, round.id,
+    );
+    if (!result.opened) {
+      if (replyToken) await replyLineMessage(replyToken, SESSION_ALREADY_OPEN_REPLY);
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+    if (replyToken) {
+      await replyLineMessage(replyToken, [
+        "เปิดชุดสลิปเงินโอนแล้ว",
+        `${round.seller_name} — ${round.market_name}`,
+        "ส่งรูปสลิปต่อได้เลย",
+        `พิมพ์ "จบสลิป" เมื่อส่งครบ`,
+      ].join("\n"));
+    }
+    log.info("slip session opened via selection", { batchId: result.batchId, workRoundId: round.id });
+    return { eventId, eventType, status: "saved", parsed: false };
+  }
+
+  // ── V2: selection resume — manual slip session open ───────────────────────
+  private async resumeManualSlipOpen(
+    event:     LineMessageEvent,
+    round:     import("@/lib/work-round/types").WorkRound,
+    payload:   Record<string, unknown>,
+    eventId:   string,
+    eventType: string,
+    log:       ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const replyToken    = event.replyToken;
+    const lineUserId    = getUserId(event.source);
+    const sourceId      = getSourceId(event.source);
+    const marketLabel   = (payload.marketLabel as string | null) ?? null;
+    const marketKey     = (payload.marketKey   as string) ?? "default";
+    const businessDate  = round.business_date;
+    const dateStr       = (payload.dateStr as string) ?? businessDate;
+    const lineMessageId = (payload.lineMessageId as string) ?? `sel-${eventId}`;
+
+    const svc    = new ManualSlipSessionService(this.supabase);
+    const result = await svc.openSession({
+      sourceId, businessDate, marketKey, marketLabel, lineUserId, lineMessageId,
+      workRoundId: round.id,
+    });
+    if (!result.opened) {
+      if (replyToken) await replyLineMessage(replyToken, "เปิดสลิปมือไม่สำเร็จ มีงวดอื่นเปิดอยู่");
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+    if (replyToken) {
+      await replyLineMessage(replyToken, [
+        `เปิดสลิปมือ ${dateStr} แล้ว (${round.seller_name} — ${round.market_name})`,
+        "ส่งจำนวนเงินได้เลย แล้วพิมพ์ จบสลิปมือ เมื่อส่งครบ",
+      ].join("\n"));
+    }
+    log.info("manual slip session opened via selection", { sessionId: result.session?.id, workRoundId: round.id });
+    return { eventId, eventType, status: "saved", parsed: false };
   }
 
   // ── DB helpers ────────────────────────────────────────────────────────────

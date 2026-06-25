@@ -69,6 +69,7 @@ export interface SlipSessionIngestor {
     sourceType:  string,
     senderId:    string | null,
     header:      SlipSessionHeader,
+    workRoundId?: string | null,
   ): Promise<{ opened: true; batchId: string } | { opened: false; existingBatchId: string }>;
 
   findActiveSession(sourceId: string): Promise<ActiveSlipSession | null>;
@@ -78,10 +79,11 @@ export class SlipSessionService implements SlipSessionIngestor {
   constructor(private readonly supabase: Supabase) {}
 
   async openSession(
-    sourceId:   string,
-    sourceType: string,
-    senderId:   string | null,
-    header:     SlipSessionHeader,
+    sourceId:    string,
+    sourceType:  string,
+    senderId:    string | null,
+    header:      SlipSessionHeader,
+    workRoundId: string | null = null,
   ): Promise<{ opened: true; batchId: string } | { opened: false; existingBatchId: string }> {
     const log = logger.child({ sourceId });
 
@@ -91,16 +93,17 @@ export class SlipSessionService implements SlipSessionIngestor {
     const { data, error } = await this.supabase
       .from("slip_batches")
       .insert({
-        source_id:   sourceId,
-        source_type: sourceType,
-        sender_id:   senderId,
-        status:      "collecting",
-        header_text: header.rawHeaderText,
-        seller_name: header.sellerName,
-        market_name: header.marketName,
-        slip_date:   header.slipDate,
-        batch_type:  header.batchType,
-        image_count: 0,
+        source_id:     sourceId,
+        source_type:   sourceType,
+        sender_id:     senderId,
+        status:        "collecting",
+        header_text:   header.rawHeaderText,
+        seller_name:   header.sellerName,
+        market_name:   header.marketName,
+        slip_date:     header.slipDate,
+        batch_type:    header.batchType,
+        image_count:   0,
+        work_round_id: workRoundId,
       })
       .select("id")
       .single();

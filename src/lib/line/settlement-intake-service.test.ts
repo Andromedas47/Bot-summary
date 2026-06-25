@@ -3,8 +3,10 @@ import {
   parseSettlementCommand,
   parseSettlementAmounts,
   hasAnyAmount,
+  isConfirmCommand,
   SettlementIntakeService,
 } from "./settlement-intake-service";
+import { memSupabase } from "@/lib/test-utils/mem-supabase";
 import type { WorkRound, SettlementDraft } from "@/lib/work-round/types";
 
 // ── Pure function tests ────────────────────────────────────────────────────────
@@ -268,5 +270,78 @@ describe("SettlementIntakeService", () => {
     expect(reply).toContain("วัดทุ่งลานนา");
     // 730+1420+410+400 = 2960
     expect(reply).toContain("2,960");
+  });
+});
+
+// ── Multi-message follow-up flow ───────────────────────────────────────────────
+
+describe("isConfirmCommand", () => {
+  it("matches ยืนยันส่งเงิน", () => {
+    expect(isConfirmCommand("ยืนยันส่งเงิน")).toBe(true);
+    expect(isConfirmCommand(" ยืนยันยอด ")).toBe(true);
+  });
+  it("rejects other text", () => {
+    expect(isConfirmCommand("ส่งเงิน 24/06/2569")).toBe(false);
+    expect(isConfirmCommand("โอน 730")).toBe(false);
+  });
+});
+
+function seedDraftWorld(over: Record<string, unknown> = {}) {
+  return memSupabase({
+    work_rounds: [
+      { id: "wr-1", source_id: "G1", business_date: "2026-06-24", seller_name: "กี้", market_name: "วัดทุ่ง", round_seq: 1, status: "awaiting_settlement" },
+    ],
+    settlement_drafts: [
+      {
+        id: "d1", work_round_id: "wr-1", status: "pending", version: 1, declared_via: "line",
+        declared_by_line_user_id: "U1", declared_transfer: null, declared_cash: null,
+        declared_expenses: null, declared_labor: null,
+        updated_at: new Date().toISOString(), created_at: new Date().toISOString(),
+        ...over,
+      },
+    ],
+  });
+}
+
+describe("SettlementIntakeService.findOpenDraftForSender", () => {
+  it("finds the open draft for the declaring sender", async () => {
+    const db  = seedDraftWorld();
+    const svc = new SettlementIntakeService(db as never);
+    const res = await svc.findOpenDraftForSender("G1", "U1");
+    expect(res?.draft.id).toBe("d1");
+    expect(res?.round.id).toBe("wr-1");
+  });
+
+  it("does NOT find a draft for a different sender", async () => {
+    const db  = seedDraftWorld();
+    const svc = new SettlementIntakeService(db as never);
+    expect(await svc.findOpenDraftForSender("G1", "U2")).toBeNull();
+  });
+
+  it("ignores a stale draft", async () => {
+    const old = new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString(); // 7h ago
+    const db  = seedDraftWorld({ updated_at: old });
+    const svc = new SettlementIntakeService(db as never);
+    expect(await svc.findOpenDraftForSender("G1", "U1")).toBeNull();
+  });
+});
+
+describe("SettlementIntakeService follow-up record/confirm", () => {
+  it("records declared amounts, sets status declared, writes history, bumps version", async () => {
+    const db  = seedDraftWorld();
+    const svc = new SettlementIntakeService(db as never);
+    const updated = await svc.recordDeclared("d1", { transfer: 730, cash: 1420, expenses: 0, labor: 0 }, "U1");
+    expect(updated.status).toBe("declared");
+    expect(updated.declared_transfer).toBe(730);
+    expect(updated.version).toBe(2);
+    expect(db._rows("settlement_draft_history")).toHaveLength(1);
+  });
+
+  it("confirmDraft marks submitted and writes history", async () => {
+    const db  = seedDraftWorld({ status: "declared", declared_transfer: 730 });
+    const svc = new SettlementIntakeService(db as never);
+    const submitted = await svc.confirmDraft("d1", "U1");
+    expect(submitted.status).toBe("submitted");
+    expect(db._rows("settlement_draft_history").some((h) => h.change_type === "submitted")).toBe(true);
   });
 });

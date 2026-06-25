@@ -57,7 +57,7 @@ describe("slip session evidence → Work Round", () => {
     expect(batches[0].work_round_id).toBe("wr-b");
   });
 
-  it("opens a pending selection when multiple rounds match and the header does not", async () => {
+  it("fails closed when a slip header specifies seller+market that match no round", async () => {
     const db = memSupabase({
       work_rounds: [
         round({ id: "wr-a", seller_name: "x", market_name: "A" }),
@@ -68,8 +68,7 @@ describe("slip session evidence → Work Round", () => {
 
     expect(db._rows("slip_batches")).toHaveLength(0);
     const sels = db._rows("work_round_selections");
-    expect(sels).toHaveLength(1);
-    expect(sels[0].intent).toBe("slip");
+    expect(sels).toHaveLength(0);
   });
 
   it("fail-closed: does not open a null-linked batch when no rounds exist", async () => {

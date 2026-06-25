@@ -78,9 +78,17 @@ export type EvidenceResolution =
   | { mode: "linked"; workRound: WorkRound }
   | { mode: "select"; candidates: WorkRound[] }
   | { mode: "no_round" }  // no rounds exist for this source/date
-  | { mode: "blocked" }   // rounds exist for this date but none are eligible
+  | { mode: "blocked"; candidates: WorkRound[] }   // rounds exist for this date but none are eligible
   | { mode: "legacy" }    // deliberate legacy caller only
   | { mode: "error"; error: string };
+
+export interface ResolveForIntentParams {
+  sourceId: string;
+  businessDate: string;
+  allowedStatuses: WorkRoundStatus[];
+  sellerName?: string;
+  marketName?: string;
+}
 
 export class WorkRoundService {
   constructor(private readonly supabase: AnyClient) {}
@@ -221,6 +229,36 @@ export class WorkRoundService {
     return all.filter((r) => SETTLEMENT_ELIGIBLE_STATUSES.includes(r.status));
   }
 
+  async resolveForIntent(params: ResolveForIntentParams): Promise<EvidenceResolution> {
+    const {
+      sourceId,
+      businessDate,
+      allowedStatuses,
+      sellerName,
+      marketName,
+    } = params;
+
+    let all: WorkRound[];
+    try {
+      all = await this.findAllRounds(sourceId, businessDate);
+    } catch (err) {
+      return { mode: "error", error: err instanceof Error ? err.message : String(err) };
+    }
+
+    const candidates = all.filter((round) => {
+      if (sellerName && round.seller_name !== sellerName) return false;
+      if (marketName && round.market_name !== marketName) return false;
+      return true;
+    });
+
+    if (candidates.length === 0) return { mode: "no_round" };
+
+    const eligible = candidates.filter((round) => allowedStatuses.includes(round.status));
+    if (eligible.length === 0) return { mode: "blocked", candidates };
+    if (eligible.length === 1) return { mode: "linked", workRound: eligible[0] };
+    return { mode: "select", candidates: eligible };
+  }
+
   /**
    * Decides how slip / manual-slip evidence should attach to a Work Round.
    *
@@ -238,28 +276,13 @@ export class WorkRoundService {
     businessDate: string,
     opts:         { sellerName?: string; marketName?: string } = {},
   ): Promise<EvidenceResolution> {
-    let all: WorkRound[];
-    try {
-      all = await this.findAllRounds(sourceId, businessDate);
-    } catch (err) {
-      return { mode: "error", error: err instanceof Error ? err.message : String(err) };
-    }
-
-    if (all.length === 0) return { mode: "no_round" };
-
-    const eligible = all.filter((r) => EVIDENCE_ELIGIBLE_STATUSES.includes(r.status));
-    if (eligible.length === 0) return { mode: "blocked" };
-
-    // Prefer a unique seller+market match among the eligible rounds.
-    if (opts.sellerName && opts.marketName) {
-      const matched = eligible.filter(
-        (r) => r.seller_name === opts.sellerName && r.market_name === opts.marketName,
-      );
-      if (matched.length === 1) return { mode: "linked", workRound: matched[0] };
-    }
-
-    if (eligible.length === 1) return { mode: "linked", workRound: eligible[0] };
-    return { mode: "select", candidates: eligible };
+    return this.resolveForIntent({
+      sourceId,
+      businessDate,
+      allowedStatuses: EVIDENCE_ELIGIBLE_STATUSES,
+      sellerName: opts.sellerName,
+      marketName: opts.marketName,
+    });
   }
 
   // Links a slip batch to a Work Round (best-effort; logs but never throws).

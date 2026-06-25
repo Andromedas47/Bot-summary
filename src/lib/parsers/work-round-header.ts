@@ -32,7 +32,13 @@ export interface GenericHeader {
   txIntent: TxIntent;
 }
 
-export type WorkRoundHeader = ExplicitHeader | GenericHeader;
+export interface SellerOnlyHeader {
+  type:       "seller_only";
+  sellerName: string;
+  txIntent:   TxIntent;
+}
+
+export type WorkRoundHeader = ExplicitHeader | GenericHeader | SellerOnlyHeader;
 
 // Pattern for append-return (ชั่งคืนเพิ่ม / คืนเพิ่ม).
 // Checked before the standard คืน pattern to avoid misclassification.
@@ -66,6 +72,15 @@ export function classifyHeader(line: string): WorkRoundHeader | null {
     };
   }
 
+  const sellerOnlyMatch = content.match(INCOMPLETE_SELLER_TX);
+  if (sellerOnlyMatch) {
+    return {
+      type:       "seller_only",
+      sellerName: sellerOnlyMatch[1].trim(),
+      txIntent:   detectTxIntent(sellerOnlyMatch[2]),
+    };
+  }
+
   // Generic: any recognised session-start keyword
   // Also check APPEND_RE which is not covered by SESSION_START.
   if (RE.SESSION_START.test(content) || APPEND_RE.test(content)) {
@@ -85,7 +100,7 @@ const GENERIC_HEADER_START =
   /^(?:รายการชั่ง|รายการเบิก|รายการคืน|ชั่งคืนเพิ่ม|คืนเพิ่ม|เบิก(?:\s|$|เพิ่ม)|คืนเสีย|คืน(?:\s|$)|เสีย\s+\d)/;
 
 const INCOMPLETE_SELLER_TX = new RegExp(
-  "^([\\u0E00-\\u0E7F\\s]+?)\\s+(ชั่งคืนเพิ่ม|คืนเพิ่ม|เบิกเพิ่ม|เบิก|คืนเสีย|คืน)(?:\\s|\\d|$)",
+  "^([\\u0E00-\\u0E7F\\s]+?)\\s+(ชั่งคืนเพิ่ม|คืนเพิ่ม|ชั่งคืน|เบิกเพิ่ม|เบิก|คืนเสีย|คืน)(?:\\s|\\d|$)",
 );
 
 /**
@@ -97,7 +112,10 @@ export function isIncompleteProduceHeader(line: string): boolean {
   if (!content) return false;
   if (RE.SELLER_MARKET.test(content)) return false;
   if (GENERIC_HEADER_START.test(content)) return false;
-  return INCOMPLETE_SELLER_TX.test(content);
+  const sellerOnlyMatch = content.match(INCOMPLETE_SELLER_TX);
+  if (!sellerOnlyMatch) return false;
+  const intent = detectTxIntent(sellerOnlyMatch[2]);
+  return intent === "เบิก" || intent === "เบิกเพิ่ม";
 }
 
 /** Standalone "รายการเบิกเพิ่ม" / "เบิกเพิ่ม" — continues an existing Work Round, not a new header. */

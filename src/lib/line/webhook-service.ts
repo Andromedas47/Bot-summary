@@ -45,7 +45,7 @@ import {
   PRODUCE_APPEND_ELIGIBLE_STATUSES,
   RETURN_APPEND_ELIGIBLE_STATUSES,
 } from "@/lib/work-round/work-round-service";
-import { classifyHeader, isIncompleteProduceHeader, isProduceAppendLine } from "@/lib/parsers/work-round-header";
+import { classifyHeader, isIncompleteProduceHeader, isProduceAppendLine, type TxIntent } from "@/lib/parsers/work-round-header";
 import {
   SettlementIntakeService,
   parseSettlementCommand,
@@ -116,6 +116,17 @@ function parseCloseRoundCommand(text: string): string | null {
 
 function isCloseRoundConfirmCommand(text: string): boolean {
   return CLOSE_ROUND_CONFIRM_RE.test(text.trim());
+}
+
+function businessDateFromText(text: string, fallbackBusinessDate: string): string {
+  const m = text.match(RE.DATE_IN_TEXT);
+  if (!m) return fallbackBusinessDate;
+  return parseBuddhistDate(m[1], m[2], m[3]);
+}
+
+function allowedProduceStatusesForIntent(txIntent: TxIntent): WorkRoundStatus[] {
+  if (txIntent === "ชั่งคืนเพิ่ม") return RETURN_APPEND_ELIGIBLE_STATUSES;
+  return PRODUCE_APPEND_ELIGIBLE_STATUSES;
 }
 
 interface WebhookServiceDependencies {
@@ -651,9 +662,7 @@ export class WebhookService {
 
     // ── V2: resolve which Work Round this manual-slip evidence belongs to ─────
     const wrs      = new WorkRoundService(this.supabase);
-    const decision = await wrs.resolveForEvidence(sourceId, businessDate, {
-      marketName: marketLabel ?? undefined,
-    });
+    const decision = await wrs.resolveForEvidence(sourceId, businessDate);
 
     if (decision.mode === "error") {
       log.warn("manual slip open blocked: Work Round lookup failed", { sourceId, businessDate, error: decision.error });
@@ -1162,9 +1171,44 @@ export class WebhookService {
         return { eventId, eventType, status: "saved", parsed: false };
       }
 
-      if (decision.mode === "no_round" || decision.mode === "blocked") {
-        log.info("slip open blocked: rounds exist but none eligible", { sourceId, businessDate });
-        if (replyToken) await this.replyMessage(replyToken, "ไม่พบงวดที่เปิดอยู่สำหรับวันนี้ กรุณาเปิดงวดก่อน");
+      if (decision.mode === "no_round") {
+        log.info("slip open blocked: no matching Work Round", {
+          sourceId,
+          businessDate,
+          sellerName: header.sellerName,
+          marketName: header.marketName,
+        });
+        if (replyToken) {
+          await this.replyMessage(
+            replyToken,
+            [
+              `ไม่พบรอบงานของ ${header.sellerName} — ${header.marketName}`,
+              `วันที่ ${header.slipDate ?? businessDate}`,
+              "กรุณาเปิดเบิกและปิดรอบให้เรียบร้อยก่อนส่งสลิป",
+            ].join("\n"),
+          );
+        }
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      if (decision.mode === "blocked") {
+        log.info("slip open blocked: matching Work Round not evidence-eligible", {
+          sourceId,
+          businessDate,
+          statuses: decision.candidates.map((r) => r.status),
+        });
+        const statusList = [...new Set(decision.candidates.map((r) => r.status))].join(", ");
+        if (replyToken) {
+          await this.replyMessage(
+            replyToken,
+            [
+              `พบรอบงานของ ${header.sellerName} — ${header.marketName}`,
+              `วันที่ ${header.slipDate ?? businessDate}`,
+              `แต่ยังไม่พร้อมรับสลิป (สถานะ: ${statusList})`,
+              "กรุณาปิดรอบและยืนยันส่งเงินก่อนส่งสลิป",
+            ].join("\n"),
+          );
+        }
         return { eventId, eventType, status: "saved", parsed: false };
       }
 
@@ -1299,34 +1343,58 @@ export class WebhookService {
     log:        ChildLogger,
   ): Promise<{ ok: true } | { ok: false; reply: string }> {
     const hdr = classifyHeader(firstLine);
+    const wrs = new WorkRoundService(this.supabase);
     if (!hdr) {
-      return { ok: false, reply: new WorkRoundService(this.supabase).buildNoRoundPrompt() };
+      return { ok: false, reply: wrs.buildNoRoundPrompt() };
     }
 
-    if (hdr.type === "explicit") return { ok: true };
+    const businessDate = businessDateFromText(firstLine, bangkokToday());
+
+    if (hdr.type === "explicit" && hdr.txIntent === "เบิก") return { ok: true };
+
+    if (hdr.type === "seller_only" && (hdr.txIntent === "เบิก" || hdr.txIntent === "เบิกเพิ่ม")) {
+      log.info("seller-only borrow header blocked before pending session", {
+        sessionKey,
+        sellerName: hdr.sellerName,
+        txIntent: hdr.txIntent,
+      });
+      return { ok: false, reply: wrs.buildNoRoundPrompt() };
+    }
 
     try {
-      const wrs    = new WorkRoundService(this.supabase);
-      const result = await wrs.disambiguateGeneric(sessionKey, bangkokToday());
-      if (result.status === "none") {
+      const decision = await wrs.resolveForIntent({
+        sourceId: sessionKey,
+        businessDate,
+        sellerName: hdr.type === "explicit" || hdr.type === "seller_only" ? hdr.sellerName : undefined,
+        marketName: hdr.type === "explicit" ? hdr.marketName : undefined,
+        allowedStatuses: allowedProduceStatusesForIntent(hdr.txIntent),
+      });
+      if (decision.mode === "error") {
+        log.warn("Work Round header gate lookup failed", { sessionKey, businessDate, error: decision.error });
+        return { ok: false, reply: wrs.buildNoRoundPrompt() };
+      }
+      if (decision.mode === "no_round") {
         log.info("generic header: no open Work Round — blocking pending session", { sessionKey });
         return { ok: false, reply: wrs.buildNoRoundPrompt() };
       }
-      if (result.status === "ambiguous") {
+      if (decision.mode === "blocked") {
         log.info("generic header: ambiguous Work Rounds — blocking pending session", {
-          sessionKey, count: result.candidates.length,
+          sessionKey, count: decision.candidates.length,
         });
-        return { ok: false, reply: wrs.buildDisambiguationPrompt(result.candidates) };
+        return {
+          ok: false,
+          reply: "พบรอบงานแล้ว แต่สถานะยังไม่พร้อมรับรายการนี้ กรุณาตรวจสอบในหน้า Work Rounds",
+        };
       }
       log.info("generic header: resolved to one open Work Round", {
-        sessionKey, workRoundId: result.workRound.id,
+        sessionKey, mode: decision.mode,
       });
       return { ok: true };
     } catch (wrErr) {
       log.warn("Work Round disambiguation failed (may need migration)", {
         error: wrErr instanceof Error ? wrErr.message : String(wrErr),
       });
-      return { ok: true };
+      return { ok: false, reply: wrs.buildNoRoundPrompt() };
     }
   }
 
@@ -1775,13 +1843,22 @@ export class WebhookService {
     const businessDate = parseBuddhistDate(parts[1], parts[2], parts[3]);
     const wrs = new WorkRoundService(this.supabase);
     try {
-      const rounds = await wrs.findOpenRounds(sourceId, businessDate);
-      if (rounds.length === 0) {
+      const decision = await wrs.resolveForIntent({
+        sourceId,
+        businessDate,
+        allowedStatuses: ["open"],
+      });
+      if (decision.mode === "error") throw new Error(decision.error);
+      if (decision.mode === "no_round") {
         if (replyToken) await this.replyMessage(replyToken, `ไม่พบรอบที่เปิดอยู่สำหรับวันที่ ${dateStr}`);
         return { eventId, eventType, status: "saved", parsed: false };
       }
-      const candidates = await wrs.buildCandidates(rounds);
-      if (rounds.length > 1) {
+      if (decision.mode === "blocked") {
+        if (replyToken) await this.replyMessage(replyToken, `พบรอบสำหรับวันที่ ${dateStr} แต่สถานะยังไม่พร้อมปิดรอบ`);
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+      if (decision.mode === "select") {
+        const candidates = await wrs.buildCandidates(decision.candidates);
         await new WorkRoundSelectionService(this.supabase).create({
           sourceId, lineUserId, businessDate, intent: "close_round", candidates,
           payload: { dateStr },
@@ -1789,8 +1866,13 @@ export class WebhookService {
         if (replyToken) await this.replyMessage(replyToken, buildSelectionMessage("close_round", candidates));
         return { eventId, eventType, status: "saved", parsed: false };
       }
+      if (decision.mode !== "linked") {
+        if (replyToken) await this.replyMessage(replyToken, "ปิดรอบไม่ได้ชั่วคราว กรุณาลองใหม่อีกครั้ง");
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+      const candidates = await wrs.buildCandidates([decision.workRound]);
       await this.createCloseRoundConfirmation(sourceId, lineUserId, businessDate, candidates[0], dateStr);
-      if (replyToken) await this.replyMessage(replyToken, await this.buildCloseRoundConfirmPrompt(rounds[0]));
+      if (replyToken) await this.replyMessage(replyToken, await this.buildCloseRoundConfirmPrompt(decision.workRound));
       return { eventId, eventType, status: "saved", parsed: false };
     } catch (err) {
       log.warn("close round command failed", { error: err instanceof Error ? err.message : String(err) });
@@ -2271,13 +2353,98 @@ export class WebhookService {
           return resolveAppendRound(matched);
         }
 
-        // Explicit headers always create/resolve their round (works for everyone).
-        const { workRound } = await wrs.resolve({
-          sourceId, businessDate,
-          sellerName: hdr.sellerName, marketName: hdr.marketName,
-          sourceMeta: { rawFirstLine: firstLine },
+        if (hdr.txIntent === "เบิก") {
+          const { workRound } = await wrs.resolve({
+            sourceId, businessDate,
+            sellerName: hdr.sellerName, marketName: hdr.marketName,
+            sourceMeta: { rawFirstLine: firstLine },
+          });
+          return { kind: "persist", workRoundId: workRound.id, isAppend: false };
+        }
+
+        const decision = await wrs.resolveForIntent({
+          sourceId,
+          businessDate,
+          sellerName: hdr.sellerName,
+          marketName: hdr.marketName,
+          allowedStatuses: allowedProduceStatusesForIntent(hdr.txIntent),
         });
-        return { kind: "persist", workRoundId: workRound.id, isAppend: false };
+
+        if (decision.mode === "error") throw new Error(decision.error);
+        if (decision.mode === "linked") {
+          return { kind: "persist", workRoundId: decision.workRound.id, isAppend: false };
+        }
+        if (decision.mode === "select") {
+          const candidates = await wrs.buildCandidates(decision.candidates);
+          await new WorkRoundSelectionService(this.supabase).create({
+            sourceId, lineUserId, businessDate, intent: "produce_attach", candidates,
+            payload: { rawMessageId, accumulatedText, isAppend: false, lineUserId },
+          });
+          if (replyToken) await replyLineMessage(replyToken, buildSelectionMessage("produce_attach", candidates));
+          return { kind: "halt", result: halt() };
+        }
+
+        log.warn("explicit non-borrow produce header blocked", {
+          sourceId,
+          businessDate,
+          sellerName: hdr.sellerName,
+          marketName: hdr.marketName,
+          txIntent: hdr.txIntent,
+          reason: decision.mode,
+        });
+        if (replyToken) await replyLineMessage(replyToken, wrs.buildNoRoundPrompt());
+        return { kind: "halt", result: halt() };
+      }
+
+      if (hdr?.type === "seller_only") {
+        if (hdr.txIntent === "เบิก" || hdr.txIntent === "เบิกเพิ่ม") {
+          log.warn("seller-only borrow header blocked: market required", {
+            sourceId,
+            businessDate,
+            sellerName: hdr.sellerName,
+          });
+          if (replyToken) await replyLineMessage(replyToken, wrs.buildNoRoundPrompt());
+          return { kind: "halt", result: halt() };
+        }
+
+        const decision = await wrs.resolveForIntent({
+          sourceId,
+          businessDate,
+          sellerName: hdr.sellerName,
+          allowedStatuses: isReturnAppend ? RETURN_APPEND_ELIGIBLE_STATUSES : PRODUCE_APPEND_ELIGIBLE_STATUSES,
+        });
+
+        if (decision.mode === "error") throw new Error(decision.error);
+        if (decision.mode === "linked") {
+          return { kind: "persist", workRoundId: decision.workRound.id, isAppend };
+        }
+        if (decision.mode === "select") {
+          const candidates = await wrs.buildCandidates(decision.candidates);
+          await new WorkRoundSelectionService(this.supabase).create({
+            sourceId, lineUserId, businessDate, intent: "produce_attach", candidates,
+            payload: { rawMessageId, accumulatedText, isAppend, lineUserId },
+          });
+          if (replyToken) await replyLineMessage(replyToken, buildSelectionMessage("produce_attach", candidates));
+          return { kind: "halt", result: halt() };
+        }
+
+        const reason = decision.mode === "blocked"
+          ? "matching seller round is not eligible for this produce event"
+          : "no matching seller round";
+        log.warn("seller-only produce header blocked", {
+          sourceId,
+          businessDate,
+          sellerName: hdr.sellerName,
+          txIntent: hdr.txIntent,
+          reason,
+        });
+        if (replyToken) {
+          const reply = decision.mode === "blocked"
+            ? `พบรอบของ ${hdr.sellerName} แต่สถานะยังไม่พร้อมรับรายการนี้ กรุณาตรวจสอบในหน้า Work Rounds`
+            : `ไม่พบรอบของ ${hdr.sellerName} สำหรับวันที่นี้ กรุณาเปิดเบิกพร้อมชื่อตลาดก่อน`;
+          await replyLineMessage(replyToken, reply);
+        }
+        return { kind: "halt", result: halt() };
       }
 
       if (isProduceAppend) {

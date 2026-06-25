@@ -475,3 +475,114 @@ describe("WebhookService — multi-message settlement", () => {
     expect(draft.declared_transfer ?? null).toBeNull();
   });
 });
+
+describe("WebhookService — incident regression for canonical Work Round resolver", () => {
+  it("keeps borrow, seller-only returns, close, settlement, and slip on one Work Round", async () => {
+    const db = memSupabase();
+    const replies: string[] = [];
+    const s = new WebhookService(db as never, {
+      produceEndSettleMs: 0,
+      replyMessage: async (_replyToken, text) => { replies.push(text); },
+    });
+
+    await s.processEvents([textEvent("กี้-วัดทุ่งลานนา เบิก 25/6/2569", "seller-1")], "dest");
+    await s.processEvents([textEvent("1หมอนทอง129บาท", "seller-1")], "dest");
+    await s.processEvents([textEvent("10โล", "seller-1")], "dest");
+    await s.processEvents([textEvent("จบรายการเบิก", "seller-1")], "dest");
+
+    const round = db._rows("work_rounds")[0];
+    expect(round.source_id).toBe("group-1");
+    expect(round.business_date).toBe("2026-06-25");
+    expect(round.seller_name).toBe("กี้");
+    expect(round.market_name).toBe("วัดทุ่งลานนา");
+
+    await s.processEvents([textEvent("กี้ ชั่งคืน 25/6/2569", "seller-1")], "dest");
+    await s.processEvents([textEvent("1หมอนทอง129บาท", "seller-1")], "dest");
+    await s.processEvents([textEvent("2โล", "seller-1")], "dest");
+    await s.processEvents([textEvent("จบรายการ", "seller-1")], "dest");
+
+    await s.processEvents([textEvent("กี้ คืนเสีย 25/6/2569", "seller-1")], "dest");
+    await s.processEvents([textEvent("1หมอนทอง129บาท", "seller-1")], "dest");
+    await s.processEvents([textEvent("1โล", "seller-1")], "dest");
+    await s.processEvents([textEvent("จบรายการ", "seller-1")], "dest");
+
+    const workRoundId = round.id as string;
+    const sessions = db._rows("produce_sessions");
+    expect(sessions).toHaveLength(3);
+    expect(sessions.every((session) => session.work_round_id === workRoundId)).toBe(true);
+
+    const totals = await computeRoundTotals(db as never, workRoundId);
+    expect(totals.borrow).toBeCloseTo(1290, 2);
+    expect(totals.ret).toBeCloseTo(258, 2);
+    expect(totals.badReturn).toBeCloseTo(129, 2);
+    expect(totals.expected).toBeCloseTo(903, 2);
+
+    await s.processEvents([textEvent("ปิดรอบ 25/6/2569", "seller-1", "close-reply")], "dest");
+    expect(replies.at(-1)).toContain("กี้");
+    expect(replies.at(-1)).toContain("วัดทุ่งลานนา");
+    expect(replies.at(-1)).toContain("ยอดที่ต้องขายได้: 903.00 บาท");
+    expect(db._rows("work_rounds")[0].status).toBe("open");
+
+    await s.processEvents([textEvent("ยืนยันปิดรอบ", "seller-1")], "dest");
+    expect(db._rows("work_rounds")[0].status).toBe("awaiting_settlement");
+
+    await s.processEvents([textEvent("ส่งเงิน 25/6/2569 903 บาท", "seller-1")], "dest");
+    const draft = db._rows("settlement_drafts")[0];
+    expect(draft.work_round_id).toBe(workRoundId);
+    expect(draft.declared_transfer).toBe(903);
+    expect(draft.status).toBe("declared");
+
+    await s.processEvents([textEvent("ยืนยันส่งเงิน", "seller-1")], "dest");
+    expect(db._rows("work_rounds")[0].status).toBe("awaiting_slips");
+
+    await s.processEvents([textEvent("กี้ วัดทุ่งลานนา สลิปเงินโอน 25/6/2569", "seller-1")], "dest");
+    const batches = db._rows("slip_batches");
+    expect(batches).toHaveLength(1);
+    expect(batches[0].work_round_id).toBe(workRoundId);
+    expect(batches[0].seller_name).toBe("กี้");
+    expect(batches[0].market_name).toBe("วัดทุ่งลานนา");
+
+    expect(db._rows("produce_sessions").some((session) => session.work_round_id == null)).toBe(false);
+    expect(db._rows("slip_batches").some((batch) => batch.work_round_id == null)).toBe(false);
+    expect(db._rows("settlement_finalizations")).toHaveLength(0);
+  });
+
+  it("does not auto-pick a seller-only return when the seller has multiple open rounds", async () => {
+    const db = memSupabase({
+      work_rounds: [
+        openRound({ id: "wr-a", business_date: "2026-06-25", seller_name: "กี้", market_name: "วัดทุ่งลานนา" }),
+        openRound({ id: "wr-b", business_date: "2026-06-25", seller_name: "กี้", market_name: "อีกตลาด" }),
+      ],
+    });
+
+    await svc(db).processEvents([
+      textEvent(["กี้ ชั่งคืน 25/6/2569", "1หมอนทอง129บาท", "2โล", "จบรายการ"].join("\n")),
+    ], "dest");
+
+    expect(db._rows("produce_sessions")).toHaveLength(0);
+    expect(db._rows("produce_items")).toHaveLength(0);
+    const selections = db._rows("work_round_selections");
+    expect(selections).toHaveLength(1);
+    expect(selections[0].intent).toBe("produce_attach");
+  });
+
+  it("uses V2 actionable wording when slips are sent before the round can accept evidence", async () => {
+    const replies: string[] = [];
+    const db = memSupabase({
+      work_rounds: [
+        openRound({ id: "wr-a", business_date: "2026-06-25", seller_name: "กี้", market_name: "วัดทุ่งลานนา", status: "open" }),
+      ],
+    });
+    const s = new WebhookService(db as never, {
+      produceEndSettleMs: 0,
+      replyMessage: async (_replyToken, text) => { replies.push(text); },
+    });
+
+    await s.processEvents([textEvent("กี้ วัดทุ่งลานนา สลิปเงินโอน 25/6/2569", "seller-1", "slip-reply")], "dest");
+
+    expect(db._rows("slip_batches")).toHaveLength(0);
+    expect(replies[0]).toContain("พบรอบงานของ กี้");
+    expect(replies[0]).toContain("ยังไม่พร้อมรับสลิป");
+    expect(replies[0]).not.toContain("ไม่พบงวดที่เปิดอยู่");
+  });
+});

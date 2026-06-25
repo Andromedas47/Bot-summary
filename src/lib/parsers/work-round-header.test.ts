@@ -39,6 +39,26 @@ describe("classifyHeader", () => {
     }
   });
 
+  it("classifies seller-only ชั่งคืน headers for Work Round resolution", () => {
+    const h = classifyHeader("กี้ ชั่งคืน 25/6/2569");
+    expect(h?.type).toBe("seller_only");
+    if (h?.type === "seller_only") {
+      expect(h.sellerName).toBe("กี้");
+      expect(h.txIntent).toBe("คืน");
+    }
+    expect(isIncompleteProduceHeader("กี้ ชั่งคืน 25/6/2569")).toBe(false);
+  });
+
+  it("classifies seller-only คืนเสีย headers for Work Round resolution", () => {
+    const h = classifyHeader("กี้ คืนเสีย 25/6/2569");
+    expect(h?.type).toBe("seller_only");
+    if (h?.type === "seller_only") {
+      expect(h.sellerName).toBe("กี้");
+      expect(h.txIntent).toBe("คืนเสีย");
+    }
+    expect(isIncompleteProduceHeader("กี้ คืนเสีย 25/6/2569")).toBe(false);
+  });
+
   // ── Generic headers ────────────────────────────────────────────────────────
 
   it("classifies 'รายการชั่งเบิก 24/06/2569' as generic เบิก", () => {

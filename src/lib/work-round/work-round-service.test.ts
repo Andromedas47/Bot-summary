@@ -193,15 +193,46 @@ describe("WorkRoundService", () => {
     if (res.status === "ambiguous") expect(res.candidates).toHaveLength(2);
   });
 
-  it("buildDisambiguationPrompt lists candidates in Thai", () => {
+  it("buildDisambiguationPrompt lists candidates with produce-append syntax", () => {
     const svc = new WorkRoundService({} as never);
     const candidates: WorkRound[] = [
       { id: "1", source_id: "g", business_date: "2026-06-24", seller_name: "กี้",   market_name: "วัดทุ่ง", round_seq: 1, status: "open", source_meta: null, created_at: "", updated_at: "" },
       { id: "2", source_id: "g", business_date: "2026-06-24", seller_name: "พี่ดำ", market_name: "วิหาร",  round_seq: 1, status: "open", source_meta: null, created_at: "", updated_at: "" },
     ];
     const prompt = svc.buildDisambiguationPrompt(candidates);
-    expect(prompt).toContain("กี้-วัดทุ่ง");
-    expect(prompt).toContain("พี่ดำ-วิหาร");
+    expect(prompt).toContain("กี้-วัดทุ่ง รายการเบิกเพิ่ม 24/6/2569");
+    expect(prompt).toContain("พี่ดำ-วิหาร รายการเบิกเพิ่ม 24/6/2569");
+    expect(prompt).not.toContain(" เบิก");
+  });
+
+  it("resolveExplicitProduceAppend resolves by seller+market+date", async () => {
+    const rounds: Row[] = [
+      { id: "wr-1", source_id: "grp1", business_date: "2026-06-28", seller_name: "ทดลองใหม่", market_name: "ตลาดจำลอง", round_seq: 1, status: "open", source_meta: null, created_at: "", updated_at: "" },
+      { id: "wr-2", source_id: "grp1", business_date: "2026-06-28", seller_name: "ทดสอบ2",   market_name: "ตลาดทดสอบ", round_seq: 1, status: "open", source_meta: null, created_at: "", updated_at: "" },
+    ];
+    const db  = makeDb(rounds);
+    const svc = new WorkRoundService(db as never);
+    const res = await svc.resolveExplicitProduceAppend({
+      sourceId: "grp1", businessDate: "2026-06-28",
+      sellerName: "ทดลองใหม่", marketName: "ตลาดจำลอง",
+    });
+    expect(res.status).toBe("resolved");
+    if (res.status === "resolved") expect(res.workRound.id).toBe("wr-1");
+  });
+
+  it("resolveExplicitProduceAppend returns none when date differs", async () => {
+    const round: Row = {
+      id: "wr-1", source_id: "grp1", business_date: "2026-06-28",
+      seller_name: "ทดลองใหม่", market_name: "ตลาดจำลอง", round_seq: 1, status: "open",
+      source_meta: null, created_at: "", updated_at: "",
+    };
+    const db  = makeDb([round]);
+    const svc = new WorkRoundService(db as never);
+    const res = await svc.resolveExplicitProduceAppend({
+      sourceId: "grp1", businessDate: "2026-06-25",
+      sellerName: "ทดลองใหม่", marketName: "ตลาดจำลอง",
+    });
+    expect(res.status).toBe("none");
   });
 
   it("resolveProduceAppendTarget finds round created by resolve()", async () => {

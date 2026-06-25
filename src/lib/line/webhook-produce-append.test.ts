@@ -366,4 +366,128 @@ describe("WebhookService — รายการเบิกเพิ่ม V2 re
     expect(parsed.parse_errors).toHaveLength(0);
     expect(parsed.items).toHaveLength(17);
   });
+
+  // ── Explicit produce-append header (multi-round disambiguation) ─────────────
+
+  const APPEND_DATE = "2026-06-28";
+
+  function twoActiveRounds(): Row[] {
+    return [
+      openRound({
+        id: "wr-a", business_date: APPEND_DATE,
+        seller_name: "ทดสอบ2", market_name: "ตลาดทดสอบ",
+      }),
+      openRound({
+        id: "wr-b", business_date: APPEND_DATE,
+        seller_name: "ทดลองใหม่", market_name: "ตลาดจำลอง",
+      }),
+    ];
+  }
+
+  it("1: two active rounds → standalone รายการเบิกเพิ่ม rejects with append syntax hint", async () => {
+    const db = memSupabase({ work_rounds: twoActiveRounds() });
+    const replies: string[] = [];
+
+    await svc(db, replies).processEvents([
+      textEvent("รายการเบิกเพิ่ม", { replyToken: "tok-multi" }),
+    ], "dest");
+
+    expect(replies[0]).toContain("มีหลายรายการที่เปิดอยู่");
+    expect(replies[0]).toContain("ทดสอบ2-ตลาดทดสอบ รายการเบิกเพิ่ม");
+    expect(replies[0]).toContain("ทดลองใหม่-ตลาดจำลอง รายการเบิกเพิ่ม");
+    expect(replies[0]).not.toMatch(/ เบิก(?:\s|$)/);
+    expect(db._rows("pending_sessions")).toHaveLength(0);
+    expect(db._rows("produce_sessions")).toHaveLength(0);
+  });
+
+  it("2: explicit seller-market รายการเบิกเพิ่ม date attaches to intended round only", async () => {
+    const rounds = twoActiveRounds();
+    const db = memSupabase({ work_rounds: rounds });
+    const replies: string[] = [];
+
+    await svc(db, replies).processEvents([
+      textEvent(
+        ["ทดลองใหม่-ตลาดจำลอง รายการเบิกเพิ่ม 28/6/2569", "1มังคุด35บาท", `5 ${LO}`, "จบรายการ"].join("\n"),
+        { replyToken: "tok-explicit" },
+      ),
+    ], "dest");
+
+    expect(replies.some((r) => r.includes("ไม่พบรอบ"))).toBe(false);
+    expect(db._rows("work_rounds")).toHaveLength(2);
+    const sessions = db._rows("produce_sessions");
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].work_round_id).toBe("wr-b");
+    expect(sessions[0].is_append_session).toBe(true);
+  });
+
+  it("3: explicit produce append does not create a second Work Round", async () => {
+    const rounds = twoActiveRounds();
+    const db = memSupabase({ work_rounds: rounds });
+    const replies: string[] = [];
+
+    await svc(db, replies).processEvents([
+      textEvent("ทดลองใหม่-ตลาดจำลอง เบิกเพิ่ม 28/6/2569", { replyToken: "tok-alias" }),
+      textEvent("2ทุเรียน35บาท"),
+      textEvent(`3 ${LO}`),
+      textEvent("จบรายการ"),
+    ], "dest");
+
+    expect(db._rows("work_rounds")).toHaveLength(2);
+    expect(db._rows("produce_sessions")).toHaveLength(1);
+    expect(db._rows("produce_sessions")[0].work_round_id).toBe("wr-b");
+  });
+
+  it("4: explicit produce append rejects closed / awaiting_settlement / needs_correction rounds", async () => {
+    for (const status of ["awaiting_settlement", "needs_correction", "approved"] as const) {
+      const round = openRound({
+        id: `wr-${status}`,
+        business_date: APPEND_DATE,
+        seller_name: "ทดลองใหม่",
+        market_name: "ตลาดจำลอง",
+        status,
+      });
+      const db = memSupabase({
+        work_rounds: [round],
+        produce_sessions: status !== "approved"
+          ? [{ id: "prior", work_round_id: round.id, is_append_session: false, staff_name: "ทดลองใหม่" }]
+          : [],
+      });
+      const replies: string[] = [];
+
+      await svc(db, replies).processEvents([
+        textEvent(
+          ["ทดลองใหม่-ตลาดจำลอง รายการเบิกเพิ่ม 28/6/2569", "1มังคุด35บาท", `2 ${LO}`, "จบรายการ"].join("\n"),
+          { replyToken: `tok-${status}` },
+        ),
+      ], "dest");
+
+      expect(replies[0]).toBeTruthy();
+      expect(replies.some((r) => r.includes("ไม่พบรอบ") || r.includes("ไม่พร้อม"))).toBe(true);
+      expect(db._rows("produce_sessions").filter((s) => s.id !== "prior")).toHaveLength(0);
+    }
+  });
+
+  it("5: standalone รายการเบิกเพิ่ม still works when exactly one append-eligible round exists", async () => {
+    const round = openRound({
+      id: "wr-only",
+      business_date: APPEND_DATE,
+      seller_name: "ทดลองใหม่",
+      market_name: "ตลาดจำลอง",
+    });
+    const db = memSupabase({ work_rounds: [round] });
+    const replies: string[] = [];
+
+    await svc(db, replies).processEvents([
+      textEvent("รายการเบิกเพิ่ม"),
+      textEvent("1มังคุด35บาท"),
+      textEvent(`2 ${LO}`),
+      textEvent("จบรายการ", { replyToken: "tok-single" }),
+    ], "dest");
+
+    expect(replies.some((r) => r.includes("ไม่พบรอบ") || r.includes("มีหลายรายการ"))).toBe(false);
+    expect(db._rows("work_rounds")).toHaveLength(1);
+    expect(db._rows("produce_sessions")).toHaveLength(1);
+    expect(db._rows("produce_sessions")[0].work_round_id).toBe("wr-only");
+    expect(db._rows("produce_sessions")[0].is_append_session).toBe(true);
+  });
 });

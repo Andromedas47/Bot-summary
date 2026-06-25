@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { classifyHeader, isIncompleteProduceHeader, isProduceAppendLine } from "./work-round-header";
+import { classifyHeader, hasExplicitProduceAppendStart, isExplicitProduceAppendHeader, isIncompleteProduceHeader, isProduceAppendLine } from "./work-round-header";
 
 describe("classifyHeader", () => {
   // ── Explicit headers ───────────────────────────────────────────────────────
@@ -109,7 +109,23 @@ describe("classifyHeader", () => {
     if (h?.type === "generic") expect(h.txIntent).toBe("เบิกเพิ่ม");
   });
 
-  it("classifies 'รายการเบิกเพิ่ม' as generic เบิกเพิ่ม", () => {
+  it("classifies explicit seller-market รายการเบิกเพิ่ม header", () => {
+    const h = classifyHeader("ทดลองใหม่-ตลาดจำลอง รายการเบิกเพิ่ม 28/6/2569");
+    expect(h?.type).toBe("explicit");
+    if (h?.type === "explicit") {
+      expect(h.sellerName).toBe("ทดลองใหม่");
+      expect(h.marketName).toBe("ตลาดจำลอง");
+      expect(h.txIntent).toBe("เบิกเพิ่ม");
+    }
+  });
+
+  it("classifies explicit seller-market เบิกเพิ่ม alias", () => {
+    const h = classifyHeader("ทดลองใหม่-ตลาดจำลอง เบิกเพิ่ม 28/6/2569");
+    expect(h?.type).toBe("explicit");
+    if (h?.type === "explicit") expect(h.txIntent).toBe("เบิกเพิ่ม");
+  });
+
+  it("classifies standalone 'รายการเบิกเพิ่ม' as generic เบิกเพิ่ม", () => {
     const h = classifyHeader("รายการเบิกเพิ่ม");
     expect(h?.type).toBe("generic");
     if (h?.type === "generic") expect(h.txIntent).toBe("เบิกเพิ่ม");
@@ -141,6 +157,24 @@ describe("isProduceAppendLine", () => {
 
   it("does not match explicit seller-market headers", () => {
     expect(isProduceAppendLine("โอม-ตลาดพาซิโอ้ผลไม้ เบิกเพิ่ม")).toBe(false);
+    expect(isProduceAppendLine("ทดลองใหม่-ตลาดจำลอง รายการเบิกเพิ่ม 28/6/2569")).toBe(false);
+  });
+});
+
+describe("isExplicitProduceAppendHeader", () => {
+  it("matches explicit รายการเบิกเพิ่ม and เบิกเพิ่ม alias", () => {
+    expect(isExplicitProduceAppendHeader("ทดลองใหม่-ตลาดจำลอง รายการเบิกเพิ่ม 28/6/2569")).toBe(true);
+    expect(isExplicitProduceAppendHeader("ทดลองใหม่-ตลาดจำลอง เบิกเพิ่ม 28/6/2569")).toBe(true);
+  });
+
+  it("does not match standalone append marker", () => {
+    expect(isExplicitProduceAppendHeader("รายการเบิกเพิ่ม")).toBe(false);
+  });
+});
+
+describe("hasExplicitProduceAppendStart", () => {
+  it("detects explicit append in multi-line message", () => {
+    expect(hasExplicitProduceAppendStart("ทดลองใหม่-ตลาดจำลอง รายการเบิกเพิ่ม 28/6/2569\n1มังคุด35บาท")).toBe(true);
   });
 });
 

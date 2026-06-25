@@ -45,7 +45,7 @@ import {
   PRODUCE_APPEND_ELIGIBLE_STATUSES,
   RETURN_APPEND_ELIGIBLE_STATUSES,
 } from "@/lib/work-round/work-round-service";
-import { classifyHeader, isIncompleteProduceHeader, isProduceAppendLine, type TxIntent } from "@/lib/parsers/work-round-header";
+import { classifyHeader, hasExplicitProduceAppendStart, isExplicitProduceAppendHeader, isIncompleteProduceHeader, isProduceAppendLine, type TxIntent } from "@/lib/parsers/work-round-header";
 import {
   SettlementIntakeService,
   parseSettlementCommand,
@@ -195,6 +195,7 @@ export function hasSessionStart(text: string): boolean {
     const line = l.trim();
     return !RE.SESSION_END.test(line)
       && !isProduceAppendLine(line)
+      && !isExplicitProduceAppendHeader(line)
       && RE.SESSION_START.test(line);
   });
 }
@@ -458,6 +459,7 @@ export class WebhookService {
 
     const firstLine = normalizedText.split("\n")[0] ?? "";
     const appendStart = hasProduceAppendStart(normalizedText);
+    const explicitAppendStart = hasExplicitProduceAppendStart(normalizedText);
 
     if (hasSessionStart(normalizedText) && isIncompleteProduceHeader(firstLine)) {
       log.info("incomplete produce header rejected", { sessionKey, firstLine });
@@ -472,7 +474,7 @@ export class WebhookService {
     }
 
     if (pending) {
-      if (hasSessionStart(normalizedText) && !appendStart) {
+      if (hasSessionStart(normalizedText) && !appendStart && !explicitAppendStart) {
         const gate = await this.canCollectProduceHeader(firstLine, sessionKey, log);
         if (!gate.ok) {
           await pendingService.delete(sessionKey);
@@ -581,6 +583,40 @@ export class WebhookService {
     }
 
     // ── 5. No active pending session ──────────────────────────────────────────
+    if (explicitAppendStart) {
+      const appendGate = await this.canCollectExplicitProduceAppend(firstLine, sessionKey, log);
+      if (!appendGate.ok) {
+        log.info("explicit produce append blocked", { sessionKey, firstLine });
+        if (replyToken) await this.replyMessage(replyToken, appendGate.reply);
+        return { eventId, eventType: event.type, status: "saved", parsed: false };
+      }
+
+      if (hasSessionEnd(normalizedText) || hasItemLine(normalizedText)) {
+        log.info("complete explicit produce-append message — parsing directly", { sessionKey });
+        return this.finalizeAccumulated(
+          text,
+          replyToken,
+          lineUserId,
+          rawMessageId,
+          eventId,
+          event.type,
+          log,
+          bangkokTimeFromTimestamp(event.timestamp),
+          sessionKey,
+          businessDateFromText(firstLine, bangkokToday()),
+        );
+      }
+
+      log.info("explicit produce append marker — starting pending session", { sessionKey });
+      try {
+        await pendingService.create(sessionKey, text, replyToken, lineUserId);
+      } catch (createErr) {
+        const msg = createErr instanceof Error ? createErr.message : String(createErr);
+        log.error("pending session create failed for explicit produce append", { sessionKey, error: msg });
+      }
+      return { eventId, eventType: event.type, status: "saved", parsed: false };
+    }
+
     if (appendStart) {
       const appendGate = await this.canCollectProduceAppend(sessionKey, log);
       if (!appendGate.ok) {
@@ -1378,6 +1414,10 @@ export class WebhookService {
 
     if (hdr.type === "explicit" && hdr.txIntent === "เบิก") return { ok: true };
 
+    if (hdr.type === "explicit" && hdr.txIntent === "เบิกเพิ่ม") {
+      return this.canCollectExplicitProduceAppend(firstLine, sessionKey, log);
+    }
+
     if (hdr.type === "seller_only" && (hdr.txIntent === "เบิก" || hdr.txIntent === "เบิกเพิ่ม")) {
       log.info("seller-only borrow header blocked before pending session", {
         sessionKey,
@@ -1421,6 +1461,64 @@ export class WebhookService {
         error: wrErr instanceof Error ? wrErr.message : String(wrErr),
       });
       return { ok: false, reply: wrs.buildNoRoundPrompt() };
+    }
+  }
+
+  private async canCollectExplicitProduceAppend(
+    firstLine:  string,
+    sessionKey: string,
+    log:        ChildLogger,
+  ): Promise<{ ok: true } | { ok: false; reply: string }> {
+    const hdr = classifyHeader(firstLine);
+    const wrs = new WorkRoundService(this.supabase);
+    if (hdr?.type !== "explicit" || hdr.txIntent !== "เบิกเพิ่ม") {
+      return { ok: false, reply: wrs.buildNoAppendRoundPrompt() };
+    }
+
+    const businessDate = businessDateFromText(firstLine, bangkokToday());
+
+    try {
+      const result = await wrs.resolveExplicitProduceAppend({
+        sourceId: sessionKey,
+        businessDate,
+        sellerName: hdr.sellerName,
+        marketName: hdr.marketName,
+      });
+      if (result.status === "resolved") {
+        log.info("explicit produce append: resolved to Work Round", {
+          sessionKey, workRoundId: result.workRound.id,
+        });
+        return { ok: true };
+      }
+      if (result.status === "ambiguous") {
+        log.info("explicit produce append: ambiguous Work Rounds", {
+          sessionKey, count: result.candidates.length,
+        });
+        return { ok: false, reply: wrs.buildDisambiguationPrompt(result.candidates) };
+      }
+
+      const all = await wrs.findAllRounds(sessionKey, businessDate);
+      const sameIdentity = all.filter(
+        (r) => r.seller_name === hdr.sellerName && r.market_name === hdr.marketName,
+      );
+      if (sameIdentity.some((r) => !PRODUCE_APPEND_ELIGIBLE_STATUSES.includes(r.status))) {
+        log.info("explicit produce append: round exists but not append-eligible", { sessionKey });
+        return {
+          ok:    false,
+          reply: "รอบนี้อนุมัติแล้วหรือไม่พร้อมรับรายการเพิ่ม กรุณาตรวจสอบสถานะรอบในหน้า Work Rounds",
+        };
+      }
+
+      log.info("explicit produce append: no matching open Work Round", { sessionKey });
+      return {
+        ok:    false,
+        reply: wrs.buildNoExplicitAppendRoundPrompt(hdr.sellerName, hdr.marketName, businessDate),
+      };
+    } catch (wrErr) {
+      log.warn("explicit produce append Work Round lookup failed", {
+        error: wrErr instanceof Error ? wrErr.message : String(wrErr),
+      });
+      return { ok: false, reply: wrs.buildNoAppendRoundPrompt() };
     }
   }
 
@@ -2386,7 +2484,50 @@ export class WebhookService {
 
     try {
       if (hdr?.type === "explicit") {
-        if (isAppend) {
+        if (isProduceAppend) {
+          const appendTarget = await wrs.resolveExplicitProduceAppend({
+            sourceId,
+            businessDate,
+            sellerName: hdr.sellerName,
+            marketName: hdr.marketName,
+          });
+          if (appendTarget.status === "resolved") {
+            return { kind: "persist", workRoundId: appendTarget.workRound.id, isAppend: true };
+          }
+          if (appendTarget.status === "ambiguous") {
+            log.warn("explicit produce append: ambiguous target rounds", { sourceId, businessDate });
+            if (replyToken) {
+              await replyLineMessage(replyToken, wrs.buildDisambiguationPrompt(appendTarget.candidates));
+            }
+            return { kind: "halt", result: halt() };
+          }
+
+          const all = await wrs.findAllRounds(sourceId, businessDate);
+          const sameIdentity = all.filter(
+            (r) => r.seller_name === hdr.sellerName && r.market_name === hdr.marketName,
+          );
+          if (sameIdentity.some((r) => !appendEligibleStatuses.includes(r.status))) {
+            log.warn("explicit produce append blocked: round not append-eligible", { sourceId, businessDate });
+            if (replyToken) {
+              await replyLineMessage(
+                replyToken,
+                "รอบนี้อนุมัติแล้วหรือไม่พร้อมรับรายการเพิ่ม กรุณาตรวจสอบสถานะรอบในหน้า Work Rounds",
+              );
+            }
+            return { kind: "halt", result: halt() };
+          }
+
+          log.warn("explicit produce append: no matching open Work Round", { sourceId, businessDate });
+          if (replyToken) {
+            await replyLineMessage(
+              replyToken,
+              wrs.buildNoExplicitAppendRoundPrompt(hdr.sellerName, hdr.marketName, businessDate),
+            );
+          }
+          return { kind: "halt", result: halt() };
+        }
+
+        if (isReturnAppend) {
           const all = await wrs.findAllRounds(sourceId, businessDate);
           const matched = all.filter(
             (r) => r.seller_name === hdr.sellerName && r.market_name === hdr.marketName,
@@ -2498,12 +2639,12 @@ export class WebhookService {
           if (replyToken) await replyLineMessage(replyToken, wrs.buildNoAppendRoundPrompt());
           return { kind: "halt", result: halt() };
         }
-        const selectionCandidates = await wrs.buildCandidates(appendTarget.candidates);
-        await new WorkRoundSelectionService(this.supabase).create({
-          sourceId, lineUserId, businessDate, intent: "produce_attach", candidates: selectionCandidates,
-          payload: { rawMessageId, accumulatedText, isAppend: true, lineUserId },
+        log.warn("produce append finalize: ambiguous Work Rounds", {
+          sourceId, count: appendTarget.candidates.length,
         });
-        if (replyToken) await replyLineMessage(replyToken, buildSelectionMessage("produce_attach", selectionCandidates));
+        if (replyToken) {
+          await replyLineMessage(replyToken, wrs.buildDisambiguationPrompt(appendTarget.candidates));
+        }
         return { kind: "halt", result: halt() };
       }
 

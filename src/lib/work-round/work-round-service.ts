@@ -184,6 +184,23 @@ export class WorkRoundService {
   }
 
   /**
+   * Resolves the Work Round for an explicit produce-append header
+   * ("seller-market รายการเบิกเพิ่ม|เบิกเพิ่ม date").
+   *
+   * Scoped to sourceId + businessDate + seller + market. Only append-eligible
+   * statuses match. Never creates a round; never picks latest on ambiguity.
+   */
+  async resolveExplicitProduceAppend(params: ResolveParams): Promise<DisambiguationResult> {
+    const { sourceId, businessDate, sellerName, marketName } = params;
+    const rounds = (await this.findProduceAppendEligibleRounds(sourceId, businessDate))
+      .filter((r) => r.seller_name === sellerName && r.market_name === marketName);
+
+    if (rounds.length === 0) return { status: "none" };
+    if (rounds.length === 1) return { status: "resolved", workRound: rounds[0] };
+    return { status: "ambiguous", candidates: rounds };
+  }
+
+  /**
    * Resolves the Work Round for a standalone "รายการเบิกเพิ่ม" marker.
    *
    * Strictly scoped to the SAME LINE group (`sourceId`) and the SAME
@@ -349,14 +366,25 @@ export class WorkRoundService {
     if (error) throw new Error(`attach produce_session failed: ${error.message}`);
   }
 
-  // Builds a user-facing disambiguation prompt (Thai).
+  // Builds a user-facing disambiguation prompt (Thai) for produce append.
   buildDisambiguationPrompt(candidates: WorkRound[]): string {
     const lines = ["มีหลายรายการที่เปิดอยู่ กรุณาส่งรายการที่มีหัว เช่น:"];
     for (const r of candidates) {
-      lines.push(`• ${r.seller_name}-${r.market_name} เบิก`);
+      lines.push(`• ${r.seller_name}-${r.market_name} รายการเบิกเพิ่ม ${formatSlashBeDate(r.business_date)}`);
     }
     lines.push("เพื่อระบุว่าเป็นรายการของใคร");
     return lines.join("\n");
+  }
+
+  buildNoExplicitAppendRoundPrompt(
+    sellerName:   string,
+    marketName:   string,
+    businessDate: string,
+  ): string {
+    return [
+      `ไม่พบรอบเบิกที่ยังเปิดอยู่ของ ${sellerName}-${marketName} วันที่ ${formatSlashBeDate(businessDate)}`,
+      "กรุณาตรวจสอบชื่อ ตลาด และวันที่ หรือเปิดหัวเบิกใหม่ก่อน",
+    ].join("\n");
   }
 
   // Builds a prompt for when no open Work Round is found for a generic header.
@@ -371,4 +399,10 @@ export class WorkRoundService {
   buildNoAppendRoundPrompt(): string {
     return "ไม่พบรอบเบิกที่ยังเปิดอยู่สำหรับรายการเพิ่ม กรุณาเปิดหัวเบิกใหม่พร้อมชื่อและตลาด";
   }
+}
+
+function formatSlashBeDate(isoDate: string): string {
+  const [year, month, day] = isoDate.split("-").map(Number);
+  if (!year || !month || !day) return isoDate;
+  return `${day}/${month}/${year + 543}`;
 }

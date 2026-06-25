@@ -124,3 +124,13 @@ export function isProduceAppendLine(line: string): boolean {
   if (!content || RE.SELLER_MARKET.test(content)) return false;
   return RE.TX_TYPE_BEIK_PHERM.test(content);
 }
+
+/** Explicit seller-market produce-append header, e.g. "ทดลองใหม่-ตลาดจำลอง รายการเบิกเพิ่ม 28/6/2569". */
+export function isExplicitProduceAppendHeader(line: string): boolean {
+  const hdr = classifyHeader(line);
+  return hdr?.type === "explicit" && hdr.txIntent === "เบิกเพิ่ม";
+}
+
+export function hasExplicitProduceAppendStart(text: string): boolean {
+  return text.split("\n").some((l) => isExplicitProduceAppendHeader(l.trim()));
+}

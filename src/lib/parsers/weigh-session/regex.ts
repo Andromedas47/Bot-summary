@@ -19,7 +19,7 @@ export const RE = {
   //   "2หมอนทอง119บาท"   (no dot)
   // Lazy Thai match stops naturally before the trailing digits+บาท.
   // Captures: [1]=item_number, [2]=product_name, [3]=price
-  ITEM: new RegExp(`^(\\d+)\\.?([${TH}][${TH}\\s]*?)(\\d+(?:\\.\\d+)?)\\s*บาท\\s*$`),
+  ITEM: new RegExp(`^(\\d+)\\.?\\s*([${TH}][${TH}\\s]*?)(\\d+(?:\\.\\d+)?)\\s*บาท\\s*$`),
 
   // Item line without an item number. Used for short correction messages.
   // Captures: [1]=product_name, [2]=price

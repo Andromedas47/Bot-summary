@@ -7,20 +7,33 @@ describe("nextStatus", () => {
     expect(nextStatus("open", "produce_attached")).toBeNull();
   });
 
-  it("produce_attached reverts a later status back to open", () => {
-    expect(nextStatus("awaiting_settlement", "produce_attached")).toBe("open");
+  it("produce_attached does not regress settlement states", () => {
+    expect(nextStatus("awaiting_settlement", "produce_attached")).toBeNull();
+    expect(nextStatus("awaiting_slips", "produce_attached")).toBeNull();
+    expect(nextStatus("variance_found", "produce_attached")).toBeNull();
+    expect(nextStatus("ready_for_review", "produce_attached")).toBeNull();
+  });
+
+  it("produce_reopened moves submitted/review states to needs_correction", () => {
+    expect(nextStatus("awaiting_slips", "produce_reopened")).toBe("needs_correction");
+    expect(nextStatus("variance_found", "produce_reopened")).toBe("needs_correction");
+    expect(nextStatus("ready_for_review", "produce_reopened")).toBe("needs_correction");
   });
 
   it("produce_attached does not revert an approved round", () => {
     expect(nextStatus("approved", "produce_attached")).toBeNull();
   });
 
-  it("produce_closed: open → produce_complete", () => {
-    expect(nextStatus("open", "produce_closed")).toBe("produce_complete");
+  it("produce_closed: open → awaiting_settlement", () => {
+    expect(nextStatus("open", "produce_closed")).toBe("awaiting_settlement");
   });
 
-  it("settlement_opened: open → awaiting_settlement", () => {
-    expect(nextStatus("open", "settlement_opened")).toBe("awaiting_settlement");
+  it("settlement_opened is blocked while open", () => {
+    expect(nextStatus("open", "settlement_opened")).toBeNull();
+  });
+
+  it("settlement_opened: awaiting_settlement stays idempotent", () => {
+    expect(nextStatus("awaiting_settlement", "settlement_opened")).toBeNull();
   });
 
   it("settlement_confirmed: awaiting_settlement → awaiting_slips", () => {

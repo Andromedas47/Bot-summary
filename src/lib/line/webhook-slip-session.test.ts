@@ -8,6 +8,32 @@ import type { Database } from "@/types/database";
 // ── Minimal supabase stub ──────────────────────────────────────────────────
 
 function makeTextSupabase(rawId = "raw-txt") {
+  const workRounds = [{
+    id: "wr-1",
+    source_id: "group-1",
+    business_date: "2026-06-09",
+    seller_name: "กี้",
+    market_name: "วัดทุ่งลานนา",
+    round_seq: 1,
+    status: "awaiting_slips",
+    source_meta: null,
+    created_at: "2026-06-09T00:00:00.000Z",
+    updated_at: "2026-06-09T00:00:00.000Z",
+  }];
+  const queryRows = (rows: Array<Record<string, unknown>>) => {
+    const chain = (filtered: Array<Record<string, unknown>>) => ({
+      eq(col: string, val: unknown) { return chain(filtered.filter(r => r[col] === val)); },
+      in(col: string, vals: unknown[]) { return chain(filtered.filter(r => vals.includes(r[col]))); },
+      order() { return chain(filtered); },
+      limit(n: number) { return chain(filtered.slice(0, n)); },
+      async maybeSingle() { return { data: filtered[0] ?? null, error: null }; },
+      then(resolve: (v: { data: Array<Record<string, unknown>>; error: null }) => unknown) {
+        return Promise.resolve(resolve({ data: filtered, error: null }));
+      },
+    });
+    return chain(rows);
+  };
+
   return {
     from(table: string) {
       if (table === "raw_messages") {
@@ -29,6 +55,12 @@ function makeTextSupabase(rawId = "raw-txt") {
             return { eq() { return { async maybeSingle() { return { data: null, error: null }; } }; } };
           },
         };
+      }
+      if (table === "work_rounds") {
+        return { select() { return queryRows(workRounds); } };
+      }
+      if (table === "settlement_drafts") {
+        return { select() { return queryRows([]); } };
       }
       if (table === "parse_errors") {
         return { async insert() { return { error: null }; } };

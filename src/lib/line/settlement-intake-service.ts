@@ -21,6 +21,8 @@ type AnyClient = SupabaseClient<any>;
 // A draft this old (since last update) is considered stale and is not reused by
 // a bare follow-up amount message — prevents consuming unrelated later input.
 const DRAFT_STALE_MS = 6 * 60 * 60 * 1000; // 6 hours
+const SETTLEMENT_RECEIVED_REPLY = "รับข้อมูลส่งเงินแล้ว รอตรวจสอบใบขาวและสลิป";
+const SETTLEMENT_SUBMITTED_REPLY = "รับข้อมูลส่งเงินและหลักฐานแล้ว รอตรวจสอบ";
 
 // ── Regex ──────────────────────────────────────────────────────────────────────
 
@@ -89,7 +91,7 @@ export class SettlementIntakeService {
 
   // Returns Work Rounds eligible to receive a settlement declaration.
   async findEligibleRounds(sourceId: string, businessDate: string): Promise<WorkRound[]> {
-    const { data } = await this.supabase
+    const { data, error } = await this.supabase
       .from("work_rounds")
       .select("*")
       .eq("source_id", sourceId)
@@ -97,6 +99,7 @@ export class SettlementIntakeService {
       .in("status", SETTLEMENT_ELIGIBLE_STATUSES)
       .order("round_seq", { ascending: true });
 
+    if (error) throw new Error(`settlement eligible round lookup failed: ${error.message}`);
     return (data ?? []) as WorkRound[];
   }
 
@@ -139,15 +142,27 @@ export class SettlementIntakeService {
     sourceId:   string,
     lineUserId: string | null,
   ): Promise<{ draft: SettlementDraft; round: WorkRound } | null> {
+    const drafts = await this.findOpenDraftsForSender(sourceId, lineUserId);
+    return drafts.length === 1 ? drafts[0] : null;
+  }
+
+  async findOpenDraftsForSender(
+    sourceId:   string,
+    lineUserId: string | null,
+  ): Promise<Array<{ draft: SettlementDraft; round: WorkRound }>> {
+    if (!lineUserId) return [];
+
     // Rounds in this group still eligible for settlement.
-    const { data: rounds } = await this.supabase
+    const { data: rounds, error: roundError } = await this.supabase
       .from("work_rounds")
       .select("*")
       .eq("source_id", sourceId)
       .in("status", SETTLEMENT_ELIGIBLE_STATUSES);
 
+    if (roundError) throw new Error(`settlement draft round lookup failed: ${roundError.message}`);
+
     const roundList = (rounds ?? []) as WorkRound[];
-    if (roundList.length === 0) return null;
+    if (roundList.length === 0) return [];
     const roundById = new Map(roundList.map((r) => [r.id, r]));
 
     let q = this.supabase
@@ -160,15 +175,16 @@ export class SettlementIntakeService {
       ? q.is("declared_by_line_user_id", null)
       : q.eq("declared_by_line_user_id", lineUserId);
 
-    const { data: drafts } = await q.order("updated_at", { ascending: false }).limit(1);
-    const draft = (drafts ?? [])[0] as SettlementDraft | undefined;
-    if (!draft) return null;
+    const { data: drafts, error: draftError } = await q.order("updated_at", { ascending: false });
+    if (draftError) throw new Error(`settlement draft lookup failed: ${draftError.message}`);
 
-    if (Date.now() - new Date(draft.updated_at).getTime() > DRAFT_STALE_MS) return null;
-
-    const round = roundById.get(draft.work_round_id);
-    if (!round) return null;
-    return { draft, round };
+    const out: Array<{ draft: SettlementDraft; round: WorkRound }> = [];
+    for (const draft of (drafts ?? []) as SettlementDraft[]) {
+      if (Date.now() - new Date(draft.updated_at).getTime() > DRAFT_STALE_MS) continue;
+      const round = roundById.get(draft.work_round_id);
+      if (round) out.push({ draft, round });
+    }
+    return out;
   }
 
   // Marks a declared draft submitted (user confirmed via ยืนยันส่งเงิน).
@@ -178,6 +194,10 @@ export class SettlementIntakeService {
       .select("*")
       .eq("id", draftId)
       .single();
+
+    if (!current || current.status !== "declared") {
+      throw new Error("settlement draft is not ready to confirm");
+    }
 
     if (current) {
       await this.supabase.from("settlement_draft_history").insert({
@@ -193,6 +213,7 @@ export class SettlementIntakeService {
       .from("settlement_drafts")
       .update({ status: "submitted", updated_at: new Date().toISOString() })
       .eq("id", draftId)
+      .eq("status", "declared")
       .select()
       .single();
 
@@ -212,6 +233,10 @@ export class SettlementIntakeService {
       .select("*")
       .eq("id", draftId)
       .single();
+
+    if (!current || !["pending", "declared"].includes(String(current.status))) {
+      throw new Error("settlement draft is not actionable");
+    }
 
     if (current) {
       await this.supabase.from("settlement_draft_history").insert({
@@ -284,23 +309,20 @@ export class SettlementIntakeService {
   }
 
   // Review summary after amounts recorded — asks the user to confirm.
-  buildReviewSummary(draft: SettlementDraft, round: WorkRound): string {
+  buildReviewSummary(_draft: SettlementDraft, _round: WorkRound): string {
+    void _draft;
+    void _round;
     return [
-      `ยอดส่งเงิน ${round.seller_name} — ${round.market_name}`,
-      ...this.draftLines(draft),
-      "",
-      "พิมพ์ ยืนยันส่งเงิน เพื่อยืนยัน",
+      SETTLEMENT_RECEIVED_REPLY,
+      "พิมพ์ ยืนยันส่งเงิน เพื่อส่งให้ผู้ตรวจสอบ",
     ].join("\n");
   }
 
   // Final reply once the user confirms the declared settlement.
-  buildSubmittedReply(draft: SettlementDraft, round: WorkRound): string {
-    return [
-      `ยืนยันส่งเงินแล้ว ${round.seller_name} — ${round.market_name}`,
-      ...this.draftLines(draft),
-      "",
-      "ส่งให้เจ้าหน้าที่ตรวจสอบแล้ว",
-    ].join("\n");
+  buildSubmittedReply(_draft: SettlementDraft, _round: WorkRound): string {
+    void _draft;
+    void _round;
+    return SETTLEMENT_SUBMITTED_REPLY;
   }
 
   // Backward-compatible alias retained for existing callers/tests.

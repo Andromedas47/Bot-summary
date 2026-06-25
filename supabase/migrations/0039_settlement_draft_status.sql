@@ -11,6 +11,10 @@
 ALTER TABLE public.settlement_drafts
   DROP CONSTRAINT IF EXISTS settlement_drafts_status_check;
 
+UPDATE public.settlement_drafts
+SET    status = 'submitted'
+WHERE  status = 'awaiting_evidence';
+
 ALTER TABLE public.settlement_drafts
   ADD CONSTRAINT settlement_drafts_status_check
   CHECK (status IN (

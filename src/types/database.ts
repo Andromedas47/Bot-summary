@@ -36,7 +36,13 @@ export type WorkRoundStatus =
 export type SettlementDraftStatus =
   | "pending" | "declared" | "submitted" | "variance_found"
   | "ready_for_review" | "approved" | "needs_correction";
-export type WorkRoundSelectionIntent = "settlement" | "produce_attach" | "slip" | "manual_slip";
+export type WorkRoundSelectionIntent =
+  | "settlement"
+  | "produce_attach"
+  | "slip"
+  | "manual_slip"
+  | "close_round"
+  | "close_round_confirm";
 export type WorkRoundSelectionStatus  = "pending" | "resolved" | "expired";
 
 // ─── Database schema ──────────────────────────────────────────────────
@@ -433,6 +439,7 @@ export interface Database {
           matched:                   boolean;
           created_at:                string;
           updated_at:                string;
+          work_round_id:             string | null;
         };
         Insert: {
           id?:                        string;
@@ -446,6 +453,7 @@ export interface Database {
           matched?:                   boolean;
           created_at?:                string;
           updated_at?:                string;
+          work_round_id?:             string | null;
         };
         Update: {
           id?:                        string;
@@ -459,6 +467,7 @@ export interface Database {
           matched?:                   boolean;
           created_at?:                string;
           updated_at?:                string;
+          work_round_id?:             string | null;
         };
         Relationships: [];
       };
@@ -555,6 +564,7 @@ export interface Database {
           updated_at:      string;
           batch_id:        string | null;
           batch_index:     number | null;
+          work_round_id:   string | null;
         };
         Insert: {
           id?:              string;
@@ -574,6 +584,7 @@ export interface Database {
           updated_at?:      string;
           batch_id?:        string | null;
           batch_index?:     number | null;
+          work_round_id?:   string | null;
         };
         Update: {
           id?:              string;
@@ -593,6 +604,7 @@ export interface Database {
           updated_at?:      string;
           batch_id?:        string | null;
           batch_index?:     number | null;
+          work_round_id?:   string | null;
         };
         Relationships: [];
       };
@@ -609,6 +621,7 @@ export interface Database {
           message_sent_at: string | null;
           last_error:      string | null;
           updated_at:      string;
+          work_round_id:   string | null;
         };
         Insert: {
           id?:              string;
@@ -621,6 +634,7 @@ export interface Database {
           message_sent_at?: string | null;
           last_error?:      string | null;
           updated_at?:      string;
+          work_round_id?:   string | null;
         };
         Update: {
           id?:              string;
@@ -633,6 +647,7 @@ export interface Database {
           message_sent_at?: string | null;
           last_error?:      string | null;
           updated_at?:      string;
+          work_round_id?:   string | null;
         };
         Relationships: [];
       };
@@ -951,6 +966,25 @@ export interface Database {
           p_quiet_seconds?: number;
         };
         Returns: Array<{ batch_id: string; is_new_batch: boolean }>;
+      };
+      claim_work_round_selection: {
+        Args: {
+          p_selection_id: string;
+          p_source_id: string;
+          p_line_user_id: string;
+          p_choice: number;
+          p_allowed_statuses: string[];
+        };
+        Returns: Array<{
+          id: string;
+          source_id: string;
+          line_user_id: string;
+          business_date: string;
+          intent: WorkRoundSelectionIntent;
+          candidates: Json;
+          payload: Json | null;
+          resolved_work_round_id: string;
+        }>;
       };
     };
     CompositeTypes: { [_ in never]: never };

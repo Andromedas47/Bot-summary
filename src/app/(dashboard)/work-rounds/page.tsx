@@ -10,11 +10,20 @@
 import { DashboardTopBar } from "@/components/dashboard/DashboardTopBar";
 import { createServiceClient } from "@/lib/supabase/server";
 import { bangkokBusinessDateNow } from "@/lib/business-date";
-import { WorkRoundStatusBadge } from "@/components/work-rounds/WorkRoundStatusBadge";
 import { WorkRoundRow } from "@/components/work-rounds/WorkRoundRow";
+import { computeRoundTotals } from "@/lib/work-round/expected-sales";
 
 interface PageProps {
   searchParams: Promise<{ date?: string }>;
+}
+
+interface RoundMetrics {
+  expectedSales: number;
+  verifiedSlipTotal: number;
+  variance: number | null;
+  evidenceState: string;
+  appendCount: number;
+  correctionCount: number;
 }
 
 export default async function WorkRoundsPage({ searchParams }: PageProps) {
@@ -41,10 +50,59 @@ export default async function WorkRoundsPage({ searchParams }: PageProps) {
     : { data: [] };
 
   const draftByRound = new Map<string, Record<string, unknown>>();
+  const draftIdByRound = new Map<string, string>();
   for (const d of drafts ?? []) {
     const key = (d as { work_round_id: string }).work_round_id;
-    if (!draftByRound.has(key)) draftByRound.set(key, d as Record<string, unknown>);
+    if (!draftByRound.has(key)) {
+      draftByRound.set(key, d as Record<string, unknown>);
+      draftIdByRound.set(key, (d as { id: string }).id);
+    }
   }
+
+  const metricsByRound = new Map<string, RoundMetrics>();
+  await Promise.all(roundIds.map(async (roundId) => {
+    const draftId = draftIdByRound.get(roundId);
+    const [totals, rec, openManual, openBatches, appendSessions, history] = await Promise.all([
+      computeRoundTotals(supabase, roundId),
+      supabase
+        .from("transfer_reconciliations")
+        .select("checked_slip_total, difference")
+        .eq("work_round_id", roundId)
+        .maybeSingle(),
+      supabase
+        .from("manual_slip_sessions")
+        .select("id")
+        .eq("work_round_id", roundId)
+        .eq("status", "open"),
+      supabase
+        .from("slip_batches")
+        .select("id")
+        .eq("work_round_id", roundId)
+        .in("status", ["collecting", "closing", "processing"]),
+      supabase
+        .from("produce_sessions")
+        .select("id")
+        .eq("work_round_id", roundId)
+        .eq("is_append_session", true),
+      draftId
+        ? supabase
+            .from("settlement_draft_history")
+            .select("id")
+            .eq("draft_id", draftId)
+            .in("change_type", ["review_needs_correction", "review_approved", "declared_update"])
+        : Promise.resolve({ data: [] }),
+    ]);
+    const recData = rec.data as { checked_slip_total?: number; difference?: number } | null;
+    const evidenceOpen = (openManual.data ?? []).length > 0 || (openBatches.data ?? []).length > 0;
+    metricsByRound.set(roundId, {
+      expectedSales: totals.expected,
+      verifiedSlipTotal: Number(recData?.checked_slip_total ?? 0),
+      variance: recData?.difference == null ? null : Number(recData.difference),
+      evidenceState: evidenceOpen ? "open" : "closed",
+      appendCount: (appendSessions.data ?? []).length,
+      correctionCount: (history.data ?? []).length,
+    });
+  }));
 
   return (
     <>
@@ -87,6 +145,8 @@ export default async function WorkRoundsPage({ searchParams }: PageProps) {
               key={round.id as string}
               round={round}
               draft={draftByRound.get(round.id as string) ?? null}
+              metrics={metricsByRound.get(round.id as string) ?? null}
+              returnTo={`/work-rounds?date=${businessDate}`}
             />
           ))}
         </div>

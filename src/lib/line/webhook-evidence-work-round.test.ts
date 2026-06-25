@@ -25,7 +25,7 @@ function textEvent(text: string, userId = "user-1"): LineMessageEvent {
 function round(over: Record<string, unknown> = {}): Row {
   return {
     id: "wr-1", source_id: "group-1", business_date: "2026-06-24",
-    seller_name: "กี้", market_name: "วัดทุ่ง", round_seq: 1, status: "open",
+    seller_name: "กี้", market_name: "วัดทุ่ง", round_seq: 1, status: "awaiting_slips",
     source_meta: null, created_at: "", updated_at: "", ...over,
   };
 }
@@ -72,13 +72,12 @@ describe("slip session evidence → Work Round", () => {
     expect(sels[0].intent).toBe("slip");
   });
 
-  it("legacy: opens a batch with null link when no rounds exist", async () => {
+  it("fail-closed: does not open a null-linked batch when no rounds exist", async () => {
     const db = memSupabase({ work_rounds: [] });
     await svc(db).processEvents([textEvent("กี้ วัดทุ่ง สลิปเงินโอน 24/06/2569")], "dest");
 
     const batches = db._rows("slip_batches");
-    expect(batches).toHaveLength(1);
-    expect(batches[0].work_round_id ?? null).toBeNull();
+    expect(batches).toHaveLength(0);
   });
 });
 

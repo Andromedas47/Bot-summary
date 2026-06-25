@@ -181,12 +181,12 @@ function makeDb(initialRounds: Row[] = [], initialDrafts: Row[] = []) {
 
 const makeRound = (overrides: Partial<WorkRound> = {}): Row => ({
   id: "wr-1", source_id: "grp1", business_date: "2026-06-24",
-  seller_name: "กี้", market_name: "วัดทุ่งลานนา", round_seq: 1, status: "open",
+  seller_name: "กี้", market_name: "วัดทุ่งลานนา", round_seq: 1, status: "awaiting_settlement",
   source_meta: null, created_at: "", updated_at: "", ...overrides,
 });
 
 describe("SettlementIntakeService", () => {
-  it("findEligibleRounds returns open rounds for the group+date", async () => {
+  it("findEligibleRounds returns closed rounds awaiting settlement for the group+date", async () => {
     const db  = makeDb([makeRound()]);
     const svc = new SettlementIntakeService(db as never);
     const res = await svc.findEligibleRounds("grp1", "2026-06-24");
@@ -255,7 +255,7 @@ describe("SettlementIntakeService", () => {
     expect(prompt).toContain("ไม่พบ");
   });
 
-  it("buildSettlementConfirmReply shows correct totals", () => {
+  it("buildSettlementConfirmReply is non-financial before reviewer approval", () => {
     const svc   = new SettlementIntakeService({} as never);
     const draft = {
       id: "d1", work_round_id: "wr-1", declared_transfer: 730, declared_cash: 1420,
@@ -266,10 +266,8 @@ describe("SettlementIntakeService", () => {
     } satisfies SettlementDraft;
     const round = makeRound() as unknown as WorkRound;
     const reply = svc.buildSettlementConfirmReply(draft, round);
-    expect(reply).toContain("กี้");
-    expect(reply).toContain("วัดทุ่งลานนา");
-    // 730+1420+410+400 = 2960
-    expect(reply).toContain("2,960");
+    expect(reply).toContain("รับข้อมูลส่งเงินแล้ว");
+    expect(reply).not.toContain("2,960");
   });
 });
 

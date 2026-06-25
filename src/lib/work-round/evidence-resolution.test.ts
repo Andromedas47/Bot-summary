@@ -5,17 +5,17 @@ import { memSupabase } from "@/lib/test-utils/mem-supabase";
 function round(over: Record<string, unknown> = {}) {
   return {
     id: "wr-1", source_id: "G1", business_date: "2026-06-24",
-    seller_name: "กี้", market_name: "วัดทุ่ง", round_seq: 1, status: "open",
+    seller_name: "กี้", market_name: "วัดทุ่ง", round_seq: 1, status: "awaiting_slips",
     source_meta: null, created_at: "", updated_at: "", ...over,
   };
 }
 
 describe("WorkRoundService.resolveForEvidence", () => {
-  it("returns legacy when no rounds exist for the date", async () => {
+  it("returns no_round when no rounds exist for the date", async () => {
     const db  = memSupabase({ work_rounds: [] });
     const svc = new WorkRoundService(db as never);
     const res = await svc.resolveForEvidence("G1", "2026-06-24");
-    expect(res.mode).toBe("legacy");
+    expect(res.mode).toBe("no_round");
   });
 
   it("links when exactly one eligible round exists", async () => {
@@ -55,10 +55,10 @@ describe("WorkRoundService.resolveForEvidence", () => {
   it("validateChoice rejects a round from a different source/date", async () => {
     const db  = memSupabase({ work_rounds: [round()] });
     const svc = new WorkRoundService(db as never);
-    const ok  = await svc.validateChoice("wr-1", "G1", "2026-06-24", ["open"]);
+    const ok  = await svc.validateChoice("wr-1", "G1", "2026-06-24", ["awaiting_slips"]);
     expect(ok?.id).toBe("wr-1");
-    expect(await svc.validateChoice("wr-1", "G-other", "2026-06-24", ["open"])).toBeNull();
-    expect(await svc.validateChoice("wr-1", "G1", "2026-06-25", ["open"])).toBeNull();
+    expect(await svc.validateChoice("wr-1", "G-other", "2026-06-24", ["awaiting_slips"])).toBeNull();
+    expect(await svc.validateChoice("wr-1", "G1", "2026-06-25", ["awaiting_slips"])).toBeNull();
     expect(await svc.validateChoice("wr-1", "G1", "2026-06-24", ["approved"])).toBeNull();
   });
 });

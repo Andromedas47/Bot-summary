@@ -29,6 +29,7 @@ import {
 } from "@/lib/slips/check-service";
 import { SlipBatchService, type SlipBatchIngestor } from "@/lib/slips/batch-service";
 import { tryFinalizeSettlement } from "@/lib/settlement-finalizer";
+import { tryFinalizeWorkRound } from "@/lib/work-round/finalizer";
 import {
   SlipSessionService,
   parseSlipSessionHeader,
@@ -55,7 +56,7 @@ import {
   buildSelectionMessage,
 } from "@/lib/work-round/selection-service";
 import { WorkRoundStatusService } from "@/lib/work-round/status";
-import type { SelectionCandidate, SelectionIntent } from "@/lib/work-round/types";
+import type { SelectionCandidate, SelectionIntent, WorkRound, WorkRoundStatus } from "@/lib/work-round/types";
 
 type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
@@ -90,12 +91,22 @@ const SESSION_ALREADY_OPEN_REPLY = [
   `กรุณาพิมพ์ "จบสลิป" ก่อน เพื่อปิดชุดสลิปปัจจุบัน`,
 ].join("\n");
 
-const ALREADY_FINALIZED_REPLY = "ชุดสลิปนี้สรุปไปแล้ว";
-
 const SLIP_CLOSE_ACKNOWLEDGED_REPLY =
   "รับคำสั่งจบชุดแล้ว กำลังตรวจสอบสลิปทั้งหมด กรุณารอสรุปผล";
 
 const ALREADY_CLOSING_REPLY = "รับทราบแล้ว กำลังสรุปสลิปอยู่ กรุณารอสักครู่";
+
+const CLOSE_ROUND_CMD_RE = /^ปิดรอบ\s+(\d{1,2}\/\d{1,2}\/(?:25)?\d{2})\s*$/;
+const CLOSE_ROUND_CONFIRM_RE = /^ยืนยันปิดรอบ\s*$/;
+
+function parseCloseRoundCommand(text: string): string | null {
+  const m = text.trim().match(CLOSE_ROUND_CMD_RE);
+  return m ? m[1] : null;
+}
+
+function isCloseRoundConfirmCommand(text: string): boolean {
+  return CLOSE_ROUND_CONFIRM_RE.test(text.trim());
+}
 
 interface WebhookServiceDependencies {
   evidenceIngestor?: SlipEvidenceIngestor;
@@ -284,7 +295,19 @@ export class WebhookService {
       // No active selection — fall through (numeric could be unrelated).
     }
 
-    // ── 3.2. Settlement command (V2) ─────────────────────────────────────────
+    // ── 3.2. Explicit Work Round close command (V2) ─────────────────────────
+    const closeRoundDateStr = parseCloseRoundCommand(text);
+    if (closeRoundDateStr !== null) {
+      return this.processCloseRoundCommand(
+        msgEvent, closeRoundDateStr, eventId, event.type, log,
+      );
+    }
+
+    if (isCloseRoundConfirmCommand(text)) {
+      return this.processCloseRoundConfirmation(msgEvent, eventId, event.type, log);
+    }
+
+    // ── 3.3. Settlement command (V2) ─────────────────────────────────────────
     // "ส่งเงิน 24/06/2569" or "ปิดยอด 24/06/2569"
     // Processed before manual slip commands to avoid confusion with amount lines.
     const settlementDateStr = parseSettlementCommand(text);
@@ -552,7 +575,13 @@ export class WebhookService {
       marketName: marketLabel ?? undefined,
     });
 
-    if (decision.mode === "blocked") {
+    if (decision.mode === "error") {
+      log.warn("manual slip open blocked: Work Round lookup failed", { sourceId, businessDate, error: decision.error });
+      if (replyToken) await this.replyMessage(replyToken, "ยังเปิดสลิปมือไม่ได้ชั่วคราว กรุณาลองใหม่อีกครั้ง");
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+
+    if (decision.mode === "no_round" || decision.mode === "blocked") {
       log.info("manual slip open blocked: rounds exist but none eligible", { sourceId, businessDate });
       if (replyToken) await this.replyMessage(replyToken, "ไม่พบงวดที่เปิดอยู่สำหรับวันนี้ กรุณาเปิดงวดก่อน");
       return { eventId, eventType, status: "saved", parsed: false };
@@ -569,7 +598,7 @@ export class WebhookService {
       return { eventId, eventType, status: "saved", parsed: false };
     }
 
-    const workRoundId = decision.mode === "linked" ? decision.workRound.id : null; // legacy → null
+    const workRoundId = decision.mode === "linked" ? decision.workRound.id : null; // deliberate legacy only
 
     try {
       const svc    = new ManualSlipSessionService(this.supabase);
@@ -619,7 +648,8 @@ export class WebhookService {
         log.info("manual slip open: reusing existing open session", { sessionId: session.id });
         await this.processSessionBatch(
           svc, session.id, dateStr, amounts, hasClose,
-          sourceId, businessDate, lineMessageId, lineUserId, replyToken, false, log,
+          sourceId, businessDate, session.work_round_id ?? null,
+          lineMessageId, lineUserId, replyToken, false, log,
         );
         return { eventId, eventType, status: "saved", parsed: false };
       }
@@ -629,7 +659,8 @@ export class WebhookService {
       if (amounts.length > 0 || hasClose) {
         await this.processSessionBatch(
           svc, result.session!.id as string, dateStr, amounts, hasClose,
-          sourceId, businessDate, lineMessageId, lineUserId, replyToken, true, log,
+          sourceId, businessDate, result.session!.work_round_id ?? null,
+          lineMessageId, lineUserId, replyToken, true, log,
         );
       } else {
         if (replyToken) {
@@ -676,6 +707,7 @@ export class WebhookService {
     hasClose:      boolean,
     sourceId:      string,
     businessDate:  string,
+    workRoundId:   string | null,
     lineMessageId: string,
     lineUserId:    string | null,
     replyToken:    string | undefined,
@@ -694,9 +726,13 @@ export class WebhookService {
         );
       }
       log.info("manual slip batch completed", { sessionId, total });
-      tryFinalizeSettlement(this.supabase, sourceId, businessDate).catch(
-        (err) => log.warn("tryFinalizeSettlement failed", { reason: err instanceof Error ? err.message : String(err) }),
-      );
+      if (workRoundId) {
+        this.tryFinalizeWorkRoundSafe(workRoundId, log);
+      } else {
+        tryFinalizeSettlement(this.supabase, sourceId, businessDate).catch(
+          (err) => log.warn("tryFinalizeSettlement failed", { reason: err instanceof Error ? err.message : String(err) }),
+        );
+      }
     } else if (amounts.length > 0) {
       const runTotal = amounts.reduce((s, a) => s + a.amount, 0);
       if (replyToken) {
@@ -753,9 +789,13 @@ export class WebhookService {
         );
       }
       log.info("manual slip session closed", { sessionId: session.id, total });
-      tryFinalizeSettlement(this.supabase, sourceId, session.business_date).catch(
-        (err) => log.warn("tryFinalizeSettlement failed", { reason: err instanceof Error ? err.message : String(err) }),
-      );
+      if (session.work_round_id) {
+        this.tryFinalizeWorkRoundSafe(session.work_round_id, log);
+      } else {
+        tryFinalizeSettlement(this.supabase, sourceId, session.business_date).catch(
+          (err) => log.warn("tryFinalizeSettlement failed", { reason: err instanceof Error ? err.message : String(err) }),
+        );
+      }
       return { eventId, eventType, status: "saved", parsed: false };
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -871,6 +911,12 @@ export class WebhookService {
 
           try {
             await this.batchService.attachEvidence(activeSession.batchId, evidenceId);
+            if (activeSession.workRoundId) {
+              await this.supabase
+                .from("slip_evidences")
+                .update({ work_round_id: activeSession.workRoundId })
+                .eq("id", evidenceId);
+            }
             shouldReply = activeSession.imageCount === 0; // first image in this session
             scheduleOcr = true; // attach succeeded — safe to process
             log.info("image attached to active slip session", {
@@ -1023,7 +1069,13 @@ export class WebhookService {
         sellerName: header.sellerName, marketName: header.marketName,
       });
 
-      if (decision.mode === "blocked") {
+      if (decision.mode === "error") {
+        log.warn("slip open blocked: Work Round lookup failed", { sourceId, businessDate, error: decision.error });
+        if (replyToken) await this.replyMessage(replyToken, "ยังเปิดชุดสลิปไม่ได้ชั่วคราว กรุณาลองใหม่อีกครั้ง");
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      if (decision.mode === "no_round" || decision.mode === "blocked") {
         log.info("slip open blocked: rounds exist but none eligible", { sourceId, businessDate });
         if (replyToken) await this.replyMessage(replyToken, "ไม่พบงวดที่เปิดอยู่สำหรับวันนี้ กรุณาเปิดงวดก่อน");
         return { eventId, eventType, status: "saved", parsed: false };
@@ -1342,6 +1394,11 @@ export class WebhookService {
 
     log.info("settlement command received", { sourceId, businessDate, dateStr });
 
+    if (!lineUserId) {
+      if (replyToken) await replyLineMessage(replyToken, "ยังระบุตัวผู้ส่งไม่ได้ กรุณาส่งคำสั่งจากบัญชี LINE ผู้ใช้ในกลุ่ม");
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+
     try {
       const svc    = new SettlementIntakeService(this.supabase);
       const rounds = await svc.findEligibleRounds(sourceId, businessDate);
@@ -1426,7 +1483,18 @@ export class WebhookService {
     let found: Awaited<ReturnType<SettlementIntakeService["findOpenDraftForSender"]>>;
     try {
       const svc = new SettlementIntakeService(this.supabase);
-      found = await svc.findOpenDraftForSender(sourceId, lineUserId);
+      const foundList = await svc.findOpenDraftsForSender(sourceId, lineUserId);
+      if (foundList.length > 1) {
+        const wrs = new WorkRoundService(this.supabase);
+        const candidates = await wrs.buildCandidates(foundList.map((f) => f.round));
+        await new WorkRoundSelectionService(this.supabase).create({
+          sourceId, lineUserId, businessDate: foundList[0].round.business_date,
+          intent: "settlement", candidates, payload: { followupText: text },
+        });
+        if (replyToken) await replyLineMessage(replyToken, buildSelectionMessage("settlement", candidates));
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+      found = foundList[0] ?? null;
     } catch (err) {
       // work_rounds/settlement_drafts not migrated — let other handlers run.
       log.warn("settlement followup lookup skipped", {
@@ -1437,15 +1505,151 @@ export class WebhookService {
 
     if (!found) return null; // wrong sender / no open draft / stale — fall through
 
+    const { draft, round } = found;
+
+    return this.applySettlementFollowupForRound(
+      draft, round, text, lineUserId, replyToken, eventId, eventType, log,
+    );
+  }
+
+  private async processCloseRoundCommand(
+    event:     LineMessageEvent,
+    dateStr:   string,
+    eventId:   string,
+    eventType: string,
+    log:       ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const sourceId   = getSourceId(event.source);
+    const lineUserId = getUserId(event.source);
+    const replyToken = event.replyToken;
+    const parts = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/((?:25)?\d{2})$/);
+    if (!parts) {
+      if (replyToken) await replyLineMessage(replyToken, "รูปแบบวันที่ไม่ถูกต้อง เช่น ปิดรอบ 24/06/2569");
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+    if (!lineUserId) {
+      if (replyToken) await replyLineMessage(replyToken, "ยังระบุตัวผู้ส่งไม่ได้ กรุณาส่งคำสั่งจากบัญชี LINE ผู้ใช้ในกลุ่ม");
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+
+    const businessDate = parseBuddhistDate(parts[1], parts[2], parts[3]);
+    const wrs = new WorkRoundService(this.supabase);
+    try {
+      const rounds = await wrs.findOpenRounds(sourceId, businessDate);
+      if (rounds.length === 0) {
+        if (replyToken) await replyLineMessage(replyToken, `ไม่พบรอบที่เปิดอยู่สำหรับวันที่ ${dateStr}`);
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+      const candidates = await wrs.buildCandidates(rounds);
+      if (rounds.length > 1) {
+        await new WorkRoundSelectionService(this.supabase).create({
+          sourceId, lineUserId, businessDate, intent: "close_round", candidates,
+          payload: { dateStr },
+        });
+        if (replyToken) await replyLineMessage(replyToken, buildSelectionMessage("close_round", candidates));
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+      await this.createCloseRoundConfirmation(sourceId, lineUserId, businessDate, candidates[0], dateStr);
+      if (replyToken) await replyLineMessage(replyToken, this.buildCloseRoundConfirmPrompt(rounds[0]));
+      return { eventId, eventType, status: "saved", parsed: false };
+    } catch (err) {
+      log.warn("close round command failed", { error: err instanceof Error ? err.message : String(err) });
+      if (replyToken) await replyLineMessage(replyToken, "ปิดรอบไม่ได้ชั่วคราว กรุณาลองใหม่อีกครั้ง");
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+  }
+
+  private async processCloseRoundConfirmation(
+    event:     LineMessageEvent,
+    eventId:   string,
+    eventType: string,
+    log:       ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const sourceId   = getSourceId(event.source);
+    const lineUserId = getUserId(event.source);
+    const replyToken = event.replyToken;
+    const selSvc = new WorkRoundSelectionService(this.supabase);
+    const wrs = new WorkRoundService(this.supabase);
+    try {
+      const selection = await selSvc.findActive(sourceId, lineUserId);
+      if (!selection || selection.intent !== "close_round_confirm") {
+        if (replyToken) await replyLineMessage(replyToken, "ไม่มีรอบที่รอยืนยันปิด กรุณาพิมพ์ ปิดรอบ พร้อมวันที่ก่อน");
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+      const claimed = await selSvc.claim({
+        selectionId: selection.id,
+        sourceId,
+        lineUserId,
+        choice: 1,
+        allowedStatuses: ["open"],
+      });
+      const workRoundId = claimed?.resolved_work_round_id;
+      if (!workRoundId) {
+        if (replyToken) await replyLineMessage(replyToken, "รอบนี้เปลี่ยนสถานะแล้ว กรุณาเริ่มใหม่");
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+      const round = await wrs.validateChoice(workRoundId, sourceId, selection.business_date, ["open"]);
+      if (!round) {
+        if (replyToken) await replyLineMessage(replyToken, "รอบนี้เปลี่ยนสถานะแล้ว กรุณาเริ่มใหม่");
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+      const next = await new WorkRoundStatusService(this.supabase).applyEvent(workRoundId, "produce_closed");
+      if (!next) {
+        if (replyToken) await replyLineMessage(replyToken, "รอบนี้ปิดไม่ได้แล้ว กรุณาตรวจสอบในหน้า Work Rounds");
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+      if (replyToken) await replyLineMessage(replyToken, `ปิดรอบแล้ว ${round.seller_name} — ${round.market_name}\nรอส่งเงิน`);
+      return { eventId, eventType, status: "saved", parsed: false };
+    } catch (err) {
+      log.warn("close round confirmation failed", { error: err instanceof Error ? err.message : String(err) });
+      if (replyToken) await replyLineMessage(replyToken, "ยืนยันปิดรอบไม่สำเร็จ กรุณาลองใหม่อีกครั้ง");
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+  }
+
+  private async createCloseRoundConfirmation(
+    sourceId: string,
+    lineUserId: string,
+    businessDate: string,
+    candidate: SelectionCandidate,
+    dateStr: string,
+  ): Promise<void> {
+    await new WorkRoundSelectionService(this.supabase).create({
+      sourceId,
+      lineUserId,
+      businessDate,
+      intent: "close_round_confirm",
+      candidates: [candidate],
+      payload: { dateStr },
+    });
+  }
+
+  private buildCloseRoundConfirmPrompt(round: WorkRound): string {
+    return [
+      `เลือกปิดรอบ ${round.seller_name} — ${round.market_name}`,
+      "พิมพ์ ยืนยันปิดรอบ เพื่อปิดรอบและเปิดให้ส่งเงิน",
+    ].join("\n");
+  }
+
+  private async applySettlementFollowupForRound(
+    draft:      import("@/lib/work-round/types").SettlementDraft,
+    round:      import("@/lib/work-round/types").WorkRound,
+    text:       string,
+    lineUserId: string | null,
+    replyToken: string | undefined,
+    eventId:    string,
+    eventType:  string,
+    log:        ChildLogger,
+  ): Promise<WebhookProcessResult> {
     const svc    = new SettlementIntakeService(this.supabase);
     const status = new WorkRoundStatusService(this.supabase);
-    const { draft, round } = found;
 
     if (isConfirmCommand(text)) {
       const submitted = await svc.confirmDraft(draft.id, lineUserId);
       await status.applyEvent(round.id, "settlement_confirmed");
       if (replyToken) await replyLineMessage(replyToken, svc.buildSubmittedReply(submitted, round));
       log.info("settlement draft confirmed/submitted", { draftId: draft.id, workRoundId: round.id });
+      this.tryFinalizeWorkRoundSafe(round.id, log);
       return { eventId, eventType, status: "saved", parsed: false };
     }
 
@@ -1490,9 +1694,18 @@ export class WebhookService {
     }
 
     const candidate = candidates[idx];
-    const eligible  = selection.intent === "settlement"
+    if (selection.intent === "close_round_confirm") {
+      if (replyToken) await replyLineMessage(replyToken, "พิมพ์ ยืนยันปิดรอบ เพื่อปิดรอบ");
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+
+    const eligible: WorkRoundStatus[] = selection.intent === "settlement"
       ? SETTLEMENT_ELIGIBLE_STATUSES
-      : EVIDENCE_ELIGIBLE_STATUSES;
+      : selection.intent === "close_round"
+        ? ["open"]
+        : selection.intent === "produce_attach"
+          ? ["open", "awaiting_settlement", "awaiting_slips", "variance_found", "ready_for_review", "needs_correction"]
+          : EVIDENCE_ELIGIBLE_STATUSES;
 
     // Re-validate: round must still exist, belong to this source/date, be eligible.
     const round = await wrs.validateChoice(
@@ -1504,15 +1717,44 @@ export class WebhookService {
       return { eventId, eventType, status: "saved", parsed: false };
     }
 
-    await selSvc.resolve(selection.id, round.id);
+    const claimed = await selSvc.claim({
+      selectionId: selection.id,
+      sourceId,
+      lineUserId,
+      choice,
+      allowedStatuses: eligible,
+    });
+    if (!claimed) {
+      if (replyToken) await replyLineMessage(replyToken, "ตัวเลือกนี้ถูกใช้ไปแล้วหรือหมดอายุ กรุณาเริ่มใหม่");
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
     log.info("selection resolved", { intent: selection.intent, workRoundId: round.id, choice });
 
     const payload = (selection.payload ?? {}) as Record<string, unknown>;
     switch (selection.intent as SelectionIntent) {
       case "settlement":
+        if (typeof payload.followupText === "string") {
+          const foundList = await new SettlementIntakeService(this.supabase).findOpenDraftsForSender(sourceId, lineUserId);
+          const found = foundList.find((f) => f.round.id === round.id);
+          if (!found) {
+            if (replyToken) await replyLineMessage(replyToken, "ไม่พบรายการส่งเงินที่เลือก กรุณาเริ่มใหม่");
+            return { eventId, eventType, status: "saved", parsed: false };
+          }
+          return this.applySettlementFollowupForRound(
+            found.draft, found.round, payload.followupText, lineUserId, replyToken, eventId, eventType, log,
+          );
+        }
         return this.openSettlementForRound(
           round, (payload.fullText as string) ?? "", lineUserId, replyToken, eventId, eventType, log,
         );
+      case "close_round": {
+        const selected = await wrs.buildCandidates([round]);
+        await this.createCloseRoundConfirmation(
+          sourceId, lineUserId!, round.business_date, selected[0], String(payload.dateStr ?? round.business_date),
+        );
+        if (replyToken) await replyLineMessage(replyToken, this.buildCloseRoundConfirmPrompt(round));
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
       case "produce_attach":
         return this.resumeProduceAttach(event, round, payload, eventId, eventType, log);
       case "slip":
@@ -1548,6 +1790,8 @@ export class WebhookService {
       sourceId, businessDate, eventId, eventType, log, forced,
     } = params;
 
+    const effectiveBusinessDate = parsed.date ?? businessDate;
+
     // 1. Decide the target Work Round (unless a selection already forced one).
     let target: { workRoundId: string | null; isAppend: boolean };
     if (forced) {
@@ -1555,7 +1799,7 @@ export class WebhookService {
     } else {
       const decision = await this.resolveProduceTarget(
         parsed, accumulatedText, rawMessageId, lineUserId, replyToken,
-        sourceId, businessDate, eventId, eventType, log,
+        sourceId, effectiveBusinessDate, eventId, eventType, log,
       );
       if (decision.kind === "halt") return decision.result;
       target = { workRoundId: decision.workRoundId, isAppend: decision.isAppend };
@@ -1630,7 +1874,10 @@ export class WebhookService {
 
     // 4. Advance Work Round status (produce_attached keeps it open).
     if (target.workRoundId) {
-      await new WorkRoundStatusService(this.supabase).applyEvent(target.workRoundId, "produce_attached");
+      await new WorkRoundStatusService(this.supabase).applyEvent(
+        target.workRoundId,
+        target.isAppend ? "produce_reopened" : "produce_attached",
+      );
     }
 
     await new DailySummaryService(this.supabase).recalculate(
@@ -1675,8 +1922,9 @@ export class WebhookService {
     });
 
     if (!sourceId || !businessDate) {
-      // No routing context — legacy persist with null link.
-      return { kind: "persist", workRoundId: null, isAppend: false };
+      log.warn("missing V2 routing context — not persisting produce session");
+      if (replyToken) await replyLineMessage(replyToken, "ยังระบุกลุ่มหรือวันที่ของรายการไม่ได้ กรุณาลองส่งใหม่อีกครั้ง");
+      return { kind: "halt", result: halt() };
     }
 
     const firstLine = normalizeText(accumulatedText).split("\n")[0] ?? "";
@@ -1686,6 +1934,29 @@ export class WebhookService {
 
     try {
       if (hdr?.type === "explicit") {
+        if (isAppend) {
+          const all = await wrs.findAllRounds(sourceId, businessDate);
+          const matched = all.filter(
+            (r) => r.seller_name === hdr.sellerName && r.market_name === hdr.marketName,
+          );
+          const candidates = matched.filter((r) => r.status !== "approved");
+          if (candidates.length === 0) {
+            log.warn("append produce blocked: no non-approved target round", { sourceId, businessDate });
+            if (replyToken) await replyLineMessage(replyToken, "รอบนี้อนุมัติแล้วหรือไม่พบรอบเดิม กรุณาให้ผู้ตรวจสอบเปิดเส้นทางแก้ไขก่อน");
+            return { kind: "halt", result: halt() };
+          }
+          if (candidates.length === 1) {
+            return { kind: "persist", workRoundId: candidates[0].id, isAppend: true };
+          }
+          const selectionCandidates = await wrs.buildCandidates(candidates);
+          await new WorkRoundSelectionService(this.supabase).create({
+            sourceId, lineUserId, businessDate, intent: "produce_attach", candidates: selectionCandidates,
+            payload: { rawMessageId, accumulatedText, isAppend, lineUserId },
+          });
+          if (replyToken) await replyLineMessage(replyToken, buildSelectionMessage("produce_attach", selectionCandidates));
+          return { kind: "halt", result: halt() };
+        }
+
         // Explicit headers always create/resolve their round (works for everyone).
         const { workRound } = await wrs.resolve({
           sourceId, businessDate,
@@ -1717,11 +1988,12 @@ export class WebhookService {
       if (replyToken) await replyLineMessage(replyToken, buildSelectionMessage("produce_attach", candidates));
       return { kind: "halt", result: halt() };
     } catch (err) {
-      // work_rounds table absent / not migrated → legacy null-link persist.
-      log.warn("Work Round resolution unavailable — legacy persist", {
+      // Fail closed: V2 produce must not persist without a resolved work_round_id.
+      log.warn("Work Round resolution unavailable — produce not persisted", {
         error: err instanceof Error ? err.message : String(err),
       });
-      return { kind: "persist", workRoundId: null, isAppend };
+      if (replyToken) await replyLineMessage(replyToken, "ยังบันทึกรายการไม่ได้ชั่วคราว กรุณาลองใหม่อีกครั้ง");
+      return { kind: "halt", result: halt() };
     }
   }
 
@@ -1826,6 +2098,13 @@ export class WebhookService {
   }
 
   // ── DB helpers ────────────────────────────────────────────────────────────
+  private tryFinalizeWorkRoundSafe(workRoundId: string | null | undefined, log: ChildLogger): void {
+    if (!workRoundId) return;
+    tryFinalizeWorkRound(this.supabase, workRoundId).catch(
+      (err) => log.warn("tryFinalizeWorkRound failed", { reason: err instanceof Error ? err.message : String(err) }),
+    );
+  }
+
   private async saveRawMessage(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     event: any,

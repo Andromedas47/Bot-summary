@@ -40,6 +40,9 @@ export class WorkRoundSelectionService {
     payload?:     Record<string, unknown>;
     ttlMs?:       number;
   }): Promise<WorkRoundSelection> {
+    if (!params.lineUserId) {
+      throw new Error("selection requires a LINE userId");
+    }
     await this.expireActiveFor(params.sourceId, params.lineUserId);
 
     const expiresAt = new Date(Date.now() + (params.ttlMs ?? DEFAULT_TTL_MS)).toISOString();
@@ -61,6 +64,51 @@ export class WorkRoundSelectionService {
 
     if (error) throw new Error(`selection create failed: ${error.message}`);
     return data as WorkRoundSelection;
+  }
+
+  async claim(params: {
+    selectionId: string;
+    sourceId: string;
+    lineUserId: string | null;
+    choice: number;
+    allowedStatuses: string[];
+  }): Promise<WorkRoundSelection | null> {
+    if (!params.lineUserId) return null;
+
+    const rpc = (this.supabase as unknown as {
+      rpc?: (fn: string, args: Record<string, unknown>) => Promise<{ data: unknown; error: { message: string } | null }>;
+    }).rpc;
+
+    if (rpc) {
+      const { data, error } = await rpc("claim_work_round_selection", {
+        p_selection_id:     params.selectionId,
+        p_source_id:        params.sourceId,
+        p_line_user_id:     params.lineUserId,
+        p_choice:           params.choice,
+        p_allowed_statuses: params.allowedStatuses,
+      });
+      if (error) throw new Error(`selection claim failed: ${error.message}`);
+      const rows = Array.isArray(data) ? data : data ? [data] : [];
+      return (rows[0] as WorkRoundSelection | undefined) ?? null;
+    }
+
+    // Test-double fallback: production uses the RPC above.
+    const active = await this.findActive(params.sourceId, params.lineUserId);
+    if (!active || active.id !== params.selectionId) return null;
+    const candidates = active.candidates as SelectionCandidate[];
+    const candidate = candidates[params.choice - 1];
+    if (!candidate) return null;
+    const { data: round } = await this.supabase
+      .from("work_rounds")
+      .select("id, source_id, business_date, status")
+      .eq("id", candidate.work_round_id)
+      .maybeSingle();
+    if (!round) return null;
+    if (round.source_id !== params.sourceId) return null;
+    if (round.business_date !== active.business_date) return null;
+    if (!params.allowedStatuses.includes(String(round.status))) return null;
+    await this.resolve(active.id, candidate.work_round_id);
+    return { ...active, status: "resolved", resolved_work_round_id: candidate.work_round_id, resolved_at: new Date().toISOString() };
   }
 
   // Returns the active (pending, unexpired) selection for this sender, if any.
@@ -124,6 +172,8 @@ const INTENT_TITLE: Record<SelectionIntent, string> = {
   produce_attach: "เลือกงวดสำหรับรายการนี้",
   slip:           "เลือกงวดสำหรับสลิป",
   manual_slip:    "เลือกงวดสำหรับสลิปมือ",
+  close_round:    "เลือกงวดที่จะปิดรอบ",
+  close_round_confirm: "ยืนยันงวดที่จะปิดรอบ",
 };
 
 /** Builds a numbered selection prompt with seller, market, round, and expected sales. */

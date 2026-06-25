@@ -19,6 +19,7 @@ export interface ActiveSlipSession {
   sellerName: string | null;
   marketName: string | null;
   slipDate:   string | null;
+  workRoundId?: string | null;
 }
 
 // "กี้-วัดทุ่งลานนา สลิปเงินโอน 9/6/2569"
@@ -137,7 +138,7 @@ export class SlipSessionService implements SlipSessionIngestor {
   async findActiveSession(sourceId: string): Promise<ActiveSlipSession | null> {
     const { data, error } = await this.supabase
       .from("slip_batches")
-      .select("id, image_count, header_text, seller_name, market_name, slip_date")
+      .select("id, image_count, header_text, seller_name, market_name, slip_date, work_round_id")
       .eq("source_id", sourceId)
       .in("status", ["collecting", "closing"])
       .order("created_at", { ascending: false })
@@ -154,6 +155,7 @@ export class SlipSessionService implements SlipSessionIngestor {
       sellerName: data.seller_name,
       marketName: data.market_name,
       slipDate:   data.slip_date,
+      workRoundId: data.work_round_id ?? null,
     };
   }
 }

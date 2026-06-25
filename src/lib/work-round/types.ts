@@ -30,7 +30,13 @@ export type SettlementDraftStatus =
   | "approved"
   | "needs_correction";
 
-export type SelectionIntent = "settlement" | "produce_attach" | "slip" | "manual_slip";
+export type SelectionIntent =
+  | "settlement"
+  | "produce_attach"
+  | "slip"
+  | "manual_slip"
+  | "close_round"
+  | "close_round_confirm";
 
 export interface SelectionCandidate {
   work_round_id: string;

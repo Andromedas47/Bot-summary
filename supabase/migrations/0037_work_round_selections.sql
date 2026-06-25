@@ -17,7 +17,7 @@ CREATE TABLE public.work_round_selections (
   line_user_id           text,
   business_date          date        NOT NULL,
   intent                 text        NOT NULL
-                         CHECK (intent IN ('settlement', 'produce_attach', 'slip', 'manual_slip')),
+                         CHECK (intent IN ('settlement', 'produce_attach', 'slip', 'manual_slip', 'close_round', 'close_round_confirm')),
   candidates             jsonb       NOT NULL,
   payload                jsonb,
   status                 text        NOT NULL DEFAULT 'pending'

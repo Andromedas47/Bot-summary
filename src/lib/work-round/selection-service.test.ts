@@ -92,4 +92,91 @@ describe("WorkRoundSelectionService", () => {
     expect(row.status).toBe("resolved");
     expect(row.resolved_work_round_id).toBe("wr-2");
   });
+
+  it("claim uses the database RPC gate with source, sender, and choice", async () => {
+    const calls: Array<{ fn: string; args: Record<string, unknown> }> = [];
+    const svc = new WorkRoundSelectionService({
+      rpc: async (fn: string, args: Record<string, unknown>) => {
+        calls.push({ fn, args });
+        return {
+          data: [{
+            id: "sel-1",
+            source_id: "G1",
+            line_user_id: "U1",
+            business_date: "2026-06-24",
+            intent: "settlement",
+            candidates: cands,
+            payload: null,
+            resolved_work_round_id: "wr-2",
+          }],
+          error: null,
+        };
+      },
+    } as never);
+
+    const claimed = await svc.claim({
+      selectionId: "sel-1",
+      sourceId: "G1",
+      lineUserId: "U1",
+      choice: 2,
+      allowedStatuses: ["awaiting_settlement"],
+    });
+
+    expect(calls).toEqual([{
+      fn: "claim_work_round_selection",
+      args: {
+        p_selection_id: "sel-1",
+        p_source_id: "G1",
+        p_line_user_id: "U1",
+        p_choice: 2,
+        p_allowed_statuses: ["awaiting_settlement"],
+      },
+    }]);
+    expect(claimed?.resolved_work_round_id).toBe("wr-2");
+  });
+
+  it("does not create or claim a selection without a sender userId", async () => {
+    const db  = memSupabase();
+    const svc = new WorkRoundSelectionService(db as never);
+
+    await expect(svc.create({
+      sourceId: "G1", lineUserId: null, businessDate: "2026-06-24",
+      intent: "settlement", candidates: cands,
+    })).rejects.toThrow("selection requires a LINE userId");
+
+    expect(await svc.claim({
+      selectionId: "sel-1",
+      sourceId: "G1",
+      lineUserId: null,
+      choice: 1,
+      allowedStatuses: ["open"],
+    })).toBeNull();
+  });
+
+  it("fallback claim rejects a candidate whose status changed before claim", async () => {
+    const db = memSupabase({
+      work_rounds: [
+        { id: "wr-1", source_id: "G1", business_date: "2026-06-24", status: "approved" },
+      ],
+    });
+    const svc = new WorkRoundSelectionService(db as never);
+    const sel = await svc.create({
+      sourceId: "G1",
+      lineUserId: "U1",
+      businessDate: "2026-06-24",
+      intent: "close_round",
+      candidates: [cands[0]],
+    });
+
+    const claimed = await svc.claim({
+      selectionId: sel.id,
+      sourceId: "G1",
+      lineUserId: "U1",
+      choice: 1,
+      allowedStatuses: ["open"],
+    });
+
+    expect(claimed).toBeNull();
+    expect(db._rows("work_round_selections")[0].status).toBe("pending");
+  });
 });

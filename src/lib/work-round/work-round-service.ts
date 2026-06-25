@@ -7,13 +7,12 @@ type AnyClient = SupabaseClient<any>;
 
 // Statuses for which a round can still receive a settlement declaration.
 export const SETTLEMENT_ELIGIBLE_STATUSES: WorkRoundStatus[] = [
-  "open", "produce_complete", "awaiting_settlement", "awaiting_slips",
-  "variance_found", "needs_correction",
+  "awaiting_settlement", "needs_correction",
 ];
 
 // Statuses for which a round can still receive slip / manual-slip evidence.
 export const EVIDENCE_ELIGIBLE_STATUSES: WorkRoundStatus[] = [
-  "open", "produce_complete", "awaiting_settlement", "awaiting_slips", "variance_found",
+  "awaiting_slips", "variance_found", "ready_for_review", "needs_correction",
 ];
 
 export interface ResolveParams {
@@ -38,8 +37,10 @@ export type DisambiguationResult =
 export type EvidenceResolution =
   | { mode: "linked"; workRound: WorkRound }
   | { mode: "select"; candidates: WorkRound[] }
+  | { mode: "no_round" }  // no rounds exist for this source/date
   | { mode: "blocked" }   // rounds exist for this date but none are eligible
-  | { mode: "legacy" };   // no rounds exist for this date — legacy/V1 path
+  | { mode: "legacy" }    // deliberate legacy caller only
+  | { mode: "error"; error: string };
 
 export class WorkRoundService {
   constructor(private readonly supabase: AnyClient) {}
@@ -136,14 +137,14 @@ export class WorkRoundService {
   /**
    * Decides how slip / manual-slip evidence should attach to a Work Round.
    *
-   *  - no rounds exist for the date      → "legacy" (preserve V1 path, null link)
+   *  - no rounds exist for the date      → "no_round" (V2 must fail closed)
    *  - exactly one eligible (or a unique
    *    seller+market match)              → "linked"
    *  - more than one eligible            → "select" (caller opens pending selection)
    *  - rounds exist but none eligible    → "blocked"
    *
-   * Tolerant: if the work_rounds query throws (table missing / not migrated),
-   * returns "legacy" so the evidence flow degrades to current behavior.
+   * Fail-closed: if the work_rounds query throws, returns "error" so V2
+   * evidence commands do not create null-linked financial records.
    */
   async resolveForEvidence(
     sourceId:     string,
@@ -153,11 +154,11 @@ export class WorkRoundService {
     let all: WorkRound[];
     try {
       all = await this.findAllRounds(sourceId, businessDate);
-    } catch {
-      return { mode: "legacy" };
+    } catch (err) {
+      return { mode: "error", error: err instanceof Error ? err.message : String(err) };
     }
 
-    if (all.length === 0) return { mode: "legacy" };
+    if (all.length === 0) return { mode: "no_round" };
 
     const eligible = all.filter((r) => EVIDENCE_ELIGIBLE_STATUSES.includes(r.status));
     if (eligible.length === 0) return { mode: "blocked" };

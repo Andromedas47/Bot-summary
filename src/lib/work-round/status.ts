@@ -7,13 +7,13 @@
  *
  * Status → driving event:
  *   open                 ← round created / produce session attached
- *   produce_complete     ← produce_closed (explicit "produce done" signal)
- *   awaiting_settlement  ← settlement_opened (ส่งเงิน resolved to this round)
+ *   awaiting_settlement  ← produce_closed (explicit "produce done" signal)
  *   awaiting_slips       ← settlement_confirmed (ยืนยันส่งเงิน)
  *   variance_found       ← reconciled_variance (declared transfer ≠ slip evidence)
  *   ready_for_review     ← reconciled_match
  *   approved             ← approved (reviewer)
  *   needs_correction     ← needs_correction (reviewer)
+ *   needs_correction     ← produce_reopened (produce changed after settlement)
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -25,6 +25,7 @@ type AnyClient = SupabaseClient<any>;
 
 export type WorkRoundEvent =
   | "produce_attached"
+  | "produce_reopened"
   | "produce_closed"
   | "settlement_opened"
   | "settlement_confirmed"
@@ -38,20 +39,24 @@ export type WorkRoundEvent =
 const TRANSITIONS: Record<WorkRoundEvent, { from: WorkRoundStatus[]; to: WorkRoundStatus }> = {
   // Produce activity keeps the round open (never reverts an approved round).
   produce_attached: {
-    from: ["open", "produce_complete", "awaiting_settlement", "awaiting_slips", "variance_found", "ready_for_review", "needs_correction"],
+    from: ["produce_complete"],
     to:   "open",
   },
   produce_closed: {
     from: ["open"],
-    to:   "produce_complete",
+    to:   "awaiting_settlement",
   },
   settlement_opened: {
-    from: ["open", "produce_complete", "awaiting_settlement", "needs_correction"],
+    from: ["awaiting_settlement", "needs_correction"],
     to:   "awaiting_settlement",
   },
   settlement_confirmed: {
     from: ["awaiting_settlement", "awaiting_slips", "needs_correction"],
     to:   "awaiting_slips",
+  },
+  produce_reopened: {
+    from: ["awaiting_settlement", "awaiting_slips", "variance_found", "ready_for_review", "needs_correction"],
+    to:   "needs_correction",
   },
   reconciled_match: {
     from: ["awaiting_slips", "variance_found"],

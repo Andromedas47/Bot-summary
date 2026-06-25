@@ -27,7 +27,7 @@ import {
   SlipCheckService,
   type SlipCheckProcessor,
 } from "@/lib/slips/check-service";
-import { SlipBatchService, type SlipBatchIngestor } from "@/lib/slips/batch-service";
+import { SlipBatchService, SLIP_BATCH_QUIET_SECONDS, type SlipBatchIngestor } from "@/lib/slips/batch-service";
 import { tryFinalizeSettlement } from "@/lib/settlement-finalizer";
 import { tryFinalizeWorkRound } from "@/lib/work-round/finalizer";
 import {
@@ -76,8 +76,15 @@ const BATCH_FINALIZED_LATE_IMAGE_REPLY =
   "รูปนี้ไม่ถูกรวมในชุดสลิป เนื่องจากระบบเริ่มสรุปแล้ว กรุณาเปิดชุดใหม่ก่อนส่งรูป";
 
 const NO_SESSION_IMAGE_REPLY = [
-  "กรุณาพิมพ์หัวชุดสลิปก่อนส่งรูป เช่น",
+  "กรุณาพิมพ์หัวชุดสลิปก่อนส่งรูป เพื่อระบุว่าเป็นสลิปของใครและตลาดไหน",
+  "",
+  "รูปแบบ:",
+  "ชื่อคนขาย ชื่อตลาด สลิปเงินโอน วันที่",
+  "",
+  "ตัวอย่าง:",
   "กี้ วัดทุ่งลานนา สลิปเงินโอน 9/6/2569",
+  "",
+  "จากนั้นส่งรูปสลิปได้หลายรูป แล้วพิมพ์ `จบสลิป` เมื่อส่งครบครับ",
 ].join("\n");
 
 const NO_ACTIVE_BATCH_REPLY = [
@@ -172,6 +179,7 @@ export class WebhookService {
   private readonly scheduleBackgroundTask: ScheduleBackgroundTask;
   private readonly sleep: Sleep;
   private readonly produceEndSettleMs: number;
+  private readonly noSessionImageGuidanceSentAt = new Map<string, number>();
 
   constructor(
     private readonly supabase: Supabase,
@@ -197,6 +205,25 @@ export class WebhookService {
       });
     this.sleep = dependencies.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.produceEndSettleMs = dependencies.produceEndSettleMs ?? 750;
+  }
+
+  private noSessionImageGuidanceKey(sourceId: string, senderId: string | null): string {
+    return `${sourceId}:${senderId ?? ""}`;
+  }
+
+  private shouldReplyNoSessionImageGuidance(sourceId: string, senderId: string | null, nowMs: number): boolean {
+    const key = this.noSessionImageGuidanceKey(sourceId, senderId);
+    const lastSentAt = this.noSessionImageGuidanceSentAt.get(key);
+    const windowMs = SLIP_BATCH_QUIET_SECONDS * 1000;
+
+    if (lastSentAt !== undefined && nowMs - lastSentAt < windowMs) return false;
+
+    this.noSessionImageGuidanceSentAt.set(key, nowMs);
+    return true;
+  }
+
+  private resetNoSessionImageGuidance(sourceId: string, senderId: string | null): void {
+    this.noSessionImageGuidanceSentAt.delete(this.noSessionImageGuidanceKey(sourceId, senderId));
   }
 
   async processEvents(events: LineEvent[], destination: string): Promise<WebhookProcessResult[]> {
@@ -892,7 +919,12 @@ export class WebhookService {
             // No open session — instruct user to open one first.
             // Evidence is saved but not processed; no OCR scheduled.
             log.info("image received but no active slip session", { sourceId });
-            if (event.replyToken) {
+            const shouldReplyNoSession = this.shouldReplyNoSessionImageGuidance(
+              sourceId,
+              senderId,
+              event.timestamp || Date.now(),
+            );
+            if (event.replyToken && shouldReplyNoSession) {
               try {
                 await this.replyMessage(event.replyToken, NO_SESSION_IMAGE_REPLY);
               } catch (replyErr) {
@@ -1053,6 +1085,8 @@ export class WebhookService {
     const sourceId  = getSourceId(event.source);
     const senderId  = getUserId(event.source);
     const replyToken = event.replyToken;
+
+    this.resetNoSessionImageGuidance(sourceId, senderId);
 
     log.info("slip session open command received", {
       sourceId,

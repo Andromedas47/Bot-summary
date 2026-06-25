@@ -5,6 +5,18 @@ import type { LineMessageEvent } from "./types";
 import type { SlipSessionIngestor, ActiveSlipSession } from "@/lib/slips/slip-session-service";
 import type { Database } from "@/types/database";
 
+const NO_SESSION_IMAGE_REPLY = [
+  "กรุณาพิมพ์หัวชุดสลิปก่อนส่งรูป เพื่อระบุว่าเป็นสลิปของใครและตลาดไหน",
+  "",
+  "รูปแบบ:",
+  "ชื่อคนขาย ชื่อตลาด สลิปเงินโอน วันที่",
+  "",
+  "ตัวอย่าง:",
+  "กี้ วัดทุ่งลานนา สลิปเงินโอน 9/6/2569",
+  "",
+  "จากนั้นส่งรูปสลิปได้หลายรูป แล้วพิมพ์ `จบสลิป` เมื่อส่งครบครับ",
+].join("\n");
+
 function createRawMessageSupabase(rawId = "raw-img") {
   const client = {
     from(table: string) {
@@ -27,6 +39,71 @@ function createRawMessageSupabase(rawId = "raw-img") {
     },
   } as unknown as SupabaseClient<Database>;
   return client;
+}
+
+function createSlipHeaderSupabase(rawId = "raw-img") {
+  const workRounds = [{
+    id: "wr-1",
+    source_id: "group-1",
+    business_date: "2026-06-09",
+    seller_name: "กี้",
+    market_name: "วัดทุ่งลานนา",
+    round_seq: 1,
+    status: "awaiting_slips",
+    source_meta: null,
+    created_at: "2026-06-09T00:00:00.000Z",
+    updated_at: "2026-06-09T00:00:00.000Z",
+  }];
+
+  const queryRows = (rows: Array<Record<string, unknown>>) => {
+    const chain = (filtered: Array<Record<string, unknown>>) => ({
+      eq(col: string, val: unknown) { return chain(filtered.filter((r) => r[col] === val)); },
+      in(col: string, vals: unknown[]) { return chain(filtered.filter((r) => vals.includes(r[col]))); },
+      order() { return chain(filtered); },
+      then(resolve: (v: { data: Array<Record<string, unknown>>; error: null }) => unknown) {
+        return Promise.resolve(resolve({ data: filtered, error: null }));
+      },
+    });
+    return chain(rows);
+  };
+
+  const client = {
+    from(table: string) {
+      if (table === "raw_messages") {
+        return {
+          insert() {
+            return {
+              select() {
+                return {
+                  async single() {
+                    return { data: { id: rawId }, error: null };
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+      if (table === "work_rounds") {
+        return { select() { return queryRows(workRounds); } };
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    },
+  } as unknown as SupabaseClient<Database>;
+  return client;
+}
+
+function textEvent(text: string, timestamp = Date.UTC(2026, 5, 9, 5, 0, 0)): LineMessageEvent {
+  return {
+    type: "message",
+    webhookEventId: `event-text-${timestamp}`,
+    deliveryContext: { isRedelivery: false },
+    timestamp,
+    source: { type: "group", groupId: "group-1", userId: "user-1" },
+    mode: "active",
+    replyToken: `reply-text-${timestamp}`,
+    message: { id: `msg-text-${timestamp}`, type: "text", quoteToken: "q", text },
+  };
 }
 
 function imageEvent(id: string, timestamp = Date.UTC(2026, 5, 1, 5, 0, 0)): LineMessageEvent {
@@ -158,7 +235,64 @@ describe("WebhookService batch slip flow", () => {
     expect(replies[0]).toContain("รับรูปหลักฐานแล้วครับ");
   });
 
-  it("image with no open session replies with open-session instructions and skips OCR", async () => {
+  it("valid header opens a slip batch and multiple images attach to the same batch", async () => {
+    const replies: string[] = [];
+    const attachCalls: Array<{ batchId: string; evidenceId: string }> = [];
+    const bgTasks: Array<() => Promise<void>> = [];
+    let opened = false;
+    let imageCount = 0;
+
+    const slipSessionService: SlipSessionIngestor = {
+      async findActiveSession() {
+        return opened ? activeSession(imageCount) : null;
+      },
+      async openSession() {
+        opened = true;
+        imageCount = 0;
+        return { opened: true, batchId: "batch-1" };
+      },
+    };
+
+    const service = new WebhookService(createSlipHeaderSupabase(), {
+      evidenceIngestor: {
+        async ingest(input) {
+          return {
+            evidenceId: `ev-${input.lineMessageId}`,
+            status: "RECEIVED",
+            storagePath: "slips/path.jpg",
+            sha256: "a".repeat(64),
+          };
+        },
+      },
+      checkProcessor: stubCheckProcessor,
+      slipSessionService,
+      batchService: {
+        async attachEvidence(batchId, evidenceId) {
+          attachCalls.push({ batchId, evidenceId });
+          imageCount += 1;
+        },
+      },
+      async replyMessage(_, text) { replies.push(text); },
+      scheduleBackgroundTask(task) { bgTasks.push(task); },
+    });
+
+    await service.processEvents([
+      textEvent("กี้ วัดทุ่งลานนา สลิปเงินโอน 9/6/2569", Date.UTC(2026, 5, 9, 5, 0, 0)),
+      imageEvent("msg-header-img-1", Date.UTC(2026, 5, 9, 5, 0, 1)),
+      imageEvent("msg-header-img-2", Date.UTC(2026, 5, 9, 5, 0, 2)),
+    ], "dest");
+
+    expect(replies).toHaveLength(2);
+    expect(replies[0]).toContain("เปิดชุดสลิปเงินโอนแล้ว");
+    expect(replies[1]).toContain("รับรูปหลักฐานแล้วครับ");
+    expect(attachCalls).toEqual([
+      { batchId: "batch-1", evidenceId: "ev-msg-header-img-1" },
+      { batchId: "batch-1", evidenceId: "ev-msg-header-img-2" },
+    ]);
+    expect(bgTasks).toHaveLength(2);
+  });
+
+  it("first image without a header replies with the exact open-session guidance and skips OCR", async () => {
     const replies: string[] = [];
     const bgTasks: Array<() => Promise<void>> = [];
 
@@ -179,7 +313,35 @@ describe("WebhookService batch slip flow", () => {
     await service.processEvents([imageEvent("msg-nosession")], "dest");
 
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("กรุณาพิมพ์หัวชุดสลิปก่อนส่งรูป");
+    expect(replies[0]).toBe(NO_SESSION_IMAGE_REPLY);
+    expect(bgTasks).toHaveLength(0);
+  });
+
+  it("multiple images without a header reply with guidance only once in the quiet window", async () => {
+    const replies: string[] = [];
+    const bgTasks: Array<() => Promise<void>> = [];
+
+    const slipSessionService: SlipSessionIngestor = {
+      async findActiveSession() { return null; },
+      async openSession() { return { opened: true, batchId: "batch-1" }; },
+    };
+
+    const service = new WebhookService(createRawMessageSupabase(), {
+      evidenceIngestor: stubIngestor(),
+      checkProcessor: stubCheckProcessor,
+      slipSessionService,
+      batchService: { async attachEvidence() {} },
+      async replyMessage(_, text) { replies.push(text); },
+      scheduleBackgroundTask(task) { bgTasks.push(task); },
+    });
+
+    await service.processEvents([
+      imageEvent("msg-nosession-a", Date.UTC(2026, 5, 1, 5, 0, 0)),
+      imageEvent("msg-nosession-b", Date.UTC(2026, 5, 1, 5, 0, 5)),
+      imageEvent("msg-nosession-c", Date.UTC(2026, 5, 1, 5, 0, 10)),
+    ], "dest");
+
+    expect(replies).toEqual([NO_SESSION_IMAGE_REPLY]);
     expect(bgTasks).toHaveLength(0);
   });
 
@@ -305,7 +467,7 @@ describe("WebhookService batch slip flow", () => {
     await service.processEvents([imageEvent("msg-nosession2")], "dest");
 
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("กรุณาพิมพ์หัวชุดสลิปก่อนส่งรูป");
+    expect(replies[0]).toBe(NO_SESSION_IMAGE_REPLY);
     // Must NOT show the finalizer-rejection message
     expect(replies[0]).not.toContain("เนื่องจากระบบเริ่มสรุปแล้ว");
     expect(bgTasks).toHaveLength(0);

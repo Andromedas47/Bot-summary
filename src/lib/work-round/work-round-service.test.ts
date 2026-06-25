@@ -192,4 +192,40 @@ describe("WorkRoundService", () => {
     expect(prompt).toContain("กี้-วัดทุ่ง");
     expect(prompt).toContain("พี่ดำ-วิหาร");
   });
+
+  it("resolveProduceAppendTarget finds round created by resolve()", async () => {
+    const db  = makeDb();
+    const svc = new WorkRoundService(db as never);
+    await svc.resolve({
+      sourceId: "grp1", businessDate: "2026-06-25",
+      sellerName: "โอม", marketName: "ตลาดพาซิโอ้ผลไม้",
+    });
+    const res = await svc.resolveProduceAppendTarget("grp1", "2026-06-25");
+    expect(res.status).toBe("resolved");
+    if (res.status === "resolved") expect(res.workRound.seller_name).toBe("โอม");
+  });
+
+  it("resolveProduceAppendTarget accepts produce_complete status", async () => {
+    const round: Row = {
+      id: "wr-1", source_id: "grp1", business_date: "2026-06-25",
+      seller_name: "โอม", market_name: "ตลาดพาซิโอ้ผลไม้", round_seq: 1, status: "produce_complete",
+      source_meta: null, created_at: "", updated_at: "",
+    };
+    const db  = makeDb([round]);
+    const svc = new WorkRoundService(db as never);
+    const res = await svc.resolveProduceAppendTarget("grp1", "2026-06-25");
+    expect(res.status).toBe("resolved");
+  });
+
+  it("resolveProduceAppendTarget rejects awaiting_settlement", async () => {
+    const round: Row = {
+      id: "wr-1", source_id: "grp1", business_date: "2026-06-25",
+      seller_name: "โอม", market_name: "ตลาดพาซิโอ้ผลไม้", round_seq: 1, status: "awaiting_settlement",
+      source_meta: null, created_at: "", updated_at: "",
+    };
+    const db  = makeDb([round]);
+    const svc = new WorkRoundService(db as never);
+    const res = await svc.resolveProduceAppendTarget("grp1", "2026-06-25");
+    expect(res.status).toBe("none");
+  });
 });

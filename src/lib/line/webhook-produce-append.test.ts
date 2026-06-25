@@ -113,6 +113,62 @@ describe("produce append markers", () => {
 });
 
 describe("WebhookService — รายการเบิกเพิ่ม V2 regression", () => {
+  it("full flow without pre-seeded round: header → batch1 → จบรายการเบิก → append → batch2", async () => {
+    const db = memSupabase({ work_rounds: [] });
+    const replies: string[] = [];
+    const s = svc(db, replies);
+
+    const batch1 = [
+      "โอม-ตลาดพาซิโอ้ผลไม้ เบิก 25/6/2569",
+      "1มังคุด35บาท", `18.3 ${LO}`,
+      "จบรายการเบิก",
+    ];
+    for (const line of batch1) {
+      await s.processEvents([textEvent(line)], "dest");
+    }
+
+    expect(db._rows("work_rounds")).toHaveLength(1);
+    const round = db._rows("work_rounds")[0];
+    expect(round.status).toBe("open");
+    expect(round.seller_name).toBe("โอม");
+    expect(round.market_name).toBe("ตลาดพาซิโอ้ผลไม้");
+    expect(db._rows("produce_sessions")).toHaveLength(1);
+
+    const batch2 = [
+      "รายการเบิกเพิ่ม",
+      "17ลองกอง40บาท", `20.9 ${LO}`,
+      "18เงาะ40บาท", `16.7 ${LO}`,
+      "จบรายการ",
+    ];
+    for (const line of batch2) {
+      const isEnd = line === "จบรายการ";
+      await s.processEvents([textEvent(line, isEnd ? { replyToken: "tok-end" } : {})], "dest");
+    }
+
+    expect(replies.some((r) => r.includes("ไม่พบรอบเบิก"))).toBe(false);
+
+    const rounds   = db._rows("work_rounds");
+    const sessions = db._rows("produce_sessions");
+    const items    = db._rows("produce_items");
+
+    expect(rounds).toHaveLength(1);
+    expect(sessions).toHaveLength(2);
+    expect(sessions.every((sess) => sess.work_round_id === round.id)).toBe(true);
+    expect(sessions.find((sess) => sess.is_append_session === true)?.staff_name).toBe("โอม");
+
+    const batch1Total = 35 * 18.3;
+    const batch2Total = 40 * 20.9 + 40 * 16.7;
+    expect(batch1Total).toBeCloseTo(640.5, 2);
+    expect(batch2Total).toBeCloseTo(1504, 2);
+
+    const roundTotal = await computeRoundTotals(db as never, round.id as string);
+    expect(roundTotal.borrow).toBeCloseTo(batch1Total + batch2Total, 0);
+    expect(roundTotal.borrow).toBeCloseTo(2144.5, 0);
+
+    expect(items.find((i) => i.item_number === 17)?.product_name).toBe("ลองกอง");
+    expect(items.find((i) => i.item_number === 18)?.product_name).toBe("เงาะ");
+  });
+
   it("full flow: header → 1–11 → จบรายการเบิก → รายการเบิกเพิ่ม → 12–28 → จบรายการ", async () => {
     const round = openRound();
     const db = memSupabase({ work_rounds: [round] });
@@ -182,6 +238,55 @@ describe("WebhookService — รายการเบิกเพิ่ม V2 re
     expect(db._rows("pending_sessions")).toHaveLength(0);
     expect(db._rows("produce_sessions")).toHaveLength(0);
     expect(db._rows("produce_items")).toHaveLength(0);
+  });
+
+  it("rejects รายการเบิกเพิ่ม after ยืนยันปิดรอบ (awaiting_settlement)", async () => {
+    const round = openRound({ status: "awaiting_settlement" });
+    const db = memSupabase({
+      work_rounds: [round],
+      produce_sessions: [{ id: "prior", work_round_id: round.id, is_append_session: false, staff_name: "โอม" }],
+    });
+    const replies: string[] = [];
+
+    await svc(db, replies).processEvents([
+      textEvent("รายการเบิกเพิ่ม", { replyToken: "tok-closed" }),
+      textEvent("17ลองกอง40บาท"),
+      textEvent(`20.9 ${LO}`),
+      textEvent("จบรายการ"),
+    ], "dest");
+
+    expect(replies[0]).toContain("ไม่พบรอบเบิกที่ยังเปิดอยู่สำหรับรายการเพิ่ม");
+    expect(db._rows("produce_sessions")).toHaveLength(1);
+  });
+
+  it("rejects รายการเบิกเพิ่ม when round is approved", async () => {
+    const round = openRound({ status: "approved" });
+    const db = memSupabase({ work_rounds: [round] });
+    const replies: string[] = [];
+
+    await svc(db, replies).processEvents([
+      textEvent("รายการเบิกเพิ่ม", { replyToken: "tok-approved" }),
+    ], "dest");
+
+    expect(replies[0]).toContain("ไม่พบรอบเบิกที่ยังเปิดอยู่สำหรับรายการเพิ่ม");
+  });
+
+  it("allows รายการเบิกเพิ่ม when round status is produce_complete", async () => {
+    const round = openRound({ status: "produce_complete" });
+    const db = memSupabase({ work_rounds: [round] });
+    const replies: string[] = [];
+
+    await svc(db, replies).processEvents([
+      textEvent("รายการเบิกเพิ่ม"),
+      textEvent("17ลองกอง40บาท"),
+      textEvent(`20.9 ${LO}`),
+      textEvent("จบรายการ", { replyToken: "tok-pc" }),
+    ], "dest");
+
+    expect(replies.some((r) => r.includes("ไม่พบรอบเบิก"))).toBe(false);
+    expect(db._rows("produce_sessions")).toHaveLength(1);
+    expect(db._rows("produce_sessions")[0].work_round_id).toBe(round.id);
+    expect(db._rows("produce_sessions")[0].is_append_session).toBe(true);
   });
 
   it("V2 produce session cannot persist without work_round_id, seller, or market", async () => {

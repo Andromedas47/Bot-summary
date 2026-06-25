@@ -41,6 +41,7 @@ import {
   WorkRoundService,
   SETTLEMENT_ELIGIBLE_STATUSES,
   EVIDENCE_ELIGIBLE_STATUSES,
+  PRODUCE_APPEND_ELIGIBLE_STATUSES,
 } from "@/lib/work-round/work-round-service";
 import { classifyHeader, isIncompleteProduceHeader, isProduceAppendLine } from "@/lib/parsers/work-round-header";
 import {
@@ -2211,9 +2212,9 @@ export class WebhookService {
       | { kind: "persist"; workRoundId: string; isAppend: boolean }
       | { kind: "halt"; result: WebhookProcessResult }
     > => {
-      const eligible = candidates.filter((r) => r.status !== "approved");
+      const eligible = candidates.filter((r) => PRODUCE_APPEND_ELIGIBLE_STATUSES.includes(r.status));
       if (eligible.length === 0) {
-        log.warn("append produce blocked: no non-approved target round", { sourceId, businessDate });
+        log.warn("append produce blocked: no append-eligible target round", { sourceId, businessDate });
         if (replyToken) await replyLineMessage(replyToken, "รอบนี้อนุมัติแล้วหรือไม่พบรอบเดิม กรุณาให้ผู้ตรวจสอบเปิดเส้นทางแก้ไขก่อน");
         return { kind: "halt", result: halt() };
       }

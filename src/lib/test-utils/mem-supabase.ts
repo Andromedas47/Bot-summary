@@ -83,6 +83,7 @@ export function memSupabase(seed: Record<string, Row[]> = {}) {
   function insert(name: string, payload: Row | Row[]) {
     const items = (Array.isArray(payload) ? payload : [payload]).map((p) => ({
       id: p.id ?? `${name}-${++idSeq}`,
+      ...(name === "work_rounds" && p.status == null ? { status: "open" } : {}),
       ...p,
     }));
     table(name).push(...items);

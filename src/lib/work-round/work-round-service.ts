@@ -15,6 +15,12 @@ export const EVIDENCE_ELIGIBLE_STATUSES: WorkRoundStatus[] = [
   "awaiting_slips", "variance_found", "ready_for_review", "needs_correction",
 ];
 
+// Statuses for which a standalone "รายการเบิกเพิ่ม" can attach another produce batch.
+// Remains appendable until ปิดรอบ / ยืนยันปิดรอบ (→ awaiting_settlement) or terminal review states.
+export const PRODUCE_APPEND_ELIGIBLE_STATUSES: WorkRoundStatus[] = [
+  "open", "produce_complete", "needs_correction",
+];
+
 export interface ResolveParams {
   sourceId:     string;
   businessDate: string;
@@ -86,6 +92,7 @@ export class WorkRoundService {
         seller_name:   sellerName,
         market_name:   marketName,
         round_seq:     nextSeq,
+        status:        "open",
         source_meta:   sourceMeta ?? null,
       })
       .select()
@@ -93,6 +100,22 @@ export class WorkRoundService {
 
     if (error) throw new Error(`work_round insert failed: ${error.message}`);
     return { workRound: created as WorkRound, created: true };
+  }
+
+  // Returns Work Rounds still eligible for a standalone produce-append marker.
+  async findProduceAppendEligibleRounds(
+    sourceId:     string,
+    businessDate: string,
+  ): Promise<WorkRound[]> {
+    const { data } = await this.supabase
+      .from("work_rounds")
+      .select("*")
+      .eq("source_id", sourceId)
+      .eq("business_date", businessDate)
+      .in("status", PRODUCE_APPEND_ELIGIBLE_STATUSES)
+      .order("round_seq", { ascending: true });
+
+    return (data ?? []) as WorkRound[];
   }
 
   // Returns all open Work Rounds for a group+date.
@@ -122,9 +145,31 @@ export class WorkRoundService {
     sourceId:     string,
     businessDate: string,
   ): Promise<DisambiguationResult> {
-    const rounds = (await this.findOpenRounds(sourceId, businessDate)).filter(
-      (r) => r.seller_name.trim().length > 0 && r.market_name.trim().length > 0,
-    );
+    const hasIdentity = (r: WorkRound) =>
+      r.seller_name.trim().length > 0 && r.market_name.trim().length > 0;
+
+    let rounds = (await this.findProduceAppendEligibleRounds(sourceId, businessDate))
+      .filter(hasIdentity);
+
+    // Header business_date may differ from bangkokToday() (e.g. before the 04:00 cutoff).
+    if (rounds.length === 0) {
+      const all = await this.findAllRounds(sourceId, businessDate);
+      rounds = all.filter(
+        (r) => PRODUCE_APPEND_ELIGIBLE_STATUSES.includes(r.status) && hasIdentity(r),
+      );
+    }
+
+    if (rounds.length === 0) {
+      const { data } = await this.supabase
+        .from("work_rounds")
+        .select("*")
+        .eq("source_id", sourceId)
+        .in("status", PRODUCE_APPEND_ELIGIBLE_STATUSES)
+        .order("round_seq", { ascending: true });
+      const bySource = ((data ?? []) as WorkRound[]).filter(hasIdentity);
+      if (bySource.length === 1) rounds = bySource;
+    }
+
     if (rounds.length === 0) return { status: "none" };
     if (rounds.length === 1) return { status: "resolved", workRound: rounds[0] };
     return { status: "ambiguous", candidates: rounds };

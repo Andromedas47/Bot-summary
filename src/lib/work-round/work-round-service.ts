@@ -29,19 +29,31 @@ export const PRODUCE_APPEND_ELIGIBLE_STATUSES: WorkRoundStatus[] = [
 ];
 
 // Statuses for which a standalone "ชั่งคืนเพิ่ม" (append RETURN) can attach.
-// Unlike produce append, a late return is the intended V2 correction path AFTER
-// close / settlement: it attaches a return session and reopens the round to
-// needs_correction (see WorkRoundStatusService "produce_reopened"). Everything
-// except `approved` is eligible — an approved round is locked.
-export const RETURN_APPEND_ELIGIBLE_STATUSES: WorkRoundStatus[] = [
-  "open",
-  "produce_complete",
-  "awaiting_settlement",
-  "awaiting_slips",
-  "variance_found",
-  "ready_for_review",
-  "needs_correction",
-];
+//
+// Unlike produce append, a late return is the intended V2 correction path through
+// the produce stage and AFTER close / settlement submission: it attaches a return
+// session and reopens the round to needs_correction (see WorkRoundStatusService
+// "produce_reopened").
+//
+// This is an EXPLICIT allowlist, NOT "everything except approved". It is declared
+// as an exhaustive Record over WorkRoundStatus, so adding a new status to the enum
+// (e.g. cancelled / rejected / void / archived) will FAIL THE BUILD here until
+// someone deliberately classifies it. A new/unknown status is never silently
+// allowed to receive a return append.
+const RETURN_APPEND_ELIGIBILITY: Record<WorkRoundStatus, boolean> = {
+  open:                true,  // ยังเปิดรอบอยู่
+  produce_complete:    true,  // ชั่งเบิกครบ ยังไม่ปิดรอบ
+  awaiting_settlement: true,  // หลังปิดรอบ (รอส่งเงิน)
+  awaiting_slips:      true,  // หลังยืนยันส่งเงิน (settlement submitted, รอสลิป)
+  needs_correction:    true,  // ถูกเปิดให้แก้ไขแล้ว — รับคืนเพิ่มต่อได้
+  variance_found:      false, // อยู่ระหว่างกระทบยอดสลิป — ใช้ reviewer action
+  ready_for_review:    false, // รอผู้ตรวจอนุมัติ — ใช้ reviewer action
+  approved:            false, // ปิดงานแล้ว — ล็อก
+};
+
+export const RETURN_APPEND_ELIGIBLE_STATUSES: WorkRoundStatus[] =
+  (Object.keys(RETURN_APPEND_ELIGIBILITY) as WorkRoundStatus[])
+    .filter((status) => RETURN_APPEND_ELIGIBILITY[status]);
 
 export interface ResolveParams {
   sourceId:     string;

@@ -18,6 +18,8 @@ import { describe, expect, it } from "bun:test";
 import { WebhookService } from "./webhook-service";
 import type { LineMessageEvent } from "./types";
 import { memSupabase, type Row } from "@/lib/test-utils/mem-supabase";
+import { computeRoundTotals } from "@/lib/work-round/expected-sales";
+import type { WorkRoundStatus } from "@/lib/work-round/types";
 const MESSAGE_DATE = "2026-06-24";
 
 // A complete, parseable produce message (header + 1 item + quantity + end).
@@ -160,6 +162,76 @@ describe("WebhookService — Work Round gated produce", () => {
     expect(db._rows("produce_sessions")).toHaveLength(1);
     expect(db._rows("work_rounds")[0].status).toBe("approved");
   });
+});
+
+// ── ชั่งคืนเพิ่ม eligibility is an explicit allowlist over the status enum ──────
+//
+// Every WorkRoundStatus is covered exactly once across these two arrays, so a new
+// enum member forces an update here (and the unit-level exhaustiveness test fails).
+const RETURN_APPEND_ELIGIBLE: WorkRoundStatus[] = [
+  "open", "produce_complete", "awaiting_settlement", "awaiting_slips", "needs_correction",
+];
+const RETURN_APPEND_NON_ELIGIBLE: WorkRoundStatus[] = [
+  "approved", "variance_found", "ready_for_review",
+];
+// Statuses where a successful return append reopens the round to needs_correction.
+const REOPEN_TO_CORRECTION: WorkRoundStatus[] = [
+  "awaiting_settlement", "awaiting_slips", "needs_correction",
+];
+
+function returnAppendMsg(): string {
+  return ["กี้-วัดทุ่ง ชั่งคืนเพิ่ม 24/06/2569", "1.มะม่วง50บาท", "5โล", "จบรายการคืน"].join("\n");
+}
+
+describe("WebhookService — ชั่งคืนเพิ่ม eligibility allowlist", () => {
+  for (const status of RETURN_APPEND_ELIGIBLE) {
+    it(`accepts return append on ${status} (creates append session)`, async () => {
+      const db = memSupabase({
+        work_rounds: [openRound({ id: "wr-a", status })],
+        produce_sessions: [{ id: "prior", work_round_id: "wr-a", is_append_session: false, staff_name: "กี้" }],
+      });
+      await svc(db).processEvents([textEvent(returnAppendMsg())], "dest");
+
+      const sessions = db._rows("produce_sessions");
+      expect(sessions).toHaveLength(2); // prior + new append
+      const appendSession = sessions.find((s) => s.id !== "prior");
+      expect(appendSession?.is_append_session).toBe(true);
+      expect(appendSession?.work_round_id).toBe("wr-a");
+      expect(db._rows("produce_items").some((i) => i.transaction_type === "ชั่งคืนเพิ่ม")).toBe(true);
+
+      const expectedStatus = REOPEN_TO_CORRECTION.includes(status) ? "needs_correction" : status;
+      expect(db._rows("work_rounds")[0].status).toBe(expectedStatus);
+    });
+  }
+
+  for (const status of RETURN_APPEND_NON_ELIGIBLE) {
+    it(`rejects return append on ${status} (no session, item, selection, or total change)`, async () => {
+      const db = memSupabase({
+        work_rounds: [openRound({ id: "wr-a", status })],
+        produce_sessions: [{ id: "prior", work_round_id: "wr-a", is_append_session: false, staff_name: "กี้" }],
+        produce_items: [
+          { id: "it-1", session_id: "prior", item_number: 1, product_name: "มะม่วง", transaction_type: "เบิก", price_per_unit: 100, quantity: 10 },
+        ],
+      });
+
+      const borrowBefore = (await computeRoundTotals(db as never, "wr-a")).borrow;
+      expect(borrowBefore).toBeCloseTo(1000, 2);
+
+      await svc(db).processEvents([textEvent(returnAppendMsg())], "dest");
+
+      // No new session and no new item — only the seeded rows remain.
+      expect(db._rows("produce_sessions")).toHaveLength(1);
+      expect(db._rows("produce_items")).toHaveLength(1);
+      // No pending session and no selection opened.
+      expect(db._rows("pending_sessions")).toHaveLength(0);
+      expect(db._rows("work_round_selections")).toHaveLength(0);
+      // Status untouched and totals unchanged.
+      expect(db._rows("work_rounds")[0].status).toBe(status);
+      const borrowAfter = (await computeRoundTotals(db as never, "wr-a")).borrow;
+      expect(borrowAfter).toBeCloseTo(borrowBefore, 2);
+      expect((await computeRoundTotals(db as never, "wr-a")).ret).toBe(0);
+    });
+  }
 });
 
 describe("WebhookService — settlement never auto-selects", () => {

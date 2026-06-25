@@ -1,6 +1,17 @@
 import { describe, expect, it } from "bun:test";
-import { WorkRoundService } from "./work-round-service";
-import type { WorkRound } from "./types";
+import {
+  WorkRoundService,
+  PRODUCE_APPEND_ELIGIBLE_STATUSES,
+  RETURN_APPEND_ELIGIBLE_STATUSES,
+} from "./work-round-service";
+import type { WorkRound, WorkRoundStatus } from "./types";
+
+// Every status currently in the WorkRoundStatus enum. Kept here as a literal so a
+// new enum member surfaces as a failing exhaustiveness check below.
+const ALL_STATUSES: WorkRoundStatus[] = [
+  "open", "produce_complete", "awaiting_settlement", "awaiting_slips",
+  "variance_found", "ready_for_review", "approved", "needs_correction",
+];
 
 // ── In-memory Supabase stub ───────────────────────────────────────────────────
 
@@ -267,6 +278,39 @@ describe("WorkRoundService", () => {
     const svc = new WorkRoundService(db as never);
     const res = await svc.resolveProduceAppendTarget("grp1", "2026-06-25");
     expect(res.status).toBe("none");
+  });
+
+  it("RETURN_APPEND_ELIGIBLE_STATUSES is an explicit allowlist (not 'all except approved')", () => {
+    // Intended lifecycle that may still receive a late return.
+    const expectedEligible: WorkRoundStatus[] = [
+      "awaiting_settlement", "awaiting_slips", "needs_correction", "open", "produce_complete",
+    ];
+    expect([...RETURN_APPEND_ELIGIBLE_STATUSES].sort()).toEqual(expectedEligible.sort());
+    // approved is locked.
+    expect(RETURN_APPEND_ELIGIBLE_STATUSES).not.toContain("approved");
+    // Reconciliation states go through reviewer action, not a return append.
+    expect(RETURN_APPEND_ELIGIBLE_STATUSES).not.toContain("variance_found");
+    expect(RETURN_APPEND_ELIGIBLE_STATUSES).not.toContain("ready_for_review");
+    // Guard against regressing back to a denylist: it must NOT cover every status.
+    expect(RETURN_APPEND_ELIGIBLE_STATUSES.length).toBeLessThan(ALL_STATUSES.length);
+  });
+
+  it("PRODUCE_APPEND_ELIGIBLE_STATUSES stays open + produce_complete only", () => {
+    const expectedProduce: WorkRoundStatus[] = ["open", "produce_complete"];
+    expect([...PRODUCE_APPEND_ELIGIBLE_STATUSES].sort()).toEqual(expectedProduce.sort());
+    expect(PRODUCE_APPEND_ELIGIBLE_STATUSES).not.toContain("needs_correction");
+  });
+
+  it("every WorkRoundStatus is explicitly classified for return append (no silent default)", () => {
+    // Each enum status is either eligible or not — never undefined. If a new status
+    // is added to the enum without updating ALL_STATUSES, this list desyncs and the
+    // allowlist test above is no longer exhaustive.
+    for (const status of ALL_STATUSES) {
+      expect(typeof RETURN_APPEND_ELIGIBLE_STATUSES.includes(status)).toBe("boolean");
+    }
+    const nonEligible = ALL_STATUSES.filter((s) => !RETURN_APPEND_ELIGIBLE_STATUSES.includes(s));
+    const expectedNonEligible: WorkRoundStatus[] = ["approved", "ready_for_review", "variance_found"];
+    expect([...nonEligible].sort()).toEqual(expectedNonEligible.sort());
   });
 
   it("resolveProduceAppendTarget is 'ambiguous' for >1 eligible round (never silently picks latest)", async () => {

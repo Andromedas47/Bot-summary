@@ -22,7 +22,34 @@ type Row = Record<string, unknown>;
 function makeSupabase() {
   const sessions: Row[] = [];
   const entries:  Row[] = [];
+  const workRounds: Row[] = [{
+    id: "wr-1",
+    source_id: "u1",
+    business_date: "2026-06-18",
+    seller_name: "หนูเล็ก",
+    market_name: "หน้าเซเวน",
+    round_seq: 1,
+    status: "awaiting_slips",
+    source_meta: null,
+    created_at: "2026-06-18T00:00:00.000Z",
+    updated_at: "2026-06-18T00:00:00.000Z",
+  }];
   let idSeq = 0;
+
+  function queryRows(rows: Row[]) {
+    const chain = (filtered: Row[]) => ({
+      eq(col: string, val: unknown) { return chain(filtered.filter(r => r[col] === val)); },
+      in(col: string, vals: unknown[]) { return chain(filtered.filter(r => vals.includes(r[col]))); },
+      order() { return chain(filtered); },
+      limit(n: number) { return chain(filtered.slice(0, n)); },
+      async maybeSingle() { return { data: filtered[0] ?? null, error: null }; },
+      async single() { return { data: filtered[0] ?? null, error: filtered[0] ? null : { message: "no rows" } }; },
+      then(resolve: (v: { data: Row[]; error: null }) => unknown) {
+        return Promise.resolve(resolve({ data: filtered, error: null }));
+      },
+    });
+    return chain(rows);
+  }
 
   function sessionStub() {
     // Supports any depth of .eq() chains before .maybeSingle()
@@ -128,6 +155,12 @@ function makeSupabase() {
       }
       if (table === "manual_slip_sessions") return sessionStub();
       if (table === "manual_slip_entries")  return entryStub();
+      if (table === "work_rounds") {
+        return { select() { return queryRows(workRounds); } };
+      }
+      if (table === "settlement_drafts") {
+        return { select() { return queryRows([]); } };
+      }
       if (table === "pending_sessions") {
         return { select() { return { eq() { return { async maybeSingle() { return { data: null, error: null }; } }; } }; } };
       }
@@ -310,6 +343,6 @@ describe("market-key separation", () => {
     await svc.processEvents([event, dup], "dest");
 
     expect(db._sessions).toHaveLength(1);
-    expect(replies => replies).toBeDefined(); // just check no throw
+    expect((replies: unknown) => replies).toBeDefined(); // just check no throw
   });
 });

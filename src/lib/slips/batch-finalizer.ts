@@ -4,6 +4,7 @@ import { pushLineMessage } from "@/lib/line/reply";
 import { logger } from "@/lib/logger";
 import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
 import { tryFinalizeSettlement } from "@/lib/settlement-finalizer";
+import { tryFinalizeWorkRound } from "@/lib/work-round/finalizer";
 import {
   computeValidationFlags,
   parseBatchDate,
@@ -319,6 +320,11 @@ export async function finalizeSlipBatch(
         });
         return { delivered: true, persisted: false, persistError: emptyErr.message };
       }
+      if (batchRow?.work_round_id) {
+        tryFinalizeWorkRound(supabase, batchRow.work_round_id).catch(
+          (err) => log.warn("tryFinalizeWorkRound failed", { reason: err instanceof Error ? err.message : String(err) }),
+        );
+      }
       return { delivered: true, persisted: true };
     }
 
@@ -371,13 +377,19 @@ export async function finalizeSlipBatch(
       isTimeoutForced,
     });
 
-    const businessDate = bangkokBusinessDateFromTimestamp(
-      new Date(batchRow?.closing_at ?? batchRow?.last_image_at ?? "").getTime(),
-    );
-    if (businessDate) {
+    if (batchRow?.work_round_id) {
+      tryFinalizeWorkRound(supabase, batchRow.work_round_id).catch(
+        (err) => log.warn("tryFinalizeWorkRound failed", { reason: err instanceof Error ? err.message : String(err) }),
+      );
+    } else {
+      const businessDate = bangkokBusinessDateFromTimestamp(
+        new Date(batchRow?.closing_at ?? batchRow?.last_image_at ?? "").getTime(),
+      );
+      if (businessDate) {
       tryFinalizeSettlement(supabase, batchRow!.source_id, businessDate).catch(
         (err) => log.warn("tryFinalizeSettlement failed", { reason: err instanceof Error ? err.message : String(err) }),
       );
+      }
     }
 
     return { delivered: true, persisted: true };

@@ -37,6 +37,7 @@ export class ManualSlipSessionService {
     marketLabel:    string | null;
     lineUserId:     string | null;
     lineMessageId:  string;
+    workRoundId?:   string | null;
   }): Promise<{
     opened:  boolean;
     session: ManualSlipSessionRow | null;
@@ -66,6 +67,7 @@ export class ManualSlipSessionService {
         status:                  "open",
         opened_by_line_user_id:  params.lineUserId,
         opened_line_message_id:  params.lineMessageId,
+        work_round_id:           params.workRoundId ?? null,
       })
       .select()
       .single();

@@ -12,6 +12,23 @@ import {
 import { reconcile } from "@/lib/reconciliation";
 import { tryFinalizeSettlement } from "@/lib/settlement-finalizer";
 
+type Supabase = Awaited<ReturnType<typeof createServiceClient>>;
+
+export async function hasV2WorkRoundForSettlement(
+  supabase: Supabase,
+  sourceId: string,
+  settlementDate: string,
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from("work_rounds")
+    .select("id")
+    .eq("source_id", sourceId)
+    .eq("business_date", settlementDate)
+    .limit(1);
+  if (error) throw new Error(error.message);
+  return (data ?? []).length > 0;
+}
+
 function monthRange(month: string): { from: string; toExclusive: string } {
   const [y, m] = month.split("-").map(Number);
   const next = new Date(y, m, 1);
@@ -63,6 +80,18 @@ export async function POST(req: NextRequest) {
 
   // If source_id provided, check for open manual slip sessions before saving.
   if (source_id) {
+    try {
+      if (await hasV2WorkRoundForSettlement(supabase, source_id, settlement_date)) {
+        return NextResponse.json({
+          error: "V2 Work Round data must be reviewed and finalized from /work-rounds",
+        }, { status: 409 });
+      }
+    } catch (err) {
+      return NextResponse.json({
+        error: err instanceof Error ? err.message : "V2 Work Round lookup failed",
+      }, { status: 500 });
+    }
+
     const reconcileResult = await reconcile(supabase, source_id, settlement_date, money_transfer);
     if (reconcileResult.blocked) {
       return NextResponse.json({ error: reconcileResult.reason }, { status: 400 });

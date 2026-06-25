@@ -332,10 +332,11 @@ function classifyTxType(text: string): TransactionType {
 }
 
 function detectTxType(text: string): TransactionType | null {
-  if (RE.TX_TYPE_BEIK_PHERM.test(text)) return "เบิกเพิ่ม";
-  if (RE.TX_TYPE_KUEN_SIA.test(text))   return "คืนเสีย";
-  if (RE.TX_TYPE_KUEN.test(text))       return "คืน";
-  if (RE.TX_TYPE_BEIK.test(text))       return "เบิก";
+  if (RE.TX_TYPE_APPEND_RETURN.test(text)) return "ชั่งคืนเพิ่ม";
+  if (RE.TX_TYPE_BEIK_PHERM.test(text))   return "เบิกเพิ่ม";
+  if (RE.TX_TYPE_KUEN_SIA.test(text))     return "คืนเสีย";
+  if (RE.TX_TYPE_KUEN.test(text))         return "คืน";
+  if (RE.TX_TYPE_BEIK.test(text))         return "เบิก";
   return null;
 }
 

@@ -63,7 +63,7 @@ export const RE = {
   // seller = before dash, market = between dash and tx-type keyword
   // Captures: [1]=seller, [2]=market, [3]=tx_type_keyword
   SELLER_MARKET: new RegExp(
-    `^([${TH}\\s]+?)-([${MARKET}]+?)\\s+(เบิกเพิ่ม|เบิก|คืนเสีย|คืน)`,
+    `^([${TH}\\s]+?)-([${MARKET}]+?)\\s+(ชั่งคืนเพิ่ม|คืนเพิ่ม|เบิกเพิ่ม|เบิก|คืนเสีย|คืน)`,
   ),
 
   // Manual slip session open: "ส่งสลิปมือ 17/06/2569"
@@ -73,4 +73,12 @@ export const RE = {
 
   // Manual slip session close: "จบสลิปมือ"
   MANUAL_SLIP_CLOSE: /^จบสลิปมือ\s*$/,
+
+  // ชั่งคืนเพิ่ม / คืนเพิ่ม — append-return transaction type (V2).
+  // Must be tested BEFORE TX_TYPE_KUEN to prevent misclassification as คืน.
+  TX_TYPE_APPEND_RETURN: /ชั่งคืนเพิ่ม|คืนเพิ่ม/,
+
+  // LINE-first settlement command (V2): "ส่งเงิน 24/06/2569" or "ปิดยอด 24/06/2569"
+  // Captures: [1]=date string (Buddhist DD/MM/YY or DD/MM/YYYY)
+  SETTLEMENT_CMD: /^(?:ส่งเงิน|ปิดยอด)\s+(\d{1,2}\/\d{1,2}\/(?:25)?\d{2})\s*$/,
 } as const;

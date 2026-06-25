@@ -7,7 +7,6 @@ import { WebhookService } from "./webhook-service";
 import type { LineMessageEvent } from "./types";
 import { memSupabase, type Row } from "@/lib/test-utils/mem-supabase";
 import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
-import { WorkRoundService } from "@/lib/work-round/work-round-service";
 
 const MESSAGE_DATE = "2026-06-25";
 
@@ -107,7 +106,6 @@ describe("WebhookService — produce pending contamination", () => {
       }],
     });
     const replies: string[] = [];
-    const wrs = new WorkRoundService(db as never);
 
     await svc(db, replies).processEvents([
       textEvent("น้อย เบิก 25/6/2569", { replyToken: "tok-1" }),
@@ -116,7 +114,7 @@ describe("WebhookService — produce pending contamination", () => {
       textEvent("จบรายการเบิก"),
     ], "dest");
 
-    expect(replies[0]).toBe(wrs.buildNoRoundPrompt());
+    expect(replies[0]).toContain("หัวเบิกยังขาดชื่อตลาด");
     expect(db._rows("pending_sessions")).toHaveLength(0);
     expect(db._rows("produce_sessions")).toHaveLength(0);
     expect(db._rows("produce_items")).toHaveLength(0);
@@ -207,5 +205,122 @@ describe("parseWeighSession — reserved financial lines", () => {
     const parsed = parseWeighSession(text, MESSAGE_DATE);
     expect(parsed.items).toHaveLength(1);
     expect(parsed.items[0].product_name).toBe("หมอนทอง");
+  });
+
+  it("blocks ตรวจสลิป and ขาดจากยอดเงินโอน from becoming produce items", () => {
+    for (const line of ["ตรวจสลิป", "ขาดจากยอดเงินโอน 0"]) {
+      const text = [
+        "เสือ-ตลาด72 เบิก",
+        line,
+        "1.หมอนทอง119บาท",
+        "38โล",
+        "จบรายการเบิก",
+      ].join("\n");
+      const parsed = parseWeighSession(text, MESSAGE_DATE);
+      expect(parsed.items).toHaveLength(1);
+      expect(parsed.items[0].product_name).toBe("หมอนทอง");
+    }
+  });
+});
+
+describe("WebhookService — V2 incomplete borrow header regression (กี้ เบิก 25/6/2569 incident)", () => {
+  it("rejects standalone incomplete header with missing-market message; no pending session or Work Round created", async () => {
+    const db = memSupabase();
+    const replies: string[] = [];
+
+    await svc(db, replies).processEvents([
+      textEvent("กี้ เบิก 25/6/2569", { replyToken: "tok-header" }),
+    ], "dest");
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("หัวเบิกยังขาดชื่อตลาด");
+    expect(replies[0]).toContain("กี้-วัดทุ่งลานนา เบิก 25/6/2569");
+    expect(db._rows("pending_sessions")).toHaveLength(0);
+    expect(db._rows("work_rounds")).toHaveLength(0);
+    expect(db._rows("produce_sessions")).toHaveLength(0);
+    expect(db._rows("produce_items")).toHaveLength(0);
+  });
+
+  it("item lines after rejected incomplete header are not accumulated or persisted", async () => {
+    const db = memSupabase();
+    const s = svc(db);
+
+    await s.processEvents([textEvent("กี้ เบิก 25/6/2569")], "dest");
+    await s.processEvents([textEvent("1.หมอนทอง119บาท")], "dest");
+    await s.processEvents([textEvent("38โล")], "dest");
+    await s.processEvents([textEvent("จบรายการเบิก")], "dest");
+
+    expect(db._rows("pending_sessions")).toHaveLength(0);
+    expect(db._rows("produce_sessions")).toHaveLength(0);
+    expect(db._rows("produce_items")).toHaveLength(0);
+  });
+
+  it("finance phrases after rejected incomplete header do not create produce items", async () => {
+    const db = memSupabase();
+    const s = svc(db);
+
+    await s.processEvents([textEvent("กี้ เบิก 25/6/2569")], "dest");
+    for (const line of [
+      "ยอดที่ต้องขายได้ 20218.90",
+      "ยอดเงินโอน 7702.30",
+      "ยอดสลิปมือ 500",
+      "ส่งเงินจริง 7702.30",
+      "ส่งเงินเกิน 0",
+      "ตรวจสลิป",
+      "ขาดจากยอดเงินโอน 0",
+    ]) {
+      await s.processEvents([textEvent(line)], "dest");
+    }
+
+    expect(db._rows("produce_items")).toHaveLength(0);
+    expect(db._rows("produce_sessions")).toHaveLength(0);
+  });
+
+  it("full valid flow (เบิก → ชั่งคืน → คืนเสีย) stays attached to one Work Round throughout", async () => {
+    const db = memSupabase();
+    const s = svc(db);
+
+    await s.processEvents([
+      textEvent("กี้-วัดทุ่งลานนา เบิก 25/6/2569", { timestamp: 1000 }),
+      textEvent("1.หมอนทอง119บาท", { timestamp: 2000 }),
+      textEvent("38โล", { timestamp: 3000 }),
+      textEvent("จบรายการเบิก", { timestamp: 4000, replyToken: "tok-borrow" }),
+    ], "dest");
+
+    expect(db._rows("work_rounds")).toHaveLength(1);
+    const wrId = String(db._rows("work_rounds")[0].id);
+
+    await s.processEvents([
+      textEvent("กี้ ชั่งคืน 25/6/2569", { timestamp: 5000 }),
+      textEvent("1.หมอนทอง119บาท", { timestamp: 6000 }),
+      textEvent("10โล", { timestamp: 7000 }),
+      textEvent("จบรายการ", { timestamp: 8000, replyToken: "tok-return" }),
+    ], "dest");
+
+    await s.processEvents([
+      textEvent("กี้ คืนเสีย 25/6/2569", { timestamp: 9000 }),
+      textEvent("1.หมอนทอง119บาท", { timestamp: 10000 }),
+      textEvent("5โล", { timestamp: 11000 }),
+      textEvent("จบรายการ", { timestamp: 12000, replyToken: "tok-bad-return" }),
+    ], "dest");
+
+    expect(db._rows("work_rounds")).toHaveLength(1);
+    expect(db._rows("produce_sessions")).toHaveLength(3);
+    expect(
+      db._rows("produce_sessions").every((r) => String(r.work_round_id) === wrId),
+    ).toBe(true);
+  });
+
+  it("slip no-round error uses V2 wording (รอบ/ปิดรอบ), not legacy term (งวด)", async () => {
+    const db = memSupabase();
+    const replies: string[] = [];
+
+    await svc(db, replies).processEvents([
+      textEvent("กี้ วัดทุ่งลานนา สลิปเงินโอน 25/6/2569", { replyToken: "tok-slip" }),
+    ], "dest");
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).not.toContain("งวด");
+    expect(replies[0]).toContain("รอบ");
   });
 });

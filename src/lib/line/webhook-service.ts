@@ -129,6 +129,18 @@ function allowedProduceStatusesForIntent(txIntent: TxIntent): WorkRoundStatus[] 
   return PRODUCE_APPEND_ELIGIBLE_STATUSES;
 }
 
+function buildIncompleteHeaderReply(firstLine: string): string {
+  const hdr    = classifyHeader(firstLine);
+  const seller = hdr?.type === "seller_only" ? hdr.sellerName : "ชื่อ";
+  const dm     = firstLine.match(RE.DATE_IN_TEXT);
+  const date   = dm ? `${dm[1]}/${dm[2]}/${dm[3]}` : "25/6/2569";
+  return [
+    "หัวเบิกยังขาดชื่อตลาด",
+    "กรุณาพิมพ์ เช่น:",
+    `${seller}-วัดทุ่งลานนา เบิก ${date}`,
+  ].join("\n");
+}
+
 interface WebhookServiceDependencies {
   evidenceIngestor?: SlipEvidenceIngestor;
   checkProcessor?: SlipCheckProcessor;
@@ -442,8 +454,7 @@ export class WebhookService {
         log.info("pending session aborted due to incomplete header", { sessionKey });
       }
       if (replyToken) {
-        const wrs = new WorkRoundService(this.supabase);
-        await this.replyMessage(replyToken, wrs.buildNoRoundPrompt());
+        await this.replyMessage(replyToken, buildIncompleteHeaderReply(firstLine));
       }
       return { eventId, eventType: event.type, status: "saved", parsed: false };
     }

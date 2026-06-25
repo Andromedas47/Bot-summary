@@ -42,7 +42,7 @@ import {
   SETTLEMENT_ELIGIBLE_STATUSES,
   EVIDENCE_ELIGIBLE_STATUSES,
 } from "@/lib/work-round/work-round-service";
-import { classifyHeader } from "@/lib/parsers/work-round-header";
+import { classifyHeader, isIncompleteProduceHeader } from "@/lib/parsers/work-round-header";
 import {
   SettlementIntakeService,
   parseSettlementCommand,
@@ -411,7 +411,75 @@ export class WebhookService {
       };
     }
 
+    const firstLine = normalizedText.split("\n")[0] ?? "";
+
+    if (hasSessionStart(normalizedText) && isIncompleteProduceHeader(firstLine)) {
+      log.info("incomplete produce header rejected", { sessionKey, firstLine });
+      if (pending) {
+        await pendingService.delete(sessionKey);
+        log.info("pending session aborted due to incomplete header", { sessionKey });
+      }
+      if (replyToken) {
+        const wrs = new WorkRoundService(this.supabase);
+        await this.replyMessage(replyToken, wrs.buildNoRoundPrompt());
+      }
+      return { eventId, eventType: event.type, status: "saved", parsed: false };
+    }
+
     if (pending) {
+      if (hasSessionStart(normalizedText)) {
+        const gate = await this.canCollectProduceHeader(firstLine, sessionKey, log);
+        if (!gate.ok) {
+          await pendingService.delete(sessionKey);
+          log.info("pending session aborted — new header blocked by Work Round gate", { sessionKey });
+          if (replyToken) await this.replyMessage(replyToken, gate.reply);
+          return { eventId, eventType: event.type, status: "saved", parsed: false };
+        }
+
+        let updated;
+        try {
+          await pendingService.create(sessionKey, text, replyToken, lineUserId);
+          updated = (await pendingService.lookup(sessionKey)).session!;
+          log.info("pending_session_replaced_by_new_header", {
+            sessionKey,
+            hadPriorPending: true,
+            priorAccumulatedChars: pending.accumulated_text.length,
+            newAccumulatedChars: updated.accumulated_text.length,
+          });
+        } catch (replaceError) {
+          const errorMessage = replaceError instanceof Error
+            ? replaceError.message
+            : String(replaceError);
+          log.error("pending session replace failed", { sessionKey, error: errorMessage });
+          return {
+            eventId,
+            eventType: event.type,
+            status: "error",
+            parsed: false,
+            error: errorMessage,
+          };
+        }
+
+        if (hasSessionEnd(normalizedText)) {
+          return this.finalizePendingSession(
+            pendingService,
+            updated,
+            sessionKey,
+            text,
+            replyToken,
+            lineUserId,
+            rawMessageId,
+            eventId,
+            event.type,
+            event.timestamp,
+            log,
+          );
+        }
+
+        log.debug("pending session replaced by header — waiting for session end", { sessionKey });
+        return { eventId, eventType: event.type, status: "saved", parsed: false };
+      }
+
       // Append raw text so the parser can extract senderName from TIME_PREFIX
       let updated;
       try {
@@ -448,54 +516,19 @@ export class WebhookService {
       }
 
       if (hasSessionEnd(normalizedText)) {
-        log.info("pending session end command received", {
+        return this.finalizePendingSession(
+          pendingService,
+          updated,
           sessionKey,
-          endCommandReceived: true,
-          settleMs: this.produceEndSettleMs,
-        });
-        if (this.produceEndSettleMs > 0) {
-          await this.sleep(this.produceEndSettleMs);
-        }
-
-        let finalText = updated.accumulated_text;
-        try {
-          finalText = await pendingService.rebuildForFinalization(
-            sessionKey,
-            updated,
-            event.timestamp,
-          );
-        } catch (rebuildError) {
-          log.error("pending session raw-message rebuild failed", {
-            sessionKey,
-            error: rebuildError instanceof Error ? rebuildError.message : String(rebuildError),
-          });
-        }
-
-        // Fallback time for sessions sent without LINE export format (no TIME_PREFIX).
-        // LINE export messages carry their own prefix so parser extracts time directly.
-        const fallbackTime = bangkokTimeFromTimestamp(new Date(updated.created_at).getTime());
-        const result = await this.finalizeAccumulated(
-          finalText,
-          updated.latest_reply_token,
-          updated.line_user_id,
+          text,
+          replyToken,
+          lineUserId,
           rawMessageId,
           eventId,
           event.type,
+          event.timestamp,
           log,
-          fallbackTime,
-          sessionKey,
-          bangkokToday(),
         );
-        if (result.pendingSessionClosed) {
-          await pendingService.delete(sessionKey);
-          log.info("pending session closed", { sessionKey, sessionStatus: "closed" });
-        } else {
-          log.warn("pending session kept active after unsuccessful finalization", {
-            sessionKey,
-            sessionStatus: "active",
-          });
-        }
-        return result;
       }
 
       log.debug("message appended to pending session — waiting for session end", { sessionKey });
@@ -511,36 +544,11 @@ export class WebhookService {
         return this.runParser(msgEvent, rawMessageId, eventId, event.type, log, sessionKey, bangkokToday());
       }
 
-      // ── V2: classify header before creating pending session ────────────────
-      // Generic headers require a unique open Work Round; ambiguous → reply & abort.
-      const firstLine  = normalizedText.split("\n")[0] ?? "";
-      const hdrClass   = classifyHeader(firstLine);
-      if (hdrClass?.type === "generic") {
-        try {
-          const wrs    = new WorkRoundService(this.supabase);
-          const result = await wrs.disambiguateGeneric(sessionKey, bangkokToday());
-          if (result.status === "none") {
-            log.info("generic header: no open Work Round — blocking pending session", { sessionKey });
-            if (replyToken) await replyLineMessage(replyToken, wrs.buildNoRoundPrompt());
-            return { eventId, eventType: event.type, status: "saved", parsed: false };
-          }
-          if (result.status === "ambiguous") {
-            log.info("generic header: ambiguous Work Rounds — blocking pending session", {
-              sessionKey, count: result.candidates.length,
-            });
-            if (replyToken) await replyLineMessage(replyToken, wrs.buildDisambiguationPrompt(result.candidates));
-            return { eventId, eventType: event.type, status: "saved", parsed: false };
-          }
-          // Exactly one open Work Round — allow accumulation to proceed.
-          log.info("generic header: resolved to one open Work Round", {
-            sessionKey, workRoundId: result.workRound.id,
-          });
-        } catch (wrErr) {
-          // Work Round table may not exist yet (pending migrations) — fall through.
-          log.warn("Work Round disambiguation failed (may need migration)", {
-            error: wrErr instanceof Error ? wrErr.message : String(wrErr),
-          });
-        }
+      const gate = await this.canCollectProduceHeader(firstLine, sessionKey, log);
+      if (!gate.ok) {
+        log.info("produce header blocked before pending session", { sessionKey, firstLine });
+        if (replyToken) await this.replyMessage(replyToken, gate.reply);
+        return { eventId, eventType: event.type, status: "saved", parsed: false };
       }
 
       // Header-only → start accumulating (store raw text so parser sees TIME_PREFIX sender)
@@ -1238,6 +1246,107 @@ export class WebhookService {
     }
   }
 
+  // ── Produce pending-session helpers ───────────────────────────────────────
+
+  private async canCollectProduceHeader(
+    firstLine:  string,
+    sessionKey: string,
+    log:        ChildLogger,
+  ): Promise<{ ok: true } | { ok: false; reply: string }> {
+    const hdr = classifyHeader(firstLine);
+    if (!hdr) {
+      return { ok: false, reply: new WorkRoundService(this.supabase).buildNoRoundPrompt() };
+    }
+
+    if (hdr.type === "explicit") return { ok: true };
+
+    try {
+      const wrs    = new WorkRoundService(this.supabase);
+      const result = await wrs.disambiguateGeneric(sessionKey, bangkokToday());
+      if (result.status === "none") {
+        log.info("generic header: no open Work Round — blocking pending session", { sessionKey });
+        return { ok: false, reply: wrs.buildNoRoundPrompt() };
+      }
+      if (result.status === "ambiguous") {
+        log.info("generic header: ambiguous Work Rounds — blocking pending session", {
+          sessionKey, count: result.candidates.length,
+        });
+        return { ok: false, reply: wrs.buildDisambiguationPrompt(result.candidates) };
+      }
+      log.info("generic header: resolved to one open Work Round", {
+        sessionKey, workRoundId: result.workRound.id,
+      });
+      return { ok: true };
+    } catch (wrErr) {
+      log.warn("Work Round disambiguation failed (may need migration)", {
+        error: wrErr instanceof Error ? wrErr.message : String(wrErr),
+      });
+      return { ok: true };
+    }
+  }
+
+  private async finalizePendingSession(
+    pendingService:   PendingSessionService,
+    updated:          import("@/lib/line/pending-session-service").PendingSession,
+    sessionKey:       string,
+    _text:            string,
+    replyToken:       string | null,
+    lineUserId:       string | null,
+    rawMessageId:     string,
+    eventId:          string,
+    eventType:        string,
+    endEventTimestamp: number,
+    log:              ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    log.info("pending session end command received", {
+      sessionKey,
+      endCommandReceived: true,
+      settleMs: this.produceEndSettleMs,
+    });
+    if (this.produceEndSettleMs > 0) {
+      await this.sleep(this.produceEndSettleMs);
+    }
+
+    let finalText = updated.accumulated_text;
+    try {
+      finalText = await pendingService.rebuildForFinalization(
+        sessionKey,
+        updated,
+        endEventTimestamp,
+      );
+    } catch (rebuildError) {
+      log.error("pending session raw-message rebuild failed", {
+        sessionKey,
+        error: rebuildError instanceof Error ? rebuildError.message : String(rebuildError),
+      });
+    }
+
+    const fallbackTime = bangkokTimeFromTimestamp(new Date(updated.created_at).getTime());
+    const result = await this.finalizeAccumulated(
+      finalText,
+      updated.latest_reply_token ?? replyToken,
+      updated.line_user_id ?? lineUserId,
+      rawMessageId,
+      eventId,
+      eventType,
+      log,
+      fallbackTime,
+      sessionKey,
+      bangkokToday(),
+    );
+
+    await pendingService.delete(sessionKey);
+    if (result.pendingSessionClosed) {
+      log.info("pending session closed", { sessionKey, sessionStatus: "closed" });
+    } else {
+      log.warn("pending session aborted after unsuccessful finalization", {
+        sessionKey,
+        sessionStatus: "aborted",
+      });
+    }
+    return result;
+  }
+
   // ── Finalize accumulated multi-message session ────────────────────────────
   private async finalizeAccumulated(
     accumulatedText:  string,
@@ -1278,7 +1387,7 @@ export class WebhookService {
           eventType,
           status: "saved",
           parsed: false,
-          pendingSessionClosed: false,
+          pendingSessionClosed: true,
         };
       }
 
@@ -1305,7 +1414,7 @@ export class WebhookService {
         status: "saved",
         parsed: false,
         error: errorMessage,
-        pendingSessionClosed: false,
+        pendingSessionClosed: true,
       };
     }
   }
@@ -1952,7 +2061,7 @@ export class WebhookService {
     | { kind: "halt"; result: WebhookProcessResult }
   > {
     const halt = (): WebhookProcessResult => ({
-      eventId, eventType, status: "saved", parsed: false, pendingSessionClosed: false,
+      eventId, eventType, status: "saved", parsed: false, pendingSessionClosed: true,
     });
 
     if (!sourceId || !businessDate) {

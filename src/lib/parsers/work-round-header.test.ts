@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { classifyHeader } from "./work-round-header";
+import { classifyHeader, isIncompleteProduceHeader } from "./work-round-header";
 
 describe("classifyHeader", () => {
   // ── Explicit headers ───────────────────────────────────────────────────────
@@ -105,5 +105,20 @@ describe("classifyHeader", () => {
 
   it("returns null for an empty line", () => {
     expect(classifyHeader("")).toBeNull();
+  });
+});
+
+describe("isIncompleteProduceHeader", () => {
+  it("flags seller + tx type without market dash", () => {
+    expect(isIncompleteProduceHeader("น้อย เบิก 25/6/2569")).toBe(true);
+  });
+
+  it("accepts explicit seller-market headers", () => {
+    expect(isIncompleteProduceHeader("กี้-วัดทุ่งลานนา เบิก 24/06/2569")).toBe(false);
+  });
+
+  it("accepts generic standalone tx headers", () => {
+    expect(isIncompleteProduceHeader("เบิก 29/5/2569")).toBe(false);
+    expect(isIncompleteProduceHeader("รายการชั่งเบิก 24/06/2569")).toBe(false);
   });
 });

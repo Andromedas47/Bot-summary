@@ -4,7 +4,7 @@ import { getUserId } from "@/lib/line/verify";
 import { logger } from "@/lib/logger";
 import { computeItemHash } from "@/lib/line/session-dedup-service";
 import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
-import { RE } from "./regex";
+import { RE, isReservedFinancialLine } from "./regex";
 import type {
   WeighSession,
   WeighSessionItem,
@@ -53,6 +53,8 @@ export function parseWeighSession(
       content = line;
     }
     console.log(`[TRACE][parseWeighSession] line="${line}" state=${state} content="${content}" hasPrefix=${!!prefixMatch} pendingItem=${JSON.stringify(pendingItem)}`);
+
+    if (isReservedFinancialLine(content)) continue;
 
     // ── Date extraction ────────────────────────────────────────────────────
     if (!date && !prefixMatch) {
@@ -241,6 +243,8 @@ function pushOrMergeItem(items: WeighSessionItem[], item: WeighSessionItem): voi
 }
 
 function parseItemLine(content: string, fallbackItemNumber: number): Partial<WeighSessionItem> | null {
+  if (isReservedFinancialLine(content)) return null;
+
   const indexed = content.match(RE.ITEM);
   if (indexed) {
     return {

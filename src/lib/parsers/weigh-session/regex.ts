@@ -81,4 +81,12 @@ export const RE = {
   // LINE-first settlement command (V2): "ส่งเงิน 24/06/2569" or "ปิดยอด 24/06/2569"
   // Captures: [1]=date string (Buddhist DD/MM/YY or DD/MM/YYYY)
   SETTLEMENT_CMD: /^(?:ส่งเงิน|ปิดยอด)\s+(\d{1,2}\/\d{1,2}\/(?:25)?\d{2})\s*$/,
+
+  // Settlement / finance summary lines — must never become produce items.
+  RESERVED_FINANCIAL:
+    /^(?:ยอดเบิก|ยอดคืนเสีย|ยอดคืน|ยอดที่ต้องขายได้|ยอดเงินโอน|ยอดสลิปมือ|ยอดรวมสลิป|ยอดรวม|ส่งเงินจริง|ส่งเงินขาด|ส่งเงินเกิน|เงินโอนไม่ขาด|ยอดเงินขาด)\b/,
 } as const;
+
+export function isReservedFinancialLine(content: string): boolean {
+  return RE.RESERVED_FINANCIAL.test(content.trim());
+}

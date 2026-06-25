@@ -74,3 +74,28 @@ export function classifyHeader(line: string): WorkRoundHeader | null {
 
   return null;
 }
+
+function headerContent(line: string): string {
+  const prefixMatch = line.match(RE.TIME_PREFIX);
+  return prefixMatch ? prefixMatch[3].trim() : line.trim();
+}
+
+// Standalone transaction keywords — no seller-market required.
+const GENERIC_HEADER_START =
+  /^(?:รายการชั่ง|รายการเบิก|รายการคืน|ชั่งคืนเพิ่ม|คืนเพิ่ม|เบิก(?:\s|$|เพิ่ม)|คืนเสีย|คืน(?:\s|$)|เสีย\s+\d)/;
+
+const INCOMPLETE_SELLER_TX = new RegExp(
+  "^([\\u0E00-\\u0E7F\\s]+?)\\s+(ชั่งคืนเพิ่ม|คืนเพิ่ม|เบิกเพิ่ม|เบิก|คืนเสีย|คืน)(?:\\s|\\d|$)",
+);
+
+/**
+ * Detects a seller name + transaction type without the required `-market` separator.
+ * Example: "น้อย เบิก 25/6/2569" — must not start pending accumulation.
+ */
+export function isIncompleteProduceHeader(line: string): boolean {
+  const content = headerContent(line);
+  if (!content) return false;
+  if (RE.SELLER_MARKET.test(content)) return false;
+  if (GENERIC_HEADER_START.test(content)) return false;
+  return INCOMPLETE_SELLER_TX.test(content);
+}

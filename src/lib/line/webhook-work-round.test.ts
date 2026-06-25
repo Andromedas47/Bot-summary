@@ -586,3 +586,92 @@ describe("WebhookService — incident regression for canonical Work Round resolv
     expect(replies[0]).not.toContain("ไม่พบงวดที่เปิดอยู่");
   });
 });
+
+describe("WebhookService — ยืนยันปิดรอบ confirmation", () => {
+  function svcR(db: ReturnType<typeof memSupabase>, replies: string[]) {
+    return new WebhookService(db as never, {
+      produceEndSettleMs: 0,
+      replyMessage: async (_tok, text) => { replies.push(text); },
+    });
+  }
+
+  it("ปิดรอบ → ยืนยันปิดรอบ transitions round to awaiting_settlement", async () => {
+    const db = memSupabase({
+      work_rounds: [{ id: "wr-a", source_id: "group-1", business_date: MESSAGE_DATE, seller_name: "กี้", market_name: "A", round_seq: 1, status: "open" }],
+    });
+    const s = svc(db);
+    await s.processEvents([textEvent("ปิดรอบ 24/06/2569")], "dest");
+    expect(db._rows("work_round_selections")[0]?.intent).toBe("close_round_confirm");
+
+    await s.processEvents([textEvent("ยืนยันปิดรอบ")], "dest");
+    expect(db._rows("work_rounds")[0]?.status).toBe("awaiting_settlement");
+    expect(db._rows("work_round_selections")[0]?.status).toBe("resolved");
+  });
+
+  it("webhook retry of ยืนยันปิดรอบ leaves round unchanged and replies with actionable error", async () => {
+    const replies: string[] = [];
+    const db = memSupabase({
+      work_rounds: [{ id: "wr-a", source_id: "group-1", business_date: MESSAGE_DATE, seller_name: "กี้", market_name: "A", round_seq: 1, status: "open" }],
+    });
+    const s = svcR(db, replies);
+    await s.processEvents([textEvent("ปิดรอบ 24/06/2569")], "dest");
+    await s.processEvents([textEvent("ยืนยันปิดรอบ")], "dest");
+    expect(db._rows("work_rounds")[0]?.status).toBe("awaiting_settlement");
+    replies.length = 0;
+
+    await s.processEvents([textEvent("ยืนยันปิดรอบ", "user-1", "reply-retry")], "dest");
+    expect(db._rows("work_rounds")[0]?.status).toBe("awaiting_settlement");
+    expect(replies[0]).toContain("ไม่พบรายการปิดรอบที่รอยืนยัน");
+  });
+
+  it("ยืนยันปิดรอบ without prior ปิดรอบ gives actionable error, no state change", async () => {
+    const replies: string[] = [];
+    const db = memSupabase({
+      work_rounds: [{ id: "wr-a", source_id: "group-1", business_date: MESSAGE_DATE, seller_name: "กี้", market_name: "A", round_seq: 1, status: "open" }],
+    });
+    const s = svcR(db, replies);
+    await s.processEvents([textEvent("ยืนยันปิดรอบ", "user-1", "reply-1")], "dest");
+    expect(db._rows("work_rounds")[0]?.status).toBe("open");
+    expect(replies[0]).toContain("ไม่พบรายการปิดรอบที่รอยืนยัน");
+  });
+
+  it("stale confirmation (round already awaiting_settlement) replies safely, no mutation", async () => {
+    const replies: string[] = [];
+    const db = memSupabase({
+      work_rounds: [{ id: "wr-a", source_id: "group-1", business_date: MESSAGE_DATE, seller_name: "กี้", market_name: "A", round_seq: 1, status: "awaiting_settlement" }],
+      work_round_selections: [{
+        id: "sel-stale", source_id: "group-1", line_user_id: "user-1", business_date: MESSAGE_DATE,
+        intent: "close_round_confirm", status: "pending",
+        candidates: [{ work_round_id: "wr-a", seller_name: "กี้", market_name: "A", round_seq: 1, expected_sales: 0 }],
+        payload: null, created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+        resolved_at: null, resolved_work_round_id: null,
+      }],
+    });
+    const s = svcR(db, replies);
+    await s.processEvents([textEvent("ยืนยันปิดรอบ", "user-1", "reply-1")], "dest");
+    expect(db._rows("work_rounds")[0]?.status).toBe("awaiting_settlement");
+    expect(replies[0]).toContain("รอบมีการเปลี่ยนแปลงหลังสรุป");
+  });
+
+  it("success reply includes seller, totals, and settlement command hint", async () => {
+    const replies: string[] = [];
+    const db = memSupabase({
+      work_rounds: [{ id: "wr-a", source_id: "group-1", business_date: MESSAGE_DATE, seller_name: "กี้", market_name: "A", round_seq: 1, status: "open" }],
+      produce_sessions: [{ id: "ps-1", work_round_id: "wr-a" }],
+      produce_items: [
+        { id: "i1", session_id: "ps-1", transaction_type: "เบิก", product_name: "มะม่วง", quantity: 10, price_per_unit: 100 },
+        { id: "i2", session_id: "ps-1", transaction_type: "คืน", product_name: "มะม่วง", quantity: 2, price_per_unit: 100 },
+      ],
+    });
+    const s = svcR(db, replies);
+    await s.processEvents([textEvent("ปิดรอบ 24/06/2569", "user-1", "reply-preview")], "dest");
+    replies.length = 0;
+    await s.processEvents([textEvent("ยืนยันปิดรอบ", "user-1", "reply-confirm")], "dest");
+    expect(replies[0]).toContain("ปิดรอบเรียบร้อย ✅");
+    expect(replies[0]).toContain("กี้ — A");
+    expect(replies[0]).toContain("800");
+    expect(replies[0]).toContain("ส่งเงิน");
+    expect(replies[0]).toContain("2569");
+  });
+});

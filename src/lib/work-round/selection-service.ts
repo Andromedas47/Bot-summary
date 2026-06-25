@@ -87,9 +87,14 @@ export class WorkRoundSelectionService {
         p_choice:           params.choice,
         p_allowed_statuses: params.allowedStatuses,
       });
-      if (error) throw new Error(`selection claim failed: ${error.message}`);
-      const rows = Array.isArray(data) ? data : data ? [data] : [];
-      return (rows[0] as WorkRoundSelection | undefined) ?? null;
+      if (!error) {
+        const rows = Array.isArray(data) ? data : data ? [data] : [];
+        return (rows[0] as WorkRoundSelection | undefined) ?? null;
+      }
+      // PGRST202: function not found — migration 0040 not yet applied; fall through to JS path.
+      if (!error.message.includes("does not exist") && !error.message.includes("Could not find the function")) {
+        throw new Error(`selection claim failed: ${error.message}`);
+      }
     }
 
     // Test-double fallback: production uses the RPC above.

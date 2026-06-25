@@ -1921,7 +1921,7 @@ export class WebhookService {
     try {
       const selection = await selSvc.findActive(sourceId, lineUserId);
       if (!selection || selection.intent !== "close_round_confirm") {
-        if (replyToken) await replyLineMessage(replyToken, "ไม่มีรอบที่รอยืนยันปิด กรุณาพิมพ์ ปิดรอบ พร้อมวันที่ก่อน");
+        if (replyToken) await this.replyMessage(replyToken, "ไม่พบรายการปิดรอบที่รอยืนยัน กรุณาพิมพ์ \"ปิดรอบ วันที่\" อีกครั้ง");
         return { eventId, eventType, status: "saved", parsed: false };
       }
       const claimed = await selSvc.claim({
@@ -1933,24 +1933,24 @@ export class WebhookService {
       });
       const workRoundId = claimed?.resolved_work_round_id;
       if (!workRoundId) {
-        if (replyToken) await replyLineMessage(replyToken, "รอบนี้เปลี่ยนสถานะแล้ว กรุณาเริ่มใหม่");
+        if (replyToken) await this.replyMessage(replyToken, "รอบมีการเปลี่ยนแปลงหลังสรุป กรุณาสั่งปิดรอบใหม่เพื่อตรวจยอดอีกครั้ง");
         return { eventId, eventType, status: "saved", parsed: false };
       }
       const round = await wrs.validateChoice(workRoundId, sourceId, selection.business_date, ["open"]);
       if (!round) {
-        if (replyToken) await replyLineMessage(replyToken, "รอบนี้เปลี่ยนสถานะแล้ว กรุณาเริ่มใหม่");
+        if (replyToken) await this.replyMessage(replyToken, "รอบมีการเปลี่ยนแปลงหลังสรุป กรุณาสั่งปิดรอบใหม่เพื่อตรวจยอดอีกครั้ง");
         return { eventId, eventType, status: "saved", parsed: false };
       }
       const next = await new WorkRoundStatusService(this.supabase).applyEvent(workRoundId, "produce_closed");
       if (!next) {
-        if (replyToken) await replyLineMessage(replyToken, "รอบนี้ปิดไม่ได้แล้ว กรุณาตรวจสอบในหน้า Work Rounds");
+        if (replyToken) await this.replyMessage(replyToken, "ปิดรอบไม่ได้แล้ว กรุณาตรวจสอบในหน้า Work Rounds");
         return { eventId, eventType, status: "saved", parsed: false };
       }
-      if (replyToken) await replyLineMessage(replyToken, `ปิดรอบแล้ว ${round.seller_name} — ${round.market_name}\nรอส่งเงิน`);
+      if (replyToken) await this.replyMessage(replyToken, await this.buildCloseRoundSuccessReply(round));
       return { eventId, eventType, status: "saved", parsed: false };
     } catch (err) {
-      log.warn("close round confirmation failed", { error: err instanceof Error ? err.message : String(err) });
-      if (replyToken) await replyLineMessage(replyToken, "ยืนยันปิดรอบไม่สำเร็จ กรุณาลองใหม่อีกครั้ง");
+      log.error("close round confirmation failed", { error: err instanceof Error ? err.message : String(err) });
+      if (replyToken) await this.replyMessage(replyToken, "ยืนยันปิดรอบไม่สำเร็จ กรุณาลองใหม่อีกครั้ง");
       return { eventId, eventType, status: "saved", parsed: false };
     }
   }
@@ -1984,6 +1984,21 @@ export class WebhookService {
       `ยอดที่ต้องขายได้: ${this.formatBaht(totals.expected)}`,
       "",
       "พิมพ์ “ยืนยันปิดรอบ” เพื่อดำเนินการต่อ",
+    ].join("\n");
+  }
+
+  private async buildCloseRoundSuccessReply(round: WorkRound): Promise<string> {
+    const totals = await computeRoundTotals(this.supabase, round.id);
+    const [year, month, day] = round.business_date.split("-").map(Number);
+    const shortDate = `${day}/${month}/${year + 543}`;
+    const amountInt = totals.expected.toLocaleString("th-TH", { maximumFractionDigits: 0 });
+    return [
+      "ปิดรอบเรียบร้อย ✅",
+      `${round.seller_name} — ${round.market_name}`,
+      `ยอดที่ต้องส่ง: ${this.formatBaht(totals.expected)}`,
+      "",
+      "แจ้งยอดโอนด้วย:",
+      `ส่งเงิน ${shortDate} ${amountInt} บาท`,
     ].join("\n");
   }
 

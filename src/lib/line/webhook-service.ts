@@ -11,7 +11,7 @@ import { getSourceId, getUserId } from "@/lib/line/verify";
 import { parserRegistry } from "@/lib/parsers/registry";
 import { logger } from "@/lib/logger";
 import { replyLineMessage, buildWeighSessionSummary } from "@/lib/line/reply";
-import { parseWeighSession, bangkokTimeFromTimestamp } from "@/lib/parsers/weigh-session/parser";
+import { parseWeighSession, bangkokTimeFromTimestamp, parseBuddhistDate, buildParseReviewReply, hasParseReviewBlockers } from "@/lib/parsers/weigh-session/parser";
 import { RE } from "@/lib/parsers/weigh-session/regex";
 import { PendingSessionService } from "@/lib/line/pending-session-service";
 import { DailySummaryService } from "@/lib/line/daily-summary-service";
@@ -19,7 +19,6 @@ import { SessionDedupService, computeItemHash } from "@/lib/line/session-dedup-s
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 import { bangkokBusinessDateNow } from "@/lib/business-date";
 import { parseManualSlipAmounts } from "@/lib/parsers/manual-slip-amount";
-import { parseBuddhistDate } from "@/lib/parsers/weigh-session/parser";
 import { ManualSlipSessionService } from "@/lib/line/manual-slip-session-service";
 import { SlipEvidenceService } from "@/lib/slips/evidence-service";
 import type { SlipEvidenceIngestor } from "@/lib/slips/types";
@@ -138,6 +137,22 @@ function buildBorrowOpenedReply(firstLine: string): string {
     `${seller} — ${market}`,
     "ส่งรายการสินค้าได้เลย",
     "ปิดรายการด้วย: จบรายการเบิก",
+  ].join("\n");
+}
+
+function buildReturnHeaderOpenedReply(
+  sellerName: string,
+  marketName: string,
+  txIntent:   TxIntent,
+): string {
+  const ack = txIntent === "คืนเสีย"
+    ? "รับหัวคืนเสียแล้ว ✅"
+    : "รับหัวชั่งคืนแล้ว ✅";
+  return [
+    ack,
+    `${sellerName} — ${marketName}`,
+    "ส่งรายการสินค้าได้เลย",
+    "ปิดรายการด้วย: จบรายการ",
   ].join("\n");
 }
 
@@ -673,7 +688,10 @@ export class WebhookService {
         await pendingService.create(sessionKey, text, replyToken, lineUserId);
         console.log("pending session create succeeded", sessionKey);
         if (replyToken) {
-          await this.replyMessage(replyToken, buildBorrowOpenedReply(firstLine));
+          await this.replyMessage(
+            replyToken,
+            await this.buildProduceHeaderOpenedReply(firstLine, sessionKey),
+          );
         }
       } catch (createErr) {
         const msg = createErr instanceof Error ? createErr.message : String(createErr);
@@ -1399,6 +1417,50 @@ export class WebhookService {
 
   // ── Produce pending-session helpers ───────────────────────────────────────
 
+  private async buildProduceHeaderOpenedReply(
+    firstLine:  string,
+    sessionKey: string,
+  ): Promise<string> {
+    const hdr = classifyHeader(firstLine);
+    if (!hdr) return buildBorrowOpenedReply(firstLine);
+
+    const isReturnIntent =
+      hdr.txIntent === "คืน" || hdr.txIntent === "คืนเสีย" || hdr.txIntent === "ชั่งคืนเพิ่ม";
+
+    if (hdr.type === "explicit" && hdr.txIntent === "เบิก") {
+      return buildBorrowOpenedReply(firstLine);
+    }
+
+    if (isReturnIntent) {
+      const wrs = new WorkRoundService(this.supabase);
+      const decision = await wrs.resolveForIntent({
+        sourceId:        sessionKey,
+        businessDate:    businessDateFromText(firstLine, bangkokToday()),
+        sellerName:      hdr.type === "explicit" || hdr.type === "seller_only" ? hdr.sellerName : undefined,
+        marketName:      hdr.type === "explicit" ? hdr.marketName : undefined,
+        allowedStatuses: allowedProduceStatusesForIntent(hdr.txIntent),
+      });
+      if (decision.mode === "linked") {
+        return buildReturnHeaderOpenedReply(
+          decision.workRound.seller_name,
+          decision.workRound.market_name,
+          hdr.txIntent,
+        );
+      }
+      if (hdr.type === "explicit") {
+        return buildReturnHeaderOpenedReply(hdr.sellerName, hdr.marketName, hdr.txIntent);
+      }
+      return [
+        hdr.txIntent === "คืนเสีย" ? "รับหัวคืนเสียแล้ว ✅" : "รับหัวชั่งคืนแล้ว ✅",
+        "— —",
+        "ส่งรายการสินค้าได้เลย",
+        "ปิดรายการด้วย: จบรายการ",
+      ].join("\n");
+    }
+
+    return buildBorrowOpenedReply(firstLine);
+  }
+
   private async canCollectProduceHeader(
     firstLine:  string,
     sessionKey: string,
@@ -1666,7 +1728,25 @@ export class WebhookService {
         log.warn("parsed session has no items — aborting");
         if (replyToken) {
           try {
-            await replyLineMessage(replyToken, "อ่านรายการไม่สำเร็จ กรุณาตรวจสอบรูปแบบข้อความ");
+            await this.replyMessage(replyToken, "อ่านรายการไม่สำเร็จ กรุณาตรวจสอบรูปแบบข้อความ");
+          } catch (e) {
+            log.error("reply failed", { error: String(e) });
+          }
+        }
+        return {
+          eventId,
+          eventType,
+          status: "saved",
+          parsed: false,
+          pendingSessionClosed: true,
+        };
+      }
+
+      if (hasParseReviewBlockers(parsed)) {
+        log.warn("parsed session has review blockers — aborting", { issues: parsed.review_issues });
+        if (replyToken) {
+          try {
+            await this.replyMessage(replyToken, buildParseReviewReply(parsed));
           } catch (e) {
             log.error("reply failed", { error: String(e) });
           }
@@ -1742,7 +1822,19 @@ export class WebhookService {
           log.warn("parsed session has no items — aborting");
           if (replyToken) {
             try {
-              await replyLineMessage(replyToken, "อ่านรายการไม่สำเร็จ กรุณาตรวจสอบรูปแบบข้อความ");
+              await this.replyMessage(replyToken, "อ่านรายการไม่สำเร็จ กรุณาตรวจสอบรูปแบบข้อความ");
+            } catch (e) {
+              log.error("reply failed", { error: String(e) });
+            }
+          }
+          return { eventId, eventType, status: "saved", parsed: false };
+        }
+
+        if (hasParseReviewBlockers(ws)) {
+          log.warn("parsed session has review blockers — aborting", { issues: ws.review_issues });
+          if (replyToken) {
+            try {
+              await this.replyMessage(replyToken, buildParseReviewReply(ws));
             } catch (e) {
               log.error("reply failed", { error: String(e) });
             }
@@ -2317,6 +2409,15 @@ export class WebhookService {
         try {
           await replyLineMessage(replyToken, new WorkRoundService(this.supabase).buildNoRoundPrompt());
         } catch (e) { log.error("reply failed", { error: String(e) }); }
+      }
+      return { eventId, eventType, status: "saved", parsed: false, pendingSessionClosed: true };
+    }
+
+    if (hasParseReviewBlockers(parsed)) {
+      log.warn("produce persist blocked: parse review issues", { issues: parsed.review_issues });
+      if (replyToken) {
+        try { await this.replyMessage(replyToken, buildParseReviewReply(parsed)); }
+        catch (e) { log.error("reply failed", { error: String(e) }); }
       }
       return { eventId, eventType, status: "saved", parsed: false, pendingSessionClosed: true };
     }

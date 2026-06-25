@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import type { LineMessageEvent } from "@/lib/line/types";
-import { parseWeighSession, bangkokTimeFromTimestamp, WeighSessionParser } from "./parser";
+import { parseWeighSession, bangkokTimeFromTimestamp, WeighSessionParser, hasParseReviewBlockers } from "./parser";
 import { RE } from "./regex";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -861,5 +861,85 @@ describe("RE.DATE_ONLY", () => {
 
   it("does not match item lines", () => {
     expect("1.หมอนทอง119บาท".match(RE.DATE_ONLY)).toBeNull();
+  });
+});
+
+describe("return parser integrity — incident regression", () => {
+  const LO = "\u0E42\u0E25"; // โlo
+  const PRODUCTION_20_ITEM = [
+    "โอม ชั่งคืน 25/6/2569",
+    "1ส้มไต้หวัน 40 บาท",
+    `2.20${LO}`,
+    "2ฝรั่ง 40บาท",
+    `3.3${LO}`,
+    "3ลองกอง 40บาท",
+    `11${LO}`,
+    "4สาลี่หอม 35 บาท",
+    `10.2${LO}`,
+    "5แก้วมังกร 35 บาท",
+    `48.1${LO}`,
+    "6มังคุด 35บาท",
+    `39.6${LO}`,
+    "7เงาะ 40บาท",
+    `16.6${LO}`,
+    "8เขียวมรกต 35 บาท",
+    `12.5${LO}`,
+    `9จีนหงส์ 3 ${LO}100บาท`,
+    `15.5${LO}`,
+    "10สายน้ำผึ้ง 50 บาท",
+    `48.6${LO}`,
+    `11น้อยหน่า${LO}ละ 50 บาท`,
+    `20.1${LO}`,
+    "12ฝรั่งขาว40 บาท",
+    `34.7${LO}`,
+    `13มหาชนก${LO}ละ35บาท`,
+    `50.1${LO}`,
+    `14องุ่นแดง ${LO}ละ130 บาท`,
+    `7.4${LO}`,
+    "15แตงไทย 20 บาท",
+    "20ลูก",
+    "16ส้มโอ 20 บาท",
+    "12ลูก",
+    "17apple 20 บาท",
+    "40ลูก",
+    `18แตง${LO} 40 บาท`,
+    "9ลูก",
+    "19มะละกอ 16 บาท",
+    "13ลูก",
+    "20สาลี่ 12 บาท",
+    "75ลูก",
+    "จบรายการ",
+  ].join("\n");
+
+  it("flags #9 ambiguous price — blocks incomplete 20-item return (apple parses at #17)", () => {
+    const result = parseWeighSession(PRODUCTION_20_ITEM, "2026-06-25");
+    expect(result.items.length).toBe(19);
+    expect(result.items.some((item) => item.item_number === 17 && item.product_name === "apple")).toBe(true);
+    expect(hasParseReviewBlockers(result)).toBe(true);
+    const flaggedNumbers = result.review_issues
+      .map((issue) => issue.item_number)
+      .filter((n): n is number => n != null);
+    expect(flaggedNumbers).toContain(9);
+    expect(flaggedNumbers).not.toContain(17);
+  });
+
+  it("parses english product name apple", () => {
+    const result = parseWeighSession(
+      "กี้-วัดทุ่ง คืน 25/6/2569\n17apple 20 บาท\n40ลูก\nจบรายการ",
+      "2026-06-25",
+    );
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].product_name).toBe("apple");
+    expect(result.review_issues).toHaveLength(0);
+  });
+
+  it("flags malformed price จีนหงส์ 3 โlo100บาท as review-required", () => {
+    const result = parseWeighSession(
+      `กี้-วัดทุ่ง คืน 25/6/2569\n9จีนหงส์ 3 ${LO}100บาท\n15.5${LO}\nจบรายการ`,
+      "2026-06-25",
+    );
+    expect(result.items.some((item) => item.item_number === 9)).toBe(false);
+    expect(result.review_issues.some((issue) => issue.item_number === 9)).toBe(true);
+    expect(result.review_issues.some((issue) => issue.reason === "ambiguous_price")).toBe(true);
   });
 });

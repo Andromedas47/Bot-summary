@@ -4,10 +4,11 @@ import { getUserId } from "@/lib/line/verify";
 import { logger } from "@/lib/logger";
 import { computeItemHash } from "@/lib/line/session-dedup-service";
 import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
-import { RE, isReservedFinancialLine } from "./regex";
+import { RE, isReservedFinancialLine, isAmbiguousItemPriceLine, looksLikeIndexedItemLine } from "./regex";
 import type {
   WeighSession,
   WeighSessionItem,
+  WeighSessionReviewIssue,
   ProduceUnit,
   TransactionType,
 } from "./types";
@@ -35,6 +36,8 @@ export function parseWeighSession(
 
   const items:       WeighSessionItem[]        = [];
   const parseErrors: string[]                  = [];
+  const reviewIssues: WeighSessionReviewIssue[] = [];
+  const declaredItemNumbers = new Set<number>();
   let   pendingItem: Partial<WeighSessionItem> | null = null;
 
   console.log("[TRACE][parseWeighSession] input_lines:", JSON.stringify(lines));
@@ -114,6 +117,20 @@ export function parseWeighSession(
 
     // ── Items state ────────────────────────────────────────────────────────
 
+    const trackDeclaredItemLine = (): void => {
+      const indexed = content.match(RE.ITEM_LINE_INDEXED);
+      if (indexed) declaredItemNumbers.add(parseInt(indexed[1], 10));
+    };
+
+    const recordItemLineFailure = (reason: WeighSessionReviewIssue["reason"]): void => {
+      const indexed = content.match(RE.ITEM_LINE_INDEXED);
+      reviewIssues.push({
+        item_number: indexed ? parseInt(indexed[1], 10) : null,
+        line:        line,
+        reason,
+      });
+    };
+
     // Bare line (no prefix) — quantity, item, or tx-type marker
     if (!prefixMatch) {
       const qm = content.match(RE.QUANTITY);
@@ -129,6 +146,7 @@ export function parseWeighSession(
           parseErrors.push(`quantity with no preceding item: "${line}"`);
         }
       } else {
+        trackDeclaredItemLine();
         const parsedItem = parseItemLine(content, nextItemNumber(items, pendingItem));
         if (parsedItem) {
           // Item line sent without LINE export timestamp (direct typed message)
@@ -140,6 +158,11 @@ export function parseWeighSession(
           pendingItem = parsedItem;
           console.log("[TRACE][parseWeighSession] SET_PENDING_ITEM:", JSON.stringify(pendingItem));
         } else if (content.length > 0) {
+          if (looksLikeIndexedItemLine(content)) {
+            recordItemLineFailure(
+              isAmbiguousItemPriceLine(content) ? "ambiguous_price" : "unparsed",
+            );
+          }
           // Non-item bare line → section / transaction-type marker
           if (pendingItem?.product_name) {
             const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
@@ -152,7 +175,7 @@ export function parseWeighSession(
             currentSection = content;
             currentTxType  = nextTxType;
             console.log("[TRACE][parseWeighSession] SECTION_CHANGE:", content, "txType:", currentTxType);
-          } else {
+          } else if (!looksLikeIndexedItemLine(content)) {
             parseErrors.push(`unrecognized line: "${line}"`);
           }
         }
@@ -161,6 +184,7 @@ export function parseWeighSession(
     }
 
     // Staff-prefixed line: try item pattern first
+    trackDeclaredItemLine();
     const parsedItem = parseItemLine(content, nextItemNumber(items, pendingItem));
     if (parsedItem) {
       if (pendingItem?.product_name) {
@@ -168,6 +192,12 @@ export function parseWeighSession(
       }
       pendingItem = parsedItem;
       continue;
+    }
+
+    if (looksLikeIndexedItemLine(content)) {
+      recordItemLineFailure(
+        isAmbiguousItemPriceLine(content) ? "ambiguous_price" : "unparsed",
+      );
     }
 
     // Staff-prefixed non-item line → section / transaction-type marker
@@ -186,10 +216,20 @@ export function parseWeighSession(
 
   // Trailing pending item (missing session-end marker)
   if (pendingItem?.product_name) {
-    const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
-    pushOrMergeItem(items, finalizedItem);
-    console.log("[TRACE][parseWeighSession] PUSH_ITEM(trailing):", JSON.stringify(finalizedItem), "items_total_after:", items.length);
+    if (isMissingQuantity(pendingItem.quantity ?? null)) {
+      reviewIssues.push({
+        item_number: pendingItem.item_number ?? null,
+        line:        `#${pendingItem.item_number ?? "?"} ${pendingItem.product_name}`,
+        reason:      "missing_quantity",
+      });
+    } else {
+      const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
+      pushOrMergeItem(items, finalizedItem);
+      console.log("[TRACE][parseWeighSession] PUSH_ITEM(trailing):", JSON.stringify(finalizedItem), "items_total_after:", items.length);
+    }
   }
+
+  finalizeDeclaredItemGaps(items, declaredItemNumbers, reviewIssues);
   console.log("[TRACE][parseWeighSession] final_items_count:", items.length);
 
   return {
@@ -200,6 +240,7 @@ export function parseWeighSession(
     session_title:    sessionTitle,
     items,
     parse_errors:     parseErrors,
+    review_issues:    dedupeReviewIssues(reviewIssues),
   };
 }
 
@@ -242,8 +283,12 @@ function pushOrMergeItem(items: WeighSessionItem[], item: WeighSessionItem): voi
   // Avoid appending repeated zero/null placeholders for the same product+price.
 }
 
-function parseItemLine(content: string, fallbackItemNumber: number): Partial<WeighSessionItem> | null {
+function parseItemLine(
+  content: string,
+  fallbackItemNumber: number,
+): Partial<WeighSessionItem> | null {
   if (isReservedFinancialLine(content)) return null;
+  if (isAmbiguousItemPriceLine(content)) return null;
 
   const indexed = content.match(RE.ITEM);
   if (indexed) {
@@ -268,6 +313,51 @@ function parseItemLine(content: string, fallbackItemNumber: number): Partial<Wei
   }
 
   return null;
+}
+
+function finalizeDeclaredItemGaps(
+  items: WeighSessionItem[],
+  declaredItemNumbers: Set<number>,
+  reviewIssues: WeighSessionReviewIssue[],
+): void {
+  const parsedNumbers = new Set(items.map((item) => item.item_number));
+  const flaggedNumbers = new Set(
+    reviewIssues.map((issue) => issue.item_number).filter((n): n is number => n != null),
+  );
+
+  for (const itemNumber of declaredItemNumbers) {
+    if (parsedNumbers.has(itemNumber) || flaggedNumbers.has(itemNumber)) continue;
+    reviewIssues.push({
+      item_number: itemNumber,
+      line:        `#${itemNumber}`,
+      reason:      "index_gap",
+    });
+  }
+}
+
+function dedupeReviewIssues(issues: WeighSessionReviewIssue[]): WeighSessionReviewIssue[] {
+  const seen = new Set<string>();
+  const out: WeighSessionReviewIssue[] = [];
+  for (const issue of issues) {
+    const key = `${issue.item_number ?? "x"}:${issue.reason}:${issue.line}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(issue);
+  }
+  return out;
+}
+
+export function hasParseReviewBlockers(session: WeighSession): boolean {
+  return session.review_issues.length > 0;
+}
+
+export function buildParseReviewReply(session: WeighSession): string {
+  const labels = session.review_issues.map((issue) => {
+    const prefix = issue.item_number != null ? `#${issue.item_number}` : "?";
+    const snippet = issue.line.replace(/^\d+\.?\s*/, "").slice(0, 40);
+    return `${prefix} ${snippet}`.trim();
+  });
+  return `อ่านรายการไม่ครบ: ${labels.join(", ")} กรุณาแก้ไขแล้วส่งใหม่`;
 }
 
 function nextItemNumber(

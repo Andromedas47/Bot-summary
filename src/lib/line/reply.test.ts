@@ -21,6 +21,7 @@ function makeSession(overrides: Partial<WeighSession> = {}): WeighSession {
     session_title: null,
     items: [],
     parse_errors: [],
+    review_issues: [],
     ...overrides,
   };
 }

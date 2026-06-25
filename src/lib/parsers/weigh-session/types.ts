@@ -11,6 +11,12 @@ export interface WeighSessionItem {
   transaction_type: TransactionType;
 }
 
+export interface WeighSessionReviewIssue {
+  item_number: number | null;
+  line:          string;
+  reason:        "unparsed" | "ambiguous_price" | "missing_quantity" | "index_gap";
+}
+
 export interface WeighSession {
   /** ISO 8601 date converted from Thai Buddhist year, e.g. "2026-05-25" */
   date:             string | null;
@@ -23,4 +29,5 @@ export interface WeighSession {
   session_title:    string | null;
   items:            WeighSessionItem[];
   parse_errors:     string[];
+  review_issues:    WeighSessionReviewIssue[];
 }

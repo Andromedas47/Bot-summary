@@ -7,7 +7,11 @@
 
 // Thai character class (letters + vowel signs + tone marks, all in U+0E00-U+0E7F)
 const TH = "\\u0E00-\\u0E7F";
+const LATIN = "a-zA-Z";
+const PROD = `${TH}${LATIN}`;
 const MARKET = `${TH}\\d\\sฯๆ().\\-/`;
+const UNITS =
+  "โล|ลูก|กล่อง|แพค|แพ็ค|แพ็ก|เเพ็ค|เเพค|แพต|แพ็ด|แผค|กำ|มัด|ถุง|หัว|หวี|เครือ|เข่ง|พวง|ลัง";
 
 export const RE = {
   // "18:53 เสือ <content>" — time separator can be colon or dot
@@ -19,11 +23,19 @@ export const RE = {
   //   "2หมอนทอง119บาท"   (no dot)
   // Lazy Thai match stops naturally before the trailing digits+บาท.
   // Captures: [1]=item_number, [2]=product_name, [3]=price
-  ITEM: new RegExp(`^(\\d+)\\.?\\s*([${TH}][${TH}\\s]*?)(\\d+(?:\\.\\d+)?)\\s*บาท\\s*$`),
+  ITEM: new RegExp(`^(\\d+)\\.?\\s*([${PROD}][${PROD}\\s]*?)(\\d+(?:\\.\\d+)?)\\s*บาท\\s*$`),
 
   // Item line without an item number. Used for short correction messages.
   // Captures: [1]=product_name, [2]=price
-  ITEM_NO_INDEX: new RegExp(`^([${TH}][${TH}\\s]*?)(\\d+(?:\\.\\d+)?)\\s*บาท\\s*$`),
+  ITEM_NO_INDEX: new RegExp(`^([${PROD}][${PROD}\\s]*?)(\\d+(?:\\.\\d+)?)\\s*บาท\\s*$`),
+
+  // Indexed item-looking row (digit prefix) — used to detect silent drops.
+  ITEM_LINE_INDEXED: /^(\d+)\.?\s*\S/,
+
+  // Quantity digits merged with price on the same item row, e.g. "3 โlo100บาท".
+  AMBIGUOUS_ITEM_PRICE: new RegExp(
+    `\\s\\d+(?:\\.\\d+)?\\.?\\s*(?:${UNITS})\\s*\\d+(?:\\.\\d+)?\\s*บาท`,
+  ),
 
   // Quantity with unit — trailing dot before unit is optional (scale output format):
   //   "38โล"  "18.5โล"  "38.1.โล"  "28.โล"
@@ -33,7 +45,7 @@ export const RE = {
   //   "3กำ"  "2มัด"  "5ถุง"  "16หัว"  "1แพ็ค"  "4หวี"
   //   "1เครือ"  "2เข่ง"  "3พวง"  "5ลัง"
   // Captures: [1]=amount, [2]=unit
-  QUANTITY: /^(\d+(?:\.\d+)?)\.?\s*(โล|ลูก|กล่อง|แพค|แพ็ค|แพ็ก|เเพ็ค|เเพค|แพต|แพ็ด|แผค|กำ|มัด|ถุง|หัว|หวี|เครือ|เข่ง|พวง|ลัง)\s*$/,
+  QUANTITY: new RegExp(`^(\\d+(?:\\.\\d+)?)\\.?\\s*(${UNITS})\\s*$`),
 
   // Full-line date (anchored to avoid false matches inside item lines):
   //   "25/5/69"   → short Buddhist year 2569 → Gregorian 2026
@@ -89,4 +101,12 @@ export const RE = {
 
 export function isReservedFinancialLine(content: string): boolean {
   return RE.RESERVED_FINANCIAL.test(content.trim());
+}
+
+export function looksLikeIndexedItemLine(content: string): boolean {
+  return RE.ITEM_LINE_INDEXED.test(content.trim());
+}
+
+export function isAmbiguousItemPriceLine(content: string): boolean {
+  return RE.AMBIGUOUS_ITEM_PRICE.test(content.trim());
 }

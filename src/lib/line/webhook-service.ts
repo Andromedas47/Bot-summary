@@ -42,6 +42,7 @@ import {
   SETTLEMENT_ELIGIBLE_STATUSES,
   EVIDENCE_ELIGIBLE_STATUSES,
   PRODUCE_APPEND_ELIGIBLE_STATUSES,
+  RETURN_APPEND_ELIGIBLE_STATUSES,
 } from "@/lib/work-round/work-round-service";
 import { classifyHeader, isIncompleteProduceHeader, isProduceAppendLine } from "@/lib/parsers/work-round-header";
 import {
@@ -2206,13 +2207,20 @@ export class WebhookService {
     const isAppend  = isReturnAppend || isProduceAppend;
     const wrs       = new WorkRoundService(this.supabase);
 
+    // Produce append (เบิกเพิ่ม) may only attach while the round is still in the
+    // produce stage. A return append (ชั่งคืนเพิ่ม) is the intended late-correction
+    // path and may attach on post-close / review statuses (→ needs_correction).
+    const appendEligibleStatuses = isReturnAppend
+      ? RETURN_APPEND_ELIGIBLE_STATUSES
+      : PRODUCE_APPEND_ELIGIBLE_STATUSES;
+
     const resolveAppendRound = async (
       candidates: import("@/lib/work-round/types").WorkRound[],
     ): Promise<
       | { kind: "persist"; workRoundId: string; isAppend: boolean }
       | { kind: "halt"; result: WebhookProcessResult }
     > => {
-      const eligible = candidates.filter((r) => PRODUCE_APPEND_ELIGIBLE_STATUSES.includes(r.status));
+      const eligible = candidates.filter((r) => appendEligibleStatuses.includes(r.status));
       if (eligible.length === 0) {
         log.warn("append produce blocked: no append-eligible target round", { sourceId, businessDate });
         if (replyToken) await replyLineMessage(replyToken, "รอบนี้อนุมัติแล้วหรือไม่พบรอบเดิม กรุณาให้ผู้ตรวจสอบเปิดเส้นทางแก้ไขก่อน");

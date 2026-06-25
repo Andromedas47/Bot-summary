@@ -16,9 +16,31 @@ export const EVIDENCE_ELIGIBLE_STATUSES: WorkRoundStatus[] = [
 ];
 
 // Statuses for which a standalone "รายการเบิกเพิ่ม" can attach another produce batch.
-// Remains appendable until ปิดรอบ / ยืนยันปิดรอบ (→ awaiting_settlement) or terminal review states.
+// Only while the round is still in the produce stage — i.e. before ปิดรอบ / ยืนยันปิดรอบ
+// (→ awaiting_settlement). Once the money/slip flow has begun the borrow total is locked.
+//
+// `needs_correction` is intentionally EXCLUDED: under V2 it occurs AFTER the round has been
+// closed / settled (e.g. a later "คืนเพิ่ม" reopens it for review). Allowing produce append
+// there would silently change the borrow total after slips and settlement already started.
+// Corrections must go through a deliberate command/flow (เช่น ชั่งคืนเพิ่ม) or a reviewer action.
 export const PRODUCE_APPEND_ELIGIBLE_STATUSES: WorkRoundStatus[] = [
-  "open", "produce_complete", "needs_correction",
+  "open",
+  "produce_complete",
+];
+
+// Statuses for which a standalone "ชั่งคืนเพิ่ม" (append RETURN) can attach.
+// Unlike produce append, a late return is the intended V2 correction path AFTER
+// close / settlement: it attaches a return session and reopens the round to
+// needs_correction (see WorkRoundStatusService "produce_reopened"). Everything
+// except `approved` is eligible — an approved round is locked.
+export const RETURN_APPEND_ELIGIBLE_STATUSES: WorkRoundStatus[] = [
+  "open",
+  "produce_complete",
+  "awaiting_settlement",
+  "awaiting_slips",
+  "variance_found",
+  "ready_for_review",
+  "needs_correction",
 ];
 
 export interface ResolveParams {
@@ -140,7 +162,21 @@ export class WorkRoundService {
     return { status: "ambiguous", candidates: rounds };
   }
 
-  /** Resolves the Work Round for a standalone "รายการเบิกเพิ่ม" marker. */
+  /**
+   * Resolves the Work Round for a standalone "รายการเบิกเพิ่ม" marker.
+   *
+   * Strictly scoped to the SAME LINE group (`sourceId`) and the SAME
+   * `business_date`. A candidate must also carry both seller_name and
+   * market_name (identity) and be in an append-eligible status.
+   *
+   *  - no candidate            → "none"   (caller asks to open a fresh header)
+   *  - exactly one candidate   → "resolved"
+   *  - more than one candidate → "ambiguous" (caller asks which round)
+   *
+   * Fail-closed by design: it never falls back across business_date and never
+   * silently picks the "latest" round. Appending to the wrong / a closed round
+   * would change the locked borrow total, so ambiguity must surface to the user.
+   */
   async resolveProduceAppendTarget(
     sourceId:     string,
     businessDate: string,
@@ -148,27 +184,8 @@ export class WorkRoundService {
     const hasIdentity = (r: WorkRound) =>
       r.seller_name.trim().length > 0 && r.market_name.trim().length > 0;
 
-    let rounds = (await this.findProduceAppendEligibleRounds(sourceId, businessDate))
+    const rounds = (await this.findProduceAppendEligibleRounds(sourceId, businessDate))
       .filter(hasIdentity);
-
-    // Header business_date may differ from bangkokToday() (e.g. before the 04:00 cutoff).
-    if (rounds.length === 0) {
-      const all = await this.findAllRounds(sourceId, businessDate);
-      rounds = all.filter(
-        (r) => PRODUCE_APPEND_ELIGIBLE_STATUSES.includes(r.status) && hasIdentity(r),
-      );
-    }
-
-    if (rounds.length === 0) {
-      const { data } = await this.supabase
-        .from("work_rounds")
-        .select("*")
-        .eq("source_id", sourceId)
-        .in("status", PRODUCE_APPEND_ELIGIBLE_STATUSES)
-        .order("round_seq", { ascending: true });
-      const bySource = ((data ?? []) as WorkRound[]).filter(hasIdentity);
-      if (bySource.length === 1) rounds = bySource;
-    }
 
     if (rounds.length === 0) return { status: "none" };
     if (rounds.length === 1) return { status: "resolved", workRound: rounds[0] };

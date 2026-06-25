@@ -259,6 +259,44 @@ describe("WebhookService — รายการเบิกเพิ่ม V2 re
     expect(db._rows("produce_sessions")).toHaveLength(1);
   });
 
+  // REVIEW BLOCKER regression: needs_correction happens AFTER a round is closed/settled
+  // (e.g. a later "คืนเพิ่ม" reopens it). A produce append must never reattach there and
+  // change the locked borrow total. It must reject without touching any prior data.
+  it("rejects รายการเบิกเพิ่ม when round is needs_correction (no pending session, no produce change)", async () => {
+    const round = openRound({ status: "needs_correction" });
+    const db = memSupabase({
+      work_rounds: [round],
+      produce_sessions: [
+        { id: "prior", work_round_id: round.id, is_append_session: false, staff_name: "โอม" },
+      ],
+      produce_items: [
+        { id: "it-1", session_id: "prior", item_number: 1, product_name: "มังคุด", transaction_type: "เบิก", price_per_unit: 35, quantity: 18.3 },
+      ],
+    });
+    const replies: string[] = [];
+
+    const borrowBefore = (await computeRoundTotals(db as never, round.id as string)).borrow;
+    expect(borrowBefore).toBeCloseTo(35 * 18.3, 2);
+
+    await svc(db, replies).processEvents([
+      textEvent("รายการเบิกเพิ่ม", { replyToken: "tok-needs-correction" }),
+      textEvent("17ลองกอง40บาท"),
+      textEvent(`20.9 ${LO}`),
+      textEvent("จบรายการ"),
+    ], "dest");
+
+    // 3. rejected with the no-append-round prompt
+    expect(replies[0]).toContain("ไม่พบรอบเบิกที่ยังเปิดอยู่สำหรับรายการเพิ่ม");
+    // 4. no pending session created
+    expect(db._rows("pending_sessions")).toHaveLength(0);
+    // 5. no new produce entry (session/items) added — only the prior data remains
+    expect(db._rows("produce_sessions")).toHaveLength(1);
+    expect(db._rows("produce_items")).toHaveLength(1);
+    // 6. existing borrow total unchanged
+    const borrowAfter = (await computeRoundTotals(db as never, round.id as string)).borrow;
+    expect(borrowAfter).toBeCloseTo(borrowBefore, 2);
+  });
+
   it("rejects รายการเบิกเพิ่ม when round is approved", async () => {
     const round = openRound({ status: "approved" });
     const db = memSupabase({ work_rounds: [round] });

@@ -228,4 +228,56 @@ describe("WorkRoundService", () => {
     const res = await svc.resolveProduceAppendTarget("grp1", "2026-06-25");
     expect(res.status).toBe("none");
   });
+
+  // V2: needs_correction occurs AFTER the round was closed / settled (e.g. a later
+  // "คืนเพิ่ม"). A produce append must NOT attach there — it would change the locked
+  // borrow total after the money/slip flow already started.
+  it("resolveProduceAppendTarget rejects needs_correction", async () => {
+    const round: Row = {
+      id: "wr-1", source_id: "grp1", business_date: "2026-06-25",
+      seller_name: "โอม", market_name: "ตลาดพาซิโอ้ผลไม้", round_seq: 1, status: "needs_correction",
+      source_meta: null, created_at: "", updated_at: "",
+    };
+    const db  = makeDb([round]);
+    const svc = new WorkRoundService(db as never);
+    const res = await svc.resolveProduceAppendTarget("grp1", "2026-06-25");
+    expect(res.status).toBe("none");
+  });
+
+  it("resolveProduceAppendTarget never crosses business_date", async () => {
+    // An eligible round exists for the same group but a DIFFERENT business_date.
+    const round: Row = {
+      id: "wr-1", source_id: "grp1", business_date: "2026-06-24",
+      seller_name: "โอม", market_name: "ตลาดพาซิโอ้ผลไม้", round_seq: 1, status: "open",
+      source_meta: null, created_at: "", updated_at: "",
+    };
+    const db  = makeDb([round]);
+    const svc = new WorkRoundService(db as never);
+    const res = await svc.resolveProduceAppendTarget("grp1", "2026-06-25");
+    expect(res.status).toBe("none");
+  });
+
+  it("resolveProduceAppendTarget requires seller_name and market_name", async () => {
+    const round: Row = {
+      id: "wr-1", source_id: "grp1", business_date: "2026-06-25",
+      seller_name: "", market_name: "", round_seq: 1, status: "open",
+      source_meta: null, created_at: "", updated_at: "",
+    };
+    const db  = makeDb([round]);
+    const svc = new WorkRoundService(db as never);
+    const res = await svc.resolveProduceAppendTarget("grp1", "2026-06-25");
+    expect(res.status).toBe("none");
+  });
+
+  it("resolveProduceAppendTarget is 'ambiguous' for >1 eligible round (never silently picks latest)", async () => {
+    const rounds: Row[] = [
+      { id: "wr-1", source_id: "grp1", business_date: "2026-06-25", seller_name: "กี้",   market_name: "A", round_seq: 1, status: "open",             source_meta: null, created_at: "", updated_at: "" },
+      { id: "wr-2", source_id: "grp1", business_date: "2026-06-25", seller_name: "พี่ดำ", market_name: "B", round_seq: 2, status: "produce_complete", source_meta: null, created_at: "", updated_at: "" },
+    ];
+    const db  = makeDb(rounds);
+    const svc = new WorkRoundService(db as never);
+    const res = await svc.resolveProduceAppendTarget("grp1", "2026-06-25");
+    expect(res.status).toBe("ambiguous");
+    if (res.status === "ambiguous") expect(res.candidates).toHaveLength(2);
+  });
 });

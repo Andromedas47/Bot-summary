@@ -37,6 +37,15 @@ export const RE = {
     `\\s\\d+(?:\\.\\d+)?\\.?\\s*(?:${UNITS})\\s*\\d+(?:\\.\\d+)?\\s*บาท`,
   ),
 
+  // Narrow repairable form: indexed item with a stray qty+unit immediately before the
+  // price, confirmed by a same-unit quantity line following it.
+  // Pattern: "<N> <product_name> <stray_qty> <unit><price>บาท"
+  // Captures: [1]=item_number, [2]=product_name, [3]=stray_qty (ignored),
+  //            [4]=unit, [5]=price_per_unit
+  AMBIGUOUS_REPAIR: new RegExp(
+    `^(\\d+)\\.?\\s*([${PROD}]+(?:\\s+[${PROD}]+)*)\\s+(\\d+(?:\\.\\d+)?)\\.?\\s*(${UNITS})\\s*(\\d+(?:\\.\\d+)?)\\s*บาท\\s*$`,
+  ),
+
   // Quantity with unit — trailing dot before unit is optional (scale output format):
   //   "38โล"  "18.5โล"  "38.1.โล"  "28.โล"
   //   "9ลูก"  "23.ลูก"  "6.ลูก"
@@ -112,4 +121,25 @@ export function looksLikeIndexedItemLine(content: string): boolean {
 
 export function isAmbiguousItemPriceLine(content: string): boolean {
   return RE.AMBIGUOUS_ITEM_PRICE.test(content.trim());
+}
+
+/**
+ * If `content` matches the narrow repairable ambiguous pattern, returns the
+ * extracted components. Returns null for any non-matching or financial line.
+ */
+export function tryExtractAmbiguousRepair(content: string): {
+  item_number:    number;
+  product_name:   string;
+  unit:           string;
+  price_per_unit: number;
+} | null {
+  if (isReservedFinancialLine(content)) return null;
+  const m = content.match(RE.AMBIGUOUS_REPAIR);
+  if (!m) return null;
+  return {
+    item_number:    parseInt(m[1], 10),
+    product_name:   m[2].trim(),
+    unit:           m[4],
+    price_per_unit: parseFloat(m[5]),
+  };
 }

@@ -4,7 +4,7 @@ import { getUserId } from "@/lib/line/verify";
 import { logger } from "@/lib/logger";
 import { computeItemHash } from "@/lib/line/session-dedup-service";
 import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
-import { RE, isReservedFinancialLine, isAmbiguousItemPriceLine, looksLikeIndexedItemLine } from "./regex";
+import { RE, isReservedFinancialLine, isAmbiguousItemPriceLine, looksLikeIndexedItemLine, tryExtractAmbiguousRepair } from "./regex";
 import type {
   WeighSession,
   WeighSessionItem,
@@ -34,11 +34,31 @@ export function parseWeighSession(
   let currentTxType: TransactionType = "เบิก";
   let state: "header" | "items"      = "header";
 
+  type PendingRepair = {
+    item_number:    number;
+    product_name:   string;
+    unit:           string;
+    price_per_unit: number;
+    sourceLine:     string;  // original line text for review_issues on failure
+  };
+
   const items:       WeighSessionItem[]        = [];
   const parseErrors: string[]                  = [];
   const reviewIssues: WeighSessionReviewIssue[] = [];
+  const repairNotes: string[]                   = [];
   const declaredItemNumbers = new Set<number>();
-  let   pendingItem: Partial<WeighSessionItem> | null = null;
+  let   pendingItem:   Partial<WeighSessionItem> | null = null;
+  let   pendingRepair: PendingRepair | null             = null;
+
+  const failPendingRepair = (): void => {
+    if (!pendingRepair) return;
+    reviewIssues.push({
+      item_number: pendingRepair.item_number,
+      line:        pendingRepair.sourceLine,
+      reason:      "ambiguous_price",
+    });
+    pendingRepair = null;
+  };
 
   console.log("[TRACE][parseWeighSession] input_lines:", JSON.stringify(lines));
   for (const line of lines) {
@@ -75,6 +95,7 @@ export function parseWeighSession(
     // ── Session end ────────────────────────────────────────────────────────
     if (RE.SESSION_END.test(content)) {
       console.log("[TRACE][parseWeighSession] SESSION_END detected, pendingItem:", JSON.stringify(pendingItem));
+      failPendingRepair(); // no qty line arrived before end
       if (pendingItem?.product_name) {
         const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
         pushOrMergeItem(items, finalizedItem);
@@ -135,7 +156,25 @@ export function parseWeighSession(
     if (!prefixMatch) {
       const qm = content.match(RE.QUANTITY);
       if (qm) {
-        if (pendingItem?.product_name) {
+        if (pendingRepair) {
+          // Repair confirmed only when the next-line unit matches the embedded stray unit.
+          const qty  = parseFloat(qm[1]);
+          const unit = qm[2];
+          if (unit === pendingRepair.unit) {
+            const repairedItem = finalize(
+              { item_number: pendingRepair.item_number, product_name: pendingRepair.product_name, price_per_unit: pendingRepair.price_per_unit, quantity: qty, unit: unit as ProduceUnit },
+              currentSection, currentTxType,
+            );
+            pushOrMergeItem(items, repairedItem);
+            repairNotes.push(`หมายเหตุ: ใช้จำนวนจากบรรทัดถัดไป ${qty} ${unit}`);
+            console.log("[TRACE][parseWeighSession] REPAIR_ITEM:", JSON.stringify(repairedItem));
+            pendingRepair = null;
+          } else {
+            // Unit mismatch → fail the repair; orphan the quantity line.
+            failPendingRepair();
+            parseErrors.push(`quantity with no preceding item: "${line}"`);
+          }
+        } else if (pendingItem?.product_name) {
           pendingItem.quantity = parseFloat(qm[1]);
           pendingItem.unit     = qm[2] as ProduceUnit;
           const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
@@ -150,6 +189,7 @@ export function parseWeighSession(
         const parsedItem = parseItemLine(content, nextItemNumber(items, pendingItem));
         if (parsedItem) {
           // Item line sent without LINE export timestamp (direct typed message)
+          failPendingRepair(); // repair displaced by new valid item
           if (pendingItem?.product_name) {
             const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
             pushOrMergeItem(items, finalizedItem);
@@ -159,24 +199,39 @@ export function parseWeighSession(
           console.log("[TRACE][parseWeighSession] SET_PENDING_ITEM:", JSON.stringify(pendingItem));
         } else if (content.length > 0) {
           if (looksLikeIndexedItemLine(content)) {
-            recordItemLineFailure(
-              isAmbiguousItemPriceLine(content) ? "ambiguous_price" : "unparsed",
-            );
+            failPendingRepair(); // flush before attempting a new repair
+            const repair = tryExtractAmbiguousRepair(content);
+            if (repair) {
+              if (pendingItem?.product_name) {
+                const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
+                pushOrMergeItem(items, finalizedItem);
+                console.log("[TRACE][parseWeighSession] PUSH_ITEM(repair-displaced):", JSON.stringify(finalizedItem), "items_total_after:", items.length);
+                pendingItem = null;
+              }
+              pendingRepair = { ...repair, sourceLine: line };
+              console.log("[TRACE][parseWeighSession] SET_PENDING_REPAIR:", JSON.stringify(pendingRepair));
+            } else {
+              recordItemLineFailure(
+                isAmbiguousItemPriceLine(content) ? "ambiguous_price" : "unparsed",
+              );
+            }
           }
           // Non-item bare line → section / transaction-type marker
-          if (pendingItem?.product_name) {
-            const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
-            pushOrMergeItem(items, finalizedItem);
-            console.log("[TRACE][parseWeighSession] PUSH_ITEM(section-change):", JSON.stringify(finalizedItem), "items_total_after:", items.length);
-            pendingItem = null;
-          }
-          const nextTxType = detectTxType(content);
-          if (nextTxType) {
-            currentSection = content;
-            currentTxType  = nextTxType;
-            console.log("[TRACE][parseWeighSession] SECTION_CHANGE:", content, "txType:", currentTxType);
-          } else if (!looksLikeIndexedItemLine(content)) {
-            parseErrors.push(`unrecognized line: "${line}"`);
+          if (!pendingRepair) {
+            if (pendingItem?.product_name) {
+              const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
+              pushOrMergeItem(items, finalizedItem);
+              console.log("[TRACE][parseWeighSession] PUSH_ITEM(section-change):", JSON.stringify(finalizedItem), "items_total_after:", items.length);
+              pendingItem = null;
+            }
+            const nextTxType = detectTxType(content);
+            if (nextTxType) {
+              currentSection = content;
+              currentTxType  = nextTxType;
+              console.log("[TRACE][parseWeighSession] SECTION_CHANGE:", content, "txType:", currentTxType);
+            } else if (!looksLikeIndexedItemLine(content)) {
+              parseErrors.push(`unrecognized line: "${line}"`);
+            }
           }
         }
       }
@@ -187,6 +242,7 @@ export function parseWeighSession(
     trackDeclaredItemLine();
     const parsedItem = parseItemLine(content, nextItemNumber(items, pendingItem));
     if (parsedItem) {
+      failPendingRepair(); // new valid item displaces any pending repair
       if (pendingItem?.product_name) {
         pushOrMergeItem(items, finalize(pendingItem, currentSection, currentTxType));
       }
@@ -195,12 +251,24 @@ export function parseWeighSession(
     }
 
     if (looksLikeIndexedItemLine(content)) {
+      failPendingRepair();
+      const repair = tryExtractAmbiguousRepair(content);
+      if (repair) {
+        if (pendingItem?.product_name) {
+          pushOrMergeItem(items, finalize(pendingItem, currentSection, currentTxType));
+          pendingItem = null;
+        }
+        pendingRepair = { ...repair, sourceLine: line };
+        console.log("[TRACE][parseWeighSession] SET_PENDING_REPAIR(prefixed):", JSON.stringify(pendingRepair));
+        continue;
+      }
       recordItemLineFailure(
         isAmbiguousItemPriceLine(content) ? "ambiguous_price" : "unparsed",
       );
     }
 
     // Staff-prefixed non-item line → section / transaction-type marker
+    failPendingRepair(); // section marker interrupts pending repair
     if (pendingItem?.product_name) {
       pushOrMergeItem(items, finalize(pendingItem, currentSection, currentTxType));
       pendingItem = null;
@@ -212,6 +280,16 @@ export function parseWeighSession(
     } else {
       parseErrors.push(`unrecognized line: "${line}"`);
     }
+  }
+
+  // Trailing state: flush any repair that never got its quantity line.
+  if (pendingRepair) {
+    reviewIssues.push({
+      item_number: pendingRepair.item_number,
+      line:        pendingRepair.sourceLine,
+      reason:      "ambiguous_price",
+    });
+    pendingRepair = null;
   }
 
   // Trailing pending item (missing session-end marker)
@@ -241,6 +319,7 @@ export function parseWeighSession(
     items,
     parse_errors:     parseErrors,
     review_issues:    dedupeReviewIssues(reviewIssues),
+    repair_notes:     repairNotes,
   };
 }
 

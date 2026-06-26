@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+﻿import { describe, it, expect } from "bun:test";
 import type { LineMessageEvent } from "@/lib/line/types";
 import { parseWeighSession, bangkokTimeFromTimestamp, WeighSessionParser, hasParseReviewBlockers } from "./parser";
 import { RE } from "./regex";
@@ -885,7 +885,7 @@ describe("return parser integrity — incident regression", () => {
     "8เขียวมรกต 35 บาท",
     `12.5${LO}`,
     `9จีนหงส์ 3 ${LO}100บาท`,
-    `15.5${LO}`,
+    "15.5ลูก",  // unit mismatch → repair ineligible → review_issues[#9]
     "10สายน้ำผึ้ง 50 บาท",
     `48.6${LO}`,
     `11น้อยหน่า${LO}ละ 50 บาท`,
@@ -955,9 +955,10 @@ describe("return parser integrity — incident regression", () => {
     expect(result.review_issues).toHaveLength(0);
   });
 
-  it("flags malformed price จีนหงส์ 3 โlo100บาท as review-required", () => {
+  it("flags malformed price จีนหงส์ 3 โล100บาท + unit mismatch (ลูก) as review-required", () => {
+    // Same-unit form (15.5โล) is now repaired; unit mismatch keeps it blocked.
     const result = parseWeighSession(
-      `กี้-วัดทุ่ง คืน 25/6/2569\n9จีนหงส์ 3 ${LO}100บาท\n15.5${LO}\nจบรายการ`,
+      `กี้-วัดทุ่ง คืน 25/6/2569\n9จีนหงส์ 3 ${LO}100บาท\n15.5ลูก\nจบรายการ`,
       "2026-06-25",
     );
     expect(result.items.some((item) => item.item_number === 9)).toBe(false);
@@ -1003,3 +1004,120 @@ describe("return parser integrity — incident regression", () => {
     expect(result.items[1].product_name).toBe("ฝรั่ง");
   });
 });
+
+describe("parseWeighSession — ambiguous repair (stray qty+unit before price)", () => {
+  const LO = "โล"; // โล
+
+  it("repairs จีนหงส์ 3 โล100บาท + 15.5 โล → qty=15.5, price=100, no review issues", () => {
+    const result = parseWeighSession(
+      [
+        "กี้-วัดทุ่ง คืน 1/7/2569",
+        `9 จีนหงส์ 3 ${LO}100บาท`,
+        `15.5 ${LO}`,
+        "จบรายการ",
+      ].join("\n"),
+      "2026-07-01",
+    );
+    expect(result.review_issues).toHaveLength(0);
+    expect(result.items).toHaveLength(1);
+    const item = result.items[0];
+    expect(item.item_number).toBe(9);
+    expect(item.product_name).toBe("จีนหงส์");
+    expect(item.quantity).toBe(15.5);
+    expect(item.unit).toBe(LO);
+    expect(item.price_per_unit).toBe(100);
+    expect((item.quantity ?? 0) * (item.price_per_unit ?? 0)).toBe(1550);
+    // UX note must be present
+    expect(result.repair_notes).toHaveLength(1);
+    expect(result.repair_notes[0]).toContain("ใช้จำนวนจากบรรทัดถัดไป");
+    expect(result.repair_notes[0]).toContain("15.5");
+    expect(result.repair_notes[0]).toContain(LO);
+  });
+
+  it("unit mismatch (โล vs ลูก) → blocked; repair fails, review_issues has #9", () => {
+    const result = parseWeighSession(
+      [
+        "กี้-วัดทุ่ง คืน 1/7/2569",
+        `9 จีนหงส์ 3 ${LO}100บาท`,
+        "15 ลูก",
+        "จบรายการ",
+      ].join("\n"),
+      "2026-07-01",
+    );
+    expect(result.items).toHaveLength(0);
+    expect(result.review_issues).toHaveLength(1);
+    expect(result.review_issues[0].item_number).toBe(9);
+    expect(result.review_issues[0].reason).toBe("ambiguous_price");
+    expect(result.repair_notes).toHaveLength(0);
+  });
+
+  it("missing next quantity (end of session) → blocked; review_issues has #9", () => {
+    const result = parseWeighSession(
+      [
+        "กี้-วัดทุ่ง คืน 1/7/2569",
+        `9 จีนหงส์ 3 ${LO}100บาท`,
+        "จบรายการ",
+      ].join("\n"),
+      "2026-07-01",
+    );
+    expect(result.items).toHaveLength(0);
+    expect(result.review_issues).toHaveLength(1);
+    expect(result.review_issues[0].item_number).toBe(9);
+    expect(result.repair_notes).toHaveLength(0);
+  });
+
+  it("no stray qty before unit (9 จีนหงส์ โล100บาท) — parses via RE.ITEM; unit ends up in product name, no repair", () => {
+    // Without a stray digit between product name and unit, AMBIGUOUS_ITEM_PRICE
+    // does not match and RE.ITEM parses "จีนหงส์ โล" as the product name.
+    // AMBIGUOUS_REPAIR also does not match (no stray qty) → no repair attempted.
+    const result = parseWeighSession(
+      [
+        "กี้-วัดทุ่ง คืน 1/7/2569",
+        `9 จีนหงส์ ${LO}100บาท`,
+        `15.5 ${LO}`,
+        "จบรายการ",
+      ].join("\n"),
+      "2026-07-01",
+    );
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].product_name).toBe(`จีนหงส์ ${LO}`);
+    expect(result.items[0].price_per_unit).toBe(100);
+    expect(result.review_issues).toHaveLength(0);
+    expect(result.repair_notes).toHaveLength(0);
+  });
+
+  it("finance phrase ยอดเบิก 3 โล100บาท → filtered before reaching repair; never becomes an item", () => {
+    // isReservedFinancialLine catches the line first; the qty line is a parse_error,
+    // not a review_issue. No item with product_name=ยอดเบิก is ever produced.
+    const result = parseWeighSession(
+      [
+        "กี้-วัดทุ่ง เบิก 1/7/2569",
+        `ยอดเบิก 3 ${LO}100บาท`,
+        `15.5 ${LO}`,
+        "จบรายการ",
+      ].join("\n"),
+      "2026-07-01",
+    );
+    expect(result.items.every((i) => i.product_name !== "ยอดเบิก")).toBe(true);
+    expect(result.review_issues).toHaveLength(0); // not a review blocker
+    expect(result.repair_notes).toHaveLength(0);
+  });
+
+  it("repair works in borrow flow (เบิก) with correct transaction_type", () => {
+    const result = parseWeighSession(
+      [
+        "กี้-วัดทุ่ง เบิก 1/7/2569",
+        `9 จีนหงส์ 3 ${LO}100บาท`,
+        `15.5 ${LO}`,
+        "จบรายการ",
+      ].join("\n"),
+      "2026-07-01",
+    );
+    expect(result.review_issues).toHaveLength(0);
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].transaction_type).toBe("เบิก");
+    expect(result.items[0].quantity).toBe(15.5);
+    expect(result.repair_notes).toHaveLength(1);
+  });
+});
+

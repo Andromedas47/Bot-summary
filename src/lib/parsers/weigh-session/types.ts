@@ -30,4 +30,6 @@ export interface WeighSession {
   items:            WeighSessionItem[];
   parse_errors:     string[];
   review_issues:    WeighSessionReviewIssue[];
+  /** Lines auto-repaired by the ambiguous-qty heuristic; shown in summary UX note. */
+  repair_notes:     string[];
 }

@@ -64,7 +64,7 @@ const PRODUCTION_20_ITEM = [
   "8เขียวมรกต 35 บาท",
   `12.5${LO}`,
   `9จีนหงส์ 3 ${LO}100บาท`,
-  `15.5${LO}`,
+  "15.5ลูก",     // unit mismatch (โล vs ลูก) → repair ineligible → review blocker
   "10สายน้ำผึ้ง 50 บาท",
   `48.6${LO}`,
   `11น้อยหน่า${LO}ละ 50 บาท`,
@@ -90,10 +90,12 @@ const PRODUCTION_20_ITEM = [
   "จบรายการ",
 ].join("\n");
 
+// Unit mismatch (โล vs ลูก): repair is ineligible → must give specific review-reply, not generic error.
+// This verifies the hasParseReviewBlockers-before-items.length===0 ordering fix survives repair.
 const PRODUCTION_SPACED_BAD = [
   "ทดสอบกำกวม-ตลาดกำกวม เบิก 1/7/2569",
   `9 จีนหงส์ 3 ${LO}100บาท`,
-  `15.5 ${LO}`,
+  "15 ลูก",  // unit mismatch → repair fails → review_issues[#9]
   "จบรายการเบิก",
 ].join("\n");
 
@@ -113,7 +115,7 @@ function expectMalformedBlocked(
 }
 
 describe("WebhookService — return parser integrity", () => {
-  it("single-message: spaced item number + ambiguous price gives parse-review reply, not generic error", async () => {
+  it("single-message: spaced item number + unit mismatch gives parse-review reply, not generic error", async () => {
     const replies: string[] = [];
     const db = memSupabase();
     await svc(db, replies).processEvents([textEvent(PRODUCTION_SPACED_BAD)], "dest");
@@ -121,14 +123,14 @@ describe("WebhookService — return parser integrity", () => {
     expectMalformedBlocked(replies[0], db);
   });
 
-  it("multi-message: spaced item number + ambiguous price gives parse-review reply via pending session path", async () => {
+  it("multi-message: spaced item number + unit mismatch gives parse-review reply via pending session path", async () => {
     const replies: string[] = [];
     const db = memSupabase();
     const service = svc(db, replies);
 
     await service.processEvents([textEvent("ทดสอบกำกวม-ตลาดกำกวม เบิก 1/7/2569")], "dest");
     await service.processEvents([
-      textEvent([`9 จีนหงส์ 3 ${LO}100บาท`, `15.5 ${LO}`, "จบรายการเบิก"].join("\n")),
+      textEvent([`9 จีนหงส์ 3 ${LO}100บาท`, "15 ลูก", "จบรายการเบิก"].join("\n")),
     ], "dest");
 
     expectMalformedBlocked(replies[replies.length - 1], db);
@@ -155,7 +157,7 @@ describe("WebhookService — return parser integrity", () => {
         "1ส้มไต้หวัน 40 บาท",
         `20${LO}`,
         `9จีนหงส์ 3 ${LO}100บาท`,
-        `15.5${LO}`,
+        "15.5ลูก",  // unit mismatch → repair fails → review_issues[#9]
       ].join("\n")),
     ], "dest");
     await service.processEvents([textEvent("จบรายการ")], "dest");
@@ -241,5 +243,68 @@ describe("parseWeighSession — review reply helper", () => {
     expect(reply).toContain("อ่านรายการไม่ครบ กรุณาแก้ไข:");
     expect(reply).toContain(BAD_LINE_REPLY);
     expect(reply.split("\n").some((l) => l.startsWith("#9"))).toBe(true);
+  });
+});
+
+describe("WebhookService — ambiguous-repair E2E", () => {
+  const REPAIR_ROUND = openRound({ seller_name: "โอม", market_name: "วัดทุ่งลานนา" });
+
+  it("single-message: repaired item persisted; DB has correct qty/price; no error reply", async () => {
+    const replies: string[] = [];
+    const db = memSupabase({ work_rounds: [REPAIR_ROUND] });
+    await svc(db, replies).processEvents([
+      textEvent([
+        "โอม ชั่งคืน 25/6/2569",
+        `9 จีนหงส์ 3 ${LO}100บาท`,
+        `15.5 ${LO}`,
+        "จบรายการ",
+      ].join("\n")),
+    ], "dest");
+
+    expect(db._rows("produce_sessions")).toHaveLength(1);
+    expect(db._rows("produce_items")).toHaveLength(1);
+    const item = db._rows("produce_items")[0] as Record<string, unknown>;
+    expect(item["product_name"]).toBe("จีนหงส์");
+    expect(item["quantity"]).toBe(15.5);
+    expect(item["price_per_unit"]).toBe(100);
+    expect(replies.every((r) => !r.includes("อ่านรายการไม่ครบ"))).toBe(true);
+    expect(replies.every((r) => !r.includes("อ่านรายการไม่สำเร็จ"))).toBe(true);
+  });
+
+  it("multi-message: header then repaired item+end persists correctly", async () => {
+    const replies: string[] = [];
+    const db = memSupabase({ work_rounds: [REPAIR_ROUND] });
+    const service = svc(db, replies);
+
+    await service.processEvents([textEvent("โอม ชั่งคืน 25/6/2569")], "dest");
+    await service.processEvents([
+      textEvent([`9 จีนหงส์ 3 ${LO}100บาท`, `15.5 ${LO}`, "จบรายการ"].join("\n")),
+    ], "dest");
+
+    expect(db._rows("produce_sessions")).toHaveLength(1);
+    expect(db._rows("produce_items")).toHaveLength(1);
+    const item = db._rows("produce_items")[0] as Record<string, unknown>;
+    expect(item["product_name"]).toBe("จีนหงส์");
+    expect(item["quantity"]).toBe(15.5);
+    expect(replies.every((r) => !r.includes("อ่านรายการไม่ครบ"))).toBe(true);
+  });
+
+  it("unit mismatch in single-message session → parse-review error, zero DB writes", async () => {
+    const replies: string[] = [];
+    const db = memSupabase({ work_rounds: [REPAIR_ROUND] });
+    await svc(db, replies).processEvents([
+      textEvent([
+        "โอม ชั่งคืน 25/6/2569",
+        `9 จีนหงส์ 3 ${LO}100บาท`,
+        "15 ลูก",
+        "จบรายการ",
+      ].join("\n")),
+    ], "dest");
+
+    expect(db._rows("produce_sessions")).toHaveLength(0);
+    expect(db._rows("produce_items")).toHaveLength(0);
+    expect(replies[0]).toContain("อ่านรายการไม่ครบ");
+    expect(replies[0]).toContain("#9");
+    expect(replies[0]).not.toContain("อ่านรายการไม่สำเร็จ");
   });
 });

@@ -160,5 +160,9 @@ export function buildWeighSessionSummary(session: WeighSession): string {
     lines.push("", ...s);
   }
 
+  if (session.repair_notes.length > 0) {
+    lines.push("", ...session.repair_notes);
+  }
+
   return lines.join("\n");
 }

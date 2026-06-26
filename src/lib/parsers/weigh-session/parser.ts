@@ -352,12 +352,12 @@ export function hasParseReviewBlockers(session: WeighSession): boolean {
 }
 
 export function buildParseReviewReply(session: WeighSession): string {
-  const labels = session.review_issues.map((issue) => {
-    const prefix = issue.item_number != null ? `#${issue.item_number}` : "?";
-    const snippet = issue.line.replace(/^\d+\.?\s*/, "").slice(0, 40);
+  const lines = session.review_issues.map((issue) => {
+    const prefix  = issue.item_number != null ? `#${issue.item_number}` : "?";
+    const snippet = issue.line.replace(/^\d+\.?\s*/, "").slice(0, 60);
     return `${prefix} ${snippet}`.trim();
   });
-  return `อ่านรายการไม่ครบ: ${labels.join(", ")} กรุณาแก้ไขแล้วส่งใหม่`;
+  return `อ่านรายการไม่ครบ กรุณาแก้ไข:\n${lines.join("\n")}`;
 }
 
 function nextItemNumber(

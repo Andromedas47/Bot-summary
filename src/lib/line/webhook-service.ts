@@ -168,6 +168,21 @@ function buildIncompleteHeaderReply(firstLine: string): string {
   ].join("\n");
 }
 
+function buildMissingDateReply(firstLine: string): string {
+  const hdr    = classifyHeader(firstLine);
+  const seller = hdr?.type === "explicit" || hdr?.type === "seller_only" ? hdr.sellerName : "ชื่อ";
+  const market = hdr?.type === "explicit" ? hdr.marketName : "ตลาด";
+  const intent = hdr?.type === "explicit" ? hdr.txIntent : "เบิก";
+  const today  = bangkokToday();
+  const [yr, mo, dy] = today.split("-").map(Number);
+  const dateEx = `${dy}/${mo}/${yr + 543}`;
+  return [
+    "หัวเบิกยังขาดวันที่",
+    "กรุณาพิมพ์ เช่น:",
+    `${seller}-${market} ${intent} ${dateEx}`,
+  ].join("\n");
+}
+
 interface WebhookServiceDependencies {
   evidenceIngestor?: SlipEvidenceIngestor;
   checkProcessor?: SlipCheckProcessor;
@@ -1474,7 +1489,12 @@ export class WebhookService {
 
     const businessDate = businessDateFromText(firstLine, bangkokToday());
 
-    if (hdr.type === "explicit" && hdr.txIntent === "เบิก") return { ok: true };
+    if (hdr.type === "explicit" && hdr.txIntent === "เบิก") {
+      if (!RE.DATE_IN_TEXT.test(firstLine)) {
+        return { ok: false, reply: buildMissingDateReply(firstLine) };
+      }
+      return { ok: true };
+    }
 
     if (hdr.type === "explicit" && hdr.txIntent === "เบิกเพิ่ม") {
       return this.canCollectExplicitProduceAppend(firstLine, sessionKey, log);
@@ -1535,6 +1555,10 @@ export class WebhookService {
     const wrs = new WorkRoundService(this.supabase);
     if (hdr?.type !== "explicit" || hdr.txIntent !== "เบิกเพิ่ม") {
       return { ok: false, reply: wrs.buildNoAppendRoundPrompt() };
+    }
+
+    if (!RE.DATE_IN_TEXT.test(firstLine)) {
+      return { ok: false, reply: buildMissingDateReply(firstLine) };
     }
 
     const businessDate = businessDateFromText(firstLine, bangkokToday());
@@ -2359,14 +2383,10 @@ export class WebhookService {
 
     if (!data) return parsed;
 
-    const titleHdr = parsed.session_title ? classifyHeader(parsed.session_title) : null;
-    const useRoundMarket = !parsed.session_title?.trim()
-      || titleHdr?.type === "generic";
-
     return {
       ...parsed,
-      staff_name:    parsed.staff_name?.trim() ? parsed.staff_name : String(data.seller_name),
-      session_title: useRoundMarket ? String(data.market_name) : parsed.session_title,
+      staff_name:    String(data.seller_name),
+      session_title: String(data.market_name),
     };
   }
 

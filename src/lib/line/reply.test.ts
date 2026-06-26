@@ -140,6 +140,29 @@ describe("buildWeighSessionSummary — header", () => {
     const result = buildWeighSessionSummary(makeSession({ items: [] }));
     expect(result).toContain("บันทึกแล้ว ✅");
   });
+
+  it("P1 — Work Round session แสดง seller — market แทนวันที่", () => {
+    // When enrichParsedFromWorkRound sets session_title, summary must prefer
+    // market name over date (P1 identity consistency requirement).
+    const result = buildWeighSessionSummary(makeSession({
+      staff_name:    "โอม",
+      session_title: "ตลาดพาซิโอ้ผลไม้",
+      date:          "2026-06-26",
+    }));
+    expect(result).toContain("โอม — ตลาดพาซิโอ้ผลไม้");
+    expect(result).not.toContain("2569");
+  });
+
+  it("P1 — fallback to date when session_title absent", () => {
+    const result = buildWeighSessionSummary(makeSession({
+      staff_name:    "พี่ดำ",
+      session_title: null,
+      date:          "2026-06-26",
+    }));
+    expect(result).toContain("พี่ดำ");
+    expect(result).toContain("2569");
+    expect(result).not.toContain("ตลาด");
+  });
 });
 
 describe("pushLineMessage — X-Line-Retry-Key and 409 handling", () => {

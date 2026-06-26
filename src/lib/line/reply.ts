@@ -143,11 +143,11 @@ export function buildWeighSessionSummary(session: WeighSession): string {
     return [label, ...items.map(itemLine), `${subtotalLabel}: ${fmt(total)} บาท`];
   };
 
-  const dateLabel = session.date ? formatThaiDate(session.date) : "";
+  const identityPart = session.session_title?.trim() || (session.date ? formatThaiDate(session.date) : "");
   const lines: string[] = [
     "บันทึกแล้ว ✅",
     "",
-    `${session.staff_name}${dateLabel ? ` — ${dateLabel}` : ""}`,
+    `${session.staff_name}${identityPart ? ` — ${identityPart}` : ""}`,
   ];
 
   const sections = [

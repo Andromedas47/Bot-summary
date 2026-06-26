@@ -91,16 +91,73 @@ const PRODUCTION_20_ITEM = [
 ].join("\n");
 
 describe("WebhookService — return parser integrity", () => {
-  it("does not persist 20-item payload when #9 is ambiguous", async () => {
+  it("does not persist 20-item payload when #9 is ambiguous — full reply format", async () => {
     const replies: string[] = [];
     const round = openRound();
     const db = memSupabase({ work_rounds: [round] });
     await svc(db, replies).processEvents([textEvent(PRODUCTION_20_ITEM)], "dest");
 
+    // Zero DB writes — even the 19 valid rows must not be persisted.
     expect(db._rows("produce_sessions")).toHaveLength(0);
     expect(db._rows("produce_items")).toHaveLength(0);
+    // Reply identifies the bad row; no success message leaks through.
     expect(replies[0]).toContain("อ่านรายการไม่ครบ");
+    expect(replies[0]).toContain("กรุณาแก้ไข");
     expect(replies[0]).toContain("#9");
+    expect(replies[0]).toContain("จีนหงส์");
+    expect(replies[0]).not.toContain("บันทึกแล้ว");
+  });
+
+  it("multi-message (pending session): malformed row in accumulated text blocks finalization", async () => {
+    // Tests the pending-session accumulation path: header, items with bad row,
+    // then end command in separate messages. The gate must hold across all three.
+    const replies: string[] = [];
+    const round = openRound();
+    const db = memSupabase({ work_rounds: [round] });
+    const service = svc(db, replies);
+
+    await service.processEvents([textEvent("โอม ชั่งคืน 25/6/2569")], "dest");
+    await service.processEvents([
+      textEvent([
+        "1ส้มไต้หวัน 40 บาท",
+        `20${LO}`,
+        `9จีนหงส์ 3 ${LO}100บาท`,
+        `15.5${LO}`,
+      ].join("\n")),
+    ], "dest");
+    await service.processEvents([textEvent("จบรายการ")], "dest");
+
+    expect(db._rows("produce_sessions")).toHaveLength(0);
+    expect(db._rows("produce_items")).toHaveLength(0);
+    const finalReply = replies[replies.length - 1];
+    expect(finalReply).toContain("อ่านรายการไม่ครบ");
+    expect(finalReply).toContain("#9");
+    expect(finalReply).not.toContain("บันทึกแล้ว");
+  });
+
+  it("apple in borrow session persists correctly — E2E", async () => {
+    // The success reply goes through replyLineMessage (HTTP), not the mock.
+    // Proof of correctness is in the DB state; the mock captures only error-path replies.
+    const replies: string[] = [];
+    const round = openRound({ status: "open" });
+    const db = memSupabase({ work_rounds: [round] });
+    await svc(db, replies).processEvents([
+      textEvent([
+        "โอม-วัดทุ่งลานนา เบิก 25/6/2569",
+        "1apple 20 บาท",
+        "40ลูก",
+        "จบรายการ",
+      ].join("\n")),
+    ], "dest");
+
+    expect(db._rows("produce_sessions")).toHaveLength(1);
+    expect(db._rows("produce_items")).toHaveLength(1);
+    const item = db._rows("produce_items")[0] as Record<string, unknown>;
+    expect(item["product_name"]).toBe("apple");
+    expect(item["quantity"]).toBe(40);
+    expect(item["price_per_unit"]).toBe(20);
+    // No parse-error reply: none of the mock replies should contain a block message.
+    expect(replies.every((r) => !r.includes("อ่านรายการไม่ครบ"))).toBe(true);
   });
 
   it("seller-only return header hydrates seller + market from the unique Work Round", async () => {
@@ -150,11 +207,16 @@ describe("WebhookService — return parser integrity", () => {
 });
 
 describe("parseWeighSession — review reply helper", () => {
-  it("buildParseReviewReply lists flagged item numbers", () => {
+  it("buildParseReviewReply lists flagged item numbers one per line with snippet", () => {
     const parsed = parseWeighSession(PRODUCTION_20_ITEM, MESSAGE_DATE);
     expect(hasParseReviewBlockers(parsed)).toBe(true);
     const reply = buildParseReviewReply(parsed);
     expect(reply).toContain("อ่านรายการไม่ครบ");
+    expect(reply).toContain("กรุณาแก้ไข");
     expect(reply).toContain("#9");
+    // The problematic line text must appear so the user knows what to fix.
+    expect(reply).toContain("จีนหงส์");
+    // Each issue on its own line (newline-per-issue format).
+    expect(reply.split("\n").some((l) => l.startsWith("#9"))).toBe(true);
   });
 });

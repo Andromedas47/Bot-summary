@@ -923,13 +923,35 @@ describe("return parser integrity — incident regression", () => {
     expect(flaggedNumbers).not.toContain(17);
   });
 
-  it("parses english product name apple", () => {
+  it("parses english product name apple (return) — full field verification", () => {
     const result = parseWeighSession(
       "กี้-วัดทุ่ง คืน 25/6/2569\n17apple 20 บาท\n40ลูก\nจบรายการ",
       "2026-06-25",
     );
     expect(result.items).toHaveLength(1);
-    expect(result.items[0].product_name).toBe("apple");
+    const item = result.items[0];
+    expect(item.product_name).toBe("apple");
+    expect(item.quantity).toBe(40);
+    expect(item.unit).toBe("ลูก");
+    expect(item.price_per_unit).toBe(20);
+    expect((item.quantity ?? 0) * (item.price_per_unit ?? 0)).toBe(800);
+    expect(item.transaction_type).toBe("คืน");
+    expect(result.review_issues).toHaveLength(0);
+  });
+
+  it("parses english product name apple (borrow) — full field verification", () => {
+    const result = parseWeighSession(
+      "กี้-วัดทุ่ง เบิก 25/6/2569\n17apple 20 บาท\n40ลูก\nจบรายการ",
+      "2026-06-25",
+    );
+    expect(result.items).toHaveLength(1);
+    const item = result.items[0];
+    expect(item.product_name).toBe("apple");
+    expect(item.quantity).toBe(40);
+    expect(item.unit).toBe("ลูก");
+    expect(item.price_per_unit).toBe(20);
+    expect((item.quantity ?? 0) * (item.price_per_unit ?? 0)).toBe(800);
+    expect(item.transaction_type).toBe("เบิก");
     expect(result.review_issues).toHaveLength(0);
   });
 
@@ -941,5 +963,43 @@ describe("return parser integrity — incident regression", () => {
     expect(result.items.some((item) => item.item_number === 9)).toBe(false);
     expect(result.review_issues.some((issue) => issue.item_number === 9)).toBe(true);
     expect(result.review_issues.some((issue) => issue.reason === "ambiguous_price")).toBe(true);
+  });
+
+  it("finance phrases are never parsed as items", () => {
+    const result = parseWeighSession(
+      [
+        "กี้-วัดทุ่ง คืน 25/6/2569",
+        "1หมอนทอง 129 บาท",
+        `10${LO}`,
+        "ยอดเบิก 1000 บาท",
+        "ยอดคืน 500 บาท",
+        "ยอดรวม 1500 บาท",
+        "ยอดเงินโอน 900 บาท",
+        "จบรายการ",
+      ].join("\n"),
+      "2026-06-25",
+    );
+    // Only the real item (#1) should be parsed; finance lines must be skipped.
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].product_name).toBe("หมอนทอง");
+    expect(result.review_issues).toHaveLength(0);
+  });
+
+  it("clean Thai rows parse without review issues", () => {
+    const result = parseWeighSession(
+      [
+        "กี้-วัดทุ่ง คืน 25/6/2569",
+        "1ส้มไต้หวัน 40 บาท",
+        `20${LO}`,
+        "2ฝรั่ง 35บาท",
+        `5${LO}`,
+        "จบรายการ",
+      ].join("\n"),
+      "2026-06-25",
+    );
+    expect(result.items).toHaveLength(2);
+    expect(result.review_issues).toHaveLength(0);
+    expect(result.items[0].product_name).toBe("ส้มไต้หวัน");
+    expect(result.items[1].product_name).toBe("ฝรั่ง");
   });
 });

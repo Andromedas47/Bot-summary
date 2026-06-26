@@ -95,8 +95,11 @@ export const RE = {
   SETTLEMENT_CMD: /^(?:ส่งเงิน|ปิดยอด)\s+(\d{1,2}\/\d{1,2}\/(?:25)?\d{2})\s*$/,
 
   // Settlement / finance summary lines — must never become produce items.
+  // \b is not used because Thai characters are non-word chars (\w = ASCII only);
+  // \b after Thai never fires before a space, so "ยอดเบิก 1000 บาท" would slip
+  // through. Lookahead (?=\s|$) anchors the keyword to end of word in Thai text.
   RESERVED_FINANCIAL:
-    /^(?:ยอดเบิก|ยอดคืนเสีย|ยอดคืน|ยอดที่ต้องขายได้|ยอดเงินโอน|ยอดสลิปมือ|ยอดรวมสลิป|ยอดรวม|ส่งเงินจริง|ส่งเงินขาด|ส่งเงินเกิน|เงินโอนไม่ขาด|ยอดเงินขาด|ตรวจสลิป|ขาดจากยอดเงินโอน)\b/,
+    /^(?:ยอดเบิก|ยอดคืนเสีย|ยอดคืน|ยอดที่ต้องขายได้|ยอดเงินโอน|ยอดสลิปมือ|ยอดรวมสลิป|ยอดรวม|ส่งเงินจริง|ส่งเงินขาด|ส่งเงินเกิน|เงินโอนไม่ขาด|ยอดเงินขาด|ตรวจสลิป|ขาดจากยอดเงินโอน)(?=[\s\d]|$)/,
 } as const;
 
 export function isReservedFinancialLine(content: string): boolean {

@@ -44,6 +44,26 @@ export type WorkRoundHeader = ExplicitHeader | GenericHeader | SellerOnlyHeader;
 // Checked before the standard คืน pattern to avoid misclassification.
 const APPEND_RE = /ชั่งคืนเพิ่ม|คืนเพิ่ม/;
 
+// Unicode dash look-alikes that LINE / mobile keyboards (and autocorrect) often
+// substitute for the ASCII hyphen "-" used as the seller-market separator.
+// Without this, "กี้–วัดทุ่งลานนา เบิก" (en-dash) fails SELLER_MARKET and gets
+// misclassified as a generic header → wrongly rejected with "no open item".
+//   U+2010 hyphen, U+2011 non-breaking hyphen, U+2012 figure dash,
+//   U+2013 en dash, U+2014 em dash, U+2015 horizontal bar,
+//   U+2212 minus sign, U+FF0D fullwidth hyphen-minus.
+const DASH_VARIANTS = /[\u2010\u2011\u2012\u2013\u2014\u2015\u2212\uFF0D]/g;
+
+function normalizeDashes(text: string): string {
+  return text.replace(DASH_VARIANTS, "-");
+}
+
+// Strips a LINE export TIME_PREFIX and normalizes dash look-alikes to "-".
+function normalizeHeaderContent(line: string): string {
+  const prefixMatch = line.match(RE.TIME_PREFIX);
+  const raw         = prefixMatch ? prefixMatch[3].trim() : line.trim();
+  return normalizeDashes(raw);
+}
+
 function detectTxIntent(text: string): TxIntent {
   if (APPEND_RE.test(text))              return "ชั่งคืนเพิ่ม";
   if (RE.TX_TYPE_BEIK_PHERM.test(text)) return "เบิกเพิ่ม";
@@ -58,8 +78,7 @@ function detectTxIntent(text: string): TxIntent {
  * Returns null if the line does not look like a produce-session header at all.
  */
 export function classifyHeader(line: string): WorkRoundHeader | null {
-  const prefixMatch = line.match(RE.TIME_PREFIX);
-  const content     = prefixMatch ? prefixMatch[3].trim() : line.trim();
+  const content = normalizeHeaderContent(line);
 
   // Explicit: "seller-market txType [date]"
   const smMatch = content.match(RE.SELLER_MARKET);
@@ -91,8 +110,7 @@ export function classifyHeader(line: string): WorkRoundHeader | null {
 }
 
 function headerContent(line: string): string {
-  const prefixMatch = line.match(RE.TIME_PREFIX);
-  return prefixMatch ? prefixMatch[3].trim() : line.trim();
+  return normalizeHeaderContent(line);
 }
 
 // Standalone transaction keywords — no seller-market required.

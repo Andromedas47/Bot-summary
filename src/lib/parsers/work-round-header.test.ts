@@ -30,6 +30,33 @@ describe("classifyHeader", () => {
     if (h?.type === "explicit") expect(h.txIntent).toBe("คืนเสีย");
   });
 
+  // Regression: production sent a non-ASCII dash between seller and market, which
+  // made SELLER_MARKET fail and the header fall through to "generic" → wrongly
+  // rejected with "ไม่พบรายการที่เปิดอยู่". All dash look-alikes must classify
+  // as the same explicit header.
+  it.each([
+    ["en dash U+2013",          "\u2013"],
+    ["em dash U+2014",          "\u2014"],
+    ["hyphen U+2010",           "\u2010"],
+    ["non-breaking hyphen U+2011", "\u2011"],
+    ["figure dash U+2012",      "\u2012"],
+    ["horizontal bar U+2015",   "\u2015"],
+    ["minus sign U+2212",       "\u2212"],
+    ["fullwidth hyphen U+FF0D", "\uFF0D"],
+  ])("classifies seller%s-market เบิก header as explicit (%s)", (_name, dash) => {
+    const h = classifyHeader(`กี้${dash}วัดทุ่งลานนา เบิก 26/06/2569`);
+    expect(h?.type).toBe("explicit");
+    if (h?.type === "explicit") {
+      expect(h.sellerName).toBe("กี้");
+      expect(h.marketName).toBe("วัดทุ่งลานนา");
+      expect(h.txIntent).toBe("เบิก");
+    }
+  });
+
+  it("does not treat an en-dash seller-market header as incomplete", () => {
+    expect(isIncompleteProduceHeader("กี้\u2013วัดทุ่งลานนา เบิก 26/06/2569")).toBe(false);
+  });
+
   it("strips LINE export TIME_PREFIX before classifying", () => {
     const h = classifyHeader("18:53 เสือ กี้-วัดทุ่งลานนา เบิก 24/06/2569");
     expect(h?.type).toBe("explicit");

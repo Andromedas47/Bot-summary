@@ -1747,12 +1747,13 @@ export class WebhookService {
         }
       }
 
-      // Fix 2: guard empty parse
-      if (parsed.items.length === 0) {
-        log.warn("parsed session has no items — aborting");
+      // Specific parse-review check first: a malformed indexed item must produce
+      // "#N line" reply, not the generic "ไม่สำเร็จ" that fires on empty items.
+      if (hasParseReviewBlockers(parsed)) {
+        log.warn("parsed session has review blockers — aborting", { issues: parsed.review_issues });
         if (replyToken) {
           try {
-            await this.replyMessage(replyToken, "อ่านรายการไม่สำเร็จ กรุณาตรวจสอบรูปแบบข้อความ");
+            await this.replyMessage(replyToken, buildParseReviewReply(parsed));
           } catch (e) {
             log.error("reply failed", { error: String(e) });
           }
@@ -1766,11 +1767,12 @@ export class WebhookService {
         };
       }
 
-      if (hasParseReviewBlockers(parsed)) {
-        log.warn("parsed session has review blockers — aborting", { issues: parsed.review_issues });
+      // Generic guard: no recognisable items and no flagged issues → truly unreadable.
+      if (parsed.items.length === 0) {
+        log.warn("parsed session has no items — aborting");
         if (replyToken) {
           try {
-            await this.replyMessage(replyToken, buildParseReviewReply(parsed));
+            await this.replyMessage(replyToken, "อ่านรายการไม่สำเร็จ กรุณาตรวจสอบรูปแบบข้อความ");
           } catch (e) {
             log.error("reply failed", { error: String(e) });
           }
@@ -1842,11 +1844,12 @@ export class WebhookService {
         const ws = result.data as unknown as WeighSession;
         console.log("[TRACE][runParser] parser_output:", JSON.stringify({ date: ws.date, staff_name: ws.staff_name, items_count: ws.items.length, items: ws.items, parse_errors: ws.parse_errors }, null, 2));
 
-        if (ws.items.length === 0) {
-          log.warn("parsed session has no items — aborting");
+        // Specific parse-review check first (same ordering as finalizeAccumulated).
+        if (hasParseReviewBlockers(ws)) {
+          log.warn("parsed session has review blockers — aborting", { issues: ws.review_issues });
           if (replyToken) {
             try {
-              await this.replyMessage(replyToken, "อ่านรายการไม่สำเร็จ กรุณาตรวจสอบรูปแบบข้อความ");
+              await this.replyMessage(replyToken, buildParseReviewReply(ws));
             } catch (e) {
               log.error("reply failed", { error: String(e) });
             }
@@ -1854,11 +1857,11 @@ export class WebhookService {
           return { eventId, eventType, status: "saved", parsed: false };
         }
 
-        if (hasParseReviewBlockers(ws)) {
-          log.warn("parsed session has review blockers — aborting", { issues: ws.review_issues });
+        if (ws.items.length === 0) {
+          log.warn("parsed session has no items — aborting");
           if (replyToken) {
             try {
-              await this.replyMessage(replyToken, buildParseReviewReply(ws));
+              await this.replyMessage(replyToken, "อ่านรายการไม่สำเร็จ กรุณาตรวจสอบรูปแบบข้อความ");
             } catch (e) {
               log.error("reply failed", { error: String(e) });
             }

@@ -90,7 +90,53 @@ const PRODUCTION_20_ITEM = [
   "จบรายการ",
 ].join("\n");
 
+// Exact production payload that reproduced the ordering bug (spaced item number).
+const PRODUCTION_SPACED_BAD = [
+  "ทดสอบกำกวม-ตลาดกำกวม เบิก 1/7/2569",
+  `9 จีนหงส์ 3 ${LO}100บาท`,
+  `15.5 ${LO}`,
+  "จบรายการเบิก",
+].join("\n");
+
 describe("WebhookService — return parser integrity", () => {
+  it("single-message: spaced item number + ambiguous price gives parse-review reply, not generic error", async () => {
+    // Production bug: "9 จีนหงส์ 3 โล100บาท" (space after 9) → items=[] + review_issues=[#9]
+    // Old behaviour: items.length===0 guard fired first → "อ่านรายการไม่สำเร็จ"
+    // Required:      hasParseReviewBlockers fires first → "#9 จีนหงส์..." reply
+    const replies: string[] = [];
+    const db = memSupabase();
+    await svc(db, replies).processEvents([textEvent(PRODUCTION_SPACED_BAD)], "dest");
+
+    expect(db._rows("produce_sessions")).toHaveLength(0);
+    expect(db._rows("produce_items")).toHaveLength(0);
+    expect(replies[0]).toContain("อ่านรายการไม่ครบ");
+    expect(replies[0]).toContain("กรุณาแก้ไข");
+    expect(replies[0]).toContain("#9");
+    expect(replies[0]).toContain("จีนหงส์");
+    expect(replies[0]).not.toContain("อ่านรายการไม่สำเร็จ");
+    expect(replies[0]).not.toContain("บันทึกแล้ว");
+  });
+
+  it("multi-message: spaced item number + ambiguous price gives parse-review reply via pending session path", async () => {
+    const replies: string[] = [];
+    const db = memSupabase();
+    const service = svc(db, replies);
+
+    await service.processEvents([textEvent("ทดสอบกำกวม-ตลาดกำกวม เบิก 1/7/2569")], "dest");
+    await service.processEvents([
+      textEvent([`9 จีนหงส์ 3 ${LO}100บาท`, `15.5 ${LO}`, "จบรายการเบิก"].join("\n")),
+    ], "dest");
+
+    expect(db._rows("produce_sessions")).toHaveLength(0);
+    expect(db._rows("produce_items")).toHaveLength(0);
+    const finalReply = replies[replies.length - 1];
+    expect(finalReply).toContain("อ่านรายการไม่ครบ");
+    expect(finalReply).toContain("#9");
+    expect(finalReply).toContain("จีนหงส์");
+    expect(finalReply).not.toContain("อ่านรายการไม่สำเร็จ");
+    expect(finalReply).not.toContain("บันทึกแล้ว");
+  });
+
   it("does not persist 20-item payload when #9 is ambiguous — full reply format", async () => {
     const replies: string[] = [];
     const round = openRound();

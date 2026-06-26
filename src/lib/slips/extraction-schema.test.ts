@@ -99,4 +99,58 @@ describe("slip extraction validation", () => {
 
     expect(extraction.transactionTime).toBe("2026-06-17T11:16:00.000Z");
   });
+
+  it("parses K+ Thai date 26 มิ.ย. 69 01:22 น. to 2026-06-26 Bangkok", () => {
+    const extraction = parseSlipExtraction({
+      slip_type: "BANK_SLIP_QR",
+      gross_amount: null,
+      discount_amount: null,
+      paid_amount: null,
+      transfer_amount: 1654,
+      reference_id: "ref-kplus",
+      transaction_time: "26 มิ.ย. 69 01:22 น.",
+      sender_name: null,
+      receiver_name: "ร้านค้า",
+      receiver_account_tail: "1234",
+      confidence: 0.98,
+    });
+
+    expect(extraction.transactionTime).toBe("2026-06-25T18:22:00.000Z");
+  });
+
+  it("repairs LLM ISO year 2069 as mis-prefixed Buddhist 2569", () => {
+    const extraction = parseSlipExtraction({
+      slip_type: "BANK_SLIP_QR",
+      gross_amount: null,
+      discount_amount: null,
+      paid_amount: null,
+      transfer_amount: 1654,
+      reference_id: "ref-kplus",
+      transaction_time: "2069-06-26T01:22:00+07:00",
+      sender_name: null,
+      receiver_name: "ร้านค้า",
+      receiver_account_tail: "1234",
+      confidence: 0.98,
+    });
+
+    expect(extraction.transactionTime).toBe("2026-06-25T18:22:00.000Z");
+  });
+
+  it("keeps four-digit Buddhist ISO 2569-06-26 unchanged in meaning", () => {
+    const extraction = parseSlipExtraction({
+      slip_type: "BANK_SLIP_QR",
+      gross_amount: null,
+      discount_amount: null,
+      paid_amount: null,
+      transfer_amount: 1654,
+      reference_id: "ref-kplus",
+      transaction_time: "2569-06-26T01:22:00+07:00",
+      sender_name: null,
+      receiver_name: "ร้านค้า",
+      receiver_account_tail: "1234",
+      confidence: 0.98,
+    });
+
+    expect(extraction.transactionTime).toBe("2026-06-25T18:22:00.000Z");
+  });
 });

@@ -6,6 +6,7 @@ import {
   parseAbandonedMinutes,
 } from "./batch-finalizer";
 import type { Database } from "@/types/database";
+import { parseSlipExtraction } from "./extraction-schema";
 
 // ── parseAbandonedMinutes ──────────────────────────────────────────────────
 
@@ -555,5 +556,34 @@ describe("buildBatchSummaryMessage trusted slip lines", () => {
     // so it never appears in the trusted section. Guard against a regression where
     // a null-amount trusted slip would render "เช็คได้ undefined บาท".
     expect(msg).not.toContain("undefined");
+  });
+
+  it("does not misclassify a still-processing slip as date mismatch after จบสลิป", () => {
+    const evidences = [
+      makeEvidence("PROCESSING", 1, { transactionTime: null, transferAmount: null }),
+      makeEvidence("EXTRACTED", 2, {
+        transactionTime: parseSlipExtraction({
+          slip_type: "BANK_SLIP_QR",
+          gross_amount: null,
+          discount_amount: null,
+          paid_amount: null,
+          transfer_amount: 1654,
+          reference_id: "ref",
+          transaction_time: "26 มิ.ย. 69 01:22 น.",
+          sender_name: null,
+          receiver_name: "shop",
+          receiver_account_tail: "1234",
+          confidence: 0.98,
+        }).transactionTime,
+        transferAmount: 1654,
+      }),
+    ];
+    const msg = buildBatchSummaryMessage(evidences, { slipDate: "26/6/2569" });
+
+    expect(msg).toContain("อ่านครบ: 1 รูป");
+    expect(msg).toContain("รอตรวจมือ: 1 รูป");
+    expect(msg).toContain("#1 รอผลการตรวจสอบ");
+    expect(msg).toContain("#2 เช็คได้ 1,654 บาท");
+    expect(msg).not.toContain("วันที่รายการไม่ตรงกับรอบ");
   });
 });

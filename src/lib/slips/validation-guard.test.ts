@@ -639,3 +639,127 @@ describe("Production batch fixture: n0i — wat takl0m — 10/6/2569", () => {
     expect(msg).toContain("ไม่พบวันที่รายการ");
   });
 });
+
+// ── K+ slip date regression (26 มิ.ย. 69 / 26/6/2569) ───────────────────────
+
+describe("K+ slip date regression", () => {
+  const BATCH_DATE = parseBatchDate("26/6/2569");
+  const KPLUS_OCR = {
+    slip_type: "BANK_SLIP_QR",
+    gross_amount: null,
+    discount_amount: null,
+    paid_amount: null,
+    transfer_amount: 1654,
+    reference_id: "016168181620CTF05042",
+    transaction_time: "26 มิ.ย. 69 01:22 น.",
+    sender_name: null,
+    receiver_name: "shop",
+    receiver_account_tail: "1234",
+    confidence: 0.98,
+  } as const;
+
+  function makeBankExtracted(
+    transferAmount: number,
+    transactionTime: string | null,
+  ) {
+    return {
+      checkStatus:     "EXTRACTED" as SlipCheckStatus,
+      slipType:        "BANK_SLIP_QR" as SlipType,
+      transferAmount,
+      paidAmount:      null,
+      transactionTime,
+    };
+  }
+
+  it("26 มิ.ย. 69 01:22 น. normalizes to Bangkok calendar date 2026-06-26", () => {
+    const tx = parseSlipExtraction(KPLUS_OCR).transactionTime;
+    expect(tx).toBe("2026-06-25T18:22:00.000Z");
+    expect(BATCH_DATE).toBe("2026-06-26");
+  });
+
+  it("exact K+ date and amount 1654 against 26/6/2569 batch is read complete", () => {
+    const tx = parseSlipExtraction(KPLUS_OCR).transactionTime;
+    const ev = makeBankExtracted(1654, tx);
+    const [flag] = computeValidationFlags([ev], BATCH_DATE);
+    const msg = buildBatchSummaryMessage(
+      [{ id: "ev-1", batchIndex: 1, ...ev, failureReason: null }],
+      { title: "สรุปชุดสลิปเงินโอน ทดสอบอ่านสลิป — ตลาดอ่านสลิป — 26/6/2569", slipDate: "26/6/2569" },
+    );
+
+    expect(flag.flagged).toBe(false);
+    expect(msg).toContain("อ่านครบ: 1 รูป");
+    expect(msg).toContain("รอตรวจมือ: 0 รูป");
+    expect(msg).not.toContain("วันที่รายการไม่ตรงกับรอบ");
+  });
+
+  it("same amount but different slip date stays review-required with date mismatch", () => {
+    const tx = parseSlipExtraction({
+      ...KPLUS_OCR,
+      transaction_time: "24 มิ.ย. 69 01:22 น.",
+    }).transactionTime;
+    const ev = makeBankExtracted(1654, tx);
+    const [flag] = computeValidationFlags([ev], BATCH_DATE);
+
+    expect(flag.flagged).toBe(true);
+    expect(flag.flagReasons).toEqual(["วันที่รายการไม่ตรงกับรอบ"]);
+  });
+
+  it("same date but missing amount stays review-required without date mismatch", () => {
+    const tx = parseSlipExtraction(KPLUS_OCR).transactionTime;
+    const ev = makeBankExtracted(1654, tx);
+    ev.transferAmount = null;
+    const [flag] = computeValidationFlags([ev], BATCH_DATE);
+
+    expect(flag.flagged).toBe(true);
+    expect(flag.flagReasons).toEqual(["ข้อมูลไม่ครบ"]);
+    expect(flag.flagReasons).not.toContain("วันที่รายการไม่ตรงกับรอบ");
+  });
+
+  it("four-digit Buddhist batch date 26/6/2569 behavior is unchanged", () => {
+    expect(parseBatchDate("26/6/2569")).toBe("2026-06-26");
+    const tx = parseSlipExtraction({
+      ...KPLUS_OCR,
+      transaction_time: "26 มิ.ย. 2569 01:22 น.",
+    }).transactionTime;
+    const [flag] = computeValidationFlags([makeBankExtracted(1654, tx)], BATCH_DATE);
+    expect(flag.flagged).toBe(false);
+  });
+
+  it("reproduces production failure when LLM pre-converts Buddhist year with -544", () => {
+    const productionTx = parseSlipExtraction({
+      ...KPLUS_OCR,
+      transaction_time: "2025-06-26T01:22:00+07:00",
+    }).transactionTime;
+    expect(productionTx).toBe("2025-06-25T18:22:00.000Z");
+
+    const [flag] = computeValidationFlags(
+      [makeBankExtracted(1654, productionTx)],
+      BATCH_DATE,
+    );
+    expect(flag.flagged).toBe(true);
+    expect(flag.flagReasons).toContain("วันที่รายการไม่ตรงกับรอบ");
+  });
+
+  it("PROCESSING evidence before extraction finishes is not misclassified as date mismatch", () => {
+    const msg = buildBatchSummaryMessage(
+      [{
+        id:              "ev-1",
+        batchIndex:      1,
+        checkStatus:     "PROCESSING",
+        slipType:        "BANK_SLIP_QR",
+        transferAmount:  null,
+        paidAmount:      null,
+        transactionTime: null,
+        failureReason:   null,
+      }],
+      {
+        title:    "สรุปชุดสลิปเงินโอน ทดสอบอ่านสลิป — ตลาดอ่านสลิป — 26/6/2569",
+        slipDate: "26/6/2569",
+      },
+    );
+
+    expect(msg).toContain("รับทั้งหมด: 1 รูป");
+    expect(msg).toContain("แต่ระบบอ่านข้อมูลไม่ครบ");
+    expect(msg).not.toContain("วันที่รายการไม่ตรงกับรอบ");
+  });
+});

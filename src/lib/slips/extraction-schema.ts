@@ -47,7 +47,8 @@ export const SLIP_EXTRACTION_JSON_SCHEMA = {
     reference_id: { type: ["string", "null"] },
     transaction_time: {
       type: ["string", "null"],
-      description: "ISO 8601 timestamp with an explicit UTC offset when visible.",
+      description:
+        "Visible transaction date/time as printed on the slip (Thai text preferred, e.g. 26 มิ.ย. 69 01:22 น.). Do not convert Buddhist years to Gregorian.",
     },
     sender_name: { type: ["string", "null"] },
     receiver_name: { type: ["string", "null"] },
@@ -237,7 +238,15 @@ function normalizeVisibleThaiTimestamp(text: string): string {
 
 function normalizeThaiYear(year: number): number {
   const fullYear = year < 100 ? year + 2500 : year;
-  return fullYear > 2400 ? fullYear - 543 : fullYear;
+  if (fullYear > 2400) return fullYear - 543;
+
+  // LLM sometimes prefixes a visible two-digit Buddhist year as AD 2069 (69 → 2069).
+  if (year >= 2060 && year <= 2099) {
+    const buddhistYear = year + 500;
+    if (buddhistYear > 2400) return buddhistYear - 543;
+  }
+
+  return year;
 }
 
 function isValidDateTimeParts(

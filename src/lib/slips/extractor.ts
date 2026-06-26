@@ -237,9 +237,12 @@ For THAI_HELP_THAI or GWALLET:
 For bank slips:
 - transfer_amount is the visible transferred amount.
 
-Use transaction_time only when both date and time are visible. Include Thailand's
-+07:00 offset unless the image explicitly shows another offset. Convert a visible
-Thai Buddhist year to the equivalent Gregorian year for ISO 8601. Keep reference_id
+Use transaction_time only when both date and time are visible on the slip.
+Copy the visible date and time exactly as printed, including Thai month
+abbreviations and two-digit Buddhist years (for example 26 มิ.ย. 69 01:22 น.).
+Do NOT convert Buddhist years to Gregorian — the server normalizes dates.
+When the slip shows a numeric ISO-style date instead, include Thailand's +07:00
+offset unless the image explicitly shows another offset. Keep reference_id
 exactly as shown. Return only the last four visible receiver account digits.
 Do not return OCR prose or any full bank account number.
 `.trim();

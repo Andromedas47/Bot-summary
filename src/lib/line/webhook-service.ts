@@ -105,6 +105,11 @@ const SLIP_CLOSE_ACKNOWLEDGED_REPLY =
 
 const ALREADY_CLOSING_REPLY = "รับทราบแล้ว กำลังสรุปสลิปอยู่ กรุณารอสักครู่";
 
+const BORROW_GENERIC_CLOSE_REPLY = [
+  "รอบนี้เป็นรายการเบิก",
+  "กรุณาพิมพ์ “จบรายการเบิก” เมื่อส่งครบ",
+].join("\n");
+
 const CLOSE_ROUND_CMD_RE = /^ปิดรอบ\s+(\d{1,2}\/\d{1,2}\/(?:25)?\d{2})\s*$/;
 const CLOSE_ROUND_CONFIRM_RE = /^ยืนยันปิดรอบ\s*$/;
 
@@ -213,8 +218,61 @@ function hasSessionEnd(text: string): boolean {
   return text.split("\n").some((l) => RE.SESSION_END.test(l.trim()));
 }
 
+function hasExactLine(text: string, exact: string): boolean {
+  return text.split("\n").some((l) => l.trim() === exact);
+}
+
+function hasBorrowCloseMarker(text: string): boolean {
+  return hasExactLine(text, "จบรายการเบิก");
+}
+
+function hasGenericCloseMarker(text: string): boolean {
+  return hasExactLine(text, "จบรายการ");
+}
+
 function hasItemLine(text: string): boolean {
   return text.split("\n").some((l) => RE.ITEM.test(l.trim()));
+}
+
+type ProducePendingKind = "borrow" | "return" | "bad-return" | "append" | "unknown";
+
+function classifyPendingProduceKind(accumulatedText: string): ProducePendingKind {
+  const firstLine = normalizeText(accumulatedText).split("\n")[0]?.trim() ?? "";
+  if (hasProduceAppendStart(firstLine) || hasExplicitProduceAppendStart(firstLine)) return "append";
+
+  const hdr = classifyHeader(firstLine);
+  if (!hdr) return "unknown";
+  if (hdr.txIntent === "เบิก") return "borrow";
+  if (hdr.txIntent === "คืน") return "return";
+  if (hdr.txIntent === "คืนเสีย") return "bad-return";
+  if (hdr.txIntent === "เบิกเพิ่ม" || hdr.txIntent === "ชั่งคืนเพิ่ม") return "append";
+  return "unknown";
+}
+
+function hasAcceptedCloseMarkerForPending(kind: ProducePendingKind, normalizedText: string): boolean {
+  switch (kind) {
+    case "borrow":
+      return hasBorrowCloseMarker(normalizedText);
+    case "return":
+      return hasGenericCloseMarker(normalizedText)
+        || hasExactLine(normalizedText, "จบรายการคืน")
+        || hasExactLine(normalizedText, "จบรายการชั่งคืน");
+    case "bad-return":
+      return hasGenericCloseMarker(normalizedText)
+        || hasExactLine(normalizedText, "จบรายการคืนเสีย");
+    case "append":
+      return hasGenericCloseMarker(normalizedText)
+        || hasBorrowCloseMarker(normalizedText)
+        || hasExactLine(normalizedText, "จบรายการเบิกเพิ่ม")
+        || hasExactLine(normalizedText, "จบรายการคืน")
+        || hasExactLine(normalizedText, "จบรายการคืนเสีย");
+    case "unknown":
+      return hasSessionEnd(normalizedText);
+  }
+}
+
+function hasBorrowGenericCloseForPending(kind: ProducePendingKind, normalizedText: string): boolean {
+  return kind === "borrow" && hasGenericCloseMarker(normalizedText) && !hasBorrowCloseMarker(normalizedText);
 }
 
 // SESSION_END lines like "จบรายการคืน" contain "คืน" which also matches SESSION_START.
@@ -504,6 +562,13 @@ export class WebhookService {
     }
 
     if (pending) {
+      const pendingKind = classifyPendingProduceKind(pending.accumulated_text);
+      if (hasBorrowGenericCloseForPending(pendingKind, normalizedText)) {
+        log.info("generic close rejected for borrow pending session", { sessionKey });
+        if (replyToken) await this.replyMessage(replyToken, BORROW_GENERIC_CLOSE_REPLY);
+        return { eventId, eventType: event.type, status: "saved", parsed: false };
+      }
+
       if (hasSessionStart(normalizedText) && !appendStart && !explicitAppendStart) {
         const gate = await this.canCollectProduceHeader(firstLine, sessionKey, log);
         if (!gate.ok) {
@@ -537,7 +602,8 @@ export class WebhookService {
           };
         }
 
-        if (hasSessionEnd(normalizedText)) {
+        const updatedKind = classifyPendingProduceKind(updated.accumulated_text);
+        if (hasAcceptedCloseMarkerForPending(updatedKind, normalizedText)) {
           return this.finalizePendingSession(
             pendingService,
             updated,
@@ -592,7 +658,7 @@ export class WebhookService {
         };
       }
 
-      if (hasSessionEnd(normalizedText)) {
+      if (hasAcceptedCloseMarkerForPending(pendingKind, normalizedText)) {
         return this.finalizePendingSession(
           pendingService,
           updated,
@@ -682,6 +748,26 @@ export class WebhookService {
     }
 
     if (hasSessionStart(normalizedText)) {
+      const sessionKind = classifyPendingProduceKind(normalizedText);
+      if (hasBorrowGenericCloseForPending(sessionKind, normalizedText)) {
+        const gate = await this.canCollectProduceHeader(firstLine, sessionKey, log);
+        if (!gate.ok) {
+          log.info("generic borrow close blocked before pending session", { sessionKey, firstLine });
+          if (replyToken) await this.replyMessage(replyToken, gate.reply);
+          return { eventId, eventType: event.type, status: "saved", parsed: false };
+        }
+
+        try {
+          await pendingService.create(sessionKey, text, replyToken, lineUserId);
+        } catch (createErr) {
+          const msg = createErr instanceof Error ? createErr.message : String(createErr);
+          log.error("pending session create failed for generic borrow close", { sessionKey, error: msg });
+          return { eventId, eventType: event.type, status: "error", parsed: false, error: msg };
+        }
+        if (replyToken) await this.replyMessage(replyToken, BORROW_GENERIC_CLOSE_REPLY);
+        return { eventId, eventType: event.type, status: "saved", parsed: false };
+      }
+
       if (hasSessionEnd(normalizedText) || hasItemLine(normalizedText)) {
         // Complete single-message: has SESSION_END or item lines → parse directly
         console.log("single complete message detected — parsing directly");
@@ -1710,13 +1796,13 @@ export class WebhookService {
       bangkokToday(),
     );
 
-    await pendingService.delete(sessionKey);
     if (result.pendingSessionClosed) {
+      await pendingService.delete(sessionKey);
       log.info("pending session closed", { sessionKey, sessionStatus: "closed" });
     } else {
-      log.warn("pending session aborted after unsuccessful finalization", {
+      log.warn("pending session retained after unsuccessful finalization", {
         sessionKey,
-        sessionStatus: "aborted",
+        sessionStatus: "active",
       });
     }
     return result;
@@ -1763,7 +1849,7 @@ export class WebhookService {
           eventType,
           status: "saved",
           parsed: false,
-          pendingSessionClosed: true,
+          pendingSessionClosed: false,
         };
       }
 
@@ -1782,7 +1868,7 @@ export class WebhookService {
           eventType,
           status: "saved",
           parsed: false,
-          pendingSessionClosed: true,
+          pendingSessionClosed: false,
         };
       }
 
@@ -1809,7 +1895,7 @@ export class WebhookService {
         status: "saved",
         parsed: false,
         error: errorMessage,
-        pendingSessionClosed: true,
+        pendingSessionClosed: false,
       };
     }
   }
@@ -2433,7 +2519,7 @@ export class WebhookService {
           await replyLineMessage(replyToken, new WorkRoundService(this.supabase).buildNoRoundPrompt());
         } catch (e) { log.error("reply failed", { error: String(e) }); }
       }
-      return { eventId, eventType, status: "saved", parsed: false, pendingSessionClosed: true };
+      return { eventId, eventType, status: "saved", parsed: false, pendingSessionClosed: false };
     }
 
     if (hasParseReviewBlockers(parsed)) {
@@ -2442,7 +2528,7 @@ export class WebhookService {
         try { await this.replyMessage(replyToken, buildParseReviewReply(parsed)); }
         catch (e) { log.error("reply failed", { error: String(e) }); }
       }
-      return { eventId, eventType, status: "saved", parsed: false, pendingSessionClosed: true };
+      return { eventId, eventType, status: "saved", parsed: false, pendingSessionClosed: false };
     }
 
     const persisted = await this.enrichParsedFromWorkRound(parsed, target.workRoundId);
@@ -2559,7 +2645,7 @@ export class WebhookService {
     | { kind: "halt"; result: WebhookProcessResult }
   > {
     const halt = (): WebhookProcessResult => ({
-      eventId, eventType, status: "saved", parsed: false, pendingSessionClosed: true,
+      eventId, eventType, status: "saved", parsed: false, pendingSessionClosed: false,
     });
 
     if (!sourceId || !businessDate) {

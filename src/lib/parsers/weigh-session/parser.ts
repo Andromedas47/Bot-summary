@@ -403,9 +403,22 @@ function finalizeDeclaredItemGaps(
   const flaggedNumbers = new Set(
     reviewIssues.map((issue) => issue.item_number).filter((n): n is number => n != null),
   );
+  const knownNumbers = new Set([...parsedNumbers, ...flaggedNumbers]);
 
   for (const itemNumber of declaredItemNumbers) {
     if (parsedNumbers.has(itemNumber) || flaggedNumbers.has(itemNumber)) continue;
+    reviewIssues.push({
+      item_number: itemNumber,
+      line:        `#${itemNumber}`,
+      reason:      "index_gap",
+    });
+  }
+
+  if (knownNumbers.size < 2) return;
+
+  const sorted = [...knownNumbers].sort((a, b) => a - b);
+  for (let itemNumber = sorted[0]; itemNumber <= sorted[sorted.length - 1]; itemNumber += 1) {
+    if (knownNumbers.has(itemNumber)) continue;
     reviewIssues.push({
       item_number: itemNumber,
       line:        `#${itemNumber}`,

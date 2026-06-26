@@ -75,35 +75,22 @@ export class PendingSessionService {
   ): Promise<PendingSession> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const rpc = (this.supabase as any).rpc?.bind(this.supabase);
-    if (rpc) {
-      const { data, error } = await rpc("append_pending_session", {
-        p_session_key:  sessionKey,
-        p_new_text:     newText,
-        p_reply_token:  replyToken,
-      });
-      if (!error) {
-        const row = Array.isArray(data) ? data[0] : data;
-        if (row) return row as PendingSession;
-      }
+    if (!rpc) {
+      throw new Error("pending session append failed: append_pending_session RPC unavailable");
     }
 
-    const current = await this.get(sessionKey);
-    if (!current) throw new Error(`pending session not found for append: ${sessionKey}`);
-    const merged = `${current.accumulated_text}\n${newText}`;
-    const { error: upsertError } = await this.supabase.from("pending_sessions").upsert(
-      {
-        session_key:        sessionKey,
-        accumulated_text:   merged,
-        latest_reply_token: replyToken,
-        line_user_id:       current.line_user_id,
-        updated_at:         new Date().toISOString(),
-      },
-      { onConflict: "session_key" },
-    );
-    if (upsertError) throw new Error(`pending session append failed: ${upsertError.message}`);
-    const updated = await this.get(sessionKey);
-    if (!updated) throw new Error(`pending session not found after append: ${sessionKey}`);
-    return updated;
+    const { data, error } = await rpc("append_pending_session", {
+      p_session_key:  sessionKey,
+      p_new_text:     newText,
+      p_reply_token:  replyToken,
+    });
+    if (error) {
+      throw new Error(`pending session append failed: ${error.message}`);
+    }
+
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!row) throw new Error(`pending session not found after append: ${sessionKey}`);
+    return row as PendingSession;
   }
 
   async delete(sessionKey: string): Promise<void> {

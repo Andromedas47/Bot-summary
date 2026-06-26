@@ -120,7 +120,7 @@ describe("WebhookService — produce pending contamination", () => {
     expect(db._rows("produce_items")).toHaveLength(0);
   });
 
-  it("aborts pending state after failed end marker and allows a clean restart", async () => {
+  it("retains pending state after failed end marker and allows a clean restart", async () => {
     const round = openRound({ seller_name: "กี้", market_name: "วัดทุ่ง" });
     const db = memSupabase({ work_rounds: [round] });
     const s = svc(db);
@@ -130,7 +130,7 @@ describe("WebhookService — produce pending contamination", () => {
 
     await s.processEvents([textEvent("จบรายการเบิก", { replyToken: "tok-fail" })], "dest");
 
-    expect(db._rows("pending_sessions")).toHaveLength(0);
+    expect(db._rows("pending_sessions")).toHaveLength(1);
     expect(db._rows("produce_sessions")).toHaveLength(0);
 
     await s.processEvents([

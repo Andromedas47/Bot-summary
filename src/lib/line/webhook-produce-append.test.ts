@@ -327,6 +327,81 @@ describe("WebhookService — รายการเบิกเพิ่ม V2 re
     expect(db._rows("produce_sessions")[0].is_append_session).toBe(true);
   });
 
+  it("borrow + จบรายการ keeps pending session open and persists zero rows", async () => {
+    const round = openRound({ seller_name: "กี้", market_name: "วัดทุ่ง" });
+    const db = memSupabase({ work_rounds: [round] });
+    const replies: string[] = [];
+
+    await svc(db, replies).processEvents([
+      textEvent("กี้-วัดทุ่ง เบิก 25/6/2569"),
+      textEvent("1.มะม่วง100บาท"),
+      textEvent(`10${LO}`),
+      textEvent("จบรายการ", { replyToken: "tok-generic-close" }),
+    ], "dest");
+
+    expect(replies.at(-1)).toBe([
+      "รอบนี้เป็นรายการเบิก",
+      "กรุณาพิมพ์ “จบรายการเบิก” เมื่อส่งครบ",
+    ].join("\n"));
+    expect(db._rows("pending_sessions")).toHaveLength(1);
+    expect(db._rows("produce_sessions")).toHaveLength(0);
+    expect(db._rows("produce_items")).toHaveLength(0);
+  });
+
+  it("borrow + จบรายการเบิก reaches close path", async () => {
+    const round = openRound({ seller_name: "กี้", market_name: "วัดทุ่ง" });
+    const db = memSupabase({ work_rounds: [round] });
+
+    await svc(db).processEvents([
+      textEvent("กี้-วัดทุ่ง เบิก 25/6/2569"),
+      textEvent("1.มะม่วง100บาท"),
+      textEvent(`10${LO}`),
+      textEvent("จบรายการเบิก"),
+    ], "dest");
+
+    expect(db._rows("pending_sessions")).toHaveLength(0);
+    expect(db._rows("produce_sessions")).toHaveLength(1);
+    expect(db._rows("produce_sessions")[0].work_round_id).toBe(round.id as string);
+    expect(db._rows("produce_items")).toHaveLength(1);
+  });
+
+  it("return sessions still close with generic จบรายการ", async () => {
+    const round = openRound({ seller_name: "กี้", market_name: "วัดทุ่ง" });
+    const db = memSupabase({ work_rounds: [round] });
+
+    await svc(db).processEvents([
+      textEvent("กี้ ชั่งคืน 25/6/2569"),
+      textEvent("1.มะม่วง100บาท"),
+      textEvent(`3${LO}`),
+      textEvent("จบรายการ"),
+    ], "dest");
+
+    expect(db._rows("pending_sessions")).toHaveLength(0);
+    expect(db._rows("produce_sessions")).toHaveLength(1);
+    expect(db._rows("produce_items")[0].transaction_type).toBe("คืน");
+  });
+
+  it("indexed gap blocks persistence and retains the pending session", async () => {
+    const round = openRound({ seller_name: "กี้", market_name: "วัดทุ่ง" });
+    const db = memSupabase({ work_rounds: [round] });
+    const replies: string[] = [];
+
+    await svc(db, replies).processEvents([
+      textEvent("กี้-วัดทุ่ง เบิก 25/6/2569"),
+      textEvent("1.มะม่วง100บาท"),
+      textEvent(`10${LO}`),
+      textEvent("3.ทุเรียน200บาท"),
+      textEvent(`2${LO}`),
+      textEvent("จบรายการเบิก", { replyToken: "tok-gap" }),
+    ], "dest");
+
+    expect(replies.at(-1)).toContain("อ่านรายการไม่ครบ");
+    expect(replies.at(-1)).toContain("#2");
+    expect(db._rows("pending_sessions")).toHaveLength(1);
+    expect(db._rows("produce_sessions")).toHaveLength(0);
+    expect(db._rows("produce_items")).toHaveLength(0);
+  });
+
   it("V2 produce session cannot persist without work_round_id, seller, or market", async () => {
     const db = memSupabase({ work_rounds: [] });
     const msg = ["รายการชั่งเบิก 25/6/2569", "1.มะม่วง100บาท", `10${LO}`, "จบรายการเบิก"].join("\n");
@@ -337,20 +412,22 @@ describe("WebhookService — รายการเบิกเพิ่ม V2 re
     expect(db._rows("produce_items")).toHaveLength(0);
   });
 
-  it("accepts both จบรายการเบิก and จบรายการ as batch end markers", async () => {
+  it("does not accept generic จบรายการ as a borrow close marker", async () => {
     const round = openRound({ seller_name: "กี้", market_name: "วัดทุ่ง" });
     const db = memSupabase({ work_rounds: [round] });
+    const replies: string[] = [];
 
-    await svc(db).processEvents([
+    await svc(db, replies).processEvents([
       textEvent("กี้-วัดทุ่ง เบิก 25/6/2569"),
       textEvent("1.มะม่วง100บาท"),
       textEvent(`10${LO}`),
-      textEvent("จบรายการ"),
+      textEvent("จบรายการ", { replyToken: "tok-generic-close-2" }),
     ], "dest");
 
-    expect(db._rows("produce_sessions")).toHaveLength(1);
-    expect(db._rows("produce_sessions")[0].work_round_id).toBe(round.id as string);
-    expect(db._rows("produce_items")).toHaveLength(1);
+    expect(replies.at(-1)).toContain("จบรายการเบิก");
+    expect(db._rows("pending_sessions")).toHaveLength(1);
+    expect(db._rows("produce_sessions")).toHaveLength(0);
+    expect(db._rows("produce_items")).toHaveLength(0);
   });
 
   it("parser keeps 17ลองกอง and 18เงาะ with quantities in append batch", () => {

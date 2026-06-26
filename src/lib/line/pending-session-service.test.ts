@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { rebuildPendingSessionText } from "./pending-session-service";
+import { PendingSessionService, rebuildPendingSessionText } from "./pending-session-service";
 import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
 
 function rawRow(
@@ -146,5 +146,48 @@ describe("produce pending-session finalization ordering", () => {
     expect(parsed.parse_errors).toContain(
       'unrecognized line: "ข้อความที่อ่านไม่ได้"',
     );
+  });
+});
+
+describe("PendingSessionService.append", () => {
+  it("fails visibly when append_pending_session RPC is unavailable", async () => {
+    const writes: unknown[] = [];
+    const service = new PendingSessionService({
+      from() {
+        writes.push("from-called");
+        return {
+          upsert() {
+            writes.push("upsert-called");
+            return Promise.resolve({ error: null });
+          },
+        };
+      },
+    } as never);
+
+    await expect(service.append("group-1", "1.มะม่วง100บาท", "reply-1")).rejects.toThrow(
+      "append_pending_session RPC unavailable",
+    );
+    expect(writes).toEqual([]);
+  });
+
+  it("does not fall back to read-modify-write when append_pending_session RPC fails", async () => {
+    const writes: unknown[] = [];
+    const service = new PendingSessionService({
+      rpc: async () => ({ data: null, error: { message: "rpc down" } }),
+      from() {
+        writes.push("from-called");
+        return {
+          upsert() {
+            writes.push("upsert-called");
+            return Promise.resolve({ error: null });
+          },
+        };
+      },
+    } as never);
+
+    await expect(service.append("group-1", "1.มะม่วง100บาท", "reply-1")).rejects.toThrow(
+      "pending session append failed: rpc down",
+    );
+    expect(writes).toEqual([]);
   });
 });

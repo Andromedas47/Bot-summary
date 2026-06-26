@@ -13,6 +13,9 @@
 export type Row = Record<string, unknown>;
 
 interface Filter { op: string; c?: string; v?: unknown; opv?: string; asc?: boolean; n?: number }
+interface MemSupabaseOptions {
+  rpcErrors?: Record<string, { message: string; code?: string }>;
+}
 
 function parseList(v: unknown): string[] {
   // e.g. ("approved","needs_correction")  →  ["approved","needs_correction"]
@@ -50,7 +53,7 @@ function applyFilters(rows: Row[], filters: Filter[]): Row[] {
   return out;
 }
 
-export function memSupabase(seed: Record<string, Row[]> = {}) {
+export function memSupabase(seed: Record<string, Row[]> = {}, options: MemSupabaseOptions = {}) {
   const tables: Record<string, Row[]> = {};
   for (const k of Object.keys(seed)) tables[k] = seed[k].map((r) => ({ ...r }));
   let idSeq = 0;
@@ -84,6 +87,7 @@ export function memSupabase(seed: Record<string, Row[]> = {}) {
     const items = (Array.isArray(payload) ? payload : [payload]).map((p) => ({
       id: p.id ?? `${name}-${++idSeq}`,
       ...(name === "work_rounds" && p.status == null ? { status: "open" } : {}),
+      ...(p.created_at == null ? { created_at: new Date().toISOString() } : {}),
       ...p,
     }));
     table(name).push(...items);
@@ -130,7 +134,11 @@ export function memSupabase(seed: Record<string, Row[]> = {}) {
       let existing: Row | undefined;
       if (keys.length) existing = table(name).find((r) => keys.every((k) => r[k] === p[k]));
       if (existing) Object.assign(existing, p);
-      else table(name).push({ id: p.id ?? `${name}-${++idSeq}`, ...p });
+      else table(name).push({
+        id: p.id ?? `${name}-${++idSeq}`,
+        ...(p.created_at == null ? { created_at: new Date().toISOString() } : {}),
+        ...p,
+      });
     }
     return {
       select() {
@@ -146,6 +154,30 @@ export function memSupabase(seed: Record<string, Row[]> = {}) {
   }
 
   const client = {
+    async rpc(name: string, params: Row = {}) {
+      const forcedError = options.rpcErrors?.[name];
+      if (forcedError) return { data: null, error: forcedError };
+
+      if (name === "append_pending_session") {
+        const sessionKey = params.p_session_key;
+        const current = table("pending_sessions").find((row) => row.session_key === sessionKey);
+        if (!current) {
+          return { data: null, error: { message: `pending session not found for append: ${String(sessionKey)}` } };
+        }
+        current.accumulated_text = `${String(current.accumulated_text)}\n${String(params.p_new_text ?? "")}`;
+        current.latest_reply_token = params.p_reply_token ?? null;
+        current.updated_at = new Date().toISOString();
+        return { data: current, error: null };
+      }
+
+      return {
+        data: null,
+        error: {
+          code:    "PGRST202",
+          message: `Could not find the function ${name}`,
+        },
+      };
+    },
     from(name: string) {
       return {
         select(_cols = "*") { return selectChain(name, []); },

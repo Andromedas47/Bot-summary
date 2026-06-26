@@ -177,7 +177,7 @@ describe("P0 production repro — full item payload is handled fail-closed", () 
     }
 
     // 3. The closing marker triggers finalization.
-    await s.processEvents([textEvent("จบรายการ", "tok-end")], "dest");
+    await s.processEvents([textEvent("จบรายการเบิก", "tok-end")], "dest");
 
     const reviewReply = replies[replies.length - 1];
     // Specific review error naming every row that needs correction.
@@ -186,10 +186,10 @@ describe("P0 production repro — full item payload is handled fail-closed", () 
     expect(reviewReply).toContain("#17");
     expect(reviewReply).toContain("#18");
 
-    // No partial total finalized: nothing persisted, pending session cleared.
+    // No partial total finalized: nothing persisted, pending session stays recoverable.
     expect(db._rows("produce_items")).toHaveLength(0);
     expect(db._rows("produce_sessions")).toHaveLength(0);
     expect(db._rows("work_rounds")).toHaveLength(0);
-    expect(db._rows("pending_sessions")).toHaveLength(0);
+    expect(db._rows("pending_sessions")).toHaveLength(1);
   });
 });

@@ -104,10 +104,11 @@ const BAD_LINE_REPLY = `#9 จีนหงส์ 3 ${LO}100บาท`;
 function expectMalformedBlocked(
   reply: string,
   db: ReturnType<typeof memSupabase>,
+  expectedPendingSessions = 0,
 ): void {
   expect(db._rows("produce_sessions")).toHaveLength(0);
   expect(db._rows("produce_items")).toHaveLength(0);
-  expect(db._rows("pending_sessions")).toHaveLength(0);
+  expect(db._rows("pending_sessions")).toHaveLength(expectedPendingSessions);
   expect(reply).toContain("อ่านรายการไม่ครบ กรุณาแก้ไข:");
   expect(reply).toContain(BAD_LINE_REPLY);
   expect(reply).not.toContain("อ่านรายการไม่สำเร็จ");
@@ -133,7 +134,7 @@ describe("WebhookService — return parser integrity", () => {
       textEvent([`9 จีนหงส์ 3 ${LO}100บาท`, "15 ลูก", "จบรายการเบิก"].join("\n")),
     ], "dest");
 
-    expectMalformedBlocked(replies[replies.length - 1], db);
+    expectMalformedBlocked(replies[replies.length - 1], db, 1);
   });
 
   it("does not persist 20-item payload when #9 is ambiguous — full reply format", async () => {
@@ -162,7 +163,7 @@ describe("WebhookService — return parser integrity", () => {
     ], "dest");
     await service.processEvents([textEvent("จบรายการ")], "dest");
 
-    expectMalformedBlocked(replies[replies.length - 1], db);
+    expectMalformedBlocked(replies[replies.length - 1], db, 1);
   });
 
   it("apple in borrow session persists correctly — E2E valid batch", async () => {
@@ -174,7 +175,7 @@ describe("WebhookService — return parser integrity", () => {
         "โอม-วัดทุ่งลานนา เบิก 25/6/2569",
         "1apple 20 บาท",
         "40ลูก",
-        "จบรายการ",
+        "จบรายการเบิก",
       ].join("\n")),
     ], "dest");
 

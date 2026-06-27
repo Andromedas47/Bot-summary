@@ -84,7 +84,26 @@ export function memSupabase(seed: Record<string, Row[]> = {}, options: MemSupaba
   }
 
   function insert(name: string, payload: Row | Row[]) {
-    const items = (Array.isArray(payload) ? payload : [payload]).map((p) => ({
+    const rawItems = Array.isArray(payload) ? payload : [payload];
+    if (name === "raw_messages") {
+      for (const p of rawItems) {
+        if (table(name).some((r) => r.line_event_id === p.line_event_id)) {
+          return {
+            select() {
+              return {
+                async single() {
+                  return {
+                    data: null,
+                    error: { code: "23505", message: "duplicate key value violates unique constraint" },
+                  };
+                },
+              };
+            },
+          };
+        }
+      }
+    }
+    const items = rawItems.map((p) => ({
       id: p.id ?? `${name}-${++idSeq}`,
       ...(name === "work_rounds" && p.status == null ? { status: "open" } : {}),
       ...(p.created_at == null ? { created_at: new Date().toISOString() } : {}),

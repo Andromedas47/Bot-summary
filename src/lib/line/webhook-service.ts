@@ -59,6 +59,13 @@ import {
 } from "@/lib/work-round/selection-service";
 import { WorkRoundStatusService } from "@/lib/work-round/status";
 import type { SelectionCandidate, SelectionIntent, WorkRound, WorkRoundStatus } from "@/lib/work-round/types";
+import { classifyMessage } from "@/lib/produce-round-events/classifier";
+import { ProduceRoundEventService } from "@/lib/produce-round-events/event-service";
+import { isProduceRoundEventsDualWriteEnabled } from "@/lib/produce-round-events/config";
+import {
+  compareProduceRoundParity,
+  type ProducePendingKind,
+} from "@/lib/produce-round-events/parity";
 
 type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
@@ -200,7 +207,14 @@ interface WebhookServiceDependencies {
   scheduleBackgroundTask?: ScheduleBackgroundTask;
   sleep?: Sleep;
   produceEndSettleMs?: number;
+  /** When set, overrides PRODUCE_ROUND_EVENTS_DUAL_WRITE_ENABLED env var. */
+  produceRoundEventsDualWriteEnabled?: boolean;
 }
+
+export type SaveRawMessageResult =
+  | { status: "inserted"; id: string }
+  | { status: "duplicate"; id: string }
+  | { status: "error" };
 
 export interface WebhookProcessResult {
   eventId:   string;
@@ -209,6 +223,7 @@ export interface WebhookProcessResult {
   parsed?:   boolean;
   error?:    string;
   pendingSessionClosed?: boolean;
+  produceRoundParity?: { match: boolean; lateEventCount: number };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -236,8 +251,6 @@ function hasGenericCloseMarker(text: string): boolean {
 function hasItemLine(text: string): boolean {
   return text.split("\n").some((l) => RE.ITEM.test(l.trim()));
 }
-
-type ProducePendingKind = "borrow" | "return" | "bad-return" | "append" | "unknown";
 
 function classifyPendingProduceKind(accumulatedText: string): ProducePendingKind {
   const firstLine = normalizeText(accumulatedText).split("\n")[0]?.trim() ?? "";
@@ -319,6 +332,7 @@ export class WebhookService {
   private readonly scheduleBackgroundTask: ScheduleBackgroundTask;
   private readonly sleep: Sleep;
   private readonly produceEndSettleMs: number;
+  private readonly produceRoundEventsDualWriteEnabled: boolean;
   private readonly noSessionImageGuidanceSentAt = new Map<string, number>();
 
   constructor(
@@ -345,6 +359,9 @@ export class WebhookService {
       });
     this.sleep = dependencies.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.produceEndSettleMs = dependencies.produceEndSettleMs ?? 750;
+    this.produceRoundEventsDualWriteEnabled = isProduceRoundEventsDualWriteEnabled(
+      dependencies.produceRoundEventsDualWriteEnabled,
+    );
   }
 
   private noSessionImageGuidanceKey(sourceId: string, senderId: string | null): string {
@@ -394,14 +411,31 @@ export class WebhookService {
     log.info("processing event");
 
     // ── 1. Persist raw event ──────────────────────────────────────────────────
-    const rawMessageId = await this.saveRawMessage(event, destination);
+    const rawSave = await this.saveRawMessage(event, destination);
 
-    if (rawMessageId === null) {
-      log.info("duplicate event — skipped");
-      return { eventId, eventType: event.type, status: "duplicate" };
-    }
-    if (rawMessageId === "error") {
+    if (rawSave.status === "error") {
       return { eventId, eventType: event.type, status: "error", error: "db insert failed" };
+    }
+
+    const rawMessageId = rawSave.id;
+    const isDuplicateDelivery = rawSave.status === "duplicate";
+
+    if (isDuplicateDelivery) {
+      log.info("duplicate event — skipping legacy processing");
+      if (event.type === "message") {
+        const dupMsg = event as LineMessageEvent;
+        if (dupMsg.message.type === "text") {
+          await this.captureProduceRoundEventsShadow(
+            rawMessageId,
+            eventId,
+            event.timestamp,
+            (dupMsg.message as LineTextMessage).text,
+            getSourceId(dupMsg.source),
+            log,
+          );
+        }
+      }
+      return { eventId, eventType: event.type, status: "duplicate" };
     }
 
     log.debug("raw message saved", { rawMessageId });
@@ -431,8 +465,18 @@ export class WebhookService {
       return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
 
-    // ── 3. Test-message shortcut (before any parser) ──────────────────────────
     const text           = (message as LineTextMessage).text;
+
+    await this.captureProduceRoundEventsShadow(
+      rawMessageId,
+      eventId,
+      event.timestamp,
+      text,
+      getSourceId(msgEvent.source),
+      log,
+    );
+
+    // ── 3. Test-message shortcut (before any parser) ──────────────────────────
     const normalizedText = normalizeText(text);
     const replyToken     = msgEvent.replyToken;
     const sessionKey     = getSourceId(msgEvent.source);
@@ -1832,6 +1876,12 @@ export class WebhookService {
       bangkokToday(),
     );
 
+    const pendingKind = classifyPendingProduceKind(finalText);
+    const parity = await this.checkProduceRoundParity(sessionKey, finalText, pendingKind, log);
+    if (parity) {
+      result.produceRoundParity = parity;
+    }
+
     if (result.pendingSessionClosed) {
       await pendingService.delete(sessionKey);
       log.info("pending session closed", { sessionKey, sessionStatus: "closed" });
@@ -3033,11 +3083,83 @@ export class WebhookService {
     );
   }
 
+  /** Fail-open shadow capture of immutable produce-round events (P2b). */
+  private async captureProduceRoundEventsShadow(
+    rawMessageId:    string,
+    lineEventId:     string,
+    lineTimestampMs: number,
+    rawText:         string,
+    sourceId:        string,
+    log:             ChildLogger,
+  ): Promise<void> {
+    if (!this.produceRoundEventsDualWriteEnabled) return;
+
+    try {
+      const drafts = classifyMessage({
+        rawMessageId,
+        lineEventId,
+        lineTimestampMs,
+        rawText,
+      });
+      if (drafts.length === 0) return;
+
+      const svc = new ProduceRoundEventService(this.supabase);
+      await svc.bulkInsert(drafts);
+    } catch (err) {
+      log.warn("produce round event shadow capture failed (fail-open)", {
+        raw_message_id: rawMessageId,
+        line_event_id:  lineEventId,
+        source_id:      sourceId,
+        timestamp:      lineTimestampMs,
+        error:          err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /** Fail-open parity check at legacy finalization boundary (P2b). */
+  private async checkProduceRoundParity(
+    sessionKey:  string,
+    finalText:   string,
+    pendingKind: ProducePendingKind,
+    log:         ChildLogger,
+  ): Promise<{ match: boolean; lateEventCount: number } | null> {
+    if (!this.produceRoundEventsDualWriteEnabled) return null;
+
+    try {
+      const normalizedLegacy = normalizeText(finalText);
+      const eventSvc = new ProduceRoundEventService(this.supabase);
+      const events = await eventSvc.listBySource(sessionKey);
+      const parity = compareProduceRoundParity(events, normalizedLegacy, pendingKind);
+
+      if (parity.match) {
+        log.info("produce round parity match", {
+          sessionKey,
+          lateEventCount: parity.lateEventCount,
+        });
+      } else {
+        log.warn("produce round parity mismatch", {
+          sessionKey,
+          lateEventCount: parity.lateEventCount,
+          legacyLineCount:   parity.legacyText.split("\n").length,
+          projectedLineCount: parity.projectedText.split("\n").length,
+        });
+      }
+
+      return { match: parity.match, lateEventCount: parity.lateEventCount };
+    } catch (err) {
+      log.warn("produce round parity check failed (fail-open)", {
+        sessionKey,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
   private async saveRawMessage(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     event: any,
-    destination: string
-  ): Promise<string | null | "error"> {
+    destination: string,
+  ): Promise<SaveRawMessageResult> {
     const source  = event.source  ?? {};
     const message = event.message as LineMessage | undefined;
 
@@ -3059,16 +3181,31 @@ export class WebhookService {
       .single();
 
     if (error) {
-      if (error.code === "23505") return null;
+      if (error.code === "23505") {
+        const { data: existing, error: fetchErr } = await this.supabase
+          .from("raw_messages")
+          .select("id")
+          .eq("line_event_id", event.webhookEventId)
+          .single();
+
+        if (fetchErr || !existing) {
+          logger.error("duplicate raw_message but fetch failed", {
+            eventId: event.webhookEventId,
+            error:   fetchErr?.message,
+          });
+          return { status: "error" };
+        }
+        return { status: "duplicate", id: existing.id };
+      }
       logger.error("failed to insert raw_message", {
         code:    error.code,
         message: error.message,
         eventId: event.webhookEventId,
       });
-      return "error";
+      return { status: "error" };
     }
 
-    return data.id;
+    return { status: "inserted", id: data.id };
   }
 
   private async recordUnsupportedType(rawMessageId: string, message: LineMessage): Promise<void> {

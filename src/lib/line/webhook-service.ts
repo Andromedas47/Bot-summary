@@ -676,6 +676,12 @@ export class WebhookService {
         }
 
         log.debug("pending session replaced by header — waiting for session end", { sessionKey });
+        if (replyToken) {
+          await this.replyMessage(
+            replyToken,
+            await this.buildProduceHeaderOpenedReply(firstLine, sessionKey),
+          );
+        }
         return { eventId, eventType: event.type, status: "saved", parsed: false };
       }
 

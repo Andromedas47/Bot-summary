@@ -1,7 +1,7 @@
 ﻿import { describe, it, expect } from "bun:test";
 import type { LineMessageEvent } from "@/lib/line/types";
 import { parseWeighSession, bangkokTimeFromTimestamp, WeighSessionParser, hasParseReviewBlockers } from "./parser";
-import { RE } from "./regex";
+import { RE, normalizeIndexedItemHeader } from "./regex";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -844,6 +844,24 @@ describe("RE.ITEM", () => {
   });
 });
 
+const LO = "\u0E42\u0E25"; // โlo
+
+describe("normalizeIndexedItemHeader", () => {
+  it("inserts space after index and before price for compact headers", () => {
+    expect(normalizeIndexedItemHeader("11อินทผาลัม 100 บาท")).toBe("11 อินทผาลัม 100 บาท");
+    expect(normalizeIndexedItemHeader("13ฝรั่งกิมจู40 บาท")).toBe("13 ฝรั่งกิมจู 40 บาท");
+  });
+
+  it("does not touch quantity lines without บาท", () => {
+    expect(normalizeIndexedItemHeader(`8.2${LO}`)).toBe(`8.2${LO}`);
+    expect(normalizeIndexedItemHeader(`3.1${LO}`)).toBe(`3.1${LO}`);
+  });
+
+  it("does not touch item lines that already have separators", () => {
+    expect(normalizeIndexedItemHeader("1.หมอนทอง119บาท")).toBe("1.หมอนทอง119บาท");
+  });
+});
+
 describe("RE.DATE_ONLY", () => {
   it("matches short Buddhist year", () => {
     const m = "25/5/69".match(RE.DATE_ONLY);
@@ -1118,6 +1136,103 @@ describe("parseWeighSession — ambiguous repair (stray qty+unit before price)",
     expect(result.items[0].transaction_type).toBe("เบิก");
     expect(result.items[0].quantity).toBe(15.5);
     expect(result.repair_notes).toHaveLength(1);
+  });
+});
+
+// ── Regression: full 21-item ชั่งคืน session (production 27/6/2569) ───────────
+
+const PRODUCTION_RACHAPHRUEK_21 = [
+  "ปลา-ราชพฤกษ์ ชั่งคืน 27/6/2569",
+  "1ส้มไต้หวัน 40 บาท",   "20โล",
+  "2ลองกอง 35 บาท",        "15โล",
+  "3มะม่วง 30 บาท",        "10โล",
+  "4ทุเรียน 119 บาท",      "25.5โล",
+  "5เงาะ 40บาท",           "18โล",
+  "6ชมพู่ 35บาท",          "8.5โล",
+  "7กล้วย 20 บาท",         "12โล",
+  "8มังคุด 50 บาท",        "9.3โล",
+  "9มะละกอ 20 บาท",        "11โล",
+  "10สาลี่ 35 บาท",        "7.8โล",
+  "11อินทผาลัม 100 บาท",   "8.2โล",
+  "12ลองกอง 35 บาท",       "3.7โล",
+  "13ฝรั่งกิมจู40 บาท",   "3.1โล",
+  "14มหาชนก 35 บาท",       "5.6โล",
+  "15แก้วมังกร 40 บาท",    "6.2โล",
+  "16เสาวรส 25 บาท",       "4.1โล",
+  "17ฝรั่งขาว 45 บาท",     "9.8โล",
+  "18มะเฟือง 30 บาท",      "2.5โล",
+  "19น้อยหน่า 50 บาท",     "7.4โล",
+  "20ระกำ 25บาท",          "3.3โล",
+  "21องุ่นแดง 130 บาท",    "5.1โล",
+  "จบรายการชั่งคืน",
+].join("\n");
+
+describe("production 27/6/2569: ปลา-ราชพฤกษ์ ชั่งคืน — all 21 items", () => {
+  const result = parseWeighSession(PRODUCTION_RACHAPHRUEK_21, "2026-06-27");
+
+  it("parses all 21 items with no review issues", () => {
+    expect(result.review_issues).toHaveLength(0);
+    expect(result.items).toHaveLength(21);
+  });
+
+  it("parses #11 อินทผาลัม 100 บาท / 8.2 โล correctly", () => {
+    const item = result.items.find((i) => i.item_number === 11);
+    expect(item).toMatchObject({ product_name: "อินทผาลัม", price_per_unit: 100, quantity: 8.2, unit: "โล" });
+  });
+
+  it("parses #13 ฝรั่งกิมจู 40 บาท / 3.1 โล (no space before price) correctly", () => {
+    const item = result.items.find((i) => i.item_number === 13);
+    expect(item).toMatchObject({ product_name: "ฝรั่งกิมจู", price_per_unit: 40, quantity: 3.1, unit: "โล" });
+  });
+
+  it("all items have transaction_type คืน", () => {
+    expect(result.items.every((i) => i.transaction_type === "คืน")).toBe(true);
+  });
+});
+
+// ── Regression: compact format without space before price ─────────────────────
+
+describe("regression: ชั่งคืน compact item format (production 27/6/2569)", () => {
+  it("parses 11อินทผาลัม 100 บาท (space before 3-digit price) + 8.2โล", () => {
+    const result = parseWeighSession(
+      [
+        "ปลา-ราชพฤกษ์ ชั่งคืน 27/6/2569",
+        "11อินทผาลัม 100 บาท",
+        "8.2โล",
+        "จบรายการชั่งคืน",
+      ].join("\n"),
+      "2026-06-27",
+    );
+    expect(result.review_issues).toHaveLength(0);
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]).toMatchObject({
+      item_number: 11,
+      product_name: "อินทผาลัม",
+      price_per_unit: 100,
+      quantity: 8.2,
+      unit: "โล",
+    });
+  });
+
+  it("parses 13ฝรั่งกิมจู40 บาท (no space before 2-digit price) + 3.1โล", () => {
+    const result = parseWeighSession(
+      [
+        "ปลา-ราชพฤกษ์ ชั่งคืน 27/6/2569",
+        "13ฝรั่งกิมจู40 บาท",
+        "3.1โล",
+        "จบรายการชั่งคืน",
+      ].join("\n"),
+      "2026-06-27",
+    );
+    expect(result.review_issues).toHaveLength(0);
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]).toMatchObject({
+      item_number: 13,
+      product_name: "ฝรั่งกิมจู",
+      price_per_unit: 40,
+      quantity: 3.1,
+      unit: "โล",
+    });
   });
 });
 

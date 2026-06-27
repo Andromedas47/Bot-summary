@@ -4,7 +4,7 @@ import { getUserId } from "@/lib/line/verify";
 import { logger } from "@/lib/logger";
 import { computeItemHash } from "@/lib/line/session-dedup-service";
 import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
-import { RE, isReservedFinancialLine, isAmbiguousItemPriceLine, looksLikeIndexedItemLine, tryExtractAmbiguousRepair } from "./regex";
+import { RE, isReservedFinancialLine, isAmbiguousItemPriceLine, looksLikeIndexedItemLine, normalizeIndexedItemHeader, tryExtractAmbiguousRepair } from "./regex";
 import type {
   WeighSession,
   WeighSessionItem,
@@ -369,7 +369,7 @@ function parseItemLine(
   if (isReservedFinancialLine(content)) return null;
   if (isAmbiguousItemPriceLine(content)) return null;
 
-  const indexed = content.match(RE.ITEM);
+  const indexed = normalizeIndexedItemHeader(content).match(RE.ITEM);
   if (indexed) {
     return {
       item_number:    parseInt(indexed[1], 10),

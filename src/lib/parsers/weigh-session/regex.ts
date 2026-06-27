@@ -111,6 +111,37 @@ export const RE = {
     /^(?:ยอดเบิก|ยอดคืนเสีย|ยอดคืน|ยอดที่ต้องขายได้|ยอดเงินโอน|ยอดสลิปมือ|ยอดรวมสลิป|ยอดรวม|ส่งเงินจริง|ส่งเงินขาด|ส่งเงินเกิน|เงินโอนไม่ขาด|ยอดเงินขาด|ตรวจสลิป|ขาดจากยอดเงินโอน)(?=[\s\d]|$)/,
 } as const;
 
+/** Indexed item row ending in บาท — not quantity lines like "8.2โlo". */
+const INDEXED_ITEM_WITH_PRICE = new RegExp(
+  `^(\\d+)\\.?\\s*[${PROD}].*\\d+(?:\\.\\d+)?\\s*บาท\\s*$`,
+);
+
+/**
+ * Inserts missing spaces on compact indexed item headers before RE.ITEM.
+ *   "11อินทผาลัม 100 บาท"  → "11 อินทผาลัม 100 บาท"
+ *   "13ฝรั่งกิมจู40 บาท"   → "13 ฝรั่งกิมจู 40 บาท"
+ * Does not touch quantity lines (no trailing บาท) or weight decimals like "8.2โlo".
+ */
+export function normalizeIndexedItemHeader(content: string): string {
+  const trimmed = content.trim();
+  if (!INDEXED_ITEM_WITH_PRICE.test(trimmed)) return trimmed;
+
+  let out = trimmed;
+
+  // Index number glued to product name: "11อ..." → "11 อ..."
+  const beforeIndex = out;
+  out = out.replace(new RegExp(`^(\\d+)([${PROD}])`), "$1 $2");
+  if (out === beforeIndex) return trimmed;
+
+  // Product name glued to price: "...จู40 บาท" → "...จู 40 บาท"
+  out = out.replace(
+    new RegExp(`([${PROD}])(\\d+(?:\\.\\d+)?)(\\s*บาท\\s*)$`),
+    "$1 $2$3",
+  );
+
+  return out;
+}
+
 export function isReservedFinancialLine(content: string): boolean {
   return RE.RESERVED_FINANCIAL.test(content.trim());
 }

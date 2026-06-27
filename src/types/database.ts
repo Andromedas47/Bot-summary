@@ -44,6 +44,8 @@ export type WorkRoundSelectionIntent =
   | "close_round"
   | "close_round_confirm";
 export type WorkRoundSelectionStatus  = "pending" | "resolved" | "expired";
+export type ProduceRoundEventKind   = 'header' | 'date' | 'item' | 'quantity' | 'close_marker' | 'unparsed';
+export type ProduceRoundEventStatus = 'parsed' | 'needs_review';
 
 // ─── Database schema ──────────────────────────────────────────────────
 export interface Database {
@@ -911,6 +913,41 @@ export interface Database {
         };
         Relationships: [];
       };
+
+      produce_round_events: {
+        Row: {
+          id:                string;
+          raw_message_id:    string;
+          line_event_id:     string;
+          seq_in_message:    number;
+          line_timestamp_ms: number;
+          event_kind:        ProduceRoundEventKind;
+          event_status:      ProduceRoundEventStatus;
+          raw_line:          string;
+          normalized_line:   string;
+          category:          string | null;
+          parsed_payload:    Json;
+          work_round_id:     string | null;
+          created_at:        string;
+        };
+        Insert: {
+          id?:                string;
+          raw_message_id:     string;
+          line_event_id:      string;
+          seq_in_message:     number;
+          line_timestamp_ms:  number;
+          event_kind:         ProduceRoundEventKind;
+          event_status?:      ProduceRoundEventStatus;
+          raw_line:           string;
+          normalized_line:    string;
+          category?:          string | null;
+          parsed_payload?:    Json;
+          work_round_id?:     string | null;
+          created_at?:        string;
+        };
+        Update: never;
+        Relationships: [];
+      };
     };
     Views: {
       produce_transactions: {
@@ -986,13 +1023,19 @@ export interface Database {
           resolved_work_round_id: string;
         }>;
       };
+      insert_produce_round_events_ignore: {
+        Args: { events: Json };
+        Returns: ProduceRoundEventRow[];
+      };
     };
     CompositeTypes: { [_ in never]: never };
     Enums: {
-      line_source_type:   LineSourceType;
-      line_event_type:    LineEventType;
-      line_message_type:  LineMessageType;
-      parse_error_type:   ParseErrorType;
+      line_source_type:             LineSourceType;
+      line_event_type:              LineEventType;
+      line_message_type:            LineMessageType;
+      parse_error_type:             ParseErrorType;
+      produce_round_event_kind:     ProduceRoundEventKind;
+      produce_round_event_status:   ProduceRoundEventStatus;
     };
   };
 }
@@ -1016,3 +1059,4 @@ export type WorkRoundRow                   = Database["public"]["Tables"]["work_
 export type SettlementDraftRow             = Database["public"]["Tables"]["settlement_drafts"]["Row"];
 export type SettlementDraftHistoryRow      = Database["public"]["Tables"]["settlement_draft_history"]["Row"];
 export type WorkRoundSelectionRow          = Database["public"]["Tables"]["work_round_selections"]["Row"];
+export type ProduceRoundEventRow           = Database["public"]["Tables"]["produce_round_events"]["Row"];

@@ -127,28 +127,74 @@ export function memSupabase(seed: Record<string, Row[]> = {}, options: MemSupaba
     };
   }
 
-  function upsert(name: string, payload: Row | Row[], opts?: { onConflict?: string }) {
-    const items = Array.isArray(payload) ? payload : [payload];
-    const keys  = opts?.onConflict?.split(",").map((s) => s.trim()) ?? [];
+  function produceRoundEventConflict(existing: Row, incoming: Row): boolean {
+    return (
+      (existing.raw_message_id === incoming.raw_message_id &&
+        existing.seq_in_message === incoming.seq_in_message) ||
+      (existing.line_event_id === incoming.line_event_id &&
+        existing.seq_in_message === incoming.seq_in_message)
+    );
+  }
+
+  function insertProduceRoundEventsIgnore(events: unknown): Row[] {
+    const items = Array.isArray(events) ? (events as Row[]) : [];
+    const inserted: Row[] = [];
     for (const p of items) {
-      let existing: Row | undefined;
-      if (keys.length) existing = table(name).find((r) => keys.every((k) => r[k] === p[k]));
-      if (existing) Object.assign(existing, p);
-      else table(name).push({
-        id: p.id ?? `${name}-${++idSeq}`,
+      const conflicting = table("produce_round_events").some((r) =>
+        produceRoundEventConflict(r, p),
+      );
+      if (conflicting) continue;
+      const newRow: Row = {
+        id: p.id ?? `produce_round_events-${++idSeq}`,
         ...(p.created_at == null ? { created_at: new Date().toISOString() } : {}),
         ...p,
-      });
+      };
+      table("produce_round_events").push(newRow);
+      inserted.push(newRow);
+    }
+    return inserted;
+  }
+
+  function upsert(
+    name: string,
+    payload: Row | Row[],
+    opts?: { onConflict?: string; ignoreDuplicates?: boolean },
+  ) {
+    const items = Array.isArray(payload) ? payload : [payload];
+    const conflictKeys = opts?.onConflict?.split(",").map((s) => s.trim()) ?? [];
+
+    const newRows: Row[] = [];
+    for (const p of items) {
+      const conflicting =
+        conflictKeys.length > 0 &&
+        table(name).some((r) => conflictKeys.every((k) => r[k] === p[k]));
+      if (conflicting) {
+        if (!opts?.ignoreDuplicates) {
+          const existing = table(name).find((r) => conflictKeys.every((k) => r[k] === p[k]));
+          if (existing) Object.assign(existing, p);
+        }
+      } else {
+        const newRow: Row = {
+          id: p.id ?? `${name}-${++idSeq}`,
+          ...(p.created_at == null ? { created_at: new Date().toISOString() } : {}),
+          ...p,
+        };
+        table(name).push(newRow);
+        newRows.push(newRow);
+      }
     }
     return {
       select() {
         return {
-          async single()      { return { data: items[0] ?? null, error: null }; },
-          async maybeSingle() { return { data: items[0] ?? null, error: null }; },
+          async single()      { return { data: newRows[0] ?? null, error: null }; },
+          async maybeSingle() { return { data: newRows[0] ?? null, error: null }; },
+          then(resolve: (v: { data: Row[]; error: null }) => unknown) {
+            return Promise.resolve(resolve({ data: newRows, error: null }));
+          },
         };
       },
       then(resolve: (v: { data: Row[]; error: null }) => unknown) {
-        return Promise.resolve(resolve({ data: items as Row[], error: null }));
+        return Promise.resolve(resolve({ data: newRows, error: null }));
       },
     };
   }
@@ -168,6 +214,11 @@ export function memSupabase(seed: Record<string, Row[]> = {}, options: MemSupaba
         current.latest_reply_token = params.p_reply_token ?? null;
         current.updated_at = new Date().toISOString();
         return { data: current, error: null };
+      }
+
+      if (name === "insert_produce_round_events_ignore") {
+        const inserted = insertProduceRoundEventsIgnore(params.events);
+        return { data: inserted, error: null };
       }
 
       return {

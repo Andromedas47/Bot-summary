@@ -44,7 +44,8 @@ import {
   PRODUCE_APPEND_ELIGIBLE_STATUSES,
   RETURN_APPEND_ELIGIBLE_STATUSES,
 } from "@/lib/work-round/work-round-service";
-import { classifyHeader, hasExplicitProduceAppendStart, isExplicitProduceAppendHeader, isIncompleteProduceHeader, isProduceAppendLine, type TxIntent } from "@/lib/parsers/work-round-header";
+import { classifyHeader, hasExplicitProduceAppendStart, isExplicitProduceAppendHeader, isIncompleteProduceHeader, isProduceAppendLine, type TxIntent, type WorkRoundHeader } from "@/lib/parsers/work-round-header";
+import type { EvidenceResolution } from "@/lib/work-round/work-round-service";
 import {
   SettlementIntakeService,
   parseSettlementCommand,
@@ -164,6 +165,50 @@ function allowedProduceStatusesForIntent(txIntent: TxIntent): WorkRoundStatus[] 
   return PRODUCE_APPEND_ELIGIBLE_STATUSES;
 }
 
+function isReturnProduceIntent(txIntent: TxIntent): boolean {
+  return txIntent === "คืน" || txIntent === "คืนเสีย";
+}
+
+async function resolveProduceHeaderGate(
+  wrs:          WorkRoundService,
+  sourceId:     string,
+  businessDate: string,
+  hdr:          WorkRoundHeader,
+): Promise<EvidenceResolution> {
+  const allowedStatuses = allowedProduceStatusesForIntent(hdr.txIntent);
+  const attempts: Array<{ sellerName?: string; marketName?: string }> = [];
+
+  if (hdr.type === "explicit") {
+    attempts.push({ sellerName: hdr.sellerName, marketName: hdr.marketName });
+    if (isReturnProduceIntent(hdr.txIntent)) {
+      attempts.push({ sellerName: hdr.sellerName });
+      attempts.push({});
+    }
+  } else if (hdr.type === "seller_only") {
+    attempts.push({ sellerName: hdr.sellerName });
+    if (isReturnProduceIntent(hdr.txIntent)) {
+      attempts.push({});
+    }
+  } else {
+    attempts.push({});
+  }
+
+  let last: EvidenceResolution = { mode: "no_round" };
+  for (const attempt of attempts) {
+    const decision = await wrs.resolveForIntent({
+      sourceId,
+      businessDate,
+      allowedStatuses,
+      sellerName: attempt.sellerName,
+      marketName: attempt.marketName,
+    });
+    if (decision.mode === "error") return decision;
+    if (decision.mode !== "no_round") return decision;
+    last = decision;
+  }
+  return last;
+}
+
 function buildBorrowOpenedReply(firstLine: string): string {
   const hdr    = classifyHeader(firstLine);
   const seller = hdr?.type === "explicit" || hdr?.type === "seller_only" ? hdr.sellerName : "—";
@@ -184,11 +229,12 @@ function buildReturnHeaderOpenedReply(
   const ack = txIntent === "คืนเสีย"
     ? "รับหัวคืนเสียแล้ว ✅"
     : "รับหัวชั่งคืนแล้ว ✅";
+  const closeHint = txIntent === "คืนเสีย" ? "จบรายการคืนเสีย" : "จบรายการ";
   return [
     ack,
     `${sellerName} — ${marketName}`,
     "ส่งรายการสินค้าได้เลย",
-    "ปิดรายการด้วย: จบรายการ",
+    `ปิดรายการด้วย: ${closeHint}`,
   ].join("\n");
 }
 
@@ -324,7 +370,7 @@ export function hasSessionStart(text: string): boolean {
     return !RE.SESSION_END.test(line)
       && !isProduceAppendLine(line)
       && !isExplicitProduceAppendHeader(line)
-      && RE.SESSION_START.test(line);
+      && (RE.SESSION_START.test(line) || classifyHeader(line) !== null);
   });
 }
 
@@ -1711,11 +1757,12 @@ export class WebhookService {
       if (hdr.type === "explicit") {
         return buildReturnHeaderOpenedReply(hdr.sellerName, hdr.marketName, hdr.txIntent);
       }
+      const closeHint = hdr.txIntent === "คืนเสีย" ? "จบรายการคืนเสีย" : "จบรายการ";
       return [
         hdr.txIntent === "คืนเสีย" ? "รับหัวคืนเสียแล้ว ✅" : "รับหัวชั่งคืนแล้ว ✅",
         "— —",
         "ส่งรายการสินค้าได้เลย",
-        "ปิดรายการด้วย: จบรายการ",
+        `ปิดรายการด้วย: ${closeHint}`,
       ].join("\n");
     }
 
@@ -1756,32 +1803,26 @@ export class WebhookService {
     }
 
     try {
-      const decision = await wrs.resolveForIntent({
-        sourceId: sessionKey,
-        businessDate,
-        sellerName: hdr.type === "explicit" || hdr.type === "seller_only" ? hdr.sellerName : undefined,
-        marketName: hdr.type === "explicit" ? hdr.marketName : undefined,
-        allowedStatuses: allowedProduceStatusesForIntent(hdr.txIntent),
-      });
+      const decision = await resolveProduceHeaderGate(wrs, sessionKey, businessDate, hdr);
       if (decision.mode === "error") {
         log.warn("Work Round header gate lookup failed", { sessionKey, businessDate, error: decision.error });
         return { ok: false, reply: wrs.buildNoRoundPrompt() };
       }
       if (decision.mode === "no_round") {
-        log.info("generic header: no open Work Round — blocking pending session", { sessionKey });
+        log.info("produce header: no open Work Round — blocking pending session", { sessionKey, txIntent: hdr.txIntent });
         return { ok: false, reply: wrs.buildNoRoundPrompt() };
       }
       if (decision.mode === "blocked") {
-        log.info("generic header: ambiguous Work Rounds — blocking pending session", {
-          sessionKey, count: decision.candidates.length,
+        log.info("produce header: matching rounds not eligible — blocking pending session", {
+          sessionKey, count: decision.candidates.length, txIntent: hdr.txIntent,
         });
         return {
           ok: false,
           reply: "พบรอบงานแล้ว แต่สถานะยังไม่พร้อมรับรายการนี้ กรุณาตรวจสอบในหน้า Work Rounds",
         };
       }
-      log.info("generic header: resolved to one open Work Round", {
-        sessionKey, mode: decision.mode,
+      log.info("produce header: resolved to one open Work Round", {
+        sessionKey, mode: decision.mode, txIntent: hdr.txIntent,
       });
       return { ok: true };
     } catch (wrErr) {
@@ -3034,13 +3075,7 @@ export class WebhookService {
           return { kind: "persist", workRoundId: workRound.id, isAppend: false };
         }
 
-        const decision = await wrs.resolveForIntent({
-          sourceId,
-          businessDate,
-          sellerName: hdr.sellerName,
-          marketName: hdr.marketName,
-          allowedStatuses: allowedProduceStatusesForIntent(hdr.txIntent),
-        });
+        const decision = await resolveProduceHeaderGate(wrs, sourceId, businessDate, hdr);
 
         if (decision.mode === "error") throw new Error(decision.error);
         if (decision.mode === "linked") {
@@ -3079,12 +3114,7 @@ export class WebhookService {
           return { kind: "halt", result: halt() };
         }
 
-        const decision = await wrs.resolveForIntent({
-          sourceId,
-          businessDate,
-          sellerName: hdr.sellerName,
-          allowedStatuses: isReturnAppend ? RETURN_APPEND_ELIGIBLE_STATUSES : PRODUCE_APPEND_ELIGIBLE_STATUSES,
-        });
+        const decision = await resolveProduceHeaderGate(wrs, sourceId, businessDate, hdr);
 
         if (decision.mode === "error") throw new Error(decision.error);
         if (decision.mode === "linked") {
@@ -3113,7 +3143,7 @@ export class WebhookService {
         if (replyToken) {
           const reply = decision.mode === "blocked"
             ? `พบรอบของ ${hdr.sellerName} แต่สถานะยังไม่พร้อมรับรายการนี้ กรุณาตรวจสอบในหน้า Work Rounds`
-            : `ไม่พบรอบของ ${hdr.sellerName} สำหรับวันที่นี้ กรุณาเปิดเบิกพร้อมชื่อตลาดก่อน`;
+            : wrs.buildNoRoundPrompt();
           await replyLineMessage(replyToken, reply);
         }
         return { kind: "halt", result: halt() };

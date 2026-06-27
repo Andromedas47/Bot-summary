@@ -76,6 +76,16 @@ describe("classifyHeader", () => {
     expect(isIncompleteProduceHeader("กี้ ชั่งคืน 25/6/2569")).toBe(false);
   });
 
+  it("classifies explicit seller-market ชั่งคืน headers", () => {
+    const h = classifyHeader("กี้-วัดทุ่งลานนา ชั่งคืน 25/6/2569");
+    expect(h?.type).toBe("explicit");
+    if (h?.type === "explicit") {
+      expect(h.sellerName).toBe("กี้");
+      expect(h.marketName).toBe("วัดทุ่งลานนา");
+      expect(h.txIntent).toBe("คืน");
+    }
+  });
+
   it("classifies seller-only คืนเสีย headers for Work Round resolution", () => {
     const h = classifyHeader("กี้ คืนเสีย 25/6/2569");
     expect(h?.type).toBe("seller_only");

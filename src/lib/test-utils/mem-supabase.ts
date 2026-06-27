@@ -387,7 +387,7 @@ export function memSupabase(seed: Record<string, Row[]> = {}, options: MemSupaba
         const readiness = closeReadinessForSession(session);
         if (!readiness.ready) {
           return {
-            data: { claimed: false, reason: readiness.reason, ...readiness },
+            data: { claimed: false, ...readiness },
             error: null,
           };
         }

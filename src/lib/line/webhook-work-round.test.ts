@@ -712,7 +712,7 @@ describe("WebhookService — produce append with future business_date", () => {
     });
     const s = svcA(db, replies);
     await s.processEvents([textEvent(
-      ["รายการเบิกเพิ่ม", "3 มังคุด 35 บาท", "2 โล", "จบรายการ"].join("\n"),
+      ["รายการเบิกเพิ่ม", "3 มังคุด 35 บาท", "2 โล", "จบรายการเบิกเพิ่ม"].join("\n"),
       "user-1", "reply-1",
     )], "dest");
     expect(replies[0] ?? "").not.toContain("ไม่พบรอบ");
@@ -749,7 +749,7 @@ describe("WebhookService — produce append with future business_date", () => {
     // 2. Append (no date — must resolve by status, not date)
     replies.length = 0;
     await s.processEvents([textEvent(
-      ["รายการเบิกเพิ่ม", "2 แอปเปิ้ล 50 บาท", "3 ลูก", "จบรายการ"].join("\n"),
+      ["รายการเบิกเพิ่ม", "2 แอปเปิ้ล 50 บาท", "3 ลูก", "จบรายการเบิกเพิ่ม"].join("\n"),
       "user-1", "reply-append",
     )], "dest");
     expect(replies[0] ?? "").not.toContain("ไม่พบรอบ");

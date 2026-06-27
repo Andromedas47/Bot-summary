@@ -97,18 +97,17 @@ describe("WebhookService — คืนเสีย pending session hotfix", () =
     expect(replies[0]).not.toContain("กี้-วัดทุ่งลานนา เบิก 24/06/2569");
   });
 
-  it("คืนเสีย header without open round mentions all supported work types", async () => {
+  it("คืนเสีย header without open round replies with explicit seller-market-date prompt", async () => {
     const replies: string[] = [];
     const db = memSupabase();
 
     await svc(db, replies).processEvents([textEvent(HEADER)], "dest");
 
     expect(db._rows("pending_sessions")).toHaveLength(0);
-    expect(replies[0]).toContain("ไม่พบรายการที่เปิดอยู่");
-    expect(replies[0]).toContain("เบิก");
-    expect(replies[0]).toContain("เบิกเพิ่ม");
-    expect(replies[0]).toContain("ชั่งคืน");
-    expect(replies[0]).toContain("คืนเสีย");
+    expect(replies[0]).toContain("ไม่พบรอบที่ตรงกับ");
+    expect(replies[0]).toContain("แดง — ตลาดนัดจตุจักร");
+    expect(replies[0]).toContain("27/6/2569");
+    expect(replies[0]).not.toContain("ทดสอบ2");
   });
 
   it("จบรายการคืนเสีย does not close an open borrow pending session", async () => {

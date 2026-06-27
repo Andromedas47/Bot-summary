@@ -231,6 +231,7 @@ describe("WebhookService — produce round events dual-write (P2b)", () => {
     const results = await s.processEvents([
       textEvent("โอม-ตลาดพาซิโอ้ผลไม้ เบิก 25/6/2569", { timestamp: 1000 }),
       textEvent("1มังคุด35บาท", { timestamp: 2000 }),
+      textEvent("10โล", { timestamp: 2500 }),
       textEvent("จบรายการเบิก", { timestamp: 3000, replyToken: "tok" }),
     ], "dest");
 
@@ -248,6 +249,7 @@ describe("WebhookService — produce round events dual-write (P2b)", () => {
     await s.processEvents([
       textEvent("โอม-ตลาดพาซิโอ้ผลไม้ เบิก 25/6/2569", { eventId: "pm-h", timestamp: 1000 }),
       textEvent("1มังคุด35บาท", { eventId: "pm-i", timestamp: 2000 }),
+      textEvent("10โล", { eventId: "pm-qty", timestamp: 2100 }),
     ], "dest");
 
     db._rows("raw_messages").push({

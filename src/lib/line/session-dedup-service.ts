@@ -16,7 +16,7 @@ function canonicalItem(item: WeighSessionItem): string {
   ].join("|");
 }
 
-export function computeSessionHash(parsed: WeighSession): string {
+export function computeSessionHash(parsed: WeighSession, workRoundId?: string): string {
   const sortedTxTypes = [...new Set(parsed.items.map((i) => i.transaction_type))].sort().join(",");
 
   const itemLines = [...parsed.items]
@@ -28,6 +28,7 @@ export function computeSessionHash(parsed: WeighSession): string {
     parsed.date         ?? "",
     parsed.staff_name,
     parsed.session_title ?? "",
+    workRoundId          ?? "",
     sortedTxTypes,
     itemLines,
   ].join("||");
@@ -57,11 +58,11 @@ export function computeItemHash(
 export class SessionDedupService {
   constructor(private readonly supabase: AnyClient) {}
 
-  private payload(parsed: WeighSession, rawText?: string) {
+  private payload(parsed: WeighSession, rawText?: string, workRoundId?: string) {
     const sortedTxTypes = [...new Set(parsed.items.map((i) => i.transaction_type))].sort().join(",");
 
     return {
-      session_hash:     computeSessionHash(parsed),
+      session_hash:     computeSessionHash(parsed, workRoundId),
       transaction_date: parsed.date ?? null,
       staff_name:       parsed.staff_name,
       market_name:      parsed.session_title ?? "",
@@ -70,11 +71,11 @@ export class SessionDedupService {
     };
   }
 
-  async isDuplicate(parsed: WeighSession): Promise<boolean> {
+  async isDuplicate(parsed: WeighSession, workRoundId?: string): Promise<boolean> {
     const { data, error } = await this.supabase
       .from("imported_sessions")
       .select("id")
-      .eq("session_hash", computeSessionHash(parsed))
+      .eq("session_hash", computeSessionHash(parsed, workRoundId))
       .maybeSingle();
 
     if (error) throw new Error(`imported_sessions lookup failed: ${error.message}`);
@@ -95,19 +96,19 @@ export class SessionDedupService {
     return (data ?? []).length > 0;
   }
 
-  async release(parsed: WeighSession): Promise<void> {
+  async release(parsed: WeighSession, workRoundId?: string): Promise<void> {
     const { error } = await this.supabase
       .from("imported_sessions")
       .delete()
-      .eq("session_hash", computeSessionHash(parsed));
+      .eq("session_hash", computeSessionHash(parsed, workRoundId));
 
     if (error) throw new Error(`imported_sessions release failed: ${error.message}`);
   }
 
-  async record(parsed: WeighSession, rawText?: string): Promise<boolean> {
+  async record(parsed: WeighSession, rawText?: string, workRoundId?: string): Promise<boolean> {
     const { error } = await this.supabase
       .from("imported_sessions")
-      .insert(this.payload(parsed, rawText));
+      .insert(this.payload(parsed, rawText, workRoundId));
 
     if (error?.code === "23505") return true;
     if (error) throw new Error(`imported_sessions insert failed: ${error.message}`);
@@ -122,7 +123,7 @@ export class SessionDedupService {
    * Prefer `isDuplicate` + successful persistence + `record` for new flows so a
    * failed item insert cannot reserve a dedup hash permanently.
    */
-  async checkAndRecord(parsed: WeighSession, rawText?: string): Promise<boolean> {
-    return this.record(parsed, rawText);
+  async checkAndRecord(parsed: WeighSession, rawText?: string, workRoundId?: string): Promise<boolean> {
+    return this.record(parsed, rawText, workRoundId);
   }
 }

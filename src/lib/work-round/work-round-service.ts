@@ -387,6 +387,17 @@ export class WorkRoundService {
     ].join("\n");
   }
 
+  buildNoExplicitProduceRoundPrompt(
+    sellerName:   string,
+    marketName:   string,
+    businessDate: string,
+  ): string {
+    return [
+      `ไม่พบรอบที่ตรงกับ ${sellerName} — ${marketName} วันที่ ${formatSlashBeDate(businessDate)}`,
+      "กรุณาตรวจสอบชื่อ ตลาด และวันที่ หรือเปิดหัวเบิกก่อนชั่งคืน",
+    ].join("\n");
+  }
+
   // Builds a prompt for when no open Work Round is found for a generic header.
   buildNoRoundPrompt(): string {
     return [

@@ -184,6 +184,7 @@ describe("WebhookService — pre-0042 pending session deploy compatibility", () 
   it("blocks close for pre-0042 malformed accumulated_text with parse-review reply", async () => {
     const header = "โอม-ตลาดพาซิโอ้ผลไม้ เบิก 25/6/2569";
     const badLine = `9จีนหงส์ 3 ${LO}100บาท`;
+    const badLineReply = `#9 จีนหงส์ 3 ${LO}100บาท`;
     const accumulated = [
       header,
       "1ส้มไต้หวัน 40 บาท",
@@ -233,7 +234,7 @@ describe("WebhookService — pre-0042 pending session deploy compatibility", () 
     expect(String(pending.accumulated_text)).toContain("15.5ลูก");
     expect(pending.close_event_timestamp_ms).toBeNull();
     expect(replies.some((r) => r.includes("อ่านรายการไม่ครบ กรุณาแก้ไข:"))).toBe(true);
-    expect(replies.some((r) => r.includes(badLine))).toBe(true);
+    expect(replies.some((r) => r.includes(badLineReply))).toBe(true);
     expect(replies.some((r) => r.includes("อ่านรายการไม่สำเร็จ"))).toBe(false);
     expect(replies.some((r) => r.includes("บันทึกแล้ว"))).toBe(false);
   });

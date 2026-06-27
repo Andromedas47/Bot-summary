@@ -97,9 +97,17 @@ export function parseWeighSession(
       console.log("[TRACE][parseWeighSession] SESSION_END detected, pendingItem:", JSON.stringify(pendingItem));
       failPendingRepair(); // no qty line arrived before end
       if (pendingItem?.product_name) {
-        const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
-        pushOrMergeItem(items, finalizedItem);
-        console.log("[TRACE][parseWeighSession] PUSH_ITEM(session-end):", JSON.stringify(finalizedItem), "items_total_after:", items.length);
+        if (isMissingQuantity(pendingItem.quantity ?? null)) {
+          reviewIssues.push({
+            item_number: pendingItem.item_number ?? null,
+            line:        `#${pendingItem.item_number ?? "?"} ${pendingItem.product_name}`,
+            reason:      "missing_quantity",
+          });
+        } else {
+          const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
+          pushOrMergeItem(items, finalizedItem);
+          console.log("[TRACE][parseWeighSession] PUSH_ITEM(session-end):", JSON.stringify(finalizedItem), "items_total_after:", items.length);
+        }
         pendingItem = null;
       }
       currentSection = "main";

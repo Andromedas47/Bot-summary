@@ -165,10 +165,6 @@ function allowedProduceStatusesForIntent(txIntent: TxIntent): WorkRoundStatus[] 
   return PRODUCE_APPEND_ELIGIBLE_STATUSES;
 }
 
-function isReturnProduceIntent(txIntent: TxIntent): boolean {
-  return txIntent === "คืน" || txIntent === "คืนเสีย";
-}
-
 async function resolveProduceHeaderGate(
   wrs:          WorkRoundService,
   sourceId:     string,
@@ -176,37 +172,41 @@ async function resolveProduceHeaderGate(
   hdr:          WorkRoundHeader,
 ): Promise<EvidenceResolution> {
   const allowedStatuses = allowedProduceStatusesForIntent(hdr.txIntent);
-  const attempts: Array<{ sellerName?: string; marketName?: string }> = [];
 
+  // Strict identity scoping: explicit headers must match seller + market + date.
+  // Never fall back to seller-only or unfiltered queries — that surfaced unrelated
+  // rounds (e.g. ทดสอบ2 / แดง2) after ชั่งคืน close for ปลา-ราชพฤกษ์.
   if (hdr.type === "explicit") {
-    attempts.push({ sellerName: hdr.sellerName, marketName: hdr.marketName });
-    if (isReturnProduceIntent(hdr.txIntent)) {
-      attempts.push({ sellerName: hdr.sellerName });
-      attempts.push({});
-    }
-  } else if (hdr.type === "seller_only") {
-    attempts.push({ sellerName: hdr.sellerName });
-    if (isReturnProduceIntent(hdr.txIntent)) {
-      attempts.push({});
-    }
-  } else {
-    attempts.push({});
-  }
-
-  let last: EvidenceResolution = { mode: "no_round" };
-  for (const attempt of attempts) {
-    const decision = await wrs.resolveForIntent({
+    return wrs.resolveForIntent({
       sourceId,
       businessDate,
       allowedStatuses,
-      sellerName: attempt.sellerName,
-      marketName: attempt.marketName,
+      sellerName: hdr.sellerName,
+      marketName: hdr.marketName,
     });
-    if (decision.mode === "error") return decision;
-    if (decision.mode !== "no_round") return decision;
-    last = decision;
   }
-  return last;
+
+  if (hdr.type === "seller_only") {
+    return wrs.resolveForIntent({
+      sourceId,
+      businessDate,
+      allowedStatuses,
+      sellerName: hdr.sellerName,
+    });
+  }
+
+  return wrs.resolveForIntent({ sourceId, businessDate, allowedStatuses });
+}
+
+function buildExplicitProduceNoRoundReply(
+  wrs:          WorkRoundService,
+  hdr:          WorkRoundHeader,
+  businessDate: string,
+): string {
+  if (hdr.type === "explicit") {
+    return wrs.buildNoExplicitProduceRoundPrompt(hdr.sellerName, hdr.marketName, businessDate);
+  }
+  return wrs.buildNoRoundPrompt();
 }
 
 function buildBorrowOpenedReply(firstLine: string): string {
@@ -1810,7 +1810,10 @@ export class WebhookService {
       }
       if (decision.mode === "no_round") {
         log.info("produce header: no open Work Round — blocking pending session", { sessionKey, txIntent: hdr.txIntent });
-        return { ok: false, reply: wrs.buildNoRoundPrompt() };
+        return {
+          ok: false,
+          reply: buildExplicitProduceNoRoundReply(wrs, hdr, businessDate),
+        };
       }
       if (decision.mode === "blocked") {
         log.info("produce header: matching rounds not eligible — blocking pending session", {
@@ -2843,6 +2846,16 @@ export class WebhookService {
       return { eventId, eventType, status: "saved", parsed: false, pendingSessionClosed: false };
     }
 
+    if (parsed.parse_errors.length > 0) {
+      log.warn("produce persist blocked: parse_errors present", { errors: parsed.parse_errors });
+      if (replyToken) {
+        try {
+          await this.replyMessage(replyToken, `อ่านรายการไม่ครบ กรุณาแก้ไขและส่งใหม่:\n${parsed.parse_errors.map((e) => e.replace(/^(quantity with no preceding item|unrecognized line): /, "")).join("\n")}`);
+        } catch (e) { log.error("reply failed", { error: String(e) }); }
+      }
+      return { eventId, eventType, status: "saved", parsed: false, pendingSessionClosed: false };
+    }
+
     if (hasParseReviewBlockers(parsed)) {
       log.warn("produce persist blocked: parse review issues", { issues: parsed.review_issues });
       if (replyToken) {
@@ -2855,9 +2868,10 @@ export class WebhookService {
     const persisted = await this.enrichParsedFromWorkRound(parsed, target.workRoundId);
     // 2. Dedup. Release ghost reservations from old failed inserts.
     const dedup     = new SessionDedupService(this.supabase);
-    let isDuplicate = await dedup.isDuplicate(persisted);
+    const wrid      = target.workRoundId ?? undefined;
+    let isDuplicate = await dedup.isDuplicate(persisted, wrid);
     if (isDuplicate && !(await dedup.hasPersistedItems(persisted))) {
-      await dedup.release(persisted);
+      await dedup.release(persisted, wrid);
       isDuplicate = false;
     }
     if (isDuplicate) {
@@ -2910,7 +2924,7 @@ export class WebhookService {
       throw err;
     }
 
-    const duplicateAfterPersist = await dedup.record(persisted, accumulatedText);
+    const duplicateAfterPersist = await dedup.record(persisted, accumulatedText, wrid);
     if (duplicateAfterPersist) {
       await this.supabase.from("produce_sessions").delete().eq("id", session.id);
       log.info("duplicate session recorded concurrently — removed current insert");
@@ -3099,7 +3113,12 @@ export class WebhookService {
           txIntent: hdr.txIntent,
           reason: decision.mode,
         });
-        if (replyToken) await replyLineMessage(replyToken, wrs.buildNoRoundPrompt());
+        if (replyToken) {
+          const reply = decision.mode === "blocked"
+            ? `พบรอบของ ${hdr.sellerName} — ${hdr.marketName} แต่สถานะยังไม่พร้อมรับรายการนี้ กรุณาตรวจสอบในหน้า Work Rounds`
+            : buildExplicitProduceNoRoundReply(wrs, hdr, businessDate);
+          await replyLineMessage(replyToken, reply);
+        }
         return { kind: "halt", result: halt() };
       }
 

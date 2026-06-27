@@ -102,7 +102,7 @@ const BATCH2_LINES = [
   "26สับปะรดหัวละ20บาท", "19หัว",
   "27สับปะรดหัวละ20บาท", "19หัว",
   "28สับปะรดหัวละ 20บาท", "19หัว",
-  "จบรายการ",
+  "จบรายการเบิกเพิ่ม",
 ];
 
 describe("produce append markers", () => {
@@ -138,10 +138,10 @@ describe("WebhookService — รายการเบิกเพิ่ม V2 re
       "รายการเบิกเพิ่ม",
       "17ลองกอง40บาท", `20.9 ${LO}`,
       "18เงาะ40บาท", `16.7 ${LO}`,
-      "จบรายการ",
+      "จบรายการเบิกเพิ่ม",
     ];
     for (const line of batch2) {
-      const isEnd = line === "จบรายการ";
+      const isEnd = line === "จบรายการเบิกเพิ่ม";
       await s.processEvents([textEvent(line, isEnd ? { replyToken: "tok-end" } : {})], "dest");
     }
 
@@ -186,7 +186,7 @@ describe("WebhookService — รายการเบิกเพิ่ม V2 re
     expect(afterBatch1[0].is_append_session).toBe(false);
 
     for (const line of BATCH2_LINES) {
-      const isEnd = line === "จบรายการ";
+      const isEnd = line === "จบรายการเบิกเพิ่ม";
       await s.processEvents([textEvent(line, isEnd ? { replyToken: "tok-append-end" } : {})], "dest");
     }
 
@@ -231,7 +231,7 @@ describe("WebhookService — รายการเบิกเพิ่ม V2 re
       textEvent("รายการเบิกเพิ่ม", { replyToken: "tok-1" }),
       textEvent("12แอปเปิ้ล20บาท"),
       textEvent("40.ลูก"),
-      textEvent("จบรายการ"),
+      textEvent("จบรายการเบิกเพิ่ม"),
     ], "dest");
 
     expect(replies[0]).toContain("ไม่พบรอบเบิกที่ยังเปิดอยู่สำหรับรายการเพิ่ม");
@@ -252,7 +252,7 @@ describe("WebhookService — รายการเบิกเพิ่ม V2 re
       textEvent("รายการเบิกเพิ่ม", { replyToken: "tok-closed" }),
       textEvent("17ลองกอง40บาท"),
       textEvent(`20.9 ${LO}`),
-      textEvent("จบรายการ"),
+      textEvent("จบรายการเบิกเพิ่ม"),
     ], "dest");
 
     expect(replies[0]).toContain("ไม่พบรอบเบิกที่ยังเปิดอยู่สำหรับรายการเพิ่ม");
@@ -282,7 +282,7 @@ describe("WebhookService — รายการเบิกเพิ่ม V2 re
       textEvent("รายการเบิกเพิ่ม", { replyToken: "tok-needs-correction" }),
       textEvent("17ลองกอง40บาท"),
       textEvent(`20.9 ${LO}`),
-      textEvent("จบรายการ"),
+      textEvent("จบรายการเบิกเพิ่ม"),
     ], "dest");
 
     // 3. rejected with the no-append-round prompt
@@ -318,7 +318,7 @@ describe("WebhookService — รายการเบิกเพิ่ม V2 re
       textEvent("รายการเบิกเพิ่ม"),
       textEvent("17ลองกอง40บาท"),
       textEvent(`20.9 ${LO}`),
-      textEvent("จบรายการ", { replyToken: "tok-pc" }),
+      textEvent("จบรายการเบิกเพิ่ม", { replyToken: "tok-pc" }),
     ], "dest");
 
     expect(replies.some((r) => r.includes("ไม่พบรอบเบิก"))).toBe(false);
@@ -430,6 +430,85 @@ describe("WebhookService — รายการเบิกเพิ่ม V2 re
     expect(db._rows("produce_items")).toHaveLength(0);
   });
 
+  const APPEND_GENERIC_CLOSE_REPLY =
+    "รอบนี้เป็นรายการเบิกเพิ่ม  กรุณาพิมพ์ “จบรายการเบิกเพิ่ม” เมื่อส่งครบ";
+
+  it("append + generic จบรายการ replies with warning and does not persist", async () => {
+    const round = openRound({ status: "produce_complete" });
+    const db = memSupabase({ work_rounds: [round] });
+    const replies: string[] = [];
+
+    await svc(db, replies).processEvents([
+      textEvent("รายการเบิกเพิ่ม"),
+      textEvent("1มังคุด35บาท"),
+      textEvent(`2 ${LO}`),
+      textEvent("จบรายการ", { replyToken: "tok-append-generic" }),
+    ], "dest");
+
+    expect(replies.at(-1)).toBe(APPEND_GENERIC_CLOSE_REPLY);
+    expect(db._rows("pending_sessions")).toHaveLength(1);
+    expect(db._rows("produce_sessions")).toHaveLength(0);
+    expect(db._rows("produce_items")).toHaveLength(0);
+  });
+
+  it("append session stays open after generic จบรายการ and accepts a later item", async () => {
+    const round = openRound({ status: "produce_complete" });
+    const db = memSupabase({ work_rounds: [round] });
+    const replies: string[] = [];
+    const s = svc(db, replies);
+
+    await s.processEvents([
+      textEvent("รายการเบิกเพิ่ม"),
+      textEvent("1มังคุด35บาท"),
+      textEvent(`2 ${LO}`),
+      textEvent("จบรายการ", { replyToken: "tok-append-generic-2" }),
+    ], "dest");
+
+    expect(replies.at(-1)).toBe(APPEND_GENERIC_CLOSE_REPLY);
+    expect(db._rows("pending_sessions")).toHaveLength(1);
+
+    await s.processEvents([textEvent("2ทุเรียน35บาท")], "dest");
+    await s.processEvents([textEvent(`3 ${LO}`)], "dest");
+
+    expect(db._rows("pending_sessions")).toHaveLength(1);
+    expect(db._rows("produce_sessions")).toHaveLength(0);
+  });
+
+  it("append + จบรายการเบิกเพิ่ม closes the session", async () => {
+    const round = openRound({ status: "produce_complete" });
+    const db = memSupabase({ work_rounds: [round] });
+
+    await svc(db).processEvents([
+      textEvent("รายการเบิกเพิ่ม"),
+      textEvent("1มังคุด35บาท"),
+      textEvent(`2 ${LO}`),
+      textEvent("จบรายการเบิกเพิ่ม"),
+    ], "dest");
+
+    expect(db._rows("pending_sessions")).toHaveLength(0);
+    expect(db._rows("produce_sessions")).toHaveLength(1);
+    expect(db._rows("produce_sessions")[0].is_append_session).toBe(true);
+    expect(db._rows("produce_items")).toHaveLength(1);
+  });
+
+  it("append + จบรายการเบิก does not close — replies with append clarification", async () => {
+    const round = openRound({ status: "produce_complete" });
+    const db = memSupabase({ work_rounds: [round] });
+    const replies: string[] = [];
+
+    await svc(db, replies).processEvents([
+      textEvent("รายการเบิกเพิ่ม"),
+      textEvent("1มังคุด35บาท"),
+      textEvent(`2 ${LO}`),
+      textEvent("จบรายการเบิก", { replyToken: "tok-borrow-close-on-append" }),
+    ], "dest");
+
+    expect(replies.at(-1)).toBe(APPEND_GENERIC_CLOSE_REPLY);
+    expect(db._rows("pending_sessions")).toHaveLength(1);
+    expect(db._rows("produce_sessions")).toHaveLength(0);
+    expect(db._rows("produce_items")).toHaveLength(0);
+  });
+
   it("parser keeps 17ลองกอง and 18เงาะ with quantities in append batch", () => {
     const text = BATCH2_LINES.join("\n");
     const parsed = parseWeighSession(text, MESSAGE_DATE);
@@ -484,7 +563,7 @@ describe("WebhookService — รายการเบิกเพิ่ม V2 re
 
     await svc(db, replies).processEvents([
       textEvent(
-        ["ทดลองใหม่-ตลาดจำลอง รายการเบิกเพิ่ม 28/6/2569", "1มังคุด35บาท", `5 ${LO}`, "จบรายการ"].join("\n"),
+        ["ทดลองใหม่-ตลาดจำลอง รายการเบิกเพิ่ม 28/6/2569", "1มังคุด35บาท", `5 ${LO}`, "จบรายการเบิกเพิ่ม"].join("\n"),
         { replyToken: "tok-explicit" },
       ),
     ], "dest");
@@ -506,7 +585,7 @@ describe("WebhookService — รายการเบิกเพิ่ม V2 re
       textEvent("ทดลองใหม่-ตลาดจำลอง เบิกเพิ่ม 28/6/2569", { replyToken: "tok-alias" }),
       textEvent("2ทุเรียน35บาท"),
       textEvent(`3 ${LO}`),
-      textEvent("จบรายการ"),
+      textEvent("จบรายการเบิกเพิ่ม"),
     ], "dest");
 
     expect(db._rows("work_rounds")).toHaveLength(2);
@@ -544,6 +623,133 @@ describe("WebhookService — รายการเบิกเพิ่ม V2 re
     }
   });
 
+  // ── One-shot close-marker safety (Phase 0 patch) ───────────────────────────
+
+  const ONE_SHOT_APPEND_GENERIC_REPLY =
+    "รอบนี้เป็นรายการเบิกเพิ่ม  กรุณาพิมพ์ “จบรายการเบิกเพิ่ม” เมื่อส่งครบ";
+
+  it("one-shot เบิกเพิ่ม + generic จบรายการ: does not persist/finalize, returns exact warning", async () => {
+    const round = openRound({ status: "produce_complete" });
+    const db = memSupabase({ work_rounds: [round] });
+    const replies: string[] = [];
+
+    await svc(db, replies).processEvents([
+      textEvent(
+        ["รายการเบิกเพิ่ม", "1มังคุด35บาท", `2 ${LO}`, "จบรายการ"].join("\n"),
+        { replyToken: "tok-one-shot-append-generic" },
+      ),
+    ], "dest");
+
+    expect(replies.at(-1)).toBe(ONE_SHOT_APPEND_GENERIC_REPLY);
+    expect(db._rows("pending_sessions")).toHaveLength(1);
+    expect(db._rows("produce_sessions")).toHaveLength(0);
+    expect(db._rows("produce_items")).toHaveLength(0);
+  });
+
+  it("one-shot เบิก + generic จบรายการ: does not persist/finalize", async () => {
+    const round = openRound({ seller_name: "กี้", market_name: "วัดทุ่ง" });
+    const db = memSupabase({ work_rounds: [round] });
+    const replies: string[] = [];
+
+    await svc(db, replies).processEvents([
+      textEvent(
+        ["กี้-วัดทุ่ง เบิก 25/6/2569", "1.มะม่วง100บาท", `10 ${LO}`, "จบรายการ"].join("\n"),
+        { replyToken: "tok-one-shot-borrow-generic" },
+      ),
+    ], "dest");
+
+    expect(replies.at(-1)).toContain("จบรายการเบิก");
+    expect(db._rows("pending_sessions")).toHaveLength(1);
+    expect(db._rows("produce_sessions")).toHaveLength(0);
+    expect(db._rows("produce_items")).toHaveLength(0);
+  });
+
+  it("one-shot เบิกเพิ่ม + จบรายการเบิกเพิ่ม: finalizes", async () => {
+    const round = openRound({ status: "produce_complete" });
+    const db = memSupabase({ work_rounds: [round] });
+
+    await svc(db).processEvents([
+      textEvent(
+        ["รายการเบิกเพิ่ม", "1มังคุด35บาท", `2 ${LO}`, "จบรายการเบิกเพิ่ม"].join("\n"),
+        { replyToken: "tok-one-shot-append-proper" },
+      ),
+    ], "dest");
+
+    expect(db._rows("pending_sessions")).toHaveLength(0);
+    expect(db._rows("produce_sessions")).toHaveLength(1);
+    expect(db._rows("produce_sessions")[0].is_append_session).toBe(true);
+    expect(db._rows("produce_items")).toHaveLength(1);
+  });
+
+  it("one-shot เบิก + จบรายการเบิก: finalizes", async () => {
+    const round = openRound({ seller_name: "กี้", market_name: "วัดทุ่ง" });
+    const db = memSupabase({ work_rounds: [round] });
+
+    await svc(db).processEvents([
+      textEvent(
+        ["กี้-วัดทุ่ง เบิก 25/6/2569", "1.มะม่วง100บาท", `10 ${LO}`, "จบรายการเบิก"].join("\n"),
+        { replyToken: "tok-one-shot-borrow-proper" },
+      ),
+    ], "dest");
+
+    expect(db._rows("pending_sessions")).toHaveLength(0);
+    expect(db._rows("produce_sessions")).toHaveLength(1);
+    expect(db._rows("produce_sessions")[0].work_round_id).toBe(round.id as string);
+    expect(db._rows("produce_items")).toHaveLength(1);
+  });
+
+  it("one-shot ชั่งคืน + จบรายการ: finalizes (generic close accepted for return — P3 will tighten)", async () => {
+    const round = openRound({ seller_name: "กี้", market_name: "วัดทุ่ง" });
+    const db = memSupabase({ work_rounds: [round] });
+
+    await svc(db).processEvents([
+      textEvent(
+        ["กี้ ชั่งคืน 25/6/2569", "1.มะม่วง100บาท", `3 ${LO}`, "จบรายการ"].join("\n"),
+        { replyToken: "tok-one-shot-return" },
+      ),
+    ], "dest");
+
+    expect(db._rows("pending_sessions")).toHaveLength(0);
+    expect(db._rows("produce_sessions")).toHaveLength(1);
+    expect(db._rows("produce_items")[0].transaction_type).toBe("คืน");
+  });
+
+  it("one-shot regular เบิกเพิ่ม + จบรายการเบิก: does not finalize, returns append clarification", async () => {
+    const round = openRound({ status: "produce_complete" });
+    const db = memSupabase({ work_rounds: [round] });
+    const replies: string[] = [];
+
+    await svc(db, replies).processEvents([
+      textEvent(
+        ["รายการเบิกเพิ่ม", "1มังคุด35บาท", `2 ${LO}`, "จบรายการเบิก"].join("\n"),
+        { replyToken: "tok-one-shot-borrow-close-on-append" },
+      ),
+    ], "dest");
+
+    expect(replies.at(-1)).toBe(ONE_SHOT_APPEND_GENERIC_REPLY);
+    expect(db._rows("pending_sessions")).toHaveLength(1);
+    expect(db._rows("produce_sessions")).toHaveLength(0);
+    expect(db._rows("produce_items")).toHaveLength(0);
+  });
+
+  it("one-shot explicit เบิกเพิ่ม + จบรายการเบิก: does not finalize, returns append clarification", async () => {
+    const round = openRound({ status: "produce_complete" });
+    const db = memSupabase({ work_rounds: [round] });
+    const replies: string[] = [];
+
+    await svc(db, replies).processEvents([
+      textEvent(
+        ["โอม-ตลาดพาซิโอ้ผลไม้ รายการเบิกเพิ่ม 25/6/2569", "1มังคุด35บาท", `5 ${LO}`, "จบรายการเบิก"].join("\n"),
+        { replyToken: "tok-one-shot-explicit-borrow-close-on-append" },
+      ),
+    ], "dest");
+
+    expect(replies.at(-1)).toBe(ONE_SHOT_APPEND_GENERIC_REPLY);
+    expect(db._rows("pending_sessions")).toHaveLength(1);
+    expect(db._rows("produce_sessions")).toHaveLength(0);
+    expect(db._rows("produce_items")).toHaveLength(0);
+  });
+
   it("5: standalone รายการเบิกเพิ่ม still works when exactly one append-eligible round exists", async () => {
     const round = openRound({
       id: "wr-only",
@@ -558,7 +764,7 @@ describe("WebhookService — รายการเบิกเพิ่ม V2 re
       textEvent("รายการเบิกเพิ่ม"),
       textEvent("1มังคุด35บาท"),
       textEvent(`2 ${LO}`),
-      textEvent("จบรายการ", { replyToken: "tok-single" }),
+      textEvent("จบรายการเบิกเพิ่ม", { replyToken: "tok-single" }),
     ], "dest");
 
     expect(replies.some((r) => r.includes("ไม่พบรอบ") || r.includes("มีหลายรายการ"))).toBe(false);

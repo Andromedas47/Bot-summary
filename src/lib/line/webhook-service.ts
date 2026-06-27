@@ -110,6 +110,9 @@ const BORROW_GENERIC_CLOSE_REPLY = [
   "กรุณาพิมพ์ “จบรายการเบิก” เมื่อส่งครบ",
 ].join("\n");
 
+const APPEND_GENERIC_CLOSE_REPLY =
+  "รอบนี้เป็นรายการเบิกเพิ่ม  กรุณาพิมพ์ “จบรายการเบิกเพิ่ม” เมื่อส่งครบ";
+
 const CLOSE_ROUND_CMD_RE = /^ปิดรอบ\s+(\d{1,2}\/\d{1,2}\/(?:25)?\d{2})\s*$/;
 const CLOSE_ROUND_CONFIRM_RE = /^ยืนยันปิดรอบ\s*$/;
 
@@ -261,11 +264,7 @@ function hasAcceptedCloseMarkerForPending(kind: ProducePendingKind, normalizedTe
       return hasGenericCloseMarker(normalizedText)
         || hasExactLine(normalizedText, "จบรายการคืนเสีย");
     case "append":
-      return hasGenericCloseMarker(normalizedText)
-        || hasBorrowCloseMarker(normalizedText)
-        || hasExactLine(normalizedText, "จบรายการเบิกเพิ่ม")
-        || hasExactLine(normalizedText, "จบรายการคืน")
-        || hasExactLine(normalizedText, "จบรายการคืนเสีย");
+      return hasExactLine(normalizedText, "จบรายการเบิกเพิ่ม");
     case "unknown":
       return hasSessionEnd(normalizedText);
   }
@@ -273,6 +272,13 @@ function hasAcceptedCloseMarkerForPending(kind: ProducePendingKind, normalizedTe
 
 function hasBorrowGenericCloseForPending(kind: ProducePendingKind, normalizedText: string): boolean {
   return kind === "borrow" && hasGenericCloseMarker(normalizedText) && !hasBorrowCloseMarker(normalizedText);
+}
+
+// ponytail: return/bad-return categories still accept generic "จบรายการ" — P3 will tighten
+function hasAppendWrongCloseForPending(kind: ProducePendingKind, normalizedText: string): boolean {
+  return kind === "append"
+    && (hasGenericCloseMarker(normalizedText) || hasBorrowCloseMarker(normalizedText))
+    && !hasExactLine(normalizedText, "จบรายการเบิกเพิ่ม");
 }
 
 // SESSION_END lines like "จบรายการคืน" contain "คืน" which also matches SESSION_START.
@@ -569,6 +575,12 @@ export class WebhookService {
         return { eventId, eventType: event.type, status: "saved", parsed: false };
       }
 
+      if (hasAppendWrongCloseForPending(pendingKind, normalizedText)) {
+        log.info("wrong close marker rejected for append pending session", { sessionKey });
+        if (replyToken) await this.replyMessage(replyToken, APPEND_GENERIC_CLOSE_REPLY);
+        return { eventId, eventType: event.type, status: "saved", parsed: false };
+      }
+
       if (hasSessionStart(normalizedText) && !appendStart && !explicitAppendStart) {
         const gate = await this.canCollectProduceHeader(firstLine, sessionKey, log);
         if (!gate.ok) {
@@ -687,6 +699,18 @@ export class WebhookService {
         return { eventId, eventType: event.type, status: "saved", parsed: false };
       }
 
+      if ((hasGenericCloseMarker(normalizedText) || hasBorrowCloseMarker(normalizedText)) && !hasAcceptedCloseMarkerForPending("append", normalizedText)) {
+        log.info("wrong close marker rejected for one-shot explicit append session", { sessionKey });
+        try {
+          await pendingService.create(sessionKey, text, replyToken, lineUserId);
+        } catch (createErr) {
+          const msg = createErr instanceof Error ? createErr.message : String(createErr);
+          log.error("pending session create failed for explicit append generic close", { sessionKey, error: msg });
+        }
+        if (replyToken) await this.replyMessage(replyToken, APPEND_GENERIC_CLOSE_REPLY);
+        return { eventId, eventType: event.type, status: "saved", parsed: false };
+      }
+
       if (hasSessionEnd(normalizedText) || hasItemLine(normalizedText)) {
         log.info("complete explicit produce-append message — parsing directly", { sessionKey });
         return this.finalizeAccumulated(
@@ -718,6 +742,18 @@ export class WebhookService {
       if (!appendGate.ok) {
         log.info("produce append blocked — no identifiable Work Round", { sessionKey });
         if (replyToken) await this.replyMessage(replyToken, appendGate.reply);
+        return { eventId, eventType: event.type, status: "saved", parsed: false };
+      }
+
+      if ((hasGenericCloseMarker(normalizedText) || hasBorrowCloseMarker(normalizedText)) && !hasAcceptedCloseMarkerForPending("append", normalizedText)) {
+        log.info("wrong close marker rejected for one-shot append session", { sessionKey });
+        try {
+          await pendingService.create(sessionKey, text, replyToken, lineUserId);
+        } catch (createErr) {
+          const msg = createErr instanceof Error ? createErr.message : String(createErr);
+          log.error("pending session create failed for append generic close", { sessionKey, error: msg });
+        }
+        if (replyToken) await this.replyMessage(replyToken, APPEND_GENERIC_CLOSE_REPLY);
         return { eventId, eventType: event.type, status: "saved", parsed: false };
       }
 

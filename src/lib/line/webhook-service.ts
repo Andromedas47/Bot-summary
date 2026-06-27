@@ -120,6 +120,27 @@ const BORROW_GENERIC_CLOSE_REPLY = [
 const APPEND_GENERIC_CLOSE_REPLY =
   "รอบนี้เป็นรายการเบิกเพิ่ม  กรุณาพิมพ์ “จบรายการเบิกเพิ่ม” เมื่อส่งครบ";
 
+const LATE_PRODUCE_AFTER_CLOSE_REPLY = [
+  "รายการนี้มาหลังปิดรอบแล้ว",
+  "กรุณาส่งรายการใหม่อีกครั้ง หรือแจ้งผู้ดูแล",
+].join("\n");
+
+const PENDING_CLOSE_DRAIN_ATTEMPTS = 120;
+const PENDING_CLOSE_DRAIN_INTERVAL_MS = 50;
+
+type PendingCloseDrainContext = {
+  rawMessageId: string;
+  eventId:      string;
+  eventType:    string;
+  lineUserId:   string | null;
+  replyToken:   string | null;
+  endEventTimestamp: number;
+};
+
+function isProduceContinuationLine(normalizedText: string): boolean {
+  return hasItemLine(normalizedText)
+    || normalizedText.split("\n").some((l) => RE.QUANTITY.test(l.trim()));
+}
 const CLOSE_ROUND_CMD_RE = /^ปิดรอบ\s+(\d{1,2}\/\d{1,2}\/(?:25)?\d{2})\s*$/;
 const CLOSE_ROUND_CONFIRM_RE = /^ยืนยันปิดรอบ\s*$/;
 
@@ -410,6 +431,20 @@ export class WebhookService {
 
     log.info("processing event");
 
+    if (event.type === "message") {
+      const earlyMsg = event as LineMessageEvent;
+      if (earlyMsg.message.type === "text") {
+        const earlyText = normalizeText((earlyMsg.message as LineTextMessage).text);
+        await this.tryAdmitPendingProduceEvent(
+          getSourceId(earlyMsg.source),
+          eventId,
+          event.timestamp,
+          earlyText,
+          (earlyMsg.message as LineTextMessage).text,
+        );
+      }
+    }
+
     // ── 1. Persist raw event ──────────────────────────────────────────────────
     const rawSave = await this.saveRawMessage(event, destination);
 
@@ -636,7 +671,7 @@ export class WebhookService {
 
         let updated;
         try {
-          await pendingService.create(sessionKey, text, replyToken, lineUserId);
+          await pendingService.create(sessionKey, text, replyToken, lineUserId, eventId, event.timestamp);
           updated = (await pendingService.lookup(sessionKey)).session!;
           log.info("pending_session_replaced_by_new_header", {
             sessionKey,
@@ -660,17 +695,21 @@ export class WebhookService {
 
         const updatedKind = classifyPendingProduceKind(updated.accumulated_text);
         if (hasAcceptedCloseMarkerForPending(updatedKind, normalizedText)) {
-          return this.finalizePendingSession(
+          updated = await pendingService.markClose(
+            sessionKey, eventId, event.timestamp, replyToken, text,
+          );
+          return this.tryDrainPendingClose(
             pendingService,
             updated,
             sessionKey,
-            text,
-            replyToken,
-            lineUserId,
-            rawMessageId,
-            eventId,
-            event.type,
-            event.timestamp,
+            {
+              rawMessageId,
+              eventId,
+              eventType: event.type,
+              lineUserId,
+              replyToken,
+              endEventTimestamp: event.timestamp,
+            },
             log,
           );
         }
@@ -685,16 +724,41 @@ export class WebhookService {
         return { eventId, eventType: event.type, status: "saved", parsed: false };
       }
 
+      if (
+        pendingService.isClosing(pending)
+        && event.timestamp > (pending.close_event_timestamp_ms ?? Number.MAX_SAFE_INTEGER)
+        && !hasAcceptedCloseMarkerForPending(pendingKind, normalizedText)
+      ) {
+        log.warn("produce line rejected — arrived after accepted close boundary", {
+          sessionKey,
+          lineEventId: eventId,
+          lineTimestampMs: event.timestamp,
+          closeEventTimestampMs: pending.close_event_timestamp_ms,
+        });
+        if (replyToken) await this.replyMessage(replyToken, LATE_PRODUCE_AFTER_CLOSE_REPLY);
+        return { eventId, eventType: event.type, status: "saved", parsed: false };
+      }
+
       // Append raw text so the parser can extract senderName from TIME_PREFIX
+      const isCloseCommand = hasAcceptedCloseMarkerForPending(pendingKind, normalizedText);
       let updated;
       try {
-        updated = await pendingService.append(sessionKey, text, replyToken);
+        await pendingService.admit(sessionKey, eventId, event.timestamp);
+        updated = await pendingService.append(
+          sessionKey,
+          text,
+          replyToken,
+          eventId,
+          event.timestamp,
+          isCloseCommand,
+        );
         const appendParse = parseWeighSession(updated.accumulated_text, bangkokToday());
         log.info("pending session append succeeded", {
           sessionKey,
           appendSuccess: true,
           parsedItemCount: appendParse.items.length,
           parseErrorCount: appendParse.parse_errors.length,
+          closePending: pendingService.isClosing(updated),
         });
         for (const parseError of appendParse.parse_errors) {
           log.warn("pending session parse error after append", {
@@ -720,18 +784,21 @@ export class WebhookService {
         };
       }
 
-      if (hasAcceptedCloseMarkerForPending(pendingKind, normalizedText)) {
-        return this.finalizePendingSession(
+      if (isCloseCommand || pendingService.isClosing(updated)) {
+        return this.tryDrainPendingClose(
           pendingService,
           updated,
           sessionKey,
-          text,
-          replyToken,
-          lineUserId,
-          rawMessageId,
-          eventId,
-          event.type,
-          event.timestamp,
+          {
+            rawMessageId,
+            eventId,
+            eventType: event.type,
+            lineUserId,
+            replyToken,
+            endEventTimestamp: pendingService.isClosing(updated)
+              ? (updated.close_event_timestamp_ms ?? event.timestamp)
+              : event.timestamp,
+          },
           log,
         );
       }
@@ -752,7 +819,7 @@ export class WebhookService {
       if ((hasGenericCloseMarker(normalizedText) || hasBorrowCloseMarker(normalizedText)) && !hasAcceptedCloseMarkerForPending("append", normalizedText)) {
         log.info("wrong close marker rejected for one-shot explicit append session", { sessionKey });
         try {
-          await pendingService.create(sessionKey, text, replyToken, lineUserId);
+          await pendingService.create(sessionKey, text, replyToken, lineUserId, eventId, event.timestamp);
         } catch (createErr) {
           const msg = createErr instanceof Error ? createErr.message : String(createErr);
           log.error("pending session create failed for explicit append generic close", { sessionKey, error: msg });
@@ -779,7 +846,7 @@ export class WebhookService {
 
       log.info("explicit produce append marker — starting pending session", { sessionKey });
       try {
-        await pendingService.create(sessionKey, text, replyToken, lineUserId);
+        await pendingService.create(sessionKey, text, replyToken, lineUserId, eventId, event.timestamp);
       } catch (createErr) {
         const msg = createErr instanceof Error ? createErr.message : String(createErr);
         log.error("pending session create failed for explicit produce append", { sessionKey, error: msg });
@@ -798,7 +865,7 @@ export class WebhookService {
       if ((hasGenericCloseMarker(normalizedText) || hasBorrowCloseMarker(normalizedText)) && !hasAcceptedCloseMarkerForPending("append", normalizedText)) {
         log.info("wrong close marker rejected for one-shot append session", { sessionKey });
         try {
-          await pendingService.create(sessionKey, text, replyToken, lineUserId);
+          await pendingService.create(sessionKey, text, replyToken, lineUserId, eventId, event.timestamp);
         } catch (createErr) {
           const msg = createErr instanceof Error ? createErr.message : String(createErr);
           log.error("pending session create failed for append generic close", { sessionKey, error: msg });
@@ -825,7 +892,7 @@ export class WebhookService {
 
       log.info("produce append marker — starting pending session", { sessionKey });
       try {
-        await pendingService.create(sessionKey, text, replyToken, lineUserId);
+        await pendingService.create(sessionKey, text, replyToken, lineUserId, eventId, event.timestamp);
       } catch (createErr) {
         const msg = createErr instanceof Error ? createErr.message : String(createErr);
         log.error("pending session create failed for produce append", { sessionKey, error: msg });
@@ -844,7 +911,7 @@ export class WebhookService {
         }
 
         try {
-          await pendingService.create(sessionKey, text, replyToken, lineUserId);
+          await pendingService.create(sessionKey, text, replyToken, lineUserId, eventId, event.timestamp);
         } catch (createErr) {
           const msg = createErr instanceof Error ? createErr.message : String(createErr);
           log.error("pending session create failed for generic borrow close", { sessionKey, error: msg });
@@ -872,7 +939,7 @@ export class WebhookService {
       console.log("session header detected — starting pending session", sessionKey);
       log.info("session header detected — starting pending session", { sessionKey });
       try {
-        await pendingService.create(sessionKey, text, replyToken, lineUserId);
+        await pendingService.create(sessionKey, text, replyToken, lineUserId, eventId, event.timestamp);
         console.log("pending session create succeeded", sessionKey);
         if (replyToken) {
           await this.replyMessage(
@@ -891,6 +958,13 @@ export class WebhookService {
     if (hasSessionEnd(normalizedText)) {
       console.log("SESSION_END received but no pending session found — ignoring", sessionKey);
       log.warn("SESSION_END received without active pending session", { sessionKey });
+      if (replyToken) await this.replyMessage(replyToken, LATE_PRODUCE_AFTER_CLOSE_REPLY);
+    } else if (isProduceContinuationLine(normalizedText)) {
+      log.warn("produce continuation line without open pending session", {
+        sessionKey,
+        lineEventId: eventId,
+      });
+      if (replyToken) await this.replyMessage(replyToken, LATE_PRODUCE_AFTER_CLOSE_REPLY);
     } else {
       log.debug("no parser matched text message — left unprocessed");
     }
@@ -1812,11 +1886,135 @@ export class WebhookService {
     }
   }
 
+  private async tryAdmitPendingProduceEvent(
+    sessionKey:     string,
+    eventId:        string,
+    lineTimestampMs: number,
+    normalizedText: string,
+    rawText:        string,
+  ): Promise<void> {
+    try {
+      const pendingService = new PendingSessionService(this.supabase);
+      const lookup = await pendingService.lookup(sessionKey);
+      if (lookup.reason === "db_error") return;
+
+      const pending = lookup.session;
+      if (!pending || pendingService.isExpired(pending)) return;
+
+      if (
+        pendingService.isClosing(pending)
+        && lineTimestampMs > (pending.close_event_timestamp_ms ?? Number.MAX_SAFE_INTEGER)
+      ) {
+        return;
+      }
+
+      const pendingKind = classifyPendingProduceKind(pending.accumulated_text);
+      if (hasBorrowGenericCloseForPending(pendingKind, normalizedText)) return;
+      if (hasAppendWrongCloseForPending(pendingKind, normalizedText)) return;
+
+      const isClose = hasAcceptedCloseMarkerForPending(pendingKind, normalizedText);
+      if (!isClose && !isProduceContinuationLine(normalizedText)) return;
+
+      await pendingService.admit(sessionKey, eventId, lineTimestampMs);
+      await pendingService.registerIngest(sessionKey, eventId, lineTimestampMs, rawText);
+    } catch (err) {
+      logger.warn("pending session admission skipped", {
+        sessionKey,
+        lineEventId: eventId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  private async tryDrainPendingClose(
+    pendingService: PendingSessionService,
+    session:        import("@/lib/line/pending-session-service").PendingSession,
+    sessionKey:     string,
+    ctx:            PendingCloseDrainContext,
+    log:            ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const claim = await pendingService.claimCloseFinalize(sessionKey);
+    if (!claim.claimed) {
+      if (claim.reason === "not_ready") {
+        log.info("pending close drain deferred", {
+          sessionKey,
+          admissionCount: claim.admissionCount,
+          ingestCount: claim.ingestCount,
+          stragglerCount: claim.stragglerCount,
+        });
+        this.schedulePendingCloseDrain(pendingService, sessionKey, ctx, log);
+      } else {
+        log.debug("pending close drain skipped", { sessionKey, reason: claim.reason });
+      }
+      return { eventId: ctx.eventId, eventType: ctx.eventType, status: "saved", parsed: false };
+    }
+
+    log.info("pending close drain claimed finalization", {
+      sessionKey,
+      admissionCount: claim.admissionCount,
+      ingestCount: claim.ingestCount,
+    });
+
+    const latest = claim.session ?? (await pendingService.lookup(sessionKey)).session ?? session;
+    return this.finalizePendingSession(
+      pendingService,
+      latest,
+      sessionKey,
+      ctx.replyToken,
+      ctx.lineUserId,
+      ctx.rawMessageId,
+      ctx.eventId,
+      ctx.eventType,
+      ctx.endEventTimestamp,
+      log,
+    );
+  }
+
+  private schedulePendingCloseDrain(
+    pendingService: PendingSessionService,
+    sessionKey:     string,
+    ctx:            PendingCloseDrainContext,
+    log:            ChildLogger,
+  ): void {
+    this.scheduleBackgroundTask(async () => {
+      for (let attempt = 0; attempt < PENDING_CLOSE_DRAIN_ATTEMPTS; attempt += 1) {
+        const claim = await pendingService.claimCloseFinalize(sessionKey);
+        if (claim.reason === "gone" || claim.reason === "already_claimed") return;
+        if (!claim.claimed) {
+          await this.sleep(PENDING_CLOSE_DRAIN_INTERVAL_MS);
+          continue;
+        }
+
+        log.info("pending close drain completing finalization", {
+          sessionKey,
+          attempt,
+          admissionCount: claim.admissionCount,
+          ingestCount: claim.ingestCount,
+        });
+        const session = claim.session ?? (await pendingService.lookup(sessionKey)).session;
+        if (!session) return;
+        await this.finalizePendingSession(
+          pendingService,
+          session,
+          sessionKey,
+          ctx.replyToken,
+          ctx.lineUserId,
+          ctx.rawMessageId,
+          ctx.eventId,
+          ctx.eventType,
+          ctx.endEventTimestamp,
+          log,
+        );
+        return;
+      }
+      log.warn("pending close drain exhausted without finalizing", { sessionKey });
+    });
+  }
+
   private async finalizePendingSession(
     pendingService:   PendingSessionService,
     updated:          import("@/lib/line/pending-session-service").PendingSession,
     sessionKey:       string,
-    _text:            string,
     replyToken:       string | null,
     lineUserId:       string | null,
     rawMessageId:     string,
@@ -1828,46 +2026,35 @@ export class WebhookService {
     log.info("pending session end command received", {
       sessionKey,
       endCommandReceived: true,
-      settleMs: this.produceEndSettleMs,
     });
-    if (this.produceEndSettleMs > 0) {
-      await this.sleep(this.produceEndSettleMs);
-    }
 
-    let finalText = updated.accumulated_text;
     const fallbackTime = bangkokTimeFromTimestamp(new Date(updated.created_at).getTime());
-    const accumulatedItemCount = parseWeighSession(
-      updated.accumulated_text,
-      bangkokToday(),
-      fallbackTime,
-    ).items.length;
-
+    let finalText: string;
     try {
-      const rebuilt = await pendingService.rebuildForFinalization(
+      finalText = await pendingService.rebuildForFinalization(
         sessionKey,
         updated,
         endEventTimestamp,
       );
-      const rebuiltItemCount = parseWeighSession(
-        rebuilt,
-        bangkokToday(),
-        fallbackTime,
-      ).items.length;
-      if (rebuiltItemCount >= accumulatedItemCount) {
-        finalText = rebuilt;
-      } else {
-        log.warn("pending session rebuild dropped items — keeping accumulated buffer", {
-          sessionKey,
-          accumulatedItemCount,
-          rebuiltItemCount,
-        });
-      }
     } catch (rebuildError) {
-      log.error("pending session raw-message rebuild failed", {
+      log.error("pending session finalization rebuild failed", {
         sessionKey,
         error: rebuildError instanceof Error ? rebuildError.message : String(rebuildError),
       });
+      return {
+        eventId,
+        eventType,
+        status: "error",
+        parsed: false,
+        error: rebuildError instanceof Error ? rebuildError.message : String(rebuildError),
+      };
     }
+
+    log.info("pending session finalize text selected", {
+      sessionKey,
+      finalLineCount: finalText.split("\n").length,
+      itemCount: parseWeighSession(finalText, bangkokToday(), fallbackTime).items.length,
+    });
 
     const result = await this.finalizeAccumulated(
       finalText,
@@ -1892,6 +2079,7 @@ export class WebhookService {
       await pendingService.delete(sessionKey);
       log.info("pending session closed", { sessionKey, sessionStatus: "closed" });
     } else {
+      await pendingService.resetCloseState(sessionKey);
       log.warn("pending session retained after unsuccessful finalization", {
         sessionKey,
         sessionStatus: "active",

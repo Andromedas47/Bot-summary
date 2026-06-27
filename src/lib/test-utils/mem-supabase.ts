@@ -15,6 +15,7 @@ export type Row = Record<string, unknown>;
 interface Filter { op: string; c?: string; v?: unknown; opv?: string; asc?: boolean; n?: number }
 interface MemSupabaseOptions {
   rpcErrors?: Record<string, { message: string; code?: string }>;
+  rpcBefore?: Record<string, (params: Row) => Promise<void>>;
 }
 
 function parseList(v: unknown): string[] {
@@ -196,6 +197,9 @@ export function memSupabase(seed: Record<string, Row[]> = {}, options: MemSupaba
         const newRow: Row = {
           id: p.id ?? `${name}-${++idSeq}`,
           ...(p.created_at == null ? { created_at: new Date().toISOString() } : {}),
+          ...(name === "pending_sessions" && p.session_generation == null
+            ? { session_generation: crypto.randomUUID() }
+            : {}),
           ...p,
         };
         table(name).push(newRow);
@@ -218,12 +222,84 @@ export function memSupabase(seed: Record<string, Row[]> = {}, options: MemSupaba
     };
   }
 
+  function closeReadinessForSession(session: Row) {
+    const sessionKey = String(session.session_key);
+    const generation = session.session_generation;
+    const closeTs = Number(session.close_event_timestamp_ms);
+    const closeRequestedAt = String(session.close_requested_at);
+
+    const admissions = table("pending_session_admission").filter(
+      (row) =>
+        row.session_key === sessionKey
+        && row.session_generation === generation
+        && Number(row.line_timestamp_ms) <= closeTs,
+    );
+    const ingests = table("pending_session_ingest").filter(
+      (row) =>
+        row.session_key === sessionKey
+        && row.session_generation === generation
+        && Number(row.line_timestamp_ms) <= closeTs
+        && String(row.raw_text ?? "").trim() !== "",
+    );
+    const ingestedIds = new Set(ingests.map((row) => row.line_event_id));
+    const stragglers = admissions.filter(
+      (row) => String(row.admitted_at) > closeRequestedAt && !ingestedIds.has(row.line_event_id),
+    );
+    const nonEmptyLines = String(session.accumulated_text ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const ledgerReady = admissions.length > 0
+      && admissions.length === ingests.length
+      && stragglers.length === 0;
+    const legacyReady = !ledgerReady
+      && admissions.length === 0
+      && nonEmptyLines.length >= 3;
+    const ready = ledgerReady || legacyReady;
+
+    return {
+      ready,
+      reason: ready
+        ? legacyReady ? "legacy_accumulated" : "ready"
+        : admissions.length === 0
+          ? "no_admissions"
+          : stragglers.length > 0
+            ? "stragglers"
+            : "awaiting_ingest",
+      admission_count: admissions.length,
+      ingest_count: ingests.length,
+      straggler_count: stragglers.length,
+    };
+  }
+
   const client = {
     async rpc(name: string, params: Row = {}) {
       const forcedError = options.rpcErrors?.[name];
       if (forcedError) return { data: null, error: forcedError };
 
+      if (name === "admit_pending_session_event") {
+        const sessionKey = params.p_session_key as string;
+        const session = table("pending_sessions").find((row) => row.session_key === sessionKey);
+        if (!session) return { data: null, error: null };
+        const exists = table("pending_session_admission").some(
+          (row) =>
+            row.session_generation === session.session_generation
+            && row.line_event_id === params.p_line_event_id,
+        );
+        if (!exists) {
+          table("pending_session_admission").push({
+            session_key: sessionKey,
+            session_generation: session.session_generation,
+            line_event_id: params.p_line_event_id,
+            line_timestamp_ms: params.p_line_timestamp_ms,
+            admitted_at: new Date().toISOString(),
+          });
+        }
+        return { data: null, error: null };
+      }
+
       if (name === "append_pending_session") {
+        await options.rpcBefore?.[name]?.(params);
         const sessionKey = params.p_session_key;
         const current = table("pending_sessions").find((row) => row.session_key === sessionKey);
         if (!current) {
@@ -232,7 +308,100 @@ export function memSupabase(seed: Record<string, Row[]> = {}, options: MemSupaba
         current.accumulated_text = `${String(current.accumulated_text)}\n${String(params.p_new_text ?? "")}`;
         current.latest_reply_token = params.p_reply_token ?? null;
         current.updated_at = new Date().toISOString();
+        if (params.p_mark_close) {
+          current.close_event_timestamp_ms = params.p_line_timestamp_ms ?? null;
+          current.close_requested_at = new Date().toISOString();
+          current.close_line_event_id = params.p_line_event_id ?? null;
+        }
+        if (params.p_line_event_id != null && params.p_line_timestamp_ms != null) {
+          const existing = table("pending_session_ingest").find(
+            (row) =>
+              row.session_generation === current.session_generation
+              && row.line_event_id === params.p_line_event_id,
+          );
+          if (existing) {
+            existing.line_timestamp_ms = params.p_line_timestamp_ms;
+            existing.raw_text = params.p_new_text ?? existing.raw_text ?? null;
+          } else {
+            table("pending_session_ingest").push({
+              session_key: sessionKey,
+              session_generation: current.session_generation,
+              line_event_id: params.p_line_event_id,
+              line_timestamp_ms: params.p_line_timestamp_ms,
+              raw_text: params.p_new_text ?? null,
+              created_at: new Date().toISOString(),
+            });
+          }
+        }
         return { data: current, error: null };
+      }
+
+      if (name === "register_pending_session_ingest") {
+        const session = table("pending_sessions").find(
+          (row) => row.session_key === params.p_session_key,
+        );
+        if (!session || params.p_raw_text == null) return { data: null, error: null };
+        const existing = table("pending_session_ingest").find(
+          (row) =>
+            row.session_generation === session.session_generation
+            && row.line_event_id === params.p_line_event_id,
+        );
+        if (existing) {
+          existing.line_timestamp_ms = params.p_line_timestamp_ms;
+          existing.raw_text = params.p_raw_text ?? existing.raw_text ?? null;
+        } else {
+          table("pending_session_ingest").push({
+            session_key: params.p_session_key,
+            session_generation: session.session_generation,
+            line_event_id: params.p_line_event_id,
+            line_timestamp_ms: params.p_line_timestamp_ms,
+            raw_text: params.p_raw_text ?? null,
+            created_at: new Date().toISOString(),
+          });
+        }
+        return { data: null, error: null };
+      }
+
+      if (name === "check_pending_close_ready") {
+        const sessionKey = params.p_session_key as string;
+        const session = table("pending_sessions").find((row) => row.session_key === sessionKey);
+        if (!session?.close_event_timestamp_ms || !session.close_requested_at) {
+          return { data: { ready: false, reason: "not_closing" }, error: null };
+        }
+        return { data: closeReadinessForSession(session), error: null };
+      }
+
+      if (name === "claim_pending_close_finalize") {
+        const sessionKey = params.p_session_key as string;
+        const session = table("pending_sessions").find((row) => row.session_key === sessionKey);
+        if (!session) {
+          return { data: { claimed: false, reason: "gone" }, error: null };
+        }
+        if (!session.close_event_timestamp_ms || !session.close_requested_at) {
+          return { data: { claimed: false, reason: "not_closing" }, error: null };
+        }
+        if (session.close_finalize_started_at) {
+          return { data: { claimed: false, reason: "already_claimed" }, error: null };
+        }
+
+        const readiness = closeReadinessForSession(session);
+        if (!readiness.ready) {
+          return {
+            data: { claimed: false, reason: readiness.reason, ...readiness },
+            error: null,
+          };
+        }
+
+        session.close_finalize_started_at = new Date().toISOString();
+        return {
+          data: {
+            claimed: true,
+            session,
+            admission_count: readiness.admission_count,
+            ingest_count: readiness.ingest_count,
+          },
+          error: null,
+        };
       }
 
       if (name === "insert_produce_round_events_ignore") {

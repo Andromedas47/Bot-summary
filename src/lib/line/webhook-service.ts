@@ -3117,7 +3117,7 @@ export class WebhookService {
           const reply = decision.mode === "blocked"
             ? `พบรอบของ ${hdr.sellerName} — ${hdr.marketName} แต่สถานะยังไม่พร้อมรับรายการนี้ กรุณาตรวจสอบในหน้า Work Rounds`
             : buildExplicitProduceNoRoundReply(wrs, hdr, businessDate);
-          await replyLineMessage(replyToken, reply);
+          await this.replyMessage(replyToken, reply);
         }
         return { kind: "halt", result: halt() };
       }
@@ -3233,9 +3233,34 @@ export class WebhookService {
     const isAppend        = Boolean(payload.isAppend);
     const lineUserId      = (payload.lineUserId as string | null) ?? getUserId(event.source);
 
+    const firstLine = normalizeText(accumulatedText).split("\n")[0] ?? "";
+    const hdr       = classifyHeader(firstLine);
+    if (
+      hdr?.type === "explicit"
+      && (hdr.sellerName !== round.seller_name || hdr.marketName !== round.market_name)
+    ) {
+      log.warn("produce attach resume blocked: round identity mismatch", {
+        headerSeller: hdr.sellerName,
+        headerMarket: hdr.marketName,
+        roundSeller:  round.seller_name,
+        roundMarket:  round.market_name,
+        workRoundId:  round.id,
+      });
+      if (replyToken) {
+        await this.replyMessage(
+          replyToken,
+          [
+            `รอบที่เลือกไม่ตรงกับหัวรายการ (${hdr.sellerName} — ${hdr.marketName})`,
+            "กรุณาส่งรายการใหม่",
+          ].join("\n"),
+        );
+      }
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+
     const parsed = parseWeighSession(accumulatedText, round.business_date);
     if (parsed.items.length === 0) {
-      if (replyToken) await replyLineMessage(replyToken, "อ่านรายการไม่สำเร็จ กรุณาส่งใหม่");
+      if (replyToken) await this.replyMessage(replyToken, "อ่านรายการไม่สำเร็จ กรุณาส่งใหม่");
       return { eventId, eventType, status: "saved", parsed: false };
     }
 

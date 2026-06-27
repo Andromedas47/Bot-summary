@@ -86,6 +86,21 @@ describe("classifyHeader", () => {
     }
   });
 
+  it.each([
+    ["P0ผ่าน-ตลาดเซฟ เบิก 27/6/2569",       "P0ผ่าน", "ตลาดเซฟ", "เบิก"],
+    ["P0ผ่าน-ตลาดเซฟ ชั่งคืน 27/6/2569",    "P0ผ่าน", "ตลาดเซฟ", "คืน"],
+    ["ทดสอบ2-ตลาด72 ชั่งคืน 27/6/2569",     "ทดสอบ2", "ตลาด72",  "คืน"],
+    ["ปลา-ราชพฤกษ์ ชั่งคืน 27/6/2569",       "ปลา",    "ราชพฤกษ์", "คืน"],
+  ])("classifies Latin/digit seller-market header: %s", (line, seller, market, intent) => {
+    const h = classifyHeader(line);
+    expect(h?.type).toBe("explicit");
+    if (h?.type === "explicit") {
+      expect(h.sellerName).toBe(seller);
+      expect(h.marketName).toBe(market);
+      expect(h.txIntent).toBe(intent);
+    }
+  });
+
   it("classifies seller-only คืนเสีย headers for Work Round resolution", () => {
     const h = classifyHeader("กี้ คืนเสีย 25/6/2569");
     expect(h?.type).toBe("seller_only");

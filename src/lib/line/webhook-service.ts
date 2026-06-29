@@ -11,7 +11,13 @@ import { getSourceId, getUserId } from "@/lib/line/verify";
 import { parserRegistry } from "@/lib/parsers/registry";
 import { logger } from "@/lib/logger";
 import { replyLineMessage, buildWeighSessionSummary } from "@/lib/line/reply";
-import { parseWeighSession, bangkokTimeFromTimestamp } from "@/lib/parsers/weigh-session/parser";
+import {
+  parseWeighSession,
+  bangkokTimeFromTimestamp,
+  parseBuddhistDate,
+  getWeighSessionFinalizationErrors,
+  buildWeighSessionValidationReply,
+} from "@/lib/parsers/weigh-session/parser";
 import { RE } from "@/lib/parsers/weigh-session/regex";
 import { PendingSessionService } from "@/lib/line/pending-session-service";
 import { DailySummaryService } from "@/lib/line/daily-summary-service";
@@ -19,7 +25,6 @@ import { SessionDedupService, computeItemHash } from "@/lib/line/session-dedup-s
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 import { bangkokBusinessDateNow } from "@/lib/business-date";
 import { parseManualSlipAmounts } from "@/lib/parsers/manual-slip-amount";
-import { parseBuddhistDate } from "@/lib/parsers/weigh-session/parser";
 import { ManualSlipSessionService } from "@/lib/line/manual-slip-session-service";
 import { SlipEvidenceService } from "@/lib/slips/evidence-service";
 import type { SlipEvidenceIngestor } from "@/lib/slips/types";
@@ -311,14 +316,20 @@ export class WebhookService {
     }
 
     if (pending) {
+      // Decide markClose before the append so the RPC call is made exactly once
+      // with the correct flag and we never fall into the close path twice.
+      const markClose = hasSessionEnd(normalizedText);
+
       // Append raw text so the parser can extract senderName from TIME_PREFIX
       let updated;
       try {
-        updated = await pendingService.append(sessionKey, text, replyToken);
+        await pendingService.admit(sessionKey, eventId, event.timestamp);
+        updated = await pendingService.append(sessionKey, text, replyToken, eventId, event.timestamp, markClose);
         const appendParse = parseWeighSession(updated.accumulated_text, bangkokToday());
         log.info("pending session append succeeded", {
           sessionKey,
           appendSuccess: true,
+          markClose,
           parsedItemCount: appendParse.items.length,
           parseErrorCount: appendParse.parse_errors.length,
         });
@@ -346,57 +357,137 @@ export class WebhookService {
         };
       }
 
-      if (hasSessionEnd(normalizedText)) {
-        log.info("pending session end command received", {
-          sessionKey,
-          endCommandReceived: true,
-          settleMs: this.produceEndSettleMs,
-        });
-        if (this.produceEndSettleMs > 0) {
-          await this.sleep(this.produceEndSettleMs);
-        }
+      if (!markClose) {
+        log.debug("message appended to pending session — waiting for session end", { sessionKey });
+        return { eventId, eventType: event.type, status: "saved", parsed: false };
+      }
 
-        let finalText = updated.accumulated_text;
+      log.info("pending session end command received", {
+        sessionKey,
+        endCommandReceived: true,
+        settleMs: this.produceEndSettleMs,
+      });
+      if (this.produceEndSettleMs > 0) {
+        await this.sleep(this.produceEndSettleMs);
+      }
+
+      let claim;
+      try {
+        claim = await pendingService.claimFinalize(sessionKey);
+      } catch (claimError) {
+        const errorMessage = claimError instanceof Error ? claimError.message : String(claimError);
+        log.error("pending session claim failed", { sessionKey, error: errorMessage });
+        return { eventId, eventType: event.type, status: "error", parsed: false, error: errorMessage };
+      }
+
+      if (!claim.claimed) {
+        const replyText = claim.reason === "already_claimed"
+          ? "กำลังสรุปรายการอยู่ กรุณารอสักครู่"
+          : "รับจบรายการแล้ว รอรายการที่ยังค้างอยู่ กรุณาส่ง จบรายการ อีกครั้งสักครู่";
+        log.info("pending session close not ready", {
+          sessionKey,
+          reason: claim.reason,
+          admission_count: claim.admission_count,
+          ingest_count: claim.ingest_count,
+        });
+        if (updated.latest_reply_token) {
+          try {
+            await this.replyMessage(updated.latest_reply_token, replyText);
+          } catch (e) {
+            log.error("reply failed", { error: String(e) });
+          }
+        }
+        return { eventId, eventType: event.type, status: "saved", parsed: false };
+      }
+
+      log.info("pending session close claimed", { sessionKey, ingest_count: claim.ingest_count });
+
+      // Fallback time for sessions sent without LINE export format (no TIME_PREFIX).
+      const fallbackTime = bangkokTimeFromTimestamp(new Date(updated.created_at).getTime());
+      let finalText = updated.accumulated_text;
+
+      // Load ingest rows to decide reconstruction path.
+      // Ordered by (line_timestamp_ms ASC, line_event_id ASC) for deterministic output.
+      let ingestRows: Array<{ raw_text: string }> = [];
+      try {
+        ingestRows = await pendingService.loadIngestRows(
+          sessionKey,
+          claim.session!.session_generation,
+          claim.session!.close_event_timestamp_ms!,
+        );
+      } catch (loadError) {
+        log.error("pending session ingest load failed", {
+          sessionKey,
+          error: loadError instanceof Error ? loadError.message : String(loadError),
+        });
+      }
+
+      // A barrier-enabled session always has a valid session-start header somewhere
+      // in the ingest ledger. We match against the first non-empty line of
+      // accumulated_text (the canonical header written at session creation) rather
+      // than checking ingestRows[0], because timestamp ties can displace the header
+      // row away from position 0 in the ORDER BY (line_timestamp_ms, line_event_id)
+      // result.
+      const expectedHeader = updated.accumulated_text
+        .split("\n")
+        .find((l) => l.trim() !== "")
+        ?.trim() ?? "";
+      const headerInLedger =
+        expectedHeader !== "" &&
+        ingestRows.some(
+          (r) => r.raw_text.trim() === expectedHeader && hasSessionStart(r.raw_text),
+        );
+
+      if (headerInLedger) {
+        // Full barrier session: reconstruct exclusively from the confirmed ingest ledger.
+        finalText = ingestRows.map((r) => r.raw_text).join("\n");
+        log.info("pending session ingest reconstruction used", {
+          sessionKey,
+          rowCount: ingestRows.length,
+        });
+      } else {
+        // Pre-deploy or mixed legacy session: fall back to raw_messages reconstruction
+        // which covers the full source_id window including pre-barrier events.
         try {
-          finalText = await pendingService.rebuildForFinalization(
-            sessionKey,
-            updated,
-            event.timestamp,
-          );
+          finalText = await pendingService.rebuildForFinalization(sessionKey, updated, event.timestamp);
         } catch (rebuildError) {
           log.error("pending session raw-message rebuild failed", {
             sessionKey,
             error: rebuildError instanceof Error ? rebuildError.message : String(rebuildError),
           });
         }
-
-        // Fallback time for sessions sent without LINE export format (no TIME_PREFIX).
-        // LINE export messages carry their own prefix so parser extracts time directly.
-        const fallbackTime = bangkokTimeFromTimestamp(new Date(updated.created_at).getTime());
-        const result = await this.finalizeAccumulated(
-          finalText,
-          updated.latest_reply_token,
-          updated.line_user_id,
-          rawMessageId,
-          eventId,
-          event.type,
-          log,
-          fallbackTime,
-        );
-        if (result.pendingSessionClosed) {
-          await pendingService.delete(sessionKey);
-          log.info("pending session closed", { sessionKey, sessionStatus: "closed" });
-        } else {
-          log.warn("pending session kept active after unsuccessful finalization", {
-            sessionKey,
-            sessionStatus: "active",
-          });
-        }
-        return result;
       }
 
-      log.debug("message appended to pending session — waiting for session end", { sessionKey });
-      return { eventId, eventType: event.type, status: "saved", parsed: false };
+      const result = await this.finalizeAccumulated(
+        finalText,
+        updated.latest_reply_token,
+        updated.line_user_id,
+        rawMessageId,
+        eventId,
+        event.type,
+        log,
+        fallbackTime,
+      );
+
+      if (result.pendingSessionClosed) {
+        await pendingService.delete(sessionKey);
+        log.info("pending session closed", { sessionKey, sessionStatus: "closed" });
+      } else {
+        // Release the claim so a retry close can proceed. Uses the exact timestamp
+        // from our claim to avoid clobbering a concurrent retry-close's newer claim.
+        await pendingService.releaseFinalizeClaim(
+          sessionKey,
+          claim.session!.close_finalize_started_at!,
+        ).catch((e) => {
+          log.error("release finalize claim failed", { error: String(e) });
+        });
+        log.warn("pending session kept active after unsuccessful finalization", {
+          sessionKey,
+          sessionStatus: "active",
+        });
+      }
+
+      return result;
     }
 
     // ── 5. No active pending session ──────────────────────────────────────────
@@ -418,6 +509,18 @@ export class WebhookService {
         const msg = createErr instanceof Error ? createErr.message : String(createErr);
         console.log("pending session create FAILED:", msg);
         log.error("pending session create failed", { sessionKey, error: msg });
+      }
+      // Register the header event in the barrier ledger so its text is counted
+      // when the close barrier checks ingest vs admission parity.
+      try {
+        await pendingService.admit(sessionKey, eventId, event.timestamp);
+        await pendingService.registerIngest(sessionKey, eventId, event.timestamp, text);
+      } catch (barrierErr) {
+        log.warn("pending session header barrier registration failed", {
+          sessionKey,
+          eventId,
+          error: barrierErr instanceof Error ? barrierErr.message : String(barrierErr),
+        });
       }
       return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
@@ -1021,10 +1124,31 @@ export class WebhookService {
       console.log("[TRACE][finalizeAccumulated] parser_output:", JSON.stringify({ date: parsed.date, staff_name: parsed.staff_name, items_count: parsed.items.length, items: parsed.items, parse_errors: parsed.parse_errors }, null, 2));
 
       if (parsed.parse_errors.length > 0) {
-        log.warn("finalized with parse errors", { errors: parsed.parse_errors });
+        log.warn("parse completed with errors", { errors: parsed.parse_errors });
         for (const parseError of parsed.parse_errors) {
           log.warn("produce session parse error", { rawLine: parseError });
         }
+      }
+
+      const validationErrors = getWeighSessionFinalizationErrors(parsed);
+      if (validationErrors.length > 0) {
+        log.warn("produce session validation failed — aborting before persistence", {
+          errors: validationErrors,
+        });
+        if (replyToken) {
+          try {
+            await this.replyMessage(replyToken, buildWeighSessionValidationReply(parsed));
+          } catch (e) {
+            log.error("reply failed", { error: String(e) });
+          }
+        }
+        return {
+          eventId,
+          eventType,
+          status: "saved",
+          parsed: false,
+          pendingSessionClosed: false,
+        };
       }
 
       // Fix 2: guard empty parse
@@ -1221,6 +1345,21 @@ export class WebhookService {
       if (parser.name === "weigh-session" && result.data) {
         const ws = result.data as unknown as WeighSession;
         console.log("[TRACE][runParser] parser_output:", JSON.stringify({ date: ws.date, staff_name: ws.staff_name, items_count: ws.items.length, items: ws.items, parse_errors: ws.parse_errors }, null, 2));
+
+        const validationErrors = getWeighSessionFinalizationErrors(ws);
+        if (validationErrors.length > 0) {
+          log.warn("produce session validation failed — aborting before persistence", {
+            errors: validationErrors,
+          });
+          if (replyToken) {
+            try {
+              await this.replyMessage(replyToken, buildWeighSessionValidationReply(ws));
+            } catch (e) {
+              log.error("reply failed", { error: String(e) });
+            }
+          }
+          return { eventId, eventType, status: "saved", parsed: false };
+        }
 
         // Fix 2: empty items guard
         if (ws.items.length === 0) {

@@ -11,7 +11,13 @@ import { getSourceId, getUserId } from "@/lib/line/verify";
 import { parserRegistry } from "@/lib/parsers/registry";
 import { logger } from "@/lib/logger";
 import { replyLineMessage, buildWeighSessionSummary } from "@/lib/line/reply";
-import { parseWeighSession, bangkokTimeFromTimestamp } from "@/lib/parsers/weigh-session/parser";
+import {
+  parseWeighSession,
+  bangkokTimeFromTimestamp,
+  parseBuddhistDate,
+  getWeighSessionFinalizationErrors,
+  buildWeighSessionValidationReply,
+} from "@/lib/parsers/weigh-session/parser";
 import { RE } from "@/lib/parsers/weigh-session/regex";
 import { PendingSessionService } from "@/lib/line/pending-session-service";
 import { DailySummaryService } from "@/lib/line/daily-summary-service";
@@ -19,7 +25,6 @@ import { SessionDedupService, computeItemHash } from "@/lib/line/session-dedup-s
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 import { bangkokBusinessDateNow } from "@/lib/business-date";
 import { parseManualSlipAmounts } from "@/lib/parsers/manual-slip-amount";
-import { parseBuddhistDate } from "@/lib/parsers/weigh-session/parser";
 import { ManualSlipSessionService } from "@/lib/line/manual-slip-session-service";
 import { SlipEvidenceService } from "@/lib/slips/evidence-service";
 import type { SlipEvidenceIngestor } from "@/lib/slips/types";
@@ -1021,10 +1026,31 @@ export class WebhookService {
       console.log("[TRACE][finalizeAccumulated] parser_output:", JSON.stringify({ date: parsed.date, staff_name: parsed.staff_name, items_count: parsed.items.length, items: parsed.items, parse_errors: parsed.parse_errors }, null, 2));
 
       if (parsed.parse_errors.length > 0) {
-        log.warn("finalized with parse errors", { errors: parsed.parse_errors });
+        log.warn("parse completed with errors", { errors: parsed.parse_errors });
         for (const parseError of parsed.parse_errors) {
           log.warn("produce session parse error", { rawLine: parseError });
         }
+      }
+
+      const validationErrors = getWeighSessionFinalizationErrors(parsed);
+      if (validationErrors.length > 0) {
+        log.warn("produce session validation failed — aborting before persistence", {
+          errors: validationErrors,
+        });
+        if (replyToken) {
+          try {
+            await this.replyMessage(replyToken, buildWeighSessionValidationReply(parsed));
+          } catch (e) {
+            log.error("reply failed", { error: String(e) });
+          }
+        }
+        return {
+          eventId,
+          eventType,
+          status: "saved",
+          parsed: false,
+          pendingSessionClosed: false,
+        };
       }
 
       // Fix 2: guard empty parse
@@ -1221,6 +1247,21 @@ export class WebhookService {
       if (parser.name === "weigh-session" && result.data) {
         const ws = result.data as unknown as WeighSession;
         console.log("[TRACE][runParser] parser_output:", JSON.stringify({ date: ws.date, staff_name: ws.staff_name, items_count: ws.items.length, items: ws.items, parse_errors: ws.parse_errors }, null, 2));
+
+        const validationErrors = getWeighSessionFinalizationErrors(ws);
+        if (validationErrors.length > 0) {
+          log.warn("produce session validation failed — aborting before persistence", {
+            errors: validationErrors,
+          });
+          if (replyToken) {
+            try {
+              await this.replyMessage(replyToken, buildWeighSessionValidationReply(ws));
+            } catch (e) {
+              log.error("reply failed", { error: String(e) });
+            }
+          }
+          return { eventId, eventType, status: "saved", parsed: false };
+        }
 
         // Fix 2: empty items guard
         if (ws.items.length === 0) {

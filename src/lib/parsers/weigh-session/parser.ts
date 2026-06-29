@@ -201,6 +201,50 @@ export function parseWeighSession(
   };
 }
 
+export function getWeighSessionFinalizationErrors(session: WeighSession): string[] {
+  const errors = [...session.parse_errors];
+
+  for (const item of session.items) {
+    if (
+      item.quantity === null ||
+      !Number.isFinite(item.quantity) ||
+      item.quantity <= 0 ||
+      item.unit === null
+    ) {
+      errors.push(
+        `item #${item.item_number} "${item.product_name}" has invalid quantity or unit`,
+      );
+    }
+  }
+
+  return errors;
+}
+
+export function assertWeighSessionFinalizable(session: WeighSession): void {
+  const errors = getWeighSessionFinalizationErrors(session);
+  if (errors.length > 0) {
+    throw new Error(`weigh session validation failed: ${errors.join("; ")}`);
+  }
+}
+
+export function buildWeighSessionValidationReply(session: WeighSession): string {
+  const details = getWeighSessionFinalizationErrors(session).map((error) => {
+    const quotedLine = error.match(/"([^"]+)"/)?.[1];
+    if (quotedLine) return `- ${quotedLine}`;
+
+    const item = error.match(/^item #(\d+) "([^"]+)"/);
+    if (item) return `- รายการ #${item[1]} ${item[2]}: จำนวนหรือหน่วยไม่ถูกต้อง`;
+
+    return `- ${error}`;
+  });
+
+  return [
+    "อ่านรายการไม่ครบ จึงยังไม่บันทึก",
+    "กรุณาตรวจสอบบรรทัดสินค้าและจำนวน แล้วส่งใหม่",
+    ...details,
+  ].join("\n");
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function finalize(
@@ -241,7 +285,8 @@ function pushOrMergeItem(items: WeighSessionItem[], item: WeighSessionItem): voi
 }
 
 function parseItemLine(content: string, fallbackItemNumber: number): Partial<WeighSessionItem> | null {
-  const indexed = content.match(RE.ITEM);
+  const normalizedContent = normalizeItemLinePunctuation(content);
+  const indexed = normalizedContent.match(RE.ITEM);
   if (indexed) {
     return {
       item_number:    parseInt(indexed[1], 10),
@@ -252,7 +297,7 @@ function parseItemLine(content: string, fallbackItemNumber: number): Partial<Wei
     };
   }
 
-  const unindexed = content.match(RE.ITEM_NO_INDEX);
+  const unindexed = normalizedContent.match(RE.ITEM_NO_INDEX);
   if (unindexed) {
     return {
       item_number:    fallbackItemNumber,
@@ -264,6 +309,12 @@ function parseItemLine(content: string, fallbackItemNumber: number): Partial<Wei
   }
 
   return null;
+}
+
+function normalizeItemLinePunctuation(content: string): string {
+  return content
+    .replace(/(\d)\.\s*บาท\.?\s*$/, "$1บาท")
+    .replace(/บาท\.\s*$/, "บาท");
 }
 
 function nextItemNumber(
@@ -406,6 +457,8 @@ export class WeighSessionParser extends BaseParser {
       data:          parsed as unknown as Record<string, unknown>,
 
       persist: async (supabase, rawMessageId) => {
+        assertWeighSessionFinalizable(parsed);
+
         const { data: session, error: sessionErr } = await supabase
           .from("produce_sessions")
           .insert({

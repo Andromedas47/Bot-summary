@@ -1,6 +1,12 @@
 import { describe, it, expect } from "bun:test";
 import type { LineMessageEvent } from "@/lib/line/types";
-import { parseWeighSession, bangkokTimeFromTimestamp, WeighSessionParser } from "./parser";
+import {
+  parseWeighSession,
+  bangkokTimeFromTimestamp,
+  WeighSessionParser,
+  assertWeighSessionFinalizable,
+  buildWeighSessionValidationReply,
+} from "./parser";
 import { RE } from "./regex";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -290,7 +296,358 @@ describe("real message: short withdraw header followed by return section", () =>
   });
 });
 
+const PRODUCTION_ITEM_14_EXCERPT = `\
+กี้-วัดทุ่งลานนา เบิก 29/6/2569
+13อินตผารัม100บาท
+3.9.โล
+14น้อยหน่า50บาท
+6.โล
+15กระท้อน20บาท
+14.8.โล
+จบรายการเบิก`;
+
+async function parseAndPersistItems(text: string, eventSuffix: string) {
+  const event: LineMessageEvent = {
+    type: "message",
+    webhookEventId: `event-${eventSuffix}`,
+    deliveryContext: { isRedelivery: false },
+    timestamp: Date.UTC(2026, 5, 29, 5, 0, 0),
+    source: { type: "user", userId: "user-1" },
+    mode: "active",
+    replyToken: "reply-token",
+    message: {
+      id: `message-${eventSuffix}`,
+      type: "text",
+      quoteToken: "quote-token",
+      text,
+    },
+  };
+  const result = await new WeighSessionParser().parse(event);
+  const parsed = result.data as unknown as ReturnType<typeof parseWeighSession>;
+  const itemInserts: Array<Record<string, unknown>> = [];
+  const database = {
+    from(table: string) {
+      return {
+        insert(payload: Record<string, unknown>) {
+          if (table === "produce_items") itemInserts.push(payload);
+          if (table === "produce_sessions") {
+            return {
+              select() {
+                return {
+                  async single() {
+                    return { data: { id: `session-${eventSuffix}` }, error: null };
+                  },
+                };
+              },
+            };
+          }
+          return Promise.resolve({ error: null });
+        },
+      };
+    },
+  };
+
+  await result.persist(database as never, `raw-message-${eventSuffix}`);
+  return { parsed, itemInserts };
+}
+
 describe("edge cases", () => {
+  it("parses and persists production item 14 น้อยหน่า between items 13 and 15", async () => {
+    const result = parseWeighSession(PRODUCTION_ITEM_14_EXCERPT);
+
+    expect(result.parse_errors).toHaveLength(0);
+    expect(result.items).toHaveLength(3);
+    expect(result.items.map((item) => item.item_number)).toEqual([13, 14, 15]);
+    expect(result.items[1]).toMatchObject({
+      item_number: 14,
+      product_name: "น้อยหน่า",
+      price_per_unit: 50,
+      quantity: 6,
+      unit: "โล",
+    });
+    expect(() => assertWeighSessionFinalizable(result)).not.toThrow();
+    expect(
+      result.items.reduce(
+        (total, item) => total + item.price_per_unit * (item.quantity ?? 0),
+        0,
+      ),
+    ).toBe(986);
+
+    const event: LineMessageEvent = {
+      type: "message",
+      webhookEventId: "event-production-item-14",
+      deliveryContext: { isRedelivery: false },
+      timestamp: Date.UTC(2026, 5, 29, 5, 0, 0),
+      source: { type: "user", userId: "user-1" },
+      mode: "active",
+      replyToken: "reply-token",
+      message: {
+        id: "message-production-item-14",
+        type: "text",
+        quoteToken: "quote-token",
+        text: PRODUCTION_ITEM_14_EXCERPT,
+      },
+    };
+    const parserResult = await new WeighSessionParser().parse(event);
+    const inserts: Array<{ table: string; payload: Record<string, unknown> }> = [];
+    const database = {
+      from(table: string) {
+        return {
+          insert(payload: Record<string, unknown>) {
+            inserts.push({ table, payload });
+            if (table === "produce_sessions") {
+              return {
+                select() {
+                  return {
+                    async single() {
+                      return { data: { id: "session-1" }, error: null };
+                    },
+                  };
+                },
+              };
+            }
+            return Promise.resolve({ error: null });
+          },
+        };
+      },
+    };
+
+    await parserResult.persist(database as never, "raw-message-1");
+    expect(
+      inserts.find(
+        ({ table, payload }) =>
+          table === "produce_items" && payload.item_number === 14,
+      )?.payload,
+    ).toMatchObject({
+      product_name: "น้อยหน่า",
+      price_per_unit: 50,
+      quantity: 6,
+      unit: "โล",
+    });
+  });
+
+  it("blocks persistence when an item or quantity line is unparseable", async () => {
+    const event: LineMessageEvent = {
+      type: "message",
+      webhookEventId: "event-malformed-item",
+      deliveryContext: { isRedelivery: false },
+      timestamp: Date.UTC(2026, 5, 29, 5, 0, 0),
+      source: { type: "user", userId: "user-1" },
+      mode: "active",
+      replyToken: "reply-token",
+      message: {
+        id: "message-malformed-item",
+        type: "text",
+        quoteToken: "quote-token",
+        text: [
+          "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+          "13อินตผารัม100บาท",
+          "3.9.โล",
+          "14น้อยหน่า50บาท",
+          "จำนวนหกโล",
+          "15กระท้อน20บาท",
+          "14.8.โล",
+          "จบรายการเบิก",
+        ].join("\n"),
+      },
+    };
+
+    const result = await new WeighSessionParser().parse(event);
+    const parsed = result.data as unknown as ReturnType<typeof parseWeighSession>;
+    let databaseCalls = 0;
+    const noWriteDatabase = {
+      from() {
+        databaseCalls += 1;
+        throw new Error("database must not be called");
+      },
+    };
+
+    expect(parsed.parse_errors).toContain(
+      'unrecognized line: "จำนวนหกโล"',
+    );
+    expect(() => assertWeighSessionFinalizable(parsed)).toThrow(
+      /weigh session validation failed/,
+    );
+    expect(buildWeighSessionValidationReply(parsed)).toContain("จึงยังไม่บันทึก");
+    expect(buildWeighSessionValidationReply(parsed)).toContain("จำนวนหกโล");
+    await expect(
+      result.persist(noWriteDatabase as never, "raw-message-1"),
+    ).rejects.toThrow(/weigh session validation failed/);
+    expect(databaseCalls).toBe(0);
+  });
+
+  it("keeps legacy quantities 1ถุง, 3แพค, and 6.โล finalizable and persistable", async () => {
+    const text = [
+      "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+      "1มะม่วง10บาท",
+      "1ถุง",
+      "2ส้ม20บาท",
+      "3แพค",
+      "3น้อยหน่า50บาท",
+      "6.โล",
+      "จบรายการเบิก",
+    ].join("\n");
+    const parsed = parseWeighSession(text);
+
+    expect(parsed.parse_errors).toHaveLength(0);
+    expect(parsed.items).toHaveLength(3);
+    expect(parsed.items).toEqual([
+      expect.objectContaining({ item_number: 1, quantity: 1, unit: "ถุง" }),
+      expect.objectContaining({ item_number: 2, quantity: 3, unit: "แพค" }),
+      expect.objectContaining({ item_number: 3, quantity: 6, unit: "โล" }),
+    ]);
+    expect(() => assertWeighSessionFinalizable(parsed)).not.toThrow();
+
+    const event: LineMessageEvent = {
+      type: "message",
+      webhookEventId: "event-valid-legacy-quantities",
+      deliveryContext: { isRedelivery: false },
+      timestamp: Date.UTC(2026, 5, 29, 5, 0, 0),
+      source: { type: "user", userId: "user-1" },
+      mode: "active",
+      replyToken: "reply-token",
+      message: {
+        id: "message-valid-legacy-quantities",
+        type: "text",
+        quoteToken: "quote-token",
+        text,
+      },
+    };
+    const result = await new WeighSessionParser().parse(event);
+    const itemInserts: Array<Record<string, unknown>> = [];
+    const database = {
+      from(table: string) {
+        return {
+          insert(payload: Record<string, unknown>) {
+            if (table === "produce_items") itemInserts.push(payload);
+            if (table === "produce_sessions") {
+              return {
+                select() {
+                  return {
+                    async single() {
+                      return { data: { id: "session-legacy-units" }, error: null };
+                    },
+                  };
+                },
+              };
+            }
+            return Promise.resolve({ error: null });
+          },
+        };
+      },
+    };
+
+    await result.persist(database as never, "raw-message-legacy-units");
+    expect(itemInserts.map(({ quantity, unit }) => ({ quantity, unit }))).toEqual([
+      { quantity: 1, unit: "ถุง" },
+      { quantity: 3, unit: "แพค" },
+      { quantity: 6, unit: "โล" },
+    ]);
+  });
+
+  it("safely rejects unsupported 0.3ขีด with a clear no-write reply", async () => {
+    const event: LineMessageEvent = {
+      type: "message",
+      webhookEventId: "event-unsupported-kheed",
+      deliveryContext: { isRedelivery: false },
+      timestamp: Date.UTC(2026, 5, 29, 5, 0, 0),
+      source: { type: "user", userId: "user-1" },
+      mode: "active",
+      replyToken: "reply-token",
+      message: {
+        id: "message-unsupported-kheed",
+        type: "text",
+        quoteToken: "quote-token",
+        text: [
+          "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+          "1น้อยหน่า50บาท",
+          "0.3ขีด",
+          "จบรายการเบิก",
+        ].join("\n"),
+      },
+    };
+    const result = await new WeighSessionParser().parse(event);
+    const parsed = result.data as unknown as ReturnType<typeof parseWeighSession>;
+    let databaseCalls = 0;
+    const noWriteDatabase = {
+      from() {
+        databaseCalls += 1;
+        throw new Error("database must not be called");
+      },
+    };
+    const reply = buildWeighSessionValidationReply(parsed);
+
+    expect(parsed.parse_errors).toContain('unrecognized line: "0.3ขีด"');
+    expect(reply).toContain("จึงยังไม่บันทึก");
+    expect(reply).toContain("0.3ขีด");
+    await expect(
+      result.persist(noWriteDatabase as never, "raw-message-kheed"),
+    ).rejects.toThrow(/weigh session validation failed/);
+    expect(databaseCalls).toBe(0);
+  });
+
+  it("parses and persists exact production ฝรั่ง line with a period before บาท", async () => {
+    const itemLine = "4ฝรั่ง35.บาท";
+    const { parsed, itemInserts } = await parseAndPersistItems(
+      [
+        "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+        itemLine,
+        "6.7.โล",
+        "จบรายการเบิก",
+      ].join("\n"),
+      "production-farang-period-before-baht",
+    );
+    const item = parsed.items[0];
+
+    expect(parsed.parse_errors).toHaveLength(0);
+    expect(parsed.parse_errors.join("\n")).not.toContain(itemLine);
+    expect(item).toMatchObject({
+      product_name: "ฝรั่ง",
+      price_per_unit: 35,
+      quantity: 6.7,
+      unit: "โล",
+    });
+    expect(item.price_per_unit * (item.quantity ?? 0)).toBeCloseTo(234.5, 2);
+    expect(() => assertWeighSessionFinalizable(parsed)).not.toThrow();
+    expect(itemInserts[0]).toMatchObject({
+      product_name: "ฝรั่ง",
+      price_per_unit: 35,
+      quantity: 6.7,
+      unit: "โล",
+    });
+  });
+
+  it("parses and persists exact production กระท้อน line with a period after บาท", async () => {
+    const itemLine = "13กระท้อน25บาท.";
+    const { parsed, itemInserts } = await parseAndPersistItems(
+      [
+        "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+        itemLine,
+        "18.4.โล",
+        "จบรายการเบิก",
+      ].join("\n"),
+      "production-krathon-period-after-baht",
+    );
+    const item = parsed.items[0];
+
+    expect(parsed.parse_errors).toHaveLength(0);
+    expect(parsed.parse_errors.join("\n")).not.toContain(itemLine);
+    expect(item).toMatchObject({
+      product_name: "กระท้อน",
+      price_per_unit: 25,
+      quantity: 18.4,
+      unit: "โล",
+    });
+    expect(item.price_per_unit * (item.quantity ?? 0)).toBeCloseTo(460, 2);
+    expect(() => assertWeighSessionFinalizable(parsed)).not.toThrow();
+    expect(itemInserts[0]).toMatchObject({
+      product_name: "กระท้อน",
+      price_per_unit: 25,
+      quantity: 18.4,
+      unit: "โล",
+    });
+  });
+
   it("normalizes typo pack unit in exact raw มะเขือลาย input", () => {
     const result = parseWeighSession(`\
 22มะเขือลาย20บาท

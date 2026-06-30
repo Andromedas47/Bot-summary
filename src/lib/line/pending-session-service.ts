@@ -32,6 +32,17 @@ export interface PendingSessionLookup {
   error?: string;
 }
 
+export interface ReplacePendingSessionInput {
+  sessionKey:                string;
+  expectedSessionGeneration: string;
+  text:                      string;
+  replyToken:                string | null;
+  lineUserId:                string | null;
+  lineEventId:               string;
+  lineTimestampMs:           number;
+  markClose:                 boolean;
+}
+
 interface PendingRawMessage {
   line_event_id: string;
   raw_text: string | null;
@@ -69,17 +80,83 @@ export class PendingSessionService {
     replyToken:  string | null,
     lineUserId:  string | null,
   ): Promise<void> {
+    const now = new Date().toISOString();
     const { error } = await this.supabase.from("pending_sessions").upsert(
       {
         session_key:        sessionKey,
         accumulated_text:   text,
         latest_reply_token: replyToken,
         line_user_id:       lineUserId,
-        updated_at:         new Date().toISOString(),
+        updated_at:         now,
+        // Reset created_at so queryStart in rebuildForFinalization is correct
+        // even when a stale row from a prior session survives the upsert.
+        created_at:         now,
       },
       { onConflict: "session_key" },
     );
     if (error) throw new Error(`pending session create failed: ${error.message}`);
+  }
+
+  async replaceGeneration(
+    input: ReplacePendingSessionInput,
+  ): Promise<PendingSession | null> {
+    const now = new Date().toISOString();
+    const replacementGeneration = crypto.randomUUID();
+    const { data, error } = await this.supabase
+      .from("pending_sessions")
+      .update({
+        session_generation:        replacementGeneration,
+        accumulated_text:          input.text,
+        latest_reply_token:        input.replyToken,
+        line_user_id:              input.lineUserId,
+        created_at:                now,
+        updated_at:                now,
+        close_event_timestamp_ms:  input.markClose ? input.lineTimestampMs : null,
+        close_requested_at:        input.markClose ? now : null,
+        close_line_event_id:       input.markClose ? input.lineEventId : null,
+        close_finalize_started_at: null,
+      })
+      .eq("session_key", input.sessionKey)
+      .eq("session_generation", input.expectedSessionGeneration)
+      .select("*")
+      .maybeSingle();
+
+    if (error) {
+      throw new Error(`pending session generation replace failed: ${error.message}`);
+    }
+    if (!data) return null;
+
+    try {
+      const { error: ingestError } = await this.supabase
+        .from("pending_session_ingest")
+        .insert({
+          session_key:        input.sessionKey,
+          session_generation: replacementGeneration,
+          line_event_id:      input.lineEventId,
+          line_timestamp_ms:  input.lineTimestampMs,
+          raw_text:           input.text,
+        });
+      if (ingestError) {
+        throw new Error(`pending session replacement ingest failed: ${ingestError.message}`);
+      }
+
+      const { error: admissionError } = await this.supabase
+        .from("pending_session_admission")
+        .insert({
+          session_key:        input.sessionKey,
+          session_generation: replacementGeneration,
+          line_event_id:      input.lineEventId,
+          line_timestamp_ms:  input.lineTimestampMs,
+        });
+      if (admissionError) {
+        throw new Error(`pending session replacement admission failed: ${admissionError.message}`);
+      }
+    } catch (registrationError) {
+      await this.deleteGeneration(input.sessionKey, replacementGeneration);
+      throw registrationError;
+    }
+
+    return data as PendingSession;
   }
 
   async append(
@@ -178,6 +255,17 @@ export class PendingSessionService {
     if (error) throw new Error(`pending session delete failed: ${error.message}`);
   }
 
+  async deleteGeneration(sessionKey: string, sessionGeneration: string): Promise<boolean> {
+    const { data, error } = await this.supabase
+      .from("pending_sessions")
+      .delete()
+      .eq("session_key", sessionKey)
+      .eq("session_generation", sessionGeneration)
+      .select("session_generation");
+    if (error) throw new Error(`pending session generation delete failed: ${error.message}`);
+    return (data ?? []).length > 0;
+  }
+
   isExpired(session: PendingSession): boolean {
     return Date.now() - new Date(session.updated_at).getTime() > TIMEOUT_MS;
   }
@@ -194,6 +282,9 @@ export class PendingSessionService {
     const queryStart = new Date(
       new Date(session.created_at).getTime() - 5 * 60 * 1000,
     ).toISOString();
+    // Cap the upper bound to 60 s after the close event so stale created_at on
+    // a re-used session row never pulls in messages from a different session.
+    const queryEnd = new Date(endEventTimestamp + 60_000).toISOString();
 
     const { data, error } = await this.supabase
       .from("raw_messages")
@@ -201,6 +292,7 @@ export class PendingSessionService {
       .eq("source_id", sourceId)
       .eq("message_type", "text")
       .gte("created_at", queryStart)
+      .lte("created_at", queryEnd)
       .order("created_at", { ascending: true });
 
     if (error) {
@@ -249,7 +341,13 @@ export function rebuildPendingSessionText(
       break;
     }
   }
-  if (headerIndex < 0) return currentText;
+  if (headerIndex < 0) {
+    // Throw so the caller can fail closed; returning stale accumulated_text
+    // risks contaminating the session with data from an earlier session on the same source.
+    throw new Error(
+      `session header "${initialHeader}" not found in raw_messages — cannot reconstruct session boundary safely`,
+    );
+  }
 
   const seen = new Set<string>();
   const texts: string[] = [];

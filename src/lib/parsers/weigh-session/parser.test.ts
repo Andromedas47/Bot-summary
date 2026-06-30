@@ -545,23 +545,52 @@ describe("edge cases", () => {
     ]);
   });
 
-  it("safely rejects unsupported 0.3ขีด with a clear no-write reply", async () => {
+  it.each([
+    ["0.8.ขีด", 0.08, "โล",  1_000, 80],
+    ["0.2ขีด",  0.02, "โล",  1_000, 20],
+    ["1ชิ้น",    1,    "ชิ้น",   100, 100],
+    ["1.ชิ้น",   1,    "ชิ้น",   100, 100],
+    ["1.2.โล",   1.2,  "โล",     100, 120],
+  ])(
+    "parses quantity %s with a total-preserving price basis",
+    (quantityLine, expectedQuantity, expectedUnit, expectedPrice, expectedTotal) => {
+      const parsed = parseWeighSession([
+        "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+        "1ดอกแค100บาท",
+        quantityLine,
+        "จบรายการเบิก",
+      ].join("\n"));
+
+      expect(parsed.parse_errors).toEqual([]);
+      expect(parsed.items).toHaveLength(1);
+      expect(parsed.items[0]).toMatchObject({
+        quantity: expectedQuantity,
+        unit: expectedUnit,
+        price_per_unit: expectedPrice,
+      });
+      expect(
+        parsed.items[0].price_per_unit * (parsed.items[0].quantity ?? 0),
+      ).toBeCloseTo(expectedTotal, 10);
+    },
+  );
+
+  it("safely rejects an unsupported malformed unit with no produce writes", async () => {
     const event: LineMessageEvent = {
       type: "message",
-      webhookEventId: "event-unsupported-kheed",
+      webhookEventId: "event-unsupported-unit",
       deliveryContext: { isRedelivery: false },
       timestamp: Date.UTC(2026, 5, 29, 5, 0, 0),
       source: { type: "user", userId: "user-1" },
       mode: "active",
       replyToken: "reply-token",
       message: {
-        id: "message-unsupported-kheed",
+        id: "message-unsupported-unit",
         type: "text",
         quoteToken: "quote-token",
         text: [
           "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
           "1น้อยหน่า50บาท",
-          "0.3ขีด",
+          "0.3ปอนด์",
           "จบรายการเบิก",
         ].join("\n"),
       },
@@ -577,11 +606,11 @@ describe("edge cases", () => {
     };
     const reply = buildWeighSessionValidationReply(parsed);
 
-    expect(parsed.parse_errors).toContain('unrecognized line: "0.3ขีด"');
+    expect(parsed.parse_errors).toContain('unrecognized line: "0.3ปอนด์"');
     expect(reply).toContain("จึงยังไม่บันทึก");
-    expect(reply).toContain("0.3ขีด");
+    expect(reply).toContain("0.3ปอนด์");
     await expect(
-      result.persist(noWriteDatabase as never, "raw-message-kheed"),
+      result.persist(noWriteDatabase as never, "raw-message-unsupported-unit"),
     ).rejects.toThrow(/weigh session validation failed/);
     expect(databaseCalls).toBe(0);
   });
@@ -1041,6 +1070,10 @@ describe("RE.QUANTITY", () => {
     ["1แพ็ค",      1,    "แพ็ค"],
     ["1แพ็ก",      1,    "แพ็ก"],
     ["1เเพ็ค",     1,    "เเพ็ค"],
+    ["0.8.ขีด",    0.8,  "ขีด"],
+    ["0.2ขีด",     0.2,  "ขีด"],
+    ["1ชิ้น",      1,    "ชิ้น"],
+    ["1.ชิ้น",     1,    "ชิ้น"],
     ["3กำ",        3,    "กำ"],
     ["2มัด",       2,    "มัด"],
     ["5ถุง",        5,    "ถุง"],

@@ -214,3 +214,54 @@ describe("produce pending-session finalization ordering", () => {
     );
   });
 });
+
+describe("fallback raw_messages contamination guard", () => {
+  const header = "ปลา-ราชพฤกษ์ เบิก 30/6/2569";
+
+  it("excludes prior-session messages when current header appears later in timestamp order", () => {
+    // Simulates stale created_at causing the SQL window to include a completed 28/6 session.
+    const rows = [
+      rawRow("old-header", "ปลา-ราชพฤกษ์ เบิก 28/6/2569", 1000, 0),
+      rawRow("old-item",   "1.ชะนี100บาท\n1โล",            2000, 100),
+      rawRow("old-end",    "จบรายการเบิก",                  3000, 200),
+      rawRow("new-header", header,                           4000, 300),
+      rawRow("new-item",   "1.ภูเขาไฟ50บาท\n2โล",          5000, 400),
+      rawRow("new-end",    "จบรายการเบิก",                  6000, 500),
+    ];
+
+    const rebuilt = rebuildPendingSessionText(header, rows, 6000);
+    expect(rebuilt).not.toContain("28/6");
+    expect(rebuilt).not.toContain("ชะนี");
+    const parsed = parseWeighSession(rebuilt, "2026-06-30");
+    expect(parsed.items).toHaveLength(1);
+    expect(parsed.items[0].product_name).toBe("ภูเขาไฟ");
+  });
+
+  it("excludes messages beyond endEventTimestamp even if source has later raw_messages", () => {
+    // Simulates a post-close bot reply somehow landing in raw_messages.
+    const rows = [
+      rawRow("new-header", header,                      1000, 0),
+      rawRow("new-item",   "1.ภูเขาไฟ50บาท\n2โล",    2000, 100),
+      rawRow("new-end",    "จบรายการเบิก",             3000, 200),
+      rawRow("late-msg",   "บันทึกแล้ว ✅\nรวม 100",  4000, 300),
+    ];
+
+    const rebuilt = rebuildPendingSessionText(header, rows, 3000); // endEventTimestamp=3000
+    expect(rebuilt).not.toContain("บันทึกแล้ว");
+    const parsed = parseWeighSession(rebuilt, "2026-06-30");
+    expect(parsed.items).toHaveLength(1);
+  });
+
+  it("throws when current session header is absent from raw_messages (fail closed)", () => {
+    // raw_messages ledger only has a completed prior session — no current session header.
+    const rows = [
+      rawRow("old-header", "ปลา-ราชพฤกษ์ เบิก 28/6/2569", 1000, 0),
+      rawRow("old-item",   "1.ชะนี100บาท\n1โล",            2000, 100),
+      rawRow("old-end",    "จบรายการเบิก",                  3000, 200),
+    ];
+
+    expect(() => rebuildPendingSessionText(header, rows, 6000)).toThrow(
+      /not found in raw_messages/,
+    );
+  });
+});

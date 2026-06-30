@@ -117,8 +117,7 @@ export function parseWeighSession(
       const qm = content.match(RE.QUANTITY);
       if (qm) {
         if (pendingItem?.product_name) {
-          pendingItem.quantity = parseFloat(qm[1]);
-          pendingItem.unit     = qm[2] as ProduceUnit;
+          applyQuantity(pendingItem, parseFloat(qm[1]), qm[2]);
           const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
           pushOrMergeItem(items, finalizedItem);
           console.log("[TRACE][parseWeighSession] PUSH_ITEM(quantity):", JSON.stringify(finalizedItem), "items_total_after:", items.length);
@@ -246,6 +245,24 @@ export function buildWeighSessionValidationReply(session: WeighSession): string 
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+function applyQuantity(
+  item: Partial<WeighSessionItem>,
+  quantity: number,
+  unit: string,
+): void {
+  if (unit === "ขีด") {
+    // Shop rule: 1 ขีด = 0.1 โล. Convert both quantity and price basis so
+    // price-per-unit × quantity remains unchanged.
+    item.quantity = Number((quantity * 0.1).toFixed(10));
+    item.unit = "โล";
+    item.price_per_unit = item.price_per_unit! * 10;
+    return;
+  }
+
+  item.quantity = quantity;
+  item.unit = unit as ProduceUnit;
+}
 
 function finalize(
   p:       Partial<WeighSessionItem>,

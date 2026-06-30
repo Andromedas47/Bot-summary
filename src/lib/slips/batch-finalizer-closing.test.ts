@@ -256,11 +256,10 @@ describe("vercel.json cron schedule", () => {
     expect(entry).toBeUndefined();
   });
 
-  it("daily-summary cron schedule is preserved", async () => {
+  it("daily-summary cron is disabled", async () => {
     const file = await import("../../../vercel.json", { with: { type: "json" } });
     const config = file.default as { crons?: Array<{ path: string; schedule: string }> };
     const entry = config.crons?.find((c) => c.path === "/api/cron/daily-summary");
-    expect(entry).toBeDefined();
-    expect(entry?.schedule).toBe("58 20 * * *");
+    expect(entry).toBeUndefined();
   });
 });

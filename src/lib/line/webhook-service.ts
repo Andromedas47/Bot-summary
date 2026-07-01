@@ -7,7 +7,7 @@ import type {
   LineTextMessage,
 } from "@/lib/line/types";
 import type { Database, LineMessageType } from "@/types/database";
-import { getSourceId, getUserId } from "@/lib/line/verify";
+import { getSourceId, getUserId, getPendingSessionKey } from "@/lib/line/verify";
 import { parserRegistry } from "@/lib/parsers/registry";
 import { logger } from "@/lib/logger";
 import { replyLineMessage, buildWeighSessionSummary } from "@/lib/line/reply";
@@ -19,7 +19,10 @@ import {
   buildWeighSessionValidationReply,
 } from "@/lib/parsers/weigh-session/parser";
 import { RE } from "@/lib/parsers/weigh-session/regex";
-import { PendingSessionService } from "@/lib/line/pending-session-service";
+import {
+  PendingSessionService,
+  PendingSessionGenerationConflictError,
+} from "@/lib/line/pending-session-service";
 import { DailySummaryService } from "@/lib/line/daily-summary-service";
 import { SessionDedupService, computeItemHash } from "@/lib/line/session-dedup-service";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
@@ -84,6 +87,9 @@ const ALREADY_CLOSING_REPLY = "รับทราบแล้ว กำลัง
 
 const STALE_PRODUCE_SESSION_REPLY =
   "พบรายการเดิมที่ยังปิดไม่สมบูรณ์ กรุณาให้ทีมงานเคลียร์รายการเดิมก่อนเริ่มรายการใหม่";
+
+const NEW_HEADER_REQUIRED_REPLY =
+  "ไม่พบรายการที่เปิดอยู่ กรุณาพิมพ์หัวรายการใหม่ก่อนส่งรายการ";
 
 interface WebhookServiceDependencies {
   evidenceIngestor?: SlipEvidenceIngestor;
@@ -288,7 +294,7 @@ export class WebhookService {
     const text           = (message as LineTextMessage).text;
     const normalizedText = normalizeText(text);
     const replyToken     = msgEvent.replyToken;
-    const sessionKey     = getSourceId(msgEvent.source);
+    const sourceId       = getSourceId(msgEvent.source);
     const lineUserId     = getUserId(msgEvent.source);
 
     console.log("incoming text (raw):", text);
@@ -338,6 +344,19 @@ export class WebhookService {
     }
 
     // ── 4. Pending session flow ───────────────────────────────────────────────
+    // Group/room sources are shared by every member — a produce event with no
+    // userId cannot be attributed to a sender, so it must not be allowed to
+    // fall back onto a shared/group-only key (see getPendingSessionKey).
+    const pendingSessionKey = getPendingSessionKey(msgEvent.source);
+    if (pendingSessionKey === null) {
+      log.warn("produce event rejected — group/room source has no userId", {
+        sourceType: msgEvent.source.type,
+        sourceId,
+      });
+      return { eventId, eventType: event.type, status: "saved", parsed: false };
+    }
+    const sessionKey = pendingSessionKey;
+
     const pendingService = new PendingSessionService(this.supabase);
     const lookup = await pendingService.lookup(sessionKey);
     const pending = lookup.session;
@@ -376,6 +395,7 @@ export class WebhookService {
         try {
           updated = await pendingService.replaceGeneration({
             sessionKey,
+            sourceId,
             expectedSessionGeneration: pending.session_generation,
             text,
             replyToken,
@@ -425,8 +445,11 @@ export class WebhookService {
         }
       } else {
         try {
-          await pendingService.admit(sessionKey, eventId, event.timestamp);
-          updated = await pendingService.append(sessionKey, text, replyToken, eventId, event.timestamp, markClose);
+          await pendingService.admit(sessionKey, eventId, event.timestamp, pending.session_generation);
+          updated = await pendingService.append(
+            sessionKey, text, replyToken, eventId, event.timestamp, markClose,
+            pending.session_generation,
+          );
           const appendParse = parseWeighSession(updated.accumulated_text, bangkokToday());
           log.info("pending session append succeeded", {
             sessionKey,
@@ -442,6 +465,21 @@ export class WebhookService {
             });
           }
         } catch (appendError) {
+          if (appendError instanceof PendingSessionGenerationConflictError) {
+            log.warn("pending session append rejected — generation conflict", {
+              sessionKey,
+              staleSessionGeneration: pending.session_generation,
+              error: appendError.message,
+            });
+            if (replyToken) {
+              try {
+                await this.replyMessage(replyToken, STALE_PRODUCE_SESSION_REPLY);
+              } catch (replyError) {
+                log.error("generation conflict reply failed", { error: String(replyError) });
+              }
+            }
+            return { eventId, eventType: event.type, status: "saved", parsed: false };
+          }
           const errorMessage = appendError instanceof Error
             ? appendError.message
             : String(appendError);
@@ -476,7 +514,7 @@ export class WebhookService {
 
       let claim;
       try {
-        claim = await pendingService.claimFinalize(sessionKey);
+        claim = await pendingService.claimFinalize(sessionKey, updated.session_generation);
       } catch (claimError) {
         const errorMessage = claimError instanceof Error ? claimError.message : String(claimError);
         log.error("pending session claim failed", { sessionKey, error: errorMessage });
@@ -554,7 +592,7 @@ export class WebhookService {
         // Pre-deploy or mixed legacy session: fall back to raw_messages reconstruction
         // which covers the full source_id window including pre-barrier events.
         try {
-          finalText = await pendingService.rebuildForFinalization(sessionKey, updated, event.timestamp);
+          finalText = await pendingService.rebuildForFinalization(updated, event.timestamp);
         } catch (rebuildError) {
           log.error("pending session raw-message rebuild failed — failing closed", {
             sessionKey,
@@ -622,7 +660,9 @@ export class WebhookService {
     }
 
     // ── 5. No active pending session ──────────────────────────────────────────
-    if (hasSessionStart(normalizedText)) {
+    // Uses the same strict header predicate as rotation (findProduceSessionHeader)
+    // so creation and rotation always agree on what counts as a valid header.
+    if (findProduceSessionHeader(normalizedText) !== null) {
       if (hasSessionEnd(normalizedText) || hasItemLine(normalizedText)) {
         // Complete single-message: has SESSION_END or item lines → parse directly
         console.log("single complete message detected — parsing directly");
@@ -634,7 +674,7 @@ export class WebhookService {
       console.log("session header detected — starting pending session", sessionKey);
       log.info("session header detected — starting pending session", { sessionKey });
       try {
-        await pendingService.create(sessionKey, text, replyToken, lineUserId);
+        await pendingService.create(sessionKey, sourceId, text, replyToken, lineUserId);
         console.log("pending session create succeeded", sessionKey);
       } catch (createErr) {
         const msg = createErr instanceof Error ? createErr.message : String(createErr);
@@ -659,9 +699,26 @@ export class WebhookService {
     if (hasSessionEnd(normalizedText)) {
       console.log("SESSION_END received but no pending session found — ignoring", sessionKey);
       log.warn("SESSION_END received without active pending session", { sessionKey });
-    } else {
-      log.debug("no parser matched text message — left unprocessed");
+      return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
+
+    if (hasItemLine(normalizedText)) {
+      // An item line with no active session — most commonly a continuation
+      // sent after the prior generation was terminalized (parser/validation
+      // failure, or fail-closed reconstruction). Must not silently create or
+      // append; the sender needs to restart with a fresh header.
+      log.info("item line received without active pending session", { sessionKey });
+      if (replyToken) {
+        try {
+          await this.replyMessage(replyToken, NEW_HEADER_REQUIRED_REPLY);
+        } catch (e) {
+          log.error("new-header-required reply failed", { error: String(e) });
+        }
+      }
+      return { eventId, eventType: event.type, status: "saved", parsed: false };
+    }
+
+    log.debug("no parser matched text message — left unprocessed");
     return { eventId, eventType: event.type, status: "saved", parsed: false };
   }
 
@@ -1273,12 +1330,16 @@ export class WebhookService {
             log.error("reply failed", { error: String(e) });
           }
         }
+        // Terminalize this generation — do not leave malformed accumulated
+        // text, the close boundary, or the reply token alive to be appended
+        // into by a later message (see PendingSessionGenerationConflictError
+        // and the sender-isolation requirements this session key enforces).
         return {
           eventId,
           eventType,
           status: "saved",
           parsed: false,
-          pendingSessionClosed: false,
+          pendingSessionClosed: true,
         };
       }
 
@@ -1297,7 +1358,7 @@ export class WebhookService {
           eventType,
           status: "saved",
           parsed: false,
-          pendingSessionClosed: false,
+          pendingSessionClosed: true,
         };
       }
 
@@ -1437,13 +1498,17 @@ export class WebhookService {
         }
       }
 
+      // Terminalize this generation rather than leaving it alive: a crash here
+      // means this exact accumulated text cannot be trusted, so keeping the
+      // generation open would let a later message append onto it and inherit
+      // the same failure.
       return {
         eventId,
         eventType,
         status: "saved",
         parsed: false,
         error: errorMessage,
-        pendingSessionClosed: false,
+        pendingSessionClosed: true,
       };
     }
   }

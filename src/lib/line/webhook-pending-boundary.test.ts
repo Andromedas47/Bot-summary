@@ -231,11 +231,14 @@ class BoundaryDatabase {
   };
 }
 
+const SESSION_KEY = "group:group-1:user:user-1";
+
 function pendingSession(accumulatedText: string, generation = "11111111-1111-4111-8111-111111111111"): PendingSession {
   const now = new Date().toISOString();
   return {
     id: "pending-1",
-    session_key: "group-1",
+    session_key: SESSION_KEY,
+    source_id: "group-1",
     session_generation: generation,
     accumulated_text: accumulatedText,
     latest_reply_token: null,
@@ -332,7 +335,7 @@ describe("produce pending-session generation boundary", () => {
     const pendingService = new PendingSessionService(db as never);
 
     const deleted = await pendingService.deleteGeneration(
-      "group-1",
+      SESSION_KEY,
       "11111111-1111-4111-8111-111111111111",
     );
 

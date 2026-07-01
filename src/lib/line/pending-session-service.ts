@@ -2,9 +2,19 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 const TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
+export class PendingSessionGenerationConflictError extends Error {
+  constructor(sessionKey: string, expectedGeneration: string) {
+    super(
+      `pending session generation conflict for ${sessionKey}: expected generation ${expectedGeneration} is no longer current`,
+    );
+    this.name = "PendingSessionGenerationConflictError";
+  }
+}
+
 export interface PendingSession {
   id:                        string;
   session_key:               string;
+  source_id:                 string;
   accumulated_text:          string;
   latest_reply_token:        string | null;
   line_user_id:              string | null;
@@ -34,6 +44,7 @@ export interface PendingSessionLookup {
 
 export interface ReplacePendingSessionInput {
   sessionKey:                string;
+  sourceId:                  string;
   expectedSessionGeneration: string;
   text:                      string;
   replyToken:                string | null;
@@ -76,6 +87,7 @@ export class PendingSessionService {
 
   async create(
     sessionKey:  string,
+    sourceId:    string,
     text:        string,
     replyToken:  string | null,
     lineUserId:  string | null,
@@ -84,6 +96,7 @@ export class PendingSessionService {
     const { error } = await this.supabase.from("pending_sessions").upsert(
       {
         session_key:        sessionKey,
+        source_id:          sourceId,
         accumulated_text:   text,
         latest_reply_token: replyToken,
         line_user_id:       lineUserId,
@@ -106,6 +119,7 @@ export class PendingSessionService {
       .from("pending_sessions")
       .update({
         session_generation:        replacementGeneration,
+        source_id:                 input.sourceId,
         accumulated_text:          input.text,
         latest_reply_token:        input.replyToken,
         line_user_id:              input.lineUserId,
@@ -160,36 +174,55 @@ export class PendingSessionService {
   }
 
   async append(
-    sessionKey:       string,
-    newText:          string,
-    replyToken:       string | null,
-    lineEventId?:     string,
-    lineTimestampMs?: number,
-    markClose?:       boolean,
+    sessionKey:          string,
+    newText:             string,
+    replyToken:          string | null,
+    lineEventId?:        string,
+    lineTimestampMs?:    number,
+    markClose?:          boolean,
+    expectedGeneration?: string,
   ): Promise<PendingSession> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data, error } = await (this.supabase as any).rpc("append_pending_session", {
-      p_session_key:       sessionKey,
-      p_new_text:          newText,
-      p_reply_token:       replyToken,
-      p_line_event_id:     lineEventId     ?? null,
-      p_line_timestamp_ms: lineTimestampMs ?? null,
-      p_mark_close:        markClose       ?? false,
+      p_session_key:                  sessionKey,
+      p_new_text:                     newText,
+      p_reply_token:                  replyToken,
+      p_line_event_id:                lineEventId     ?? null,
+      p_line_timestamp_ms:            lineTimestampMs ?? null,
+      p_mark_close:                   markClose       ?? false,
+      p_expected_session_generation:  expectedGeneration ?? null,
     });
     if (error) throw new Error(`pending session append failed: ${error.message}`);
     const row = Array.isArray(data) ? data[0] : data;
-    if (!row) throw new Error(`pending session not found for append: ${sessionKey}`);
+    if (!row) {
+      if (expectedGeneration) {
+        throw new PendingSessionGenerationConflictError(sessionKey, expectedGeneration);
+      }
+      throw new Error(`pending session not found for append: ${sessionKey}`);
+    }
     return row as PendingSession;
   }
 
-  async admit(sessionKey: string, lineEventId: string, lineTimestampMs: number): Promise<void> {
+  async admit(
+    sessionKey:          string,
+    lineEventId:         string,
+    lineTimestampMs:     number,
+    expectedGeneration?: string,
+  ): Promise<void> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { error } = await (this.supabase as any).rpc("admit_pending_session_event", {
-      p_session_key:       sessionKey,
-      p_line_event_id:     lineEventId,
-      p_line_timestamp_ms: lineTimestampMs,
+    const { data, error } = await (this.supabase as any).rpc("admit_pending_session_event", {
+      p_session_key:                  sessionKey,
+      p_line_event_id:                lineEventId,
+      p_line_timestamp_ms:            lineTimestampMs,
+      p_expected_session_generation:  expectedGeneration ?? null,
     });
     if (error) throw new Error(`pending session admit failed: ${error.message}`);
+    if (data === false) {
+      if (expectedGeneration) {
+        throw new PendingSessionGenerationConflictError(sessionKey, expectedGeneration);
+      }
+      throw new Error(`pending session admit failed: session not found for ${sessionKey}`);
+    }
   }
 
   async registerIngest(
@@ -208,10 +241,14 @@ export class PendingSessionService {
     if (error) throw new Error(`pending session register ingest failed: ${error.message}`);
   }
 
-  async claimFinalize(sessionKey: string): Promise<ClaimFinalizeResult> {
+  async claimFinalize(
+    sessionKey:          string,
+    expectedGeneration?: string,
+  ): Promise<ClaimFinalizeResult> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data, error } = await (this.supabase as any).rpc("claim_pending_close_finalize", {
-      p_session_key: sessionKey,
+      p_session_key:                 sessionKey,
+      p_expected_session_generation: expectedGeneration ?? null,
     });
     if (error) throw new Error(`pending session claim failed: ${error.message}`);
     return data as ClaimFinalizeResult;
@@ -275,10 +312,19 @@ export class PendingSessionService {
   }
 
   async rebuildForFinalization(
-    sourceId: string,
     session: PendingSession,
     endEventTimestamp: number,
   ): Promise<string> {
+    // Fail closed rather than reconstruct from every sender in the source: a
+    // null sender here would mean scoping this query by source_id alone,
+    // which is exactly the cross-sender contamination this method exists to
+    // prevent (see getPendingSessionKey in verify.ts).
+    if (!session.line_user_id) {
+      throw new Error(
+        `pending session raw-message rebuild refused: no line_user_id to scope reconstruction for ${session.session_key}`,
+      );
+    }
+
     const queryStart = new Date(
       new Date(session.created_at).getTime() - 5 * 60 * 1000,
     ).toISOString();
@@ -289,7 +335,8 @@ export class PendingSessionService {
     const { data, error } = await this.supabase
       .from("raw_messages")
       .select("line_event_id, raw_text, payload, created_at")
-      .eq("source_id", sourceId)
+      .eq("source_id", session.source_id)
+      .eq("user_id", session.line_user_id)
       .eq("message_type", "text")
       .gte("created_at", queryStart)
       .lte("created_at", queryEnd)

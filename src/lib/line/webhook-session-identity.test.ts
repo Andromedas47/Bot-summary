@@ -300,6 +300,35 @@ describe("pending produce session — sender identity isolation (Release A)", ()
     ].sort());
     expect(rows.find((r) => r.session_key === `group:${GROUP}:user:${U1}`)?.accumulated_text).toBe(U1_HEADER);
     expect(rows.find((r) => r.session_key === `group:${GROUP}:user:${U2}`)?.accumulated_text).toBe(U2_HEADER);
+
+    // source_id must be the plain LINE destination (groupId) — never the
+    // composite session_key — for both senders' rows.
+    for (const row of rows) {
+      expect(row.source_id).toBe(GROUP);
+      expect(row.source_id).not.toBe(row.session_key);
+    }
+  });
+
+  it("reply destination is never the composite session_key or source_id — only the original LINE replyToken is used", async () => {
+    const db = new IdentityDatabase();
+    const replies = new Map<string, string[]>();
+    const webhook = service(db, replies);
+
+    // Item line with no active pending session — handled entirely via
+    // this.replyMessage (the injectable reply path), so it's a direct probe
+    // of what value is used as the reply destination.
+    const [result] = await webhook.processEvents([
+      textEvent("1.ทุเรียน100บาท\n2โล", 1_000, { groupId: GROUP, userId: U1, replyToken: "u1-no-session" }),
+    ], "destination");
+
+    expect(result.parsed).toBe(false);
+    const compositeKey = getPendingSessionKey({ type: "group", groupId: GROUP, userId: U1 })!;
+    const tokensUsed = [...replies.keys()];
+    expect(tokensUsed).toEqual(["u1-no-session"]);
+    for (const token of tokensUsed) {
+      expect(token).not.toBe(compositeKey);
+      expect(token).not.toBe(GROUP); // never the plain source_id/destination either
+    }
   });
 
   it("interleaved header/item/close traffic never leaks text, reply token, or metadata across senders", async () => {

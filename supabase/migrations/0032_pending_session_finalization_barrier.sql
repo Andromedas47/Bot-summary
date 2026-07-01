@@ -48,8 +48,10 @@ RETURNS jsonb
 LANGUAGE plpgsql
 AS $$
 DECLARE
-  v_row         public.pending_sessions%ROWTYPE;
-  v_was_closing boolean;
+  v_row                public.pending_sessions%ROWTYPE;
+  v_was_closing        boolean;
+  v_admission_inserted integer;
+  v_ingest_inserted    integer;
 BEGIN
   SELECT * INTO v_row
   FROM public.pending_sessions
@@ -78,6 +80,30 @@ BEGIN
     RETURN jsonb_build_object('accepted', false, 'reason', 'close_generation_conflict');
   END IF;
 
+  -- The row lock serializes append attempts for this generation. Detect a
+  -- previously reserved event before close-status handling or any pending-row
+  -- mutation so redelivery is a true no-op.
+  IF p_line_event_id IS NOT NULL
+     AND p_line_timestamp_ms IS NOT NULL
+     AND (
+       EXISTS (
+         SELECT 1
+         FROM public.pending_session_admission
+         WHERE session_generation = v_row.session_generation
+           AND line_event_id = p_line_event_id
+       )
+       OR EXISTS (
+         SELECT 1
+         FROM public.pending_session_ingest
+         WHERE session_generation = v_row.session_generation
+           AND line_event_id = p_line_event_id
+       )
+     ) THEN
+    RETURN jsonb_build_object(
+      'accepted', true, 'reason', 'duplicate_event', 'session', to_jsonb(v_row)
+    );
+  END IF;
+
   -- A repeated close is a status request. The first boundary, expected count,
   -- quiet window and hard deadline remain immutable.
   IF v_was_closing AND p_mark_close THEN
@@ -103,6 +129,46 @@ BEGIN
      AND p_expected_item_count IS NOT NULL
      AND p_expected_item_count < 1 THEN
     RETURN jsonb_build_object('accepted', false, 'reason', 'invalid_expected_item_count');
+  END IF;
+
+  -- Reserve a newly accepted LINE event in both generation ledgers before
+  -- changing accumulated text, close state, quiet time, or ingest revision.
+  -- The defensive cleanup handles an inconsistent pre-existing ingest row
+  -- without leaving behind a new admission row.
+  IF p_line_event_id IS NOT NULL AND p_line_timestamp_ms IS NOT NULL THEN
+    INSERT INTO public.pending_session_admission (
+      session_key, session_generation, line_event_id, line_timestamp_ms
+    )
+    VALUES (
+      p_session_key, v_row.session_generation, p_line_event_id, p_line_timestamp_ms
+    )
+    ON CONFLICT (session_generation, line_event_id) DO NOTHING;
+
+    GET DIAGNOSTICS v_admission_inserted = ROW_COUNT;
+    IF v_admission_inserted = 0 THEN
+      RETURN jsonb_build_object(
+        'accepted', true, 'reason', 'duplicate_event', 'session', to_jsonb(v_row)
+      );
+    END IF;
+
+    INSERT INTO public.pending_session_ingest (
+      session_key, session_generation, line_event_id, line_timestamp_ms, raw_text
+    )
+    VALUES (
+      p_session_key, v_row.session_generation, p_line_event_id, p_line_timestamp_ms, p_new_text
+    )
+    ON CONFLICT (session_generation, line_event_id) DO NOTHING;
+
+    GET DIAGNOSTICS v_ingest_inserted = ROW_COUNT;
+    IF v_ingest_inserted = 0 THEN
+      DELETE FROM public.pending_session_admission
+      WHERE session_generation = v_row.session_generation
+        AND line_event_id = p_line_event_id;
+
+      RETURN jsonb_build_object(
+        'accepted', true, 'reason', 'duplicate_event', 'session', to_jsonb(v_row)
+      );
+    END IF;
   END IF;
 
   UPDATE public.pending_sessions
@@ -140,26 +206,6 @@ BEGIN
 
   IF NOT FOUND THEN
     RETURN jsonb_build_object('accepted', false, 'reason', 'generation_conflict');
-  END IF;
-
-  IF p_line_event_id IS NOT NULL AND p_line_timestamp_ms IS NOT NULL THEN
-    INSERT INTO public.pending_session_admission (
-      session_key, session_generation, line_event_id, line_timestamp_ms
-    )
-    VALUES (
-      p_session_key, v_row.session_generation, p_line_event_id, p_line_timestamp_ms
-    )
-    ON CONFLICT (session_generation, line_event_id) DO NOTHING;
-
-    INSERT INTO public.pending_session_ingest (
-      session_key, session_generation, line_event_id, line_timestamp_ms, raw_text
-    )
-    VALUES (
-      p_session_key, v_row.session_generation, p_line_event_id, p_line_timestamp_ms, p_new_text
-    )
-    ON CONFLICT (session_generation, line_event_id) DO UPDATE SET
-      raw_text = EXCLUDED.raw_text,
-      line_timestamp_ms = EXCLUDED.line_timestamp_ms;
   END IF;
 
   RETURN jsonb_build_object(

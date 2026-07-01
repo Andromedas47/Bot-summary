@@ -76,6 +76,36 @@ describe("Release B migration transaction contract", () => {
       .toBeLessThan(sql.indexOf("INSERT INTO public.pending_session_admission"));
   });
 
+  it("reserves new events and returns duplicates before mutating the pending row", async () => {
+    const sql = await Bun.file(migrationPath).text();
+    const functionStart = sql.indexOf(
+      "CREATE FUNCTION public.append_pending_session",
+    );
+    const functionEnd = sql.indexOf(
+      "-- Sole Release-B finalization authority",
+      functionStart,
+    );
+    const appendSql = sql.slice(functionStart, functionEnd);
+    const duplicateResult = appendSql.indexOf(
+      "'accepted', true, 'reason', 'duplicate_event'",
+    );
+    const admissionReservation = appendSql.indexOf(
+      "INSERT INTO public.pending_session_admission",
+    );
+    const ingestReservation = appendSql.indexOf(
+      "INSERT INTO public.pending_session_ingest",
+    );
+    const pendingMutation = appendSql.indexOf("UPDATE public.pending_sessions");
+
+    expect(duplicateResult).toBeGreaterThan(0);
+    expect(duplicateResult).toBeLessThan(pendingMutation);
+    expect(admissionReservation).toBeLessThan(pendingMutation);
+    expect(ingestReservation).toBeLessThan(pendingMutation);
+    expect(appendSql).toContain("GET DIAGNOSTICS v_admission_inserted = ROW_COUNT");
+    expect(appendSql).toContain("GET DIAGNOSTICS v_ingest_inserted = ROW_COUNT");
+    expect(appendSql).toContain("ingest_revision           = ingest_revision + 1");
+  });
+
   it("rejects stale parser snapshots before every produce write", async () => {
     const sql = await Bun.file(migrationPath).text();
     const staleGuard = sql.indexOf(

@@ -49,6 +49,12 @@ export const RE = {
   // All observed end markers start with จบรายการ
   SESSION_END: /^จบรายการ/,
 
+  // "จบรายการ 18 รายการ" — guaranteed-completeness close form. Captures:
+  // [1]=count. Bare "จบรายการ" (no count) remains quiet-window best-effort
+  // only — see try_finalize_pending_generation in
+  // 0032_pending_session_finalization_barrier.sql.
+  SESSION_END_COUNT: /^จบรายการ\s+(\d+)\s*รายการ/,
+
   // Section / transaction-type header lines (matched against content after TIME_PREFIX strip):
   //   รายการชั่งเบิก  → เบิก
   //   รายการเบิกเพิ่ม  → เบิกเพิ่ม

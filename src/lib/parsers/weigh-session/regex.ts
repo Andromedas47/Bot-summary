@@ -63,7 +63,7 @@ export const RE = {
   // seller = before dash, market = between dash and tx-type keyword
   // Captures: [1]=seller, [2]=market, [3]=tx_type_keyword
   SELLER_MARKET: new RegExp(
-    `^([${TH}\\s]+?)-([${MARKET}]+?)\\s+(เบิกเพิ่ม|เบิก|คืนเสีย|คืน)`,
+    `^([${TH}\\s]+?)-([${MARKET}]+?)\\s+(เบิกเพิ่ม|เบิก|คืนเสีย|ชั่งคืน|คืน)`,
   ),
 
   // Manual slip session open: "ส่งสลิปมือ 17/06/2569"

@@ -1197,6 +1197,30 @@ describe("real sample: พาซิโอ้ผัก borrow session with ถุ
   });
 });
 
+describe("production regression: seller-market header with ชั่งคืน", () => {
+  const result = parseWeighSession(`\
+ต้อม-พาซิโอ้ผัก ชั่งคืน 30/06/2569
+1ผักชีไทย10บาท
+28กำ
+จบรายการชั่งคืน`);
+
+  it("preserves seller, market, and return metadata", () => {
+    expect(result.staff_name).toBe("ต้อม");
+    expect(result.session_title).toBe("พาซิโอ้ผัก");
+    expect(result.date).toBe("2026-06-30");
+    expect(result.parse_errors).toHaveLength(0);
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]).toMatchObject({
+      item_number: 1,
+      product_name: "ผักชีไทย",
+      price_per_unit: 10,
+      quantity: 28,
+      unit: "กำ",
+      transaction_type: "คืน",
+    });
+  });
+});
+
 describe("RE.ITEM", () => {
   it("matches item with dot separator", () => {
     const m = "1.หมอนทอง119บาท".match(RE.ITEM);

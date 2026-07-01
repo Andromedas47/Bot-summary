@@ -595,4 +595,52 @@ describe("pending produce session — sender identity isolation (Release A)", ()
     expect(legacyRow?.accumulated_text).toBe("old malformed accumulated text");
     expect(freshRow?.accumulated_text).toBe(U1_HEADER);
   });
+
+  // ── Backward-compatible rollout: application code always resolves to the
+  // new generation-pinned RPC overload, never the old wrapper ──────────────
+  //
+  // The migration keeps both old (3/6/1-arg) and new (4/7/2-arg) overloads
+  // of admit_pending_session_event / append_pending_session /
+  // claim_pending_close_finalize live during rollout. Postgres/PostgREST
+  // picks the overload matching the exact named-argument set supplied, so
+  // this application-layer guarantee — every call always includes
+  // p_expected_session_generation, even when the value is null — is what
+  // keeps this code resolving to the new overload and never falling back
+  // onto the old, unguarded wrapper. This can't be proven against a real
+  // Postgres overload resolver in this in-memory test harness; it only
+  // asserts the RPC args shape the application sends.
+  it("admit/append/claimFinalize always send p_expected_session_generation — never the bare old-signature arg shape", async () => {
+    const calls: Array<{ name: string; args: Row }> = [];
+    const db = new IdentityDatabase();
+    const originalRpc = db.rpc;
+    db.rpc = async (name: string, args: Row) => {
+      calls.push({ name, args });
+      return originalRpc(name, args);
+    };
+
+    const sessionKey = getPendingSessionKey({ type: "group", groupId: GROUP, userId: U1 })!;
+    db.insert("pending_sessions", {
+      session_key: sessionKey,
+      source_id: GROUP,
+      session_generation: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      accumulated_text: U1_HEADER,
+      line_user_id: U1,
+    }, "insert");
+
+    const service = new PendingSessionService(db as never);
+    await service.admit(sessionKey, "evt-1", 1_000, "dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+    await service.append(
+      sessionKey, "1.ทุเรียน100บาท\n1โล", null, "evt-2", 2_000, false,
+      "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    );
+    await service.claimFinalize(sessionKey, "dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+
+    expect(calls).toHaveLength(3);
+    for (const call of calls) {
+      expect(Object.prototype.hasOwnProperty.call(call.args, "p_expected_session_generation")).toBe(true);
+    }
+    expect(calls[0].name).toBe("admit_pending_session_event");
+    expect(calls[1].name).toBe("append_pending_session");
+    expect(calls[2].name).toBe("claim_pending_close_finalize");
+  });
 });

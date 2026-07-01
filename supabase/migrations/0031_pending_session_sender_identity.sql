@@ -58,28 +58,48 @@ ALTER TABLE public.pending_sessions
 -- No automated recovery/backfill of stranded legacy rows is performed here;
 -- treat that as a manual, per-incident operator action if it comes up.
 
--- ── 3. Generation-pinned mutations ──────────────────────────────────────────
+-- ── 3. Generation-pinned mutations — backward-compatible rollout ───────────
 --
--- All three functions below use DROP FUNCTION IF EXISTS + CREATE (not
--- CREATE OR REPLACE) so exactly one, generation-aware overload of each
--- survives this migration — no unguarded prior signature is left resident
--- in pg_proc. Every call site in the repository was grepped
+-- Deployed origin/main still calls the OLD signatures (3/6/1-arg) at the
+-- moment this migration runs — code deploy and migration apply are two
+-- separate events with no guaranteed ordering. This migration must
+-- therefore leave every old signature callable:
+--
+--   1. The new generation-pinned signature is created first (distinct
+--      arity — a new overload, not a replacement).
+--   2. The old signature is re-created (CREATE OR REPLACE; return type is
+--      unchanged for append/claim, so this is a true in-place replace, not
+--      a new overload) as a thin wrapper that forwards to the new
+--      signature with expected_generation = NULL — i.e. "don't check",
+--      identical to the new function's own behavior when NULL is passed.
+--   3. Nothing is DROPped in this migration. Both old and new signatures
+--      are simultaneously live and grants are re-applied to both, so
+--      whichever code (old, pre-deploy or new, post-deploy) happens to be
+--      running at any point mid-rollout keeps working.
+--   4. A follow-up cleanup migration (after this release) will DROP the
+--      old signatures once production is confirmed fully on the new code
+--      and no old caller remains — not part of this migration.
+--
+-- Every call site in the repository was grepped
 -- (src/lib/line/pending-session-service.ts is the only caller of all three;
--- no other .ts/.sql file invokes them) and always passes the full current
--- argument list, so dropping the old signatures breaks nothing.
---
--- admit_pending_session_event's return type also changes (void → boolean) so
--- a generation conflict can be reported explicitly instead of a silent
--- no-op — CREATE OR REPLACE cannot change a function's return type either,
--- so DROP + CREATE was already required here regardless of the overload
--- concern.
-DROP FUNCTION IF EXISTS public.admit_pending_session_event(text, text, bigint);
+-- no other .ts/.sql file invokes them), and the new application code always
+-- passes the full new argument list (including expected_generation, even
+-- when NULL) — so it always resolves to the new overload, never the old
+-- wrapper. Old, already-deployed code passes the old, shorter argument
+-- list — so it always resolves to the old wrapper.
 
+-- admit_pending_session_event: new 4-arg boolean signature first. No
+-- DEFAULT on p_expected_session_generation: a default here would make this
+-- 4-arg signature callable with only 3 supplied arguments, which is
+-- ambiguous against the old 3-arg wrapper below (PostgreSQL cannot pick
+-- between "exact 3-arg match" and "4-arg match with 1 default filled" in
+-- all call shapes) — keeping it required means only a call that explicitly
+-- supplies all 4 arguments resolves here.
 CREATE FUNCTION public.admit_pending_session_event(
   p_session_key                  text,
   p_line_event_id                text,
   p_line_timestamp_ms            bigint,
-  p_expected_session_generation  uuid DEFAULT NULL
+  p_expected_session_generation  uuid
 )
 RETURNS boolean
 LANGUAGE plpgsql
@@ -111,32 +131,47 @@ BEGIN
 END;
 $$;
 
--- append_pending_session keeps its existing return type (SETOF
--- pending_sessions), but a trailing parameter still changes the function's
--- argument-type signature — CREATE OR REPLACE would add a new overload
--- alongside the previous one rather than replacing it, leaving an unguarded
--- (no expected-generation param) copy permanently callable. Explicitly drop
--- every prior signature so exactly one, generation-aware overload remains:
---   - (text, text, text) — original 0012_append_pending_session_rpc.sql.
---   - (text, text, text, text, bigint, boolean) — the barrier-aware version
---     src/lib/line/pending-session-service.ts called before this migration
---     (applied out-of-band; see file header). No repository caller invokes
---     either shape (confirmed by grep across src/**), so dropping both is
---     safe. IF EXISTS makes this a no-op on a database missing one of them.
--- On a generation mismatch the surviving function returns an empty set,
--- mirroring the existing "session not found" empty-set signal so callers
--- already handling that case correctly reject the write.
-DROP FUNCTION IF EXISTS public.append_pending_session(text, text, text);
-DROP FUNCTION IF EXISTS public.append_pending_session(text, text, text, text, bigint, boolean);
+-- Old 3-arg void wrapper: forwards to the new 4-arg function with
+-- expected_generation = NULL (unconditional admit, matching the old
+-- behavior exactly) and discards the boolean result so the return type
+-- (void) — and therefore old callers' contract — is unchanged.
+CREATE OR REPLACE FUNCTION public.admit_pending_session_event(
+  p_session_key       text,
+  p_line_event_id     text,
+  p_line_timestamp_ms bigint
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  PERFORM public.admit_pending_session_event(
+    p_session_key, p_line_event_id, p_line_timestamp_ms, NULL::uuid
+  );
+END;
+$$;
 
+-- append_pending_session: new 7-arg signature first. Same return type
+-- (SETOF pending_sessions) as every prior version of this function. On a
+-- generation mismatch it returns an empty set, mirroring the existing
+-- "session not found" empty-set signal so callers already handling that
+-- case correctly reject the write.
+-- No DEFAULT on p_expected_session_generation (same ambiguity reason as
+-- admit_pending_session_event above). PostgreSQL requires defaulted
+-- parameters to be a trailing group — once the last parameter has no
+-- default, none of the parameters before it may have one either — so
+-- p_line_event_id/p_line_timestamp_ms/p_mark_close also drop their DEFAULTs
+-- here. This is a compile-validity consequence of the trailing-uuid fix,
+-- not a scope change: the application (pending-session-service.ts) already
+-- supplies all 7 named arguments on every call, so this signature is always
+-- called fully populated regardless.
 CREATE FUNCTION public.append_pending_session(
   p_session_key                  text,
   p_new_text                     text,
   p_reply_token                  text,
-  p_line_event_id                text    DEFAULT NULL,
-  p_line_timestamp_ms            bigint  DEFAULT NULL,
-  p_mark_close                   boolean DEFAULT false,
-  p_expected_session_generation  uuid    DEFAULT NULL
+  p_line_event_id                text,
+  p_line_timestamp_ms            bigint,
+  p_mark_close                   boolean,
+  p_expected_session_generation  uuid
 )
 RETURNS SETOF public.pending_sessions
 LANGUAGE plpgsql
@@ -184,17 +219,46 @@ BEGIN
 END;
 $$;
 
--- claim_pending_close_finalize keeps its jsonb return type. Same overload
--- caveat as append_pending_session above: adding a parameter would leave an
--- unguarded 1-argument overload resident in pg_proc under CREATE OR REPLACE.
--- Drop the prior (text) signature explicitly first — no repository caller
--- invokes it (confirmed by grep across src/**) — so exactly one,
--- generation-aware overload survives this migration.
-DROP FUNCTION IF EXISTS public.claim_pending_close_finalize(text);
+-- Old 6-arg wrapper (the barrier-aware version deployed on origin/main —
+-- see file header re: out-of-band application). Same return type
+-- (SETOF pending_sessions), so CREATE OR REPLACE is a true in-place
+-- replace here, not a new overload. Forwards to the new 7-arg function
+-- with expected_generation = NULL (unconditional append, matching the old
+-- behavior exactly).
+--
+-- NOTE: the original (text, text, text) 3-arg signature from
+-- 0012_append_pending_session_rpc.sql is NOT touched by this migration
+-- either way — nothing in the currently deployed code calls it, and
+-- leaving it exactly as-is (whatever state it is in on production today)
+-- is strictly more conservative than modifying it. It is left for the
+-- follow-up cleanup migration to assess and drop alongside the other old
+-- signatures once production history is reconciled.
+CREATE OR REPLACE FUNCTION public.append_pending_session(
+  p_session_key       text,
+  p_new_text          text,
+  p_reply_token       text,
+  p_line_event_id     text    DEFAULT NULL,
+  p_line_timestamp_ms bigint  DEFAULT NULL,
+  p_mark_close        boolean DEFAULT false
+)
+RETURNS SETOF public.pending_sessions
+LANGUAGE sql
+AS $$
+  SELECT * FROM public.append_pending_session(
+    p_session_key, p_new_text, p_reply_token,
+    p_line_event_id, p_line_timestamp_ms, p_mark_close,
+    NULL::uuid
+  );
+$$;
 
+-- claim_pending_close_finalize: new 2-arg signature first. Same jsonb
+-- return type as every prior version. No DEFAULT on
+-- p_expected_session_generation (same ambiguity reason as
+-- admit_pending_session_event above) — p_session_key already has no
+-- default, so this doesn't affect it.
 CREATE FUNCTION public.claim_pending_close_finalize(
   p_session_key                  text,
-  p_expected_session_generation  uuid DEFAULT NULL
+  p_expected_session_generation  uuid
 )
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -252,17 +316,39 @@ BEGIN
 END;
 $$;
 
+-- Old 1-arg wrapper. Same jsonb return type, so CREATE OR REPLACE is a true
+-- in-place replace here. Forwards to the new 2-arg function with
+-- expected_generation = NULL (unconditional claim, matching the old
+-- behavior exactly).
+CREATE OR REPLACE FUNCTION public.claim_pending_close_finalize(
+  p_session_key text
+)
+RETURNS jsonb
+LANGUAGE sql
+AS $$
+  SELECT public.claim_pending_close_finalize(p_session_key, NULL::uuid);
+$$;
+
 -- ── 4. Grants ────────────────────────────────────────────────────────────────
 --
--- Only the three new/changed signatures above. register_pending_session_ingest
--- and check_pending_close_ready are untouched by this migration, so their
--- existing grants (from whatever applied the out-of-band baseline) are left
--- alone here.
+-- Every signature that is live during the rollout window — old wrapper AND
+-- new generation-pinned function — gets an explicit grant, since a brand
+-- new overload (the three "new" signatures created above) does not inherit
+-- grants from a same-named function with a different argument list.
+-- register_pending_session_ingest and check_pending_close_ready are
+-- untouched by this migration, so their existing grants (from whatever
+-- applied the out-of-band baseline) are left alone here.
+REVOKE ALL ON FUNCTION public.admit_pending_session_event(text, text, bigint) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.admit_pending_session_event(text, text, bigint) TO service_role;
 REVOKE ALL ON FUNCTION public.admit_pending_session_event(text, text, bigint, uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.admit_pending_session_event(text, text, bigint, uuid) TO service_role;
 
+REVOKE ALL ON FUNCTION public.append_pending_session(text, text, text, text, bigint, boolean) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.append_pending_session(text, text, text, text, bigint, boolean) TO service_role;
 REVOKE ALL ON FUNCTION public.append_pending_session(text, text, text, text, bigint, boolean, uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.append_pending_session(text, text, text, text, bigint, boolean, uuid) TO service_role;
 
+REVOKE ALL ON FUNCTION public.claim_pending_close_finalize(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.claim_pending_close_finalize(text) TO service_role;
 REVOKE ALL ON FUNCTION public.claim_pending_close_finalize(text, uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.claim_pending_close_finalize(text, uuid) TO service_role;

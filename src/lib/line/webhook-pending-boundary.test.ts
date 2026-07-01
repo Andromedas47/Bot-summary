@@ -143,6 +143,12 @@ class BoundaryDatabase {
       row.close_requested_at = row.close_requested_at ?? null;
       row.close_line_event_id = row.close_line_event_id ?? null;
       row.close_finalize_started_at = row.close_finalize_started_at ?? null;
+      row.terminalized = row.terminalized ?? false;
+      row.next_attempt_at = row.next_attempt_at ?? null;
+      row.close_deadline_at = row.close_deadline_at ?? null;
+      row.close_session_generation = row.close_session_generation ?? null;
+      row.expected_item_count = row.expected_item_count ?? null;
+      row.ingest_revision = row.ingest_revision ?? 0;
     }
     if (table === "produce_sessions") row.id = row.id ?? `produce-${rows.length + 1}`;
     rows.push(row);
@@ -195,14 +201,54 @@ class BoundaryDatabase {
 
     if (name === "append_pending_session") {
       this.appendCalls += 1;
-      if (!pending) return { data: [], error: null };
-      pending.accumulated_text = `${pending.accumulated_text}\n${args.p_new_text}`;
-      pending.latest_reply_token = args.p_reply_token;
-      if (args.p_mark_close) {
-        pending.close_event_timestamp_ms = args.p_line_timestamp_ms;
-        pending.close_requested_at = new Date().toISOString();
-        pending.close_line_event_id = args.p_line_event_id;
+      if (!pending) {
+        return { data: { accepted: false, reason: "not_found" }, error: null };
       }
+      if (
+        args.p_expected_session_generation != null
+        && pending.session_generation !== args.p_expected_session_generation
+      ) {
+        return { data: { accepted: false, reason: "generation_conflict" }, error: null };
+      }
+      const isDuplicate = args.p_line_event_id != null
+        && (
+          this.rows("pending_session_admission").some((row) =>
+            row.session_generation === pending.session_generation
+            && row.line_event_id === args.p_line_event_id
+          )
+          || this.rows("pending_session_ingest").some((row) =>
+            row.session_generation === pending.session_generation
+            && row.line_event_id === args.p_line_event_id
+          )
+        );
+      if (isDuplicate) {
+        return {
+          data: { accepted: true, reason: "duplicate_event", session: pending },
+          error: null,
+        };
+      }
+      if (pending.close_event_timestamp_ms != null && args.p_mark_close) {
+        return {
+          data: { accepted: true, reason: "close_already_requested", session: pending },
+          error: null,
+        };
+      }
+      if (
+        pending.close_event_timestamp_ms != null
+        && !args.p_mark_close
+        && Number(args.p_line_timestamp_ms) > Number(pending.close_event_timestamp_ms)
+      ) {
+        return {
+          data: { accepted: false, reason: "after_close_boundary", session: pending },
+          error: null,
+        };
+      }
+      this.insert("pending_session_admission", {
+        session_key: pending.session_key,
+        session_generation: pending.session_generation,
+        line_event_id: args.p_line_event_id,
+        line_timestamp_ms: args.p_line_timestamp_ms,
+      }, "insert");
       this.insert("pending_session_ingest", {
         session_key: pending.session_key,
         session_generation: pending.session_generation,
@@ -210,7 +256,21 @@ class BoundaryDatabase {
         line_timestamp_ms: args.p_line_timestamp_ms,
         raw_text: args.p_new_text,
       }, "insert");
-      return { data: [pending], error: null };
+      pending.accumulated_text = `${pending.accumulated_text}\n${args.p_new_text}`;
+      pending.latest_reply_token = args.p_reply_token;
+      pending.ingest_revision = Number(pending.ingest_revision ?? 0) + 1;
+      if (args.p_mark_close) {
+        pending.close_event_timestamp_ms = args.p_line_timestamp_ms;
+        pending.close_requested_at = new Date().toISOString();
+        pending.close_line_event_id = args.p_line_event_id;
+        pending.close_session_generation = pending.session_generation;
+        pending.close_deadline_at = new Date(Date.now() + 30_000).toISOString();
+        pending.next_attempt_at = new Date(Date.now() + 8_000).toISOString();
+        pending.expected_item_count = args.p_expected_item_count;
+      } else if (pending.close_event_timestamp_ms != null) {
+        pending.next_attempt_at = new Date(Date.now() + 8_000).toISOString();
+      }
+      return { data: { accepted: true, reason: "appended", session: pending }, error: null };
     }
 
     if (name === "claim_pending_close_finalize") {
@@ -249,15 +309,26 @@ function pendingSession(accumulatedText: string, generation = "11111111-1111-411
     close_requested_at: null,
     close_line_event_id: null,
     close_finalize_started_at: null,
+    terminalized: false,
+    next_attempt_at: null,
+    close_deadline_at: null,
+    close_session_generation: null,
+    expected_item_count: null,
+    ingest_revision: 0,
   };
 }
 
 let eventSequence = 0;
-function textEvent(text: string, timestamp: number, replyToken?: string): LineMessageEvent {
+function textEvent(
+  text: string,
+  timestamp: number,
+  replyToken?: string,
+  eventId?: string,
+): LineMessageEvent {
   eventSequence += 1;
   return {
     type: "message",
-    webhookEventId: `boundary-event-${eventSequence}`,
+    webhookEventId: eventId ?? `boundary-event-${eventSequence}`,
     deliveryContext: { isRedelivery: false },
     timestamp,
     source: { type: "group", groupId: "group-1", userId: "user-1" },
@@ -269,7 +340,6 @@ function textEvent(text: string, timestamp: number, replyToken?: string): LineMe
 
 function service(db: BoundaryDatabase, replies: string[] = []) {
   return new WebhookService(db as never, {
-    produceEndSettleMs: 0,
     replyMessage: async (_token, text) => { replies.push(text); },
   });
 }
@@ -344,7 +414,151 @@ describe("produce pending-session generation boundary", () => {
       .toBe(replacementGeneration);
   });
 
-  it("fallback reconstruction failure performs no produce writes", async () => {
+  it("accepts an eligible middle item that reaches the app after close and rearms quiet time", async () => {
+    const db = new BoundaryDatabase(pendingSession(
+      "โอม-พาซิโอ้ผลไม้ เบิก 30/06/2569",
+    ));
+    const webhook = service(db);
+
+    await webhook.processEvents(
+      [textEvent("จบรายการ 1 รายการ", 5_000, "close-reply")],
+      "destination",
+    );
+    const pending = db.rows("pending_sessions")[0];
+    const originalBoundary = pending.close_event_timestamp_ms;
+    pending.next_attempt_at = "2000-01-01T00:00:00.000Z";
+
+    await webhook.processEvents(
+      [textEvent("1.ทุเรียน100บาท\n2โล", 3_000, "late-item-reply")],
+      "destination",
+    );
+
+    expect(pending.close_event_timestamp_ms).toBe(originalBoundary);
+    expect(pending.accumulated_text).toContain("ทุเรียน");
+    expect(pending.ingest_revision).toBe(2);
+    expect(String(pending.next_attempt_at)).not.toBe("2000-01-01T00:00:00.000Z");
+    expect(db.rows("pending_session_ingest").some((row) =>
+      String(row.raw_text).includes("ทุเรียน"),
+    )).toBe(true);
+  });
+
+  it("deduplicates a repeated item before changing text, ledgers, or revision", async () => {
+    const db = new BoundaryDatabase(pendingSession(
+      "โอม-พาซิโอ้ผลไม้ เบิก 30/06/2569",
+    ));
+    const webhook = service(db);
+    const itemText = "1.ทุเรียน100บาท\n2โล";
+    const itemEvent = textEvent(itemText, 2_000, "item-reply", "duplicate-item-event");
+
+    await webhook.processEvents([itemEvent], "destination");
+    await webhook.processEvents([itemEvent], "destination");
+
+    const pending = db.rows("pending_sessions")[0];
+    expect(String(pending.accumulated_text).split(itemText)).toHaveLength(2);
+    expect(pending.ingest_revision).toBe(1);
+    expect(db.rows("pending_session_admission")).toHaveLength(1);
+    expect(db.rows("pending_session_ingest")).toHaveLength(1);
+  });
+
+  it("deduplicates a repeated close without changing its immutable fields", async () => {
+    const db = new BoundaryDatabase(pendingSession(
+      "โอม-พาซิโอ้ผลไม้ เบิก 30/06/2569\n1.ทุเรียน100บาท\n2โล",
+    ));
+    const webhook = service(db);
+    const closeText = "จบรายการ 1 รายการ";
+    const closeEvent = textEvent(
+      closeText,
+      3_000,
+      "close-reply",
+      "duplicate-close-event",
+    );
+
+    await webhook.processEvents([closeEvent], "destination");
+    const pending = db.rows("pending_sessions")[0];
+    const immutableClose = {
+      boundary: pending.close_event_timestamp_ms,
+      requestedAt: pending.close_requested_at,
+      eventId: pending.close_line_event_id,
+      deadline: pending.close_deadline_at,
+      nextAttempt: pending.next_attempt_at,
+      expectedCount: pending.expected_item_count,
+      revision: pending.ingest_revision,
+    };
+
+    await webhook.processEvents([closeEvent], "destination");
+
+    expect(String(pending.accumulated_text).split(closeText)).toHaveLength(2);
+    expect({
+      boundary: pending.close_event_timestamp_ms,
+      requestedAt: pending.close_requested_at,
+      eventId: pending.close_line_event_id,
+      deadline: pending.close_deadline_at,
+      nextAttempt: pending.next_attempt_at,
+      expectedCount: pending.expected_item_count,
+      revision: pending.ingest_revision,
+    }).toEqual(immutableClose);
+    expect(db.rows("pending_session_admission")).toHaveLength(1);
+    expect(db.rows("pending_session_ingest")).toHaveLength(1);
+  });
+
+  it("does not mutate pending state or ledgers when an after-close event is redelivered", async () => {
+    const db = new BoundaryDatabase(pendingSession(
+      "โอม-พาซิโอ้ผลไม้ เบิก 30/06/2569",
+    ));
+    const webhook = service(db);
+
+    await webhook.processEvents(
+      [textEvent("จบรายการ 1 รายการ", 3_000, "close-reply")],
+      "destination",
+    );
+    const pending = db.rows("pending_sessions")[0];
+    const afterCloseEvent = textEvent(
+      "1.ทุเรียน100บาท\n2โล",
+      4_000,
+      "after-reply",
+      "duplicate-after-close-event",
+    );
+    const before = { ...pending };
+    const admissionCount = db.rows("pending_session_admission").length;
+    const ingestCount = db.rows("pending_session_ingest").length;
+
+    await webhook.processEvents([afterCloseEvent], "destination");
+    await webhook.processEvents([afterCloseEvent], "destination");
+
+    expect(pending).toEqual(before);
+    expect(db.rows("pending_session_admission")).toHaveLength(admissionCount);
+    expect(db.rows("pending_session_ingest")).toHaveLength(ingestCount);
+  });
+
+  it("rejects an item beyond the first close timestamp without touching old-generation ledgers", async () => {
+    const db = new BoundaryDatabase(pendingSession(
+      "โอม-พาซิโอ้ผลไม้ เบิก 30/06/2569",
+    ));
+    const replies: string[] = [];
+    const webhook = service(db, replies);
+
+    await webhook.processEvents(
+      [textEvent("จบรายการ 1 รายการ", 3_000, "close-reply")],
+      "destination",
+    );
+    const pending = db.rows("pending_sessions")[0];
+    const revisionAfterClose = pending.ingest_revision;
+    const ingestCountAfterClose = db.rows("pending_session_ingest").length;
+    const admissionCountAfterClose = db.rows("pending_session_admission").length;
+
+    await webhook.processEvents(
+      [textEvent("1.ทุเรียน100บาท\n2โล", 4_000, "after-reply")],
+      "destination",
+    );
+
+    expect(pending.accumulated_text).not.toContain("ทุเรียน");
+    expect(pending.ingest_revision).toBe(revisionAfterClose);
+    expect(db.rows("pending_session_ingest")).toHaveLength(ingestCountAfterClose);
+    expect(db.rows("pending_session_admission")).toHaveLength(admissionCountAfterClose);
+    expect(replies.at(-1)).toContain("ไม่ถูกรวม");
+  });
+
+  it("close request performs no produce writes in the webhook request", async () => {
     const stale = pendingSession(
       "โอม-พาซิโอ้ผลไม้ เบิก 29/06/2569\n1.ทุเรียน100บาท\n1โล",
     );
@@ -358,10 +572,11 @@ describe("produce pending-session generation boundary", () => {
     expect(result.parsed).toBe(false);
     expect(db.rows("produce_sessions")).toHaveLength(0);
     expect(db.rows("produce_items")).toHaveLength(0);
-    expect(db.rows("pending_sessions")).toHaveLength(0);
+    expect(db.rows("pending_sessions")).toHaveLength(1);
+    expect(db.rows("pending_sessions")[0].next_attempt_at).not.toBeNull();
   });
 
-  it("normal header → items → close still finalizes one clean session", async () => {
+  it("normal header → items → close is deferred for the cron finalizer", async () => {
     const db = new BoundaryDatabase();
     const webhook = service(db);
 
@@ -371,9 +586,10 @@ describe("produce pending-session generation boundary", () => {
       textEvent("จบรายการเบิก", 3_000),
     ], "destination");
 
-    expect(results.at(-1)?.parsed).toBe(true);
-    expect(db.rows("produce_sessions")).toHaveLength(1);
-    expect(db.rows("produce_items")).toHaveLength(1);
-    expect(db.rows("pending_sessions")).toHaveLength(0);
+    expect(results.at(-1)?.parsed).toBe(false);
+    expect(db.rows("produce_sessions")).toHaveLength(0);
+    expect(db.rows("produce_items")).toHaveLength(0);
+    expect(db.rows("pending_sessions")).toHaveLength(1);
+    expect(db.rows("pending_sessions")[0].close_event_timestamp_ms).toBe(3_000);
   });
 });

@@ -11,6 +11,28 @@ export class PendingSessionGenerationConflictError extends Error {
   }
 }
 
+// Thrown when a content item arrives after the immutable first-close
+// boundary for its generation — Release B rejects it outright rather than
+// appending it to the ledger (see 0032_pending_session_finalization_barrier.sql).
+export class PendingSessionAfterCloseBoundaryError extends Error {
+  constructor(sessionKey: string, closeEventTimestampMs: number) {
+    super(
+      `pending session append rejected for ${sessionKey}: message arrived after the immutable close boundary at ${closeEventTimestampMs}`,
+    );
+    this.name = "PendingSessionAfterCloseBoundaryError";
+  }
+}
+
+export class PendingSessionClosedError extends Error {
+  constructor(
+    sessionKey: string,
+    public readonly reason: "terminalized" | "deadline_elapsed" | "close_generation_conflict",
+  ) {
+    super(`pending session append rejected for ${sessionKey}: ${reason}`);
+    this.name = "PendingSessionClosedError";
+  }
+}
+
 export interface PendingSession {
   id:                        string;
   session_key:               string;
@@ -25,6 +47,28 @@ export interface PendingSession {
   close_requested_at:        string | null;
   close_line_event_id:       string | null;
   close_finalize_started_at: string | null;
+  terminalized:              boolean;
+  next_attempt_at:           string | null;
+  close_deadline_at:         string | null;
+  close_session_generation:  string | null;
+  expected_item_count:       number | null;
+  ingest_revision:           number;
+}
+
+export interface TryFinalizeResult {
+  status:
+    | "skipped"
+    | "stale_snapshot"
+    | "pending"
+    | "failed_closed"
+    | "duplicate"
+    | "finalized";
+  reason?:             string;
+  missing?:            number[];
+  current_revision?:   number;
+  session_id?:         string;
+  validation_errors?:  string[];
+  next_attempt_at?:    string;
 }
 
 export interface ClaimFinalizeResult {
@@ -52,6 +96,7 @@ export interface ReplacePendingSessionInput {
   lineEventId:               string;
   lineTimestampMs:           number;
   markClose:                 boolean;
+  expectedItemCount?:        number;
 }
 
 interface PendingRawMessage {
@@ -104,6 +149,16 @@ export class PendingSessionService {
         // Reset created_at so queryStart in rebuildForFinalization is correct
         // even when a stale row from a prior session survives the upsert.
         created_at:         now,
+        close_event_timestamp_ms:  null,
+        close_requested_at:        null,
+        close_line_event_id:       null,
+        close_finalize_started_at: null,
+        terminalized:              false,
+        next_attempt_at:           null,
+        close_deadline_at:         null,
+        close_session_generation:  null,
+        expected_item_count:       null,
+        ingest_revision:           0,
       },
       { onConflict: "session_key" },
     );
@@ -113,8 +168,15 @@ export class PendingSessionService {
   async replaceGeneration(
     input: ReplacePendingSessionInput,
   ): Promise<PendingSession | null> {
-    const now = new Date().toISOString();
+    const now = new Date();
+    const nowIso = now.toISOString();
     const replacementGeneration = crypto.randomUUID();
+    const closeDeadline = input.markClose
+      ? new Date(now.getTime() + 30_000).toISOString()
+      : null;
+    const nextAttempt = input.markClose
+      ? new Date(now.getTime() + 8_000).toISOString()
+      : null;
     const { data, error } = await this.supabase
       .from("pending_sessions")
       .update({
@@ -123,12 +185,18 @@ export class PendingSessionService {
         accumulated_text:          input.text,
         latest_reply_token:        input.replyToken,
         line_user_id:              input.lineUserId,
-        created_at:                now,
-        updated_at:                now,
+        created_at:                nowIso,
+        updated_at:                nowIso,
         close_event_timestamp_ms:  input.markClose ? input.lineTimestampMs : null,
-        close_requested_at:        input.markClose ? now : null,
+        close_requested_at:        input.markClose ? nowIso : null,
         close_line_event_id:       input.markClose ? input.lineEventId : null,
         close_finalize_started_at: null,
+        terminalized:              false,
+        next_attempt_at:           nextAttempt,
+        close_deadline_at:         closeDeadline,
+        close_session_generation:  input.markClose ? replacementGeneration : null,
+        expected_item_count:       input.markClose ? input.expectedItemCount ?? null : null,
+        ingest_revision:           1,
       })
       .eq("session_key", input.sessionKey)
       .eq("session_generation", input.expectedSessionGeneration)
@@ -181,6 +249,7 @@ export class PendingSessionService {
     lineTimestampMs?:    number,
     markClose?:          boolean,
     expectedGeneration?: string,
+    expectedItemCount?:  number,
   ): Promise<PendingSession> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data, error } = await (this.supabase as any).rpc("append_pending_session", {
@@ -191,16 +260,58 @@ export class PendingSessionService {
       p_line_timestamp_ms:            lineTimestampMs ?? null,
       p_mark_close:                   markClose       ?? false,
       p_expected_session_generation:  expectedGeneration ?? null,
+      p_expected_item_count:          expectedItemCount  ?? null,
     });
     if (error) throw new Error(`pending session append failed: ${error.message}`);
-    const row = Array.isArray(data) ? data[0] : data;
-    if (!row) {
-      if (expectedGeneration) {
+    const result = data as {
+      accepted: boolean;
+      reason?: string;
+      session?: PendingSession;
+    } | null;
+    if (!result || !result.accepted) {
+      const reason = result?.reason;
+      if (reason === "generation_conflict" && expectedGeneration) {
         throw new PendingSessionGenerationConflictError(sessionKey, expectedGeneration);
+      }
+      if (reason === "after_close_boundary") {
+        const boundary = result?.session?.close_event_timestamp_ms ?? lineTimestampMs ?? 0;
+        throw new PendingSessionAfterCloseBoundaryError(sessionKey, boundary);
+      }
+      if (
+        reason === "terminalized"
+        || reason === "deadline_elapsed"
+        || reason === "close_generation_conflict"
+      ) {
+        throw new PendingSessionClosedError(sessionKey, reason);
       }
       throw new Error(`pending session not found for append: ${sessionKey}`);
     }
-    return row as PendingSession;
+    return result.session as PendingSession;
+  }
+
+  async tryFinalizeGeneration(
+    sessionKey:         string,
+    expectedGeneration: string,
+    expectedLineUserId: string | null,
+    snapshotRevision:   number,
+    sessionHash:        string,
+    rawText:            string,
+    sessionPayload:     Record<string, unknown>,
+    items:              Array<Record<string, unknown>>,
+  ): Promise<TryFinalizeResult> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data, error } = await (this.supabase as any).rpc("try_finalize_pending_generation", {
+      p_session_key:         sessionKey,
+      p_expected_generation: expectedGeneration,
+      p_expected_line_user_id: expectedLineUserId,
+      p_snapshot_revision:   snapshotRevision,
+      p_session_hash:        sessionHash,
+      p_raw_text:            rawText,
+      p_session:             sessionPayload,
+      p_items:               items,
+    });
+    if (error) throw new Error(`pending session finalize failed: ${error.message}`);
+    return data as TryFinalizeResult;
   }
 
   async admit(

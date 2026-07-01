@@ -31,6 +31,12 @@ function withPendingSessionDefaults(row: Row): Row {
     close_requested_at: null,
     close_line_event_id: null,
     close_finalize_started_at: null,
+    terminalized: false,
+    next_attempt_at: null,
+    close_deadline_at: null,
+    close_session_generation: null,
+    expected_item_count: null,
+    ingest_revision: 0,
     latest_reply_token: null,
     ...row,
   };
@@ -182,18 +188,52 @@ class IdentityDatabase {
     }
 
     if (name === "append_pending_session") {
-      if (!pending) return { data: [], error: null };
+      if (!pending) {
+        return { data: { accepted: false, reason: "not_found" }, error: null };
+      }
       const expected = args.p_expected_session_generation;
       if (expected != null && pending.session_generation !== expected) {
-        return { data: [], error: null }; // generation conflict — empty set
+        return {
+          data: { accepted: false, reason: "generation_conflict" },
+          error: null,
+        };
+      }
+      if (pending.terminalized) {
+        return {
+          data: { accepted: false, reason: "terminalized", session: pending },
+          error: null,
+        };
+      }
+      if (
+        pending.close_event_timestamp_ms != null
+        && !args.p_mark_close
+        && Number(args.p_line_timestamp_ms) > Number(pending.close_event_timestamp_ms)
+      ) {
+        return {
+          data: { accepted: false, reason: "after_close_boundary", session: pending },
+          error: null,
+        };
       }
       pending.accumulated_text = `${pending.accumulated_text}\n${args.p_new_text}`;
       pending.latest_reply_token = args.p_reply_token;
+      pending.ingest_revision = Number(pending.ingest_revision ?? 0) + 1;
       if (args.p_mark_close) {
         pending.close_event_timestamp_ms = args.p_line_timestamp_ms;
         pending.close_requested_at = new Date().toISOString();
         pending.close_line_event_id = args.p_line_event_id;
+        pending.close_session_generation = pending.session_generation;
+        pending.close_deadline_at = new Date(Date.now() + 30_000).toISOString();
+        pending.next_attempt_at = new Date(Date.now() + 8_000).toISOString();
+        pending.expected_item_count = args.p_expected_item_count;
+      } else if (pending.close_event_timestamp_ms != null) {
+        pending.next_attempt_at = new Date(Date.now() + 8_000).toISOString();
       }
+      this.insert("pending_session_admission", {
+        session_key: pending.session_key,
+        session_generation: pending.session_generation,
+        line_event_id: args.p_line_event_id,
+        line_timestamp_ms: args.p_line_timestamp_ms,
+      }, "insert");
       this.insert("pending_session_ingest", {
         session_key: pending.session_key,
         session_generation: pending.session_generation,
@@ -201,7 +241,10 @@ class IdentityDatabase {
         line_timestamp_ms: args.p_line_timestamp_ms,
         raw_text: args.p_new_text,
       }, "insert");
-      return { data: [pending], error: null };
+      return {
+        data: { accepted: true, reason: "appended", session: pending },
+        error: null,
+      };
     }
 
     if (name === "claim_pending_close_finalize") {
@@ -265,7 +308,6 @@ function textEvent(
 
 function service(db: IdentityDatabase, repliesByToken: Map<string, string[]>) {
   return new WebhookService(db as never, {
-    produceEndSettleMs: 0,
     replyMessage: async (token, text) => {
       const list = repliesByToken.get(token) ?? [];
       list.push(text);
@@ -345,25 +387,20 @@ describe("pending produce session — sender identity isolation (Release A)", ()
       textEvent("จบรายการเบิก", 3_001, { groupId: GROUP, userId: U2, replyToken: "u2-close" }),
     ], "destination");
 
-    expect(results.filter((r) => r.parsed).length).toBe(2);
+    expect(results.filter((r) => r.parsed).length).toBe(0);
+    expect(db.rows("produce_sessions")).toHaveLength(0);
+    expect(db.rows("produce_items")).toHaveLength(0);
 
-    const sessions = db.rows("produce_sessions");
-    expect(sessions).toHaveLength(2);
-    const items = db.rows("produce_items");
-    expect(items).toHaveLength(2);
-
-    const u1Session = sessions.find((s) => s.sender_name === "โอม" || s.staff_name === "โอม");
-    const u2Session = sessions.find((s) => s.sender_name === "แนน" || s.staff_name === "แนน");
-    expect(u1Session).toBeTruthy();
-    expect(u2Session).toBeTruthy();
-
-    const u1Item = items.find((i) => i.session_id === u1Session!.id);
-    const u2Item = items.find((i) => i.session_id === u2Session!.id);
-    expect(u1Item?.product_name).toBe("ทุเรียน");
-    expect(u2Item?.product_name).toBe("มะม่วง");
-
-    // Confirm no cross-sender reply-token or pending row survives.
-    expect(db.rows("pending_sessions")).toHaveLength(0);
+    const pending = db.rows("pending_sessions");
+    expect(pending).toHaveLength(2);
+    const u1 = pending.find((row) => row.line_user_id === U1)!;
+    const u2 = pending.find((row) => row.line_user_id === U2)!;
+    expect(u1.accumulated_text).toContain("ทุเรียน");
+    expect(u1.accumulated_text).not.toContain("มะม่วง");
+    expect(u2.accumulated_text).toContain("มะม่วง");
+    expect(u2.accumulated_text).not.toContain("ทุเรียน");
+    expect(u1.latest_reply_token).toBe("u1-close");
+    expect(u2.latest_reply_token).toBe("u2-close");
   });
 
   it("rejects a group event without userId — no pending session mutation", async () => {
@@ -405,9 +442,9 @@ describe("pending produce session — sender identity isolation (Release A)", ()
       textEvent("จบรายการเบิก", 3_000, { groupId: GROUP, userId: U1, replyToken: "u1-close" }),
     ], "destination");
 
-    // The failed generation must have been deleted — no row survives to be
-    // appended into by a later item-only message.
-    expect(db.rows("pending_sessions")).toHaveLength(0);
+    const [failed] = db.rows("pending_sessions");
+    failed.terminalized = true;
+    failed.next_attempt_at = null;
     expect(db.rows("produce_sessions")).toHaveLength(0);
     expect(db.rows("produce_items")).toHaveLength(0);
 
@@ -416,8 +453,9 @@ describe("pending produce session — sender identity isolation (Release A)", ()
     ], "destination");
 
     expect(itemOnlyResult.parsed).toBe(false);
-    expect(db.rows("pending_sessions")).toHaveLength(0); // still no session created
-    expect(replies.get("u1-retry")?.[0]).toContain("หัวรายการใหม่");
+    expect(db.rows("pending_sessions")).toHaveLength(1);
+    expect(db.rows("pending_sessions")[0].accumulated_text).not.toContain("ทุเรียน");
+    expect(replies.get("u1-retry")?.[0]).toContain("รายการเดิม");
   });
 
   it("a valid header after a failed generation creates a clean generation with no old error/text", async () => {
@@ -432,7 +470,9 @@ describe("pending produce session — sender identity isolation (Release A)", ()
     await webhook.processEvents([
       textEvent("จบรายการเบิก", 3_000, { groupId: GROUP, userId: U1, replyToken: "u1-close" }),
     ], "destination");
-    expect(db.rows("pending_sessions")).toHaveLength(0);
+    const failed = db.rows("pending_sessions")[0];
+    failed.terminalized = true;
+    failed.next_attempt_at = null;
 
     await webhook.processEvents([
       textEvent(U1_HEADER, 4_000, { groupId: GROUP, userId: U1, replyToken: "u1-fresh" }),
@@ -442,6 +482,16 @@ describe("pending produce session — sender identity isolation (Release A)", ()
     expect(rows).toHaveLength(1);
     expect(rows[0].accumulated_text).toBe(U1_HEADER);
     expect(rows[0].accumulated_text).not.toContain("รายการพัง");
+    expect(rows[0].terminalized).toBe(false);
+    expect(rows[0].next_attempt_at).toBeNull();
+    expect(rows[0].close_deadline_at).toBeNull();
+    expect(rows[0].close_session_generation).toBeNull();
+    expect(rows[0].expected_item_count).toBeNull();
+    expect(rows[0].close_event_timestamp_ms).toBeNull();
+    expect(rows[0].close_requested_at).toBeNull();
+    expect(rows[0].close_line_event_id).toBeNull();
+    expect(rows[0].close_finalize_started_at).toBeNull();
+    expect(rows[0].ingest_revision).toBe(1);
   });
 
   it("U2 is unaffected by U1's parser failure — no shared reply/error/metadata", async () => {
@@ -457,19 +507,20 @@ describe("pending produce session — sender identity isolation (Release A)", ()
       textEvent("จบรายการเบิก", 3_000, { groupId: GROUP, userId: U1, replyToken: "u1-close" }),
     ], "destination");
 
-    // U2 opens and closes cleanly in the same group — must succeed independently.
+    // U2 opens and closes independently; both generations remain deferred.
     const results = await webhook.processEvents([
       textEvent(U2_HEADER, 4_000, { groupId: GROUP, userId: U2, replyToken: "u2-header" }),
       textEvent("1.มะม่วง50บาท\n1โล", 5_000, { groupId: GROUP, userId: U2, replyToken: "u2-item" }),
       textEvent("จบรายการเบิก", 6_000, { groupId: GROUP, userId: U2, replyToken: "u2-close" }),
     ], "destination");
 
-    expect(results.at(-1)?.parsed).toBe(true);
+    expect(results.at(-1)?.parsed).toBe(false);
     expect(replies.has("u1-bad")).toBe(false); // U2 never received U1's failure reply
-    const sessions = db.rows("produce_sessions");
-    expect(sessions).toHaveLength(1);
-    expect(sessions[0].staff_name).toBe("แนน");
-    expect(db.rows("produce_items")).toHaveLength(1);
+    expect(db.rows("produce_sessions")).toHaveLength(0);
+    expect(db.rows("produce_items")).toHaveLength(0);
+    const u2Pending = db.rows("pending_sessions").find((row) => row.line_user_id === U2);
+    expect(u2Pending?.accumulated_text).toContain("มะม่วง");
+    expect(u2Pending?.accumulated_text).not.toContain("รายการพัง");
   });
 
   it("header-predicate consistency: creation and rotation accept the same header forms", () => {
@@ -564,6 +615,12 @@ describe("pending produce session — sender identity isolation (Release A)", ()
       close_requested_at: new Date(now + 2000).toISOString(),
       close_line_event_id: "u1-close",
       close_finalize_started_at: null,
+      terminalized: false,
+      next_attempt_at: new Date(now + 10_000).toISOString(),
+      close_deadline_at: new Date(now + 32_000).toISOString(),
+      close_session_generation: "11111111-1111-4111-8111-111111111111",
+      expected_item_count: null,
+      ingest_revision: 3,
     };
 
     const rebuilt = await service.rebuildForFinalization(session, now + 2000);

@@ -13,7 +13,6 @@ import { logger } from "@/lib/logger";
 import { replyLineMessage, buildWeighSessionSummary } from "@/lib/line/reply";
 import {
   parseWeighSession,
-  bangkokTimeFromTimestamp,
   parseBuddhistDate,
   getWeighSessionFinalizationErrors,
   buildWeighSessionValidationReply,
@@ -21,6 +20,8 @@ import {
 import { RE } from "@/lib/parsers/weigh-session/regex";
 import {
   PendingSessionService,
+  PendingSessionAfterCloseBoundaryError,
+  PendingSessionClosedError,
   PendingSessionGenerationConflictError,
 } from "@/lib/line/pending-session-service";
 import { DailySummaryService } from "@/lib/line/daily-summary-service";
@@ -49,7 +50,6 @@ type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
 type ReplyLineMessage = (replyToken: string, text: string) => Promise<void>;
 type ScheduleBackgroundTask = (task: () => Promise<void>) => void;
-type Sleep = (ms: number) => Promise<void>;
 
 const BATCH_FIRST_IMAGE_REPLY = [
   "รับรูปหลักฐานแล้วครับ",
@@ -91,6 +91,12 @@ const STALE_PRODUCE_SESSION_REPLY =
 const NEW_HEADER_REQUIRED_REPLY =
   "ไม่พบรายการที่เปิดอยู่ กรุณาพิมพ์หัวรายการใหม่ก่อนส่งรายการ";
 
+const PRODUCE_CLOSE_PENDING_REPLY =
+  "รับจบรายการแล้ว กำลังตรวจสอบรายการที่ยังส่งมาไม่ถึง กรุณารอสักครู่";
+
+const PRODUCE_AFTER_BOUNDARY_REPLY =
+  "รายการนี้ส่งหลังคำสั่งจบ จึงไม่ถูกรวมในรายการเดิม กรุณาเริ่มหัวรายการใหม่";
+
 interface WebhookServiceDependencies {
   evidenceIngestor?: SlipEvidenceIngestor;
   checkProcessor?: SlipCheckProcessor;
@@ -98,8 +104,6 @@ interface WebhookServiceDependencies {
   slipSessionService?: SlipSessionIngestor;
   replyMessage?: ReplyLineMessage;
   scheduleBackgroundTask?: ScheduleBackgroundTask;
-  sleep?: Sleep;
-  produceEndSettleMs?: number;
 }
 
 export interface WebhookProcessResult {
@@ -119,6 +123,16 @@ function bangkokToday(): string {
 
 function hasSessionEnd(text: string): boolean {
   return text.split("\n").some((l) => RE.SESSION_END.test(l.trim()));
+}
+
+export function parseExpectedItemCount(text: string): number | null {
+  for (const rawLine of text.split("\n")) {
+    const match = normalizeLine(rawLine).trim().match(RE.SESSION_END_COUNT);
+    if (!match) continue;
+    const count = Number.parseInt(match[1], 10);
+    return Number.isSafeInteger(count) && count > 0 ? count : null;
+  }
+  return null;
 }
 
 function hasItemLine(text: string): boolean {
@@ -196,8 +210,6 @@ export class WebhookService {
   private readonly slipSessionService: SlipSessionIngestor;
   private readonly replyMessage: ReplyLineMessage;
   private readonly scheduleBackgroundTask: ScheduleBackgroundTask;
-  private readonly sleep: Sleep;
-  private readonly produceEndSettleMs: number;
 
   constructor(
     private readonly supabase: Supabase,
@@ -221,8 +233,6 @@ export class WebhookService {
           });
         });
       });
-    this.sleep = dependencies.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-    this.produceEndSettleMs = dependencies.produceEndSettleMs ?? 750;
   }
 
   async processEvents(events: LineEvent[], destination: string): Promise<WebhookProcessResult[]> {
@@ -381,16 +391,28 @@ export class WebhookService {
     }
 
     if (pending) {
-      // Decide markClose before the append so the RPC call is made exactly once
-      // with the correct flag and we never fall into the close path twice.
       const markClose = hasSessionEnd(normalizedText);
+      const expectedItemCount = markClose
+        ? parseExpectedItemCount(normalizedText)
+        : null;
       const incomingHeader = findProduceSessionHeader(normalizedText);
 
-      // Preserve raw text so the parser can extract senderName from TIME_PREFIX.
+      if (
+        incomingHeader
+        && !pending.terminalized
+        && pending.close_event_timestamp_ms !== null
+      ) {
+        if (replyToken) await this.replyMessage(replyToken, STALE_PRODUCE_SESSION_REPLY);
+        return { eventId, eventType: event.type, status: "saved", parsed: false };
+      }
+
       let updated;
       if (
         incomingHeader
-        && requiresFreshPendingGeneration(pending.accumulated_text, incomingHeader)
+        && (
+          pending.terminalized
+          || requiresFreshPendingGeneration(pending.accumulated_text, incomingHeader)
+        )
       ) {
         try {
           updated = await pendingService.replaceGeneration({
@@ -403,6 +425,7 @@ export class WebhookService {
             lineEventId: eventId,
             lineTimestampMs: event.timestamp,
             markClose,
+            expectedItemCount: expectedItemCount ?? undefined,
           });
 
           if (!updated) {
@@ -445,10 +468,9 @@ export class WebhookService {
         }
       } else {
         try {
-          await pendingService.admit(sessionKey, eventId, event.timestamp, pending.session_generation);
           updated = await pendingService.append(
             sessionKey, text, replyToken, eventId, event.timestamp, markClose,
-            pending.session_generation,
+            pending.session_generation, expectedItemCount ?? undefined,
           );
           const appendParse = parseWeighSession(updated.accumulated_text, bangkokToday());
           log.info("pending session append succeeded", {
@@ -465,7 +487,10 @@ export class WebhookService {
             });
           }
         } catch (appendError) {
-          if (appendError instanceof PendingSessionGenerationConflictError) {
+          if (
+            appendError instanceof PendingSessionGenerationConflictError
+            || appendError instanceof PendingSessionClosedError
+          ) {
             log.warn("pending session append rejected — generation conflict", {
               sessionKey,
               staleSessionGeneration: pending.session_generation,
@@ -476,6 +501,24 @@ export class WebhookService {
                 await this.replyMessage(replyToken, STALE_PRODUCE_SESSION_REPLY);
               } catch (replyError) {
                 log.error("generation conflict reply failed", { error: String(replyError) });
+              }
+            }
+            return { eventId, eventType: event.type, status: "saved", parsed: false };
+          }
+          if (appendError instanceof PendingSessionAfterCloseBoundaryError) {
+            log.info("pending session item rejected after immutable close boundary", {
+              sessionKey,
+              sessionGeneration: pending.session_generation,
+              lineTimestampMs: event.timestamp,
+              closeEventTimestampMs: pending.close_event_timestamp_ms,
+            });
+            if (replyToken) {
+              try {
+                await this.replyMessage(replyToken, PRODUCE_AFTER_BOUNDARY_REPLY);
+              } catch (replyError) {
+                log.error("after-boundary rejection reply failed", {
+                  error: String(replyError),
+                });
               }
             }
             return { eventId, eventType: event.type, status: "saved", parsed: false };
@@ -506,157 +549,21 @@ export class WebhookService {
       log.info("pending session end command received", {
         sessionKey,
         endCommandReceived: true,
-        settleMs: this.produceEndSettleMs,
+        sessionGeneration: updated.session_generation,
+        expectedItemCount,
+        nextAttemptAt: updated.next_attempt_at,
+        closeDeadlineAt: updated.close_deadline_at,
       });
-      if (this.produceEndSettleMs > 0) {
-        await this.sleep(this.produceEndSettleMs);
-      }
-
-      let claim;
-      try {
-        claim = await pendingService.claimFinalize(sessionKey, updated.session_generation);
-      } catch (claimError) {
-        const errorMessage = claimError instanceof Error ? claimError.message : String(claimError);
-        log.error("pending session claim failed", { sessionKey, error: errorMessage });
-        return { eventId, eventType: event.type, status: "error", parsed: false, error: errorMessage };
-      }
-
-      if (!claim.claimed) {
-        const replyText = claim.reason === "already_claimed"
-          ? "กำลังสรุปรายการอยู่ กรุณารอสักครู่"
-          : "รับจบรายการแล้ว รอรายการที่ยังค้างอยู่ กรุณาส่ง จบรายการ อีกครั้งสักครู่";
-        log.info("pending session close not ready", {
-          sessionKey,
-          reason: claim.reason,
-          admission_count: claim.admission_count,
-          ingest_count: claim.ingest_count,
-        });
-        if (updated.latest_reply_token) {
-          try {
-            await this.replyMessage(updated.latest_reply_token, replyText);
-          } catch (e) {
-            log.error("reply failed", { error: String(e) });
-          }
-        }
-        return { eventId, eventType: event.type, status: "saved", parsed: false };
-      }
-
-      log.info("pending session close claimed", { sessionKey, ingest_count: claim.ingest_count });
-
-      // Fallback time for sessions sent without LINE export format (no TIME_PREFIX).
-      const fallbackTime = bangkokTimeFromTimestamp(new Date(updated.created_at).getTime());
-      let finalText = updated.accumulated_text;
-
-      // Load ingest rows to decide reconstruction path.
-      // Ordered by (line_timestamp_ms ASC, line_event_id ASC) for deterministic output.
-      let ingestRows: Array<{ raw_text: string }> = [];
-      try {
-        ingestRows = await pendingService.loadIngestRows(
-          sessionKey,
-          claim.session!.session_generation,
-          claim.session!.close_event_timestamp_ms!,
-        );
-      } catch (loadError) {
-        log.error("pending session ingest load failed", {
-          sessionKey,
-          error: loadError instanceof Error ? loadError.message : String(loadError),
-        });
-      }
-
-      // A barrier-enabled session always has a valid session-start header somewhere
-      // in the ingest ledger. We match against the first non-empty line of
-      // accumulated_text (the canonical header written at session creation) rather
-      // than checking ingestRows[0], because timestamp ties can displace the header
-      // row away from position 0 in the ORDER BY (line_timestamp_ms, line_event_id)
-      // result.
-      const expectedHeader = updated.accumulated_text
-        .split("\n")
-        .find((l) => l.trim() !== "")
-        ?.trim() ?? "";
-      const headerInLedger =
-        expectedHeader !== "" &&
-        ingestRows.some(
-          (r) =>
-            findProduceSessionHeader(r.raw_text)
-            === canonicalSessionHeader(expectedHeader),
-        );
-
-      if (headerInLedger) {
-        // Full barrier session: reconstruct exclusively from the confirmed ingest ledger.
-        finalText = ingestRows.map((r) => r.raw_text).join("\n");
-        log.info("pending session ingest reconstruction used", {
-          sessionKey,
-          rowCount: ingestRows.length,
-        });
-      } else {
-        // Pre-deploy or mixed legacy session: fall back to raw_messages reconstruction
-        // which covers the full source_id window including pre-barrier events.
+      if (replyToken) {
         try {
-          finalText = await pendingService.rebuildForFinalization(updated, event.timestamp);
-        } catch (rebuildError) {
-          log.error("pending session raw-message rebuild failed — failing closed", {
-            sessionKey,
-            error: rebuildError instanceof Error ? rebuildError.message : String(rebuildError),
+          await this.replyMessage(replyToken, PRODUCE_CLOSE_PENDING_REPLY);
+        } catch (replyError) {
+          log.error("produce close acknowledgement failed", {
+            error: String(replyError),
           });
-          // Cannot safely reconstruct: do NOT parse accumulated_text which may be contaminated
-          // by a prior session on the same source. Delete only the claimed generation.
-          const failToken = updated.latest_reply_token;
-          if (failToken) {
-            try {
-              await this.replyMessage(failToken, "อ่านรายการไม่สำเร็จ กรุณาเริ่มรายการใหม่");
-            } catch (replyErr) {
-              log.error("fail-closed reply failed", { error: String(replyErr) });
-            }
-          }
-          await pendingService.deleteGeneration(
-            sessionKey,
-            claim.session!.session_generation,
-          );
-          log.info("pending session generation deleted after fail-closed reconstruction", {
-            sessionKey,
-            sessionGeneration: claim.session!.session_generation,
-          });
-          return { eventId, eventType: event.type, status: "saved", parsed: false, pendingSessionClosed: true };
         }
       }
-
-      const result = await this.finalizeAccumulated(
-        finalText,
-        updated.latest_reply_token,
-        updated.line_user_id,
-        rawMessageId,
-        eventId,
-        event.type,
-        log,
-        fallbackTime,
-      );
-
-      if (result.pendingSessionClosed) {
-        await pendingService.deleteGeneration(
-          sessionKey,
-          claim.session!.session_generation,
-        );
-        log.info("pending session closed", {
-          sessionKey,
-          sessionGeneration: claim.session!.session_generation,
-          sessionStatus: "closed",
-        });
-      } else {
-        // Release the claim so a retry close can proceed. Uses the exact timestamp
-        // from our claim to avoid clobbering a concurrent retry-close's newer claim.
-        await pendingService.releaseFinalizeClaim(
-          sessionKey,
-          claim.session!.close_finalize_started_at!,
-        ).catch((e) => {
-          log.error("release finalize claim failed", { error: String(e) });
-        });
-        log.warn("pending session kept active after unsuccessful finalization", {
-          sessionKey,
-          sessionStatus: "active",
-        });
-      }
-
-      return result;
+      return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
 
     // ── 5. No active pending session ──────────────────────────────────────────

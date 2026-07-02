@@ -20,7 +20,7 @@ async function getRows(
   let query = supabase
     .from("produce_transactions")
     .select(
-      "transaction_date, market_name, staff_name, product_name, quantity, unit, price_per_unit, total_amount, transaction_type, item_number",
+      "transaction_date, market_name, staff_name, product_name, quantity, unit, price_per_unit, total_amount, transaction_type, item_number, basis_quantity, basis_unit, basis_price",
     )
     .in("transaction_type", ["เบิก", "เบิกเพิ่ม", "คืน", "คืนเสีย"])
     .order("transaction_date", { ascending: true })

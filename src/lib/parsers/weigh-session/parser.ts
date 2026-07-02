@@ -5,10 +5,10 @@ import { logger } from "@/lib/logger";
 import { computeItemHash } from "@/lib/line/session-dedup-service";
 import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
 import { RE } from "./regex";
+import { conversionFactor, isKnownUnit, normalizeUnitAlias, resolveUnitQuantity } from "./units";
 import type {
   WeighSession,
   WeighSessionItem,
-  ProduceUnit,
   TransactionType,
 } from "./types";
 
@@ -84,6 +84,10 @@ export function parseWeighSession(
     if (state === "header") {
       // Accept both prefixed (LINE export) and bare (direct typed) header lines.
       const headerItem = parseItemLine(content, nextItemNumber(items, pendingItem));
+      if (headerItem === "orphan_basis") {
+        parseErrors.push(`orphan basis line (no product name): "${line}"`);
+        continue;
+      }
       if (headerItem) {
         pendingItem = headerItem;
         state = "items";
@@ -115,9 +119,15 @@ export function parseWeighSession(
     // Bare line (no prefix) — quantity, item, or tx-type marker
     if (!prefixMatch) {
       const qm = content.match(RE.QUANTITY);
-      if (qm) {
+      if (qm && qm[2] !== "บาท") {
         if (pendingItem?.product_name) {
           applyQuantity(pendingItem, parseFloat(qm[1]), qm[2]);
+          if (pendingItem.basis_unit && pendingItem.unit !== pendingItem.basis_unit) {
+            parseErrors.push(
+              `basis unit mismatch for item #${pendingItem.item_number} "${pendingItem.product_name}": ` +
+              `basis is per ${pendingItem.basis_unit} but quantity line uses ${pendingItem.unit}`,
+            );
+          }
           const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
           pushOrMergeItem(items, finalizedItem);
           console.log("[TRACE][parseWeighSession] PUSH_ITEM(quantity):", JSON.stringify(finalizedItem), "items_total_after:", items.length);
@@ -127,7 +137,13 @@ export function parseWeighSession(
         }
       } else {
         const parsedItem = parseItemLine(content, nextItemNumber(items, pendingItem));
-        if (parsedItem) {
+        if (parsedItem === "orphan_basis") {
+          if (pendingItem?.product_name) {
+            pushOrMergeItem(items, finalize(pendingItem, currentSection, currentTxType));
+            pendingItem = null;
+          }
+          parseErrors.push(`orphan basis line (no product name): "${line}"`);
+        } else if (parsedItem) {
           // Item line sent without LINE export timestamp (direct typed message)
           if (pendingItem?.product_name) {
             const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
@@ -159,6 +175,14 @@ export function parseWeighSession(
 
     // Staff-prefixed line: try item pattern first
     const parsedItem = parseItemLine(content, nextItemNumber(items, pendingItem));
+    if (parsedItem === "orphan_basis") {
+      if (pendingItem?.product_name) {
+        pushOrMergeItem(items, finalize(pendingItem, currentSection, currentTxType));
+        pendingItem = null;
+      }
+      parseErrors.push(`orphan basis line (no product name): "${line}"`);
+      continue;
+    }
     if (parsedItem) {
       if (pendingItem?.product_name) {
         pushOrMergeItem(items, finalize(pendingItem, currentSection, currentTxType));
@@ -251,17 +275,18 @@ function applyQuantity(
   quantity: number,
   unit: string,
 ): void {
-  if (unit === "ขีด") {
-    // Shop rule: 1 ขีด = 0.1 โล. Convert both quantity and price basis so
-    // price-per-unit × quantity remains unchanged.
-    item.quantity = Number((quantity * 0.1).toFixed(10));
-    item.unit = "โล";
-    item.price_per_unit = item.price_per_unit! * 10;
-    return;
-  }
+  const resolved = resolveUnitQuantity(quantity, unit);
+  const factor   = conversionFactor(unit);
+  item.quantity  = resolved.quantity;
+  item.unit      = resolved.unit;
 
-  item.quantity = quantity;
-  item.unit = unit as ProduceUnit;
+  // Legacy (non-basis) price_per_unit is quoted per the raw unit — rescale
+  // it so price_per_unit × quantity stays unchanged after conversion. Basis
+  // rows don't use price_per_unit for totals (see basis_quantity/basis_price
+  // in units.ts docs), so no compensation is needed or applied there.
+  if (item.basis_quantity == null && factor !== 1) {
+    item.price_per_unit = Number((item.price_per_unit! / factor).toFixed(2));
+  }
 }
 
 function finalize(
@@ -274,9 +299,13 @@ function finalize(
     product_name:     p.product_name!,
     price_per_unit:   p.price_per_unit!,
     quantity:         p.quantity ?? null,
-    unit:             normalizeUnit(p.unit),
+    unit:             p.unit ? normalizeUnitAlias(p.unit) : null,
     section,
     transaction_type: txType,
+    pricing_mode:     p.pricing_mode ?? "unit",
+    basis_quantity:   p.basis_quantity ?? null,
+    basis_unit:       p.basis_unit     ?? null,
+    basis_price:      p.basis_price    ?? null,
   };
 }
 
@@ -301,16 +330,64 @@ function pushOrMergeItem(items: WeighSessionItem[], item: WeighSessionItem): voi
   // Avoid appending repeated zero/null placeholders for the same product+price.
 }
 
-function parseItemLine(content: string, fallbackItemNumber: number): Partial<WeighSessionItem> | null {
+/**
+ * Parses one item header line. Returns:
+ *   - a partial item for a normal or basis-priced header
+ *   - "orphan_basis" for a bare "<qty><unit><price>บาท" line with no product
+ *     name (e.g. "3โล100บาท" alone) — the leading digit run reads as an
+ *     item_number and the unit word as a "product name", which would create
+ *     a phantom item; callers must record an explicit error instead.
+ *   - null if the line isn't an item header at all
+ */
+function parseItemLine(
+  content: string,
+  fallbackItemNumber: number,
+): Partial<WeighSessionItem> | "orphan_basis" | null {
   const normalizedContent = normalizeItemLinePunctuation(content);
+
+  // Parsed backwards from the final บาท token: item_number, product_name,
+  // then a bundled basis quantity/unit/price. Tried before the plain ITEM
+  // pattern since it's the more specific shape (two digit runs, not one) —
+  // a plain "<product>NNบาท" line (e.g. "102.ฝักกระเจียบ20บาท", which starts
+  // with the unit word ฝัก) only has one digit run before บาท and so never
+  // matches here.
+  const withBasis = normalizedContent.match(RE.ITEM_WITH_BASIS);
+  if (withBasis) {
+    const resolved = resolveUnitQuantity(parseFloat(withBasis[3]), withBasis[4]);
+    if (!Number.isFinite(resolved.quantity) || resolved.quantity <= 0) return null; // fail closed: zero/invalid basis quantity
+
+    return {
+      item_number:    parseInt(withBasis[1], 10),
+      product_name:   withBasis[2].trim(),
+      price_per_unit: Number((parseFloat(withBasis[5]) / resolved.quantity).toFixed(2)),
+      quantity:       null,
+      unit:           null,
+      pricing_mode:   "basis",
+      basis_quantity: resolved.quantity,
+      basis_unit:     resolved.unit,
+      basis_price:    parseFloat(withBasis[5]),
+    };
+  }
+
   const indexed = normalizedContent.match(RE.ITEM);
   if (indexed) {
+    const productName = indexed[2].trim();
+    // "<digits><unit word><digits>บาท" with the leading digits misread as an
+    // item_number and the unit word as the product name — e.g. a standalone
+    // "3โล100บาท" with nothing identifying an actual product. Never persist
+    // this as a phantom item.
+    if (isKnownUnit(productName)) return "orphan_basis";
+
     return {
       item_number:    parseInt(indexed[1], 10),
-      product_name:   indexed[2].trim(),
+      product_name:   productName,
       price_per_unit: parseFloat(indexed[3]),
       quantity:       null,
       unit:           null,
+      pricing_mode:   "unit",
+      basis_quantity: null,
+      basis_unit:     null,
+      basis_price:    null,
     };
   }
 
@@ -322,6 +399,10 @@ function parseItemLine(content: string, fallbackItemNumber: number): Partial<Wei
       price_per_unit: parseFloat(unindexed[2]),
       quantity:       null,
       unit:           null,
+      pricing_mode:   "unit",
+      basis_quantity: null,
+      basis_unit:     null,
+      basis_price:    null,
     };
   }
 
@@ -378,21 +459,6 @@ function isIncompleteItem(item: WeighSessionItem): boolean {
 
 function hasValidQuantity(item: WeighSessionItem): boolean {
   return item.quantity !== null && Number.isFinite(item.quantity) && item.quantity > 0 && item.unit !== null;
-}
-
-function normalizeUnit(
-  unit: ProduceUnit | "แพ็ค" | "แพ็ก" | "เเพ็ค" | "เเพค" | "แพต" | "แพ็ด" | "แผค" | null | undefined,
-): ProduceUnit | null {
-  if (
-    unit === "แพ็ค" ||
-    unit === "แพ็ก" ||
-    unit === "เเพ็ค" ||
-    unit === "เเพค" ||
-    unit === "แพต" ||
-    unit === "แพ็ด" ||
-    unit === "แผค"
-  ) return "แพค";
-  return unit ?? null;
 }
 
 function classifyTxType(text: string): TransactionType {
@@ -510,6 +576,9 @@ export class WeighSessionParser extends BaseParser {
                 section:          item.section,
                 transaction_type: item.transaction_type,
                 item_hash:        computeItemHash(parsed, item),
+                basis_quantity:   item.basis_quantity ?? undefined,
+                basis_unit:       item.basis_unit     ?? undefined,
+                basis_price:      item.basis_price    ?? undefined,
               });
 
             if (itemErr) {

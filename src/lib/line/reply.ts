@@ -106,6 +106,10 @@ function fmt(n: number): string {
   return n.toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
 export function buildWeighSessionSummary(session: WeighSession): string {
   type Item = typeof session.items[number];
 
@@ -123,8 +127,19 @@ export function buildWeighSessionSummary(session: WeighSession): string {
     }
   }
 
+  // Basis rows (e.g. "3โล100บาท") total round(qty * basis_price / basis_quantity, 2),
+  // never (qty * price_per_unit) — price_per_unit is only a rounded display
+  // approximation for those rows and multiplying it back out reintroduces
+  // the rounding error.
+  const lineTotal = (item: Item): number => {
+    if (item.basis_quantity && item.basis_price != null) {
+      return round2((item.quantity ?? 0) * item.basis_price / item.basis_quantity);
+    }
+    return (item.price_per_unit ?? 0) * (item.quantity ?? 0);
+  };
+
   const sumItems = (items: Item[]) =>
-    items.reduce((acc, it) => acc + (it.price_per_unit ?? 0) * (it.quantity ?? 0), 0);
+    items.reduce((acc, it) => acc + lineTotal(it), 0);
 
   const borrowTotal    = sumItems(borrowItems);
   const returnTotal    = sumItems(returnItems);
@@ -133,8 +148,17 @@ export function buildWeighSessionSummary(session: WeighSession): string {
   const itemLine = (item: Item, i: number): string => {
     const qty   = item.quantity ?? 0;
     const unit  = item.unit ? ` ${item.unit}` : "";
+    const total = lineTotal(item);
+
+    // Basis rows show the real basis instead of a "qty × price_per_unit"
+    // equation that wouldn't multiply out correctly:
+    //   32 หัว × 20 บาท / 3 หัว = 213.33
+    if (item.basis_quantity && item.basis_price != null) {
+      const basisUnit = item.basis_unit ? ` ${item.basis_unit}` : "";
+      return `${i + 1}. ${item.product_name} ${fmt(qty)}${unit} × ${fmt(item.basis_price)} บาท / ${fmt(item.basis_quantity)}${basisUnit} = ${fmt(total)}`;
+    }
+
     const price = item.price_per_unit ?? 0;
-    const total = price * qty;
     return `${i + 1}. ${item.product_name} ${fmt(qty)}${unit} × ${fmt(price)} = ${fmt(total)}`;
   };
 

@@ -574,45 +574,30 @@ describe("edge cases", () => {
     },
   );
 
-  it("safely rejects an unsupported malformed unit with no produce writes", async () => {
-    const event: LineMessageEvent = {
-      type: "message",
-      webhookEventId: "event-unsupported-unit",
-      deliveryContext: { isRedelivery: false },
-      timestamp: Date.UTC(2026, 5, 29, 5, 0, 0),
-      source: { type: "user", userId: "user-1" },
-      mode: "active",
-      replyToken: "reply-token",
-      message: {
-        id: "message-unsupported-unit",
-        type: "text",
-        quoteToken: "quote-token",
-        text: [
-          "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
-          "1น้อยหน่า50บาท",
-          "0.3ปอนด์",
-          "จบรายการเบิก",
-        ].join("\n"),
-      },
-    };
-    const result = await new WeighSessionParser().parse(event);
-    const parsed = result.data as unknown as ReturnType<typeof parseWeighSession>;
-    let databaseCalls = 0;
-    const noWriteDatabase = {
-      from() {
-        databaseCalls += 1;
-        throw new Error("database must not be called");
-      },
-    };
-    const reply = buildWeighSessionValidationReply(parsed);
+  // Behavior change from the old whitelist-only parser (see units.ts):
+  // a genuinely unknown unit is no longer rejected — it persists as text,
+  // with no invented conversion, rather than blocking the whole session.
+  it("accepts a genuinely unknown unit as text with no invented conversion", async () => {
+    const { parsed, itemInserts } = await parseAndPersistItems(
+      [
+        "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+        "1น้อยหน่า50บาท",
+        "0.3ปอนด์",
+        "จบรายการเบิก",
+      ].join("\n"),
+      "unknown-unit-pound",
+    );
+    const item = parsed.items[0];
 
-    expect(parsed.parse_errors).toContain('unrecognized line: "0.3ปอนด์"');
-    expect(reply).toContain("จึงยังไม่บันทึก");
-    expect(reply).toContain("0.3ปอนด์");
-    await expect(
-      result.persist(noWriteDatabase as never, "raw-message-unsupported-unit"),
-    ).rejects.toThrow(/weigh session validation failed/);
-    expect(databaseCalls).toBe(0);
+    expect(parsed.parse_errors).toHaveLength(0);
+    expect(item).toMatchObject({
+      product_name:   "น้อยหน่า",
+      quantity:       0.3,
+      unit:           "ปอนด์",
+      price_per_unit: 50, // unchanged — no conversion invented for an unknown unit
+    });
+    expect(() => assertWeighSessionFinalizable(parsed)).not.toThrow();
+    expect(itemInserts[0]).toMatchObject({ quantity: 0.3, unit: "ปอนด์" });
   });
 
   it("parses and persists exact production ฝรั่ง line with a period before บาท", async () => {
@@ -1275,5 +1260,260 @@ describe("RE.DATE_ONLY", () => {
 
   it("does not match item lines", () => {
     expect("1.หมอนทอง119บาท".match(RE.DATE_ONLY)).toBeNull();
+  });
+});
+
+// ── Universal units + generic price-basis support ──────────────────────────────
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+describe("real-world session: mixed plain, basis, and conversion lines", () => {
+  const SESSION = [
+    "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+    "56ปลาทูเคม20บาท",
+    "4ตัว",
+    "85ผักกาดขาว3หัว20บาท",
+    "32.หัว",
+    "102.ฝักกระเจียบ20บาท",
+    "26.แพค",
+    "52ถั่วพู20บาท",
+    "9.แพต",
+    "26ดอกผักปัง100บาท",
+    "0.5.ขีด",
+    "จบรายการเบิก",
+  ].join("\n");
+
+  it("parses all 5 items with zero errors", async () => {
+    const { parsed, itemInserts } = await parseAndPersistItems(SESSION, "real-world-mixed-session");
+
+    expect(parsed.parse_errors).toHaveLength(0);
+    expect(parsed.items).toHaveLength(5);
+    expect(parsed.items.map((i) => i.item_number)).toEqual([56, 85, 102, 52, 26]);
+
+    // "ตัว" is accepted with no fixed whitelist and no invented conversion.
+    expect(parsed.items[0]).toMatchObject({
+      product_name: "ปลาทูเคม", quantity: 4, unit: "ตัว",
+      price_per_unit: 20, pricing_mode: "unit", basis_quantity: null,
+    });
+
+    // The flagship basis case: 85ผักกาดขาว3หัว20บาท / 32.หัว
+    expect(parsed.items[1]).toMatchObject({
+      item_number: 85, product_name: "ผักกาดขาว",
+      quantity: 32, unit: "หัว",
+      pricing_mode: "basis", basis_quantity: 3, basis_unit: "หัว", basis_price: 20,
+    });
+    expect(round2((parsed.items[1].quantity ?? 0) * parsed.items[1].basis_price! / parsed.items[1].basis_quantity!))
+      .toBe(213.33);
+
+    // Product name starting with the unit word ฝัก must not be misread as a basis line.
+    expect(parsed.items[2]).toMatchObject({
+      item_number: 102, product_name: "ฝักกระเจียบ",
+      quantity: 26, unit: "แพค", price_per_unit: 20, pricing_mode: "unit",
+    });
+
+    // "แพต" typo alias normalizes to "แพค".
+    expect(parsed.items[3]).toMatchObject({
+      item_number: 52, product_name: "ถั่วพู", quantity: 9, unit: "แพค", price_per_unit: 20,
+    });
+
+    // Product name starting with the unit word ดอก, plus a ขีด→โล conversion
+    // on the quantity line — total-preserving price compensation unchanged.
+    expect(parsed.items[4]).toMatchObject({
+      item_number: 26, product_name: "ดอกผักปัง", quantity: 0.05, unit: "โล", price_per_unit: 1000,
+    });
+    expect(parsed.items[4].price_per_unit * (parsed.items[4].quantity ?? 0)).toBe(50);
+
+    expect(() => assertWeighSessionFinalizable(parsed)).not.toThrow();
+    expect(itemInserts.find((i) => i.item_number === 85)).toMatchObject({
+      basis_quantity: 3, basis_unit: "หัว", basis_price: 20,
+    });
+  });
+});
+
+describe("exact basis cases", () => {
+  it.each([
+    ["1เงาะ2โล50บาท",       "10โล",  2,  "โล",   50,  25,     250],
+    ["1มะม่วง3โล100บาท",    "9โล",   3,  "โล",   100, 33.33,  300],
+    ["1สับปะรด4โล25บาท",    "8โล",   4,  "โล",   25,  6.25,   50],
+    ["1มะพร้าว5ลูก100บาท",  "15ลูก", 5,  "ลูก",  100, 20,     300],
+    ["1กระท้อน3แพค50บาท",   "6แพค",  3,  "แพค",  50,  16.67,  100],
+  ] as const)(
+    "%s / %s → basis %d %s / %d บาท",
+    (headerLine, quantityLine, basisQty, basisUnit, basisPrice, expectedPricePerUnit, expectedTotal) => {
+      const parsed = parseWeighSession([
+        "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+        headerLine,
+        quantityLine,
+        "จบรายการเบิก",
+      ].join("\n"));
+
+      expect(parsed.parse_errors).toHaveLength(0);
+      expect(parsed.items).toHaveLength(1);
+      const item = parsed.items[0];
+      expect(item).toMatchObject({
+        pricing_mode:   "basis",
+        basis_quantity: basisQty,
+        basis_unit:     basisUnit,
+        basis_price:    basisPrice,
+        price_per_unit: expectedPricePerUnit,
+      });
+      expect(round2((item.quantity ?? 0) * item.basis_price! / item.basis_quantity!)).toBe(expectedTotal);
+    },
+  );
+});
+
+describe("unit aliases and generic unknown units", () => {
+  it("matches basis and quantity lines written with different spelling aliases of the same unit", () => {
+    const parsed = parseWeighSession([
+      "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+      "1กระท้อน2แพ็ค50บาท", // basis unit written with the แพ็ค alias spelling
+      "6แพค",                // quantity line written with the canonical spelling
+      "จบรายการเบิก",
+    ].join("\n"));
+
+    expect(parsed.parse_errors).toHaveLength(0);
+    expect(parsed.items[0]).toMatchObject({
+      unit: "แพค", basis_unit: "แพค", basis_quantity: 2, basis_price: 50,
+    });
+  });
+
+  it("accepts a wholly unrecognized unit as long as basis and quantity agree on it", () => {
+    const parsed = parseWeighSession([
+      "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+      "1ทุเรียนพันธุ์ใหม่2ผล50บาท", // "ผล" is not in any alias/canonical/conversion table
+      "6ผล",
+      "จบรายการเบิก",
+    ].join("\n"));
+
+    expect(parsed.parse_errors).toHaveLength(0);
+    expect(parsed.items[0]).toMatchObject({
+      unit: "ผล", basis_unit: "ผล", basis_quantity: 2, basis_price: 50, quantity: 6,
+    });
+  });
+});
+
+describe("known unit conversions in a basis context", () => {
+  it("converts a ขีด basis to canonical โล", () => {
+    const parsed = parseWeighSession([
+      "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+      "1เงาะ30ขีด100บาท",
+      "15.4โล",
+      "จบรายการเบิก",
+    ].join("\n"));
+    const item = parsed.items[0];
+
+    expect(parsed.parse_errors).toHaveLength(0);
+    expect(item).toMatchObject({ basis_quantity: 3, basis_unit: "โล", unit: "โล" });
+    expect(round2((item.quantity ?? 0) * item.basis_price! / item.basis_quantity!)).toBe(513.33);
+  });
+
+  it("converts a กรัม basis to canonical โล", () => {
+    const parsed = parseWeighSession([
+      "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+      "1เงาะ300กรัม100บาท",
+      "1.5โล",
+      "จบรายการเบิก",
+    ].join("\n"));
+    const item = parsed.items[0];
+
+    expect(parsed.parse_errors).toHaveLength(0);
+    expect(item).toMatchObject({ basis_quantity: 0.3, basis_unit: "โล", unit: "โล" });
+    expect(round2((item.quantity ?? 0) * item.basis_price! / item.basis_quantity!)).toBe(500);
+  });
+});
+
+describe("unknown-unit basis/quantity mismatch fails closed", () => {
+  it("rejects a basis in an unrecognized unit that disagrees with the quantity line's unit", () => {
+    const parsed = parseWeighSession([
+      "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+      "1เงาะ2ตัน50บาท", // ตัน (ton) is not a known unit and does not equal โล
+      "15.4โล",
+      "จบรายการเบิก",
+    ].join("\n"));
+
+    expect(parsed.parse_errors.some((e) => e.includes("basis unit mismatch"))).toBe(true);
+    expect(() => assertWeighSessionFinalizable(parsed)).toThrow(/weigh session validation failed/);
+  });
+});
+
+describe("no rounding drift for basis totals", () => {
+  it("the true total differs from (rounded price_per_unit × quantity) for a 3-unit basis", () => {
+    const parsed = parseWeighSession([
+      "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+      "85ผักกาดขาว3หัว20บาท",
+      "32.หัว",
+      "จบรายการเบิก",
+    ].join("\n"));
+    const item = parsed.items[0];
+
+    const trueTotal    = round2((item.quantity ?? 0) * item.basis_price! / item.basis_quantity!);
+    const driftedTotal = round2(item.price_per_unit * (item.quantity ?? 0));
+
+    expect(trueTotal).toBe(213.33);
+    expect(driftedTotal).not.toBe(trueTotal); // 6.67 × 32 = 213.44 — drift from pre-rounding
+  });
+});
+
+describe("standalone orphan basis line", () => {
+  it("does not create a phantom item and records an explicit error", () => {
+    const parsed = parseWeighSession([
+      "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+      "3โล100บาท",
+      "จบรายการเบิก",
+    ].join("\n"));
+
+    expect(parsed.items).toHaveLength(0);
+    expect(parsed.parse_errors.some((e) => e.includes("orphan basis line"))).toBe(true);
+    expect(() => assertWeighSessionFinalizable(parsed)).toThrow(/weigh session validation failed/);
+  });
+
+  it.each(["2โล50บาท", "4โล25บาท", "5ลูก100บาท", "3แพค50บาท"])(
+    "also rejects bare %s with no product name",
+    (line) => {
+      const parsed = parseWeighSession([
+        "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+        line,
+        "จบรายการเบิก",
+      ].join("\n"));
+
+      expect(parsed.items).toHaveLength(0);
+      expect(parsed.parse_errors.some((e) => e.includes("orphan basis line"))).toBe(true);
+    },
+  );
+});
+
+describe("malformed multi-dot quantities remain fail-closed", () => {
+  it.each([".41.1.โล", "36..1.โล"])("rejects %s as an unrecognized line", (badQuantityLine) => {
+    const parsed = parseWeighSession([
+      "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+      "1เงาะ50บาท",
+      badQuantityLine,
+      "จบรายการเบิก",
+    ].join("\n"));
+
+    expect(parsed.parse_errors.some((e) => e.includes(badQuantityLine))).toBe(true);
+    expect(() => assertWeighSessionFinalizable(parsed)).toThrow(/weigh session validation failed/);
+  });
+});
+
+describe("RE.ITEM_WITH_BASIS", () => {
+  it("matches item + product + basis triple", () => {
+    const m = "85ผักกาดขาว3หัว20บาท".match(RE.ITEM_WITH_BASIS);
+    expect(m).not.toBeNull();
+    expect(m![1]).toBe("85");
+    expect(m![2]).toBe("ผักกาดขาว");
+    expect(m![3]).toBe("3");
+    expect(m![4]).toBe("หัว");
+    expect(m![5]).toBe("20");
+  });
+
+  it("does not match a plain single-price item line", () => {
+    expect("102.ฝักกระเจียบ20บาท".match(RE.ITEM_WITH_BASIS)).toBeNull();
+  });
+
+  it("does not match a bare quantity line", () => {
+    expect("38โล".match(RE.ITEM_WITH_BASIS)).toBeNull();
   });
 });

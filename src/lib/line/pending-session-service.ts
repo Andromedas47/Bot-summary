@@ -53,12 +53,6 @@ export interface PendingSession {
   close_session_generation:  string | null;
   expected_item_count:       number | null;
   ingest_revision:           number;
-  finalization_started_at?:       string | null;
-  finalized_at?:                  string | null;
-  finalization_status?:
-    | "pending" | "processing" | "failed_closed" | "duplicate" | "finalized";
-  finalization_error?:            unknown | null;
-  finalized_produce_session_id?:  string | null;
 }
 
 export interface TryFinalizeResult {
@@ -74,7 +68,6 @@ export interface TryFinalizeResult {
   current_revision?:   number;
   session_id?:         string;
   validation_errors?:  string[];
-  notification_id?:    string;
   next_attempt_at?:    string;
 }
 
@@ -166,11 +159,6 @@ export class PendingSessionService {
         close_session_generation:  null,
         expected_item_count:       null,
         ingest_revision:           0,
-        finalization_started_at:      null,
-        finalized_at:                 null,
-        finalization_status:          "pending",
-        finalization_error:           null,
-        finalized_produce_session_id: null,
       },
       { onConflict: "session_key" },
     );
@@ -209,11 +197,6 @@ export class PendingSessionService {
         close_session_generation:  input.markClose ? replacementGeneration : null,
         expected_item_count:       input.markClose ? input.expectedItemCount ?? null : null,
         ingest_revision:           1,
-        finalization_started_at:      null,
-        finalized_at:                 null,
-        finalization_status:          "pending",
-        finalization_error:           null,
-        finalized_produce_session_id: null,
       })
       .eq("session_key", input.sessionKey)
       .eq("session_generation", input.expectedSessionGeneration)

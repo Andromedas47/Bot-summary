@@ -30,7 +30,6 @@ export type SlipBatchStatus =
   | "collecting" | "closing" | "processing" | "completed" | "review_needed" | "failed";
 export type ManualSlipSessionStatus      = "open" | "closed";
 export type SettlementFinalizationStatus = "pending" | "sending" | "sent" | "failed" | "ambiguous";
-export type ProduceNotificationStatus = "pending" | "sending" | "sent" | "failed";
 
 // ─── Database schema ──────────────────────────────────────────────────
 export interface Database {
@@ -124,49 +123,43 @@ export interface Database {
 
       produce_sessions: {
         Row: {
-          id:                      string;
-          raw_message_id:          string;
-          line_user_id:            string | null;
-          staff_name:              string;
-          sender_name:             string | null;
-          transaction_time:        string | null;
-          session_date:            string | null;
-          session_title:           string | null;
-          total_items:             number;
-          parser_errors:           Json | null;
-          created_at:              string;
-          finalization_started_at: string | null;
-          finalized_at:            string | null;
+          id:               string;
+          raw_message_id:   string;
+          line_user_id:     string | null;
+          staff_name:       string;
+          sender_name:      string | null;
+          transaction_time: string | null;
+          session_date:     string | null;
+          session_title:    string | null;
+          total_items:      number;
+          parser_errors:    Json | null;
+          created_at:       string;
         };
         Insert: {
-          id?:                      string;
-          raw_message_id:           string;
-          line_user_id?:            string | null;
-          staff_name:               string;
-          sender_name?:             string | null;
-          transaction_time?:        string | null;
-          session_date?:            string | null;
-          session_title?:           string | null;
-          total_items?:             number;
-          parser_errors?:           Json | null;
-          created_at?:              string;
-          finalization_started_at?: string | null;
-          finalized_at?:            string | null;
+          id?:               string;
+          raw_message_id:    string;
+          line_user_id?:     string | null;
+          staff_name:        string;
+          sender_name?:      string | null;
+          transaction_time?: string | null;
+          session_date?:     string | null;
+          session_title?:    string | null;
+          total_items?:      number;
+          parser_errors?:    Json | null;
+          created_at?:       string;
         };
         Update: {
-          id?:                      string;
-          raw_message_id?:          string;
-          line_user_id?:            string | null;
-          staff_name?:              string;
-          sender_name?:             string | null;
-          transaction_time?:        string | null;
-          session_date?:            string | null;
-          session_title?:           string | null;
-          total_items?:             number;
-          parser_errors?:           Json | null;
-          created_at?:              string;
-          finalization_started_at?: string | null;
-          finalized_at?:            string | null;
+          id?:               string;
+          raw_message_id?:   string;
+          line_user_id?:     string | null;
+          staff_name?:       string;
+          sender_name?:      string | null;
+          transaction_time?: string | null;
+          session_date?:     string | null;
+          session_title?:    string | null;
+          total_items?:      number;
+          parser_errors?:    Json | null;
+          created_at?:       string;
         };
         Relationships: [];
       };
@@ -219,125 +212,6 @@ export interface Database {
           basis_quantity?:   number | null;
           basis_unit?:       string | null;
           basis_price?:      number | null;
-        };
-        Relationships: [];
-      };
-
-      produce_session_notifications: {
-        Row: {
-          id:                                string;
-          produce_session_id:                string;
-          session_key:                       string;
-          session_generation:                string;
-          source_id:                         string;
-          correlation_id:                    string;
-          notification_status:               ProduceNotificationStatus;
-          notification_attempt_count:        number;
-          notification_cycle_attempt_count:  number;
-          notification_retryable:            boolean;
-          last_notification_error:           string | null;
-          last_notification_attempt_at:      string | null;
-          notification_sent_at:              string | null;
-          notification_payload:              string;
-          line_retry_key:                    string;
-          next_notification_attempt_at:      string | null;
-          sending_started_at:                string | null;
-          resend_count:                      number;
-          last_resend_requested_at:          string | null;
-          created_at:                        string;
-          updated_at:                        string;
-        };
-        Insert: {
-          id?:                                string;
-          produce_session_id:                 string;
-          session_key:                        string;
-          session_generation:                 string;
-          source_id:                          string;
-          correlation_id:                     string;
-          notification_status?:               ProduceNotificationStatus;
-          notification_attempt_count?:        number;
-          notification_cycle_attempt_count?:  number;
-          notification_retryable?:            boolean;
-          last_notification_error?:           string | null;
-          last_notification_attempt_at?:      string | null;
-          notification_sent_at?:              string | null;
-          notification_payload:               string;
-          line_retry_key?:                    string;
-          next_notification_attempt_at?:      string | null;
-          sending_started_at?:                string | null;
-          resend_count?:                      number;
-          last_resend_requested_at?:          string | null;
-          created_at?:                        string;
-          updated_at?:                        string;
-        };
-        Update: {
-          id?:                                string;
-          produce_session_id?:                string;
-          session_key?:                       string;
-          session_generation?:                string;
-          source_id?:                         string;
-          correlation_id?:                    string;
-          notification_status?:               ProduceNotificationStatus;
-          notification_attempt_count?:        number;
-          notification_cycle_attempt_count?:  number;
-          notification_retryable?:            boolean;
-          last_notification_error?:           string | null;
-          last_notification_attempt_at?:      string | null;
-          notification_sent_at?:              string | null;
-          notification_payload?:              string;
-          line_retry_key?:                    string;
-          next_notification_attempt_at?:      string | null;
-          sending_started_at?:                string | null;
-          resend_count?:                      number;
-          last_resend_requested_at?:          string | null;
-          created_at?:                        string;
-          updated_at?:                        string;
-        };
-        Relationships: [];
-      };
-
-      produce_notification_attempts: {
-        Row: {
-          id:                    string;
-          notification_id:       string;
-          attempt_number:        number;
-          cycle_attempt_number:  number;
-          correlation_id:        string;
-          transition_from:       string;
-          transition_to:         string;
-          attempted_at:          string;
-          completed_at:          string | null;
-          http_status:           number | null;
-          retry_after_ms:        number | null;
-          error:                 string | null;
-        };
-        Insert: {
-          id?:                    string;
-          notification_id:        string;
-          attempt_number:         number;
-          cycle_attempt_number:   number;
-          correlation_id:         string;
-          transition_from:        string;
-          transition_to?:         string;
-          attempted_at?:          string;
-          completed_at?:          string | null;
-          http_status?:           number | null;
-          retry_after_ms?:        number | null;
-          error?:                 string | null;
-        };
-        Update: {
-          id?:                    string;
-          notification_id?:       string;
-          attempt_number?:        number;
-          cycle_attempt_number?:  number;
-          correlation_id?:        string;
-          transition_from?:       string;
-          transition_to?:         string;
-          attempted_at?:          string;
-          completed_at?:          string | null;
-          http_status?:           number | null;
-          retry_after_ms?:        number | null;
-          error?:                 string | null;
         };
         Relationships: [];
       };

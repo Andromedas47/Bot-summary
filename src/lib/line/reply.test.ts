@@ -1,8 +1,6 @@
 import { afterEach, describe, it, expect, spyOn } from "bun:test";
 import {
   buildWeighSessionSummary,
-  LinePushError,
-  parseRetryAfterMs,
   pushLineMessage,
   replyLineMessage,
 } from "./reply";
@@ -302,37 +300,5 @@ describe("LINE API error logging", () => {
     expect(logged).not.toContain(sensitiveBody);
     expect(logged).not.toContain("recipient detail");
     errorLog.mockRestore();
-  });
-});
-
-describe("LINE push retry metadata", () => {
-  it("classifies 429 and exposes Retry-After without exposing the body", async () => {
-    globalThis.fetch = (async () =>
-      new Response('{"message":"private detail"}', {
-        status: 429,
-        headers: { "Retry-After": "7" },
-      })) as unknown as typeof fetch;
-
-    let thrown: unknown;
-    try {
-      await pushLineMessage("group-id", "hello", "retry-key");
-    } catch (error) {
-      thrown = error;
-    }
-
-    expect(thrown).toBeInstanceOf(LinePushError);
-    expect(thrown).toMatchObject({
-      httpStatus: 429,
-      retryable: true,
-      retryAfterMs: 7_000,
-      message: "LINE push HTTP 429",
-    });
-  });
-
-  it("parses an HTTP-date Retry-After value", () => {
-    expect(parseRetryAfterMs(
-      "Fri, 03 Jul 2026 00:00:12 GMT",
-      Date.parse("2026-07-03T00:00:00.000Z"),
-    )).toBe(12_000);
   });
 });

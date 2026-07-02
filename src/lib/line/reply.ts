@@ -36,34 +36,6 @@ export async function replyLineMessage(replyToken: string, text: string): Promis
 
 export type PushResult = { status: "delivered" | "already_accepted" };
 
-export class LinePushError extends Error {
-  constructor(
-    message: string,
-    public readonly httpStatus: number | null,
-    public readonly retryable: boolean,
-    public readonly retryAfterMs: number | null = null,
-  ) {
-    super(message);
-    this.name = "LinePushError";
-  }
-}
-
-export function parseRetryAfterMs(
-  value: string | null,
-  nowMs = Date.now(),
-): number | null {
-  if (!value) return null;
-
-  const seconds = Number(value);
-  if (Number.isFinite(seconds) && seconds >= 0) {
-    return Math.ceil(seconds * 1_000);
-  }
-
-  const retryAt = Date.parse(value);
-  if (!Number.isFinite(retryAt)) return null;
-  return Math.max(0, retryAt - nowMs);
-}
-
 // LINE Messaging API supports X-Line-Retry-Key for push idempotency.
 // Passing the same UUID on a retry causes LINE to return 409 without
 // re-delivering if the original request was already processed — safe for
@@ -96,7 +68,7 @@ export async function pushLineMessage(to: string, text: string, retryKey?: strin
       operation: "push",
       category: "network_error",
     });
-    throw new LinePushError("LINE push network error", null, true);
+    throw new Error("LINE push network error");
   }
 
   if (res.ok) {
@@ -114,20 +86,12 @@ export async function pushLineMessage(to: string, text: string, retryKey?: strin
     return { status: "already_accepted" };
   }
 
-  const retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after"));
-  const retryable = res.status === 429 || res.status >= 500;
   logger.error("LINE API request failed", {
     operation: "push",
     status: res.status,
     category: lineHttpErrorCategory(res.status),
-    retryAfterMs,
   });
-  throw new LinePushError(
-    `LINE push HTTP ${res.status}`,
-    res.status,
-    retryable,
-    retryAfterMs,
-  );
+  throw new Error(`LINE push HTTP ${res.status}`);
 }
 
 function lineHttpErrorCategory(status: number): string {

@@ -33,6 +33,10 @@ const BORROW_ITEM = {
   unit: "โล" as const,
   section: "",
   transaction_type: "เบิก" as const,
+  pricing_mode: "unit" as const,
+  basis_quantity: null,
+  basis_unit: null,
+  basis_price: null,
 };
 
 const BORROW_EXTRA_ITEM = {
@@ -43,6 +47,10 @@ const BORROW_EXTRA_ITEM = {
   unit: "โล" as const,
   section: "",
   transaction_type: "เบิกเพิ่ม" as const,
+  pricing_mode: "unit" as const,
+  basis_quantity: null,
+  basis_unit: null,
+  basis_price: null,
 };
 
 const RETURN_ITEM = {
@@ -53,6 +61,10 @@ const RETURN_ITEM = {
   unit: "โล" as const,
   section: "",
   transaction_type: "คืน" as const,
+  pricing_mode: "unit" as const,
+  basis_quantity: null,
+  basis_unit: null,
+  basis_price: null,
 };
 
 const BAD_RETURN_ITEM = {
@@ -63,6 +75,24 @@ const BAD_RETURN_ITEM = {
   unit: "โล" as const,
   section: "",
   transaction_type: "คืนเสีย" as const,
+  pricing_mode: "unit" as const,
+  basis_quantity: null,
+  basis_unit: null,
+  basis_price: null,
+};
+
+const BASIS_ITEM = {
+  item_number: 1,
+  product_name: "ผักกาดขาว",
+  price_per_unit: 6.67, // rounded display approximation, not used for the total below
+  quantity: 32,
+  unit: "หัว" as const,
+  section: "",
+  transaction_type: "เบิก" as const,
+  pricing_mode: "basis" as const,
+  basis_quantity: 3,
+  basis_unit: "หัว" as const,
+  basis_price: 20,
 };
 
 describe("buildWeighSessionSummary — ยอดส่ง must not appear", () => {
@@ -124,6 +154,18 @@ describe("buildWeighSessionSummary — section subtotals", () => {
     // both items appear under one เบิก section — numbered 1 and 2
     expect(result).toContain("1. ทุเรียน");
     expect(result).toContain("2. หมอนทอง");
+  });
+});
+
+describe("buildWeighSessionSummary — price-basis rows", () => {
+  it("shows the basis equation instead of an inconsistent qty × price_per_unit line", () => {
+    const result = buildWeighSessionSummary(makeSession({ items: [BASIS_ITEM] }));
+
+    // Must never print "32.00 หัว × 6.67" — that arithmetic doesn't multiply out.
+    expect(result).not.toContain("× 6.67 ");
+    // Must show the real basis and the correctly rounded total (32 × 20 / 3 = 213.33).
+    expect(result).toContain("32.00 หัว × 20.00 บาท / 3.00 หัว = 213.33");
+    expect(result).toContain("รวมเบิก: 213.33");
   });
 });
 

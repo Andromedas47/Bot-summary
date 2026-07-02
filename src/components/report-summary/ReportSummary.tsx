@@ -27,8 +27,17 @@ function fmtSummary(n: number): string {
 function itemLine(r: ReportRow, i: number): string {
   const qty = r.quantity ?? 0;
   const unit = r.unit ?? "";
-  const price = r.price_per_unit ?? 0;
   const total = r.total_amount ?? 0;
+
+  // price_per_unit is only a rounded display approximation for basis rows
+  // (e.g. "3โล100บาท"); printing "qty x price_per_unit = total" would show an
+  // equation that doesn't multiply out. Show the actual basis instead.
+  if (r.basis_quantity && r.basis_price != null) {
+    const basisUnit = r.basis_unit ?? "";
+    return `${i + 1}. ${r.product_name} ${fmtNum(qty)} ${unit} x ${fmtNum(r.basis_price)} บาท / ${fmtNum(r.basis_quantity)} ${basisUnit} = ${fmtNum(total)}`;
+  }
+
+  const price = r.price_per_unit ?? 0;
   return `${i + 1}. ${r.product_name} ${fmtNum(qty)} ${unit} x ${fmtNum(price)} = ${fmtNum(total)}`;
 }
 

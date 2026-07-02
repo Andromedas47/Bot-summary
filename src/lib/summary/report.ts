@@ -16,6 +16,9 @@ export interface ReportRow {
   total_amount: number | null;
   transaction_type: string;
   item_number: number | null;
+  basis_quantity: number | null;
+  basis_unit: string | null;
+  basis_price: number | null;
 }
 
 export type SettlementMap = Record<string, {

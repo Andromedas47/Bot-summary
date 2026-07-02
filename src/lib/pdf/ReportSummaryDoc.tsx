@@ -261,16 +261,24 @@ function DetailTable({ items, typeLabel }: { items: ReportRow[]; typeLabel: stri
             </Text>
           ))}
         </View>
-        {items.map((r, i) => (
-          <View key={r.product_name + i} style={[S.tr, i % 2 === 1 ? S.trAlt : {}]} wrap={false}>
-            <Text style={[S.td, { flex: 2 }]}>{(r.item_number ?? i + 1)}</Text>
-            <Text style={[S.td, S.tdLeft, { flex: 10 }]}>{r.product_name}</Text>
-            <Text style={[S.td, { flex: 4 }]}>{fmtQty(r.quantity ?? 0)}</Text>
-            <Text style={[S.td, { flex: 3 }]}>{r.unit ?? ""}</Text>
-            <Text style={[S.td, { flex: 4 }]}>{fmt(r.price_per_unit ?? 0)}</Text>
-            <Text style={[S.td, { flex: 5 }]}>{fmt(r.total_amount ?? 0)}</Text>
-          </View>
-        ))}
+        {items.map((r, i) => {
+          // price_per_unit is only a rounded display approximation for basis
+          // rows (e.g. "3โล100บาท"); show the actual basis instead so the
+          // printed price isn't a misleading rounding of the real terms.
+          const priceCell = r.basis_quantity && r.basis_price != null
+            ? `${fmt(r.basis_price)}/${fmtQty(r.basis_quantity)}${r.basis_unit ?? ""}`
+            : fmt(r.price_per_unit ?? 0);
+          return (
+            <View key={r.product_name + i} style={[S.tr, i % 2 === 1 ? S.trAlt : {}]} wrap={false}>
+              <Text style={[S.td, { flex: 2 }]}>{(r.item_number ?? i + 1)}</Text>
+              <Text style={[S.td, S.tdLeft, { flex: 10 }]}>{r.product_name}</Text>
+              <Text style={[S.td, { flex: 4 }]}>{fmtQty(r.quantity ?? 0)}</Text>
+              <Text style={[S.td, { flex: 3 }]}>{r.unit ?? ""}</Text>
+              <Text style={[S.td, { flex: 4 }]}>{priceCell}</Text>
+              <Text style={[S.td, { flex: 5 }]}>{fmt(r.total_amount ?? 0)}</Text>
+            </View>
+          );
+        })}
         <View style={S.trFoot} wrap={false}>
           <Text style={[S.tdFoot, S.tdLeft, { flex: 2 + 10 + 4 + 3 + 4 }]}>รวม {items.length} รายการ</Text>
           <Text style={[S.tdFoot, { flex: 5 }]}>{fmt(total)}</Text>

@@ -177,6 +177,9 @@ export interface Database {
           transaction_type: string;
           item_hash:        string | null;
           created_at:       string;
+          basis_quantity:   number | null;
+          basis_unit:       string | null;
+          basis_price:      number | null;
         };
         Insert: {
           id?:               string;
@@ -190,6 +193,9 @@ export interface Database {
           transaction_type?: string;
           item_hash?:        string | null;
           created_at?:       string;
+          basis_quantity?:   number | null;
+          basis_unit?:       string | null;
+          basis_price?:      number | null;
         };
         Update: {
           id?:               string;
@@ -203,6 +209,9 @@ export interface Database {
           transaction_type?: string;
           item_hash?:        string | null;
           created_at?:       string;
+          basis_quantity?:   number | null;
+          basis_unit?:       string | null;
+          basis_price?:      number | null;
         };
         Relationships: [];
       };
@@ -704,6 +713,10 @@ export interface Database {
           session_created_at: string;
           raw_message_id:     string;
           source_message:     string | null;
+          basis_quantity:     number | null;
+          basis_unit:         string | null;
+          basis_price:        number | null;
+          pricing_mode:       string;
         };
         Insert: never;
         Update: never;

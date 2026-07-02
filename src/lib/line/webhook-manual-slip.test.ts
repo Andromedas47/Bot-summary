@@ -303,13 +303,14 @@ describe("market-key separation", () => {
 
   it("redelivery does not duplicate entries", async () => {
     const db      = makeSupabase();
-    const svc     = makeService(db);
+    const replies: string[] = [];
+    const svc     = makeService(db, replies);
     const event   = makeEvent("ส่งสลิปมือ 18/6/2569", "tok1", "msg1");
     const dup     = makeEvent("ส่งสลิปมือ 18/6/2569", "tok2", "msg2");
 
     await svc.processEvents([event, dup], "dest");
 
     expect(db._sessions).toHaveLength(1);
-    expect(replies => replies).toBeDefined(); // just check no throw
+    expect(replies).toBeDefined(); // just check no throw
   });
 });

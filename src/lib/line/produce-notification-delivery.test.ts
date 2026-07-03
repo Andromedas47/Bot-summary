@@ -311,6 +311,10 @@ describe("notification migration contract", () => {
     "../../../supabase/migrations/0034_produce_notification_delivery.sql",
     import.meta.url,
   );
+  const retryScheduleFixPath = new URL(
+    "../../../supabase/migrations/0035_fix_notification_retry_schedule.sql",
+    import.meta.url,
+  );
 
   it("creates accounting and one pending outbox row in the same finalization RPC", async () => {
     const sql = await Bun.file(migrationPath).text();
@@ -339,6 +343,26 @@ describe("notification migration contract", () => {
     expect(resendSql).not.toContain("notification_payload =");
     expect(resendSql).not.toContain("INSERT INTO public.produce_sessions");
     expect(resendSql).not.toContain("INSERT INTO public.produce_items");
+  });
+
+  it("allows a due notification claim to clear its retry schedule without recreating accounting", async () => {
+    const sql = await Bun.file(migrationPath).text();
+    const fixSql = await Bun.file(retryScheduleFixPath).text();
+    const claimSql = sql.slice(
+      sql.indexOf("CREATE OR REPLACE FUNCTION public.claim_due_produce_notifications"),
+      sql.indexOf("-- Claim exactly one already-queued notification"),
+    );
+
+    expect(fixSql).toContain(
+      "ALTER COLUMN next_notification_attempt_at DROP NOT NULL",
+    );
+    expect(claimSql).toContain("n.next_notification_attempt_at <= now()");
+    expect(claimSql).toContain("next_notification_attempt_at = NULL");
+    expect(claimSql).toContain(
+      "notification_attempt_count = n.notification_attempt_count + 1",
+    );
+    expect(claimSql).not.toContain("INSERT INTO public.produce_sessions");
+    expect(claimSql).not.toContain("INSERT INTO public.produce_items");
   });
 
   it("does not add a cron or alter Release B quiet-window admission", async () => {

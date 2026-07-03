@@ -100,7 +100,10 @@ export async function finalizePendingGeneration(
   snapshot: PendingSession,
   push: PushMessage = defaultPush,
 ): Promise<TryFinalizeResult> {
+  const finalizationStartedAt = new Date().toISOString();
+  const correlationId = `${snapshot.session_key}:${snapshot.session_generation}`;
   const log = logger.child({
+    correlationId,
     sessionKey: snapshot.session_key,
     sessionGeneration: snapshot.session_generation,
     ingestRevision: snapshot.ingest_revision,
@@ -112,6 +115,13 @@ export async function finalizePendingGeneration(
     return { status: "skipped", reason: "not_closing" };
   }
 
+  log.info("produce finalization started", {
+    closeRequestedAt: snapshot.close_requested_at,
+    closeEventTimestampMs: closeTimestamp,
+    nextAttemptAt: snapshot.next_attempt_at,
+    closeDeadlineAt: snapshot.close_deadline_at,
+    finalizationStartedAt,
+  });
   let finalText = snapshot.accumulated_text;
   const reconstructionErrors: string[] = [];
   try {
@@ -154,6 +164,10 @@ export async function finalizePendingGeneration(
     session_title: parsed.session_title,
     transaction_types: transactionTypes,
     validation_errors: validationErrors,
+    finalization_started_at: finalizationStartedAt,
+    notification_payload: buildWeighSessionSummary(parsed),
+    notification_source_id: snapshot.source_id,
+    correlation_id: correlationId,
   };
   const itemPayload = parsed.items.map((item) => ({
     ...item,
@@ -171,6 +185,13 @@ export async function finalizePendingGeneration(
     itemPayload,
   );
 
+
+  log.info("produce finalization completed", {
+    status: result.status,
+    reason: result.reason ?? null,
+    produceSessionId: result.session_id ?? null,
+    finalizedAt: new Date().toISOString(),
+  });
   let message: string | null = null;
   if (result.status === "pending" && result.reason === "missing_items") {
     message = buildMissingItemsMessage(result.missing ?? []);
@@ -178,7 +199,11 @@ export async function finalizePendingGeneration(
     message = result.reason === "missing_items"
       ? buildMissingItemsMessage(result.missing ?? [], true)
       : buildWeighSessionValidationReply(parsed);
-  } else if (result.status === "finalized") {
+  } else if (result.status === "finalized" && !result.notification_id) {
+    // Rolling-deploy fallback: the pre-0034 RPC cannot create an outbox row.
+    // Once 0034 is installed, notification_id is always returned and success
+    // delivery is handled exclusively by the durable worker.
+    log.warn("produce notification outbox unavailable; using direct push fallback");
     message = buildWeighSessionSummary(parsed);
   } else if (result.status === "duplicate") {
     message = "รายการนี้เคยบันทึกแล้ว";
@@ -188,8 +213,8 @@ export async function finalizePendingGeneration(
     try {
       await push(snapshot.source_id, message);
     } catch (error) {
-      // Release B intentionally has no outbox/delivery retry subsystem.
-      // Database finalization remains authoritative; notification failure is logged.
+      // Validation and duplicate notices are best-effort. Successful-session
+      // summaries are handled only by the durable notification outbox.
       log.error("produce finalizer LINE push failed", {
         status: result.status,
         error: error instanceof Error ? error.message : String(error),

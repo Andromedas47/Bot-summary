@@ -1,18 +1,20 @@
-import { createHmac } from "crypto";
+import { createHmac, timingSafeEqual } from "crypto";
 
 /**
  * Verifies the X-Line-Signature header from LINE's webhook.
- * Uses HMAC-SHA256 of the raw request body with the channel secret.
+ * Uses HMAC-SHA256 of the raw request body with the channel secret,
+ * compared in constant time so the comparison leaks no timing signal.
  */
 export function verifyLineSignature(
   body: string,
   signature: string,
   channelSecret: string
 ): boolean {
-  const hash = createHmac("sha256", channelSecret)
-    .update(body)
-    .digest("base64");
-  return hash === signature;
+  const expected = Buffer.from(
+    createHmac("sha256", channelSecret).update(body).digest("base64"),
+  );
+  const provided = Buffer.from(signature);
+  return expected.length === provided.length && timingSafeEqual(expected, provided);
 }
 
 export function getSourceId(source: {

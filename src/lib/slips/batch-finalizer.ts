@@ -89,6 +89,7 @@ interface EvidenceWithCheck {
   grossAmount?:    number | null;
   discountAmount?: number | null;
   transactionTime: string | null;
+  referenceId?:    string | null;
   failureReason:   string | null;
 }
 
@@ -431,7 +432,7 @@ async function loadBatchEvidences(
 
   const { data: checkData, error: checkError } = await supabase
     .from("slip_checks")
-    .select("evidence_id, status, slip_type, gross_amount, discount_amount, transfer_amount, paid_amount, transaction_time, failure_reason")
+    .select("evidence_id, status, slip_type, gross_amount, discount_amount, transfer_amount, paid_amount, transaction_time, reference_id, failure_reason")
     .in("evidence_id", evidenceIds);
 
   if (checkError) throw new Error(`loadBatchEvidences checks: ${checkError.message}`);
@@ -453,6 +454,7 @@ async function loadBatchEvidences(
       transferAmount:  check?.transfer_amount ?? null,
       paidAmount:      check?.paid_amount ?? null,
       transactionTime: check?.transaction_time ?? null,
+      referenceId:     check?.reference_id ?? null,
       failureReason:   check?.failure_reason ?? null,
     };
   });
@@ -467,7 +469,7 @@ function buildSessionTitle(batch: SlipBatchRow | null): string | undefined {
 
 // Reasons that represent amount-level problems (not date-only).
 // Only these count toward "ยอดที่ถูกระงับ"; date-only exclusions are not suspicious amounts.
-const AMOUNT_FLAG_REASONS = new Set<ValidationReason>(["ยอดเงินสูงผิดปกติ", "ข้อมูลไม่ครบ"]);
+const AMOUNT_FLAG_REASONS = new Set<ValidationReason>(["ยอดเงินสูงผิดปกติ", "สลิปซ้ำ", "ข้อมูลไม่ครบ"]);
 
 /**
  * Builds the LINE summary message for a finalized batch.

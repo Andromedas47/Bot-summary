@@ -4,6 +4,7 @@ import { logger } from "@/lib/logger";
 import { pushLineMessage } from "@/lib/line/reply";
 import { buildDailySummaryMessage } from "@/lib/line/daily-summary-message";
 import {
+  dailySummaryRetryKey,
   groupDailySummariesBySource,
   resolveDailySummaryDate,
   type DailySummarySourceRow,
@@ -21,19 +22,6 @@ export async function GET(req: NextRequest) {
   }
 
   const authHeader = req.headers.get("authorization");
-  if (req.nextUrl.searchParams.get("authdebug") === "1") {
-    return NextResponse.json({
-      hasCronSecret: Boolean(secret),
-      cronSecretLength: secret.length,
-      authHeaderExists: Boolean(authHeader),
-      authHeaderLength: authHeader?.length ?? 0,
-      authHeaderStartsWithBearer: authHeader?.startsWith("Bearer ") ?? false,
-      expectedHeaderLength: `Bearer ${secret}`.length,
-      nodeEnv: process.env.NODE_ENV,
-      vercelEnv: process.env.VERCEL_ENV,
-    });
-  }
-
   if (authHeader !== `Bearer ${secret}`) {
     logger.warn("daily summary cron rejected - invalid authorization");
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -123,6 +111,11 @@ export async function GET(req: NextRequest) {
     });
   }
 
+  // Per-target isolation: one failing push must not block the remaining
+  // targets. The deterministic retry key makes the eventual cron retry
+  // idempotent for targets that already received today's summary.
+  let sentCount = 0;
+  const failedSourceIds: string[] = [];
   for (const [sourceId, rows] of summariesBySource) {
     const message = buildDailySummaryMessage(summaryDate, rows);
     logger.info("daily summary cron pushing LINE message", {
@@ -130,7 +123,39 @@ export async function GET(req: NextRequest) {
       sourceId,
       rowCount: rows.length,
     });
-    await pushLineMessage(sourceId, message);
+    try {
+      await pushLineMessage(sourceId, message, dailySummaryRetryKey(summaryDate, sourceId));
+      sentCount += 1;
+    } catch (error) {
+      failedSourceIds.push(sourceId);
+      logger.error("daily summary cron push failed", {
+        summaryDate,
+        sourceId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  if (failedSourceIds.length > 0) {
+    logger.error("daily summary cron completed with failures", {
+      summaryDate,
+      sent: sentCount,
+      failed: failedSourceIds.length,
+    });
+    // 500 so the cron scheduler retries; delivered targets are protected by
+    // the retry key and will not receive duplicates.
+    return NextResponse.json(
+      {
+        ok: false,
+        summaryDate,
+        sent: sentCount > 0,
+        sentCount,
+        failedCount: failedSourceIds.length,
+        rowCount: transactions.length,
+        targetCount: summariesBySource.size,
+      },
+      { status: 500 },
+    );
   }
 
   logger.info("daily summary cron sent", {

@@ -25,7 +25,7 @@ import {
   PendingSessionGenerationConflictError,
 } from "@/lib/line/pending-session-service";
 import { DailySummaryService } from "@/lib/line/daily-summary-service";
-import { SessionDedupService, computeItemHash } from "@/lib/line/session-dedup-service";
+import { SessionDedupService } from "@/lib/line/session-dedup-service";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 import { bangkokBusinessDateNow } from "@/lib/business-date";
 import { parseManualSlipAmounts } from "@/lib/parsers/manual-slip-amount";
@@ -77,8 +77,6 @@ const SESSION_ALREADY_OPEN_REPLY = [
   "มีชุดสลิปที่เปิดอยู่แล้ว",
   `กรุณาพิมพ์ "จบสลิป" ก่อน เพื่อปิดชุดสลิปปัจจุบัน`,
 ].join("\n");
-
-const ALREADY_FINALIZED_REPLY = "ชุดสลิปนี้สรุปไปแล้ว";
 
 const SLIP_CLOSE_ACKNOWLEDGED_REPLY =
   "รับคำสั่งจบชุดแล้ว กำลังตรวจสอบสลิปทั้งหมด กรุณารอสรุปผล";
@@ -307,14 +305,8 @@ export class WebhookService {
     const sourceId       = getSourceId(msgEvent.source);
     const lineUserId     = getUserId(msgEvent.source);
 
-    console.log("incoming text (raw):", text);
-    console.log("incoming text (normalized):", normalizedText);
-    console.log("replyToken exists:", !!replyToken);
-    console.log("hasSessionStart:", hasSessionStart(normalizedText));
-    console.log("hasSessionEnd:", hasSessionEnd(normalizedText));
 
     if (text.trim().toLowerCase() === "test") {
-      console.log("test reply triggered");
       if (replyToken) await replyLineMessage(replyToken, "Bot รับข้อความได้แล้ว ✅");
       return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
@@ -572,20 +564,16 @@ export class WebhookService {
     if (findProduceSessionHeader(normalizedText) !== null) {
       if (hasSessionEnd(normalizedText) || hasItemLine(normalizedText)) {
         // Complete single-message: has SESSION_END or item lines → parse directly
-        console.log("single complete message detected — parsing directly");
         log.info("single complete message detected (has SESSION_END or items), parsing directly");
         return this.runParser(msgEvent, rawMessageId, eventId, event.type, log);
       }
 
       // Header-only → start accumulating (store raw text so parser sees TIME_PREFIX sender)
-      console.log("session header detected — starting pending session", sessionKey);
       log.info("session header detected — starting pending session", { sessionKey });
       try {
         await pendingService.create(sessionKey, sourceId, text, replyToken, lineUserId);
-        console.log("pending session create succeeded", sessionKey);
       } catch (createErr) {
         const msg = createErr instanceof Error ? createErr.message : String(createErr);
-        console.log("pending session create FAILED:", msg);
         log.error("pending session create failed", { sessionKey, error: msg });
       }
       // Register the header event in the barrier ledger so its text is counted
@@ -604,7 +592,6 @@ export class WebhookService {
     }
 
     if (hasSessionEnd(normalizedText)) {
-      console.log("SESSION_END received but no pending session found — ignoring", sessionKey);
       log.warn("SESSION_END received without active pending session", { sessionKey });
       return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
@@ -1202,224 +1189,6 @@ export class WebhookService {
     }
   }
 
-  // ── Finalize accumulated multi-message session ────────────────────────────
-  private async finalizeAccumulated(
-    accumulatedText:  string,
-    replyToken:       string | null,
-    lineUserId:       string | null,
-    rawMessageId:     string,
-    eventId:          string,
-    eventType:        string,
-    log:              ChildLogger,
-    fallbackTime:     string | null = null,
-  ): Promise<WebhookProcessResult> {
-    try {
-      console.log("[TRACE][finalizeAccumulated] accumulated_text_before_parse:\n" + accumulatedText);
-      const parsed = parseWeighSession(accumulatedText, bangkokToday(), fallbackTime);
-      console.log("[TRACE][finalizeAccumulated] parser_output:", JSON.stringify({ date: parsed.date, staff_name: parsed.staff_name, items_count: parsed.items.length, items: parsed.items, parse_errors: parsed.parse_errors }, null, 2));
-
-      if (parsed.parse_errors.length > 0) {
-        log.warn("parse completed with errors", { errors: parsed.parse_errors });
-        for (const parseError of parsed.parse_errors) {
-          log.warn("produce session parse error", { rawLine: parseError });
-        }
-      }
-
-      const validationErrors = getWeighSessionFinalizationErrors(parsed);
-      if (validationErrors.length > 0) {
-        log.warn("produce session validation failed — aborting before persistence", {
-          errors: validationErrors,
-        });
-        if (replyToken) {
-          try {
-            await this.replyMessage(replyToken, buildWeighSessionValidationReply(parsed));
-          } catch (e) {
-            log.error("reply failed", { error: String(e) });
-          }
-        }
-        // Terminalize this generation — do not leave malformed accumulated
-        // text, the close boundary, or the reply token alive to be appended
-        // into by a later message (see PendingSessionGenerationConflictError
-        // and the sender-isolation requirements this session key enforces).
-        return {
-          eventId,
-          eventType,
-          status: "saved",
-          parsed: false,
-          pendingSessionClosed: true,
-        };
-      }
-
-      // Fix 2: guard empty parse
-      if (parsed.items.length === 0) {
-        log.warn("parsed session has no items — aborting");
-        if (replyToken) {
-          try {
-            await replyLineMessage(replyToken, "อ่านรายการไม่สำเร็จ กรุณาตรวจสอบรูปแบบข้อความ");
-          } catch (e) {
-            log.error("reply failed", { error: String(e) });
-          }
-        }
-        return {
-          eventId,
-          eventType,
-          status: "saved",
-          parsed: false,
-          pendingSessionClosed: true,
-        };
-      }
-
-      // Fix 3: dedup check. Old failures may have reserved a hash before any
-      // produce_items were inserted; release those ghost reservations.
-      const dedup       = new SessionDedupService(this.supabase);
-      let isDuplicate   = await dedup.isDuplicate(parsed);
-      if (isDuplicate && !(await dedup.hasPersistedItems(parsed))) {
-        await dedup.release(parsed);
-        isDuplicate = false;
-      }
-      if (isDuplicate) {
-        log.info("duplicate session — skipping insert");
-        if (replyToken) {
-          console.log("duplicate reply triggered");
-          try {
-            await replyLineMessage(replyToken, "รายการนี้เคยบันทึกแล้ว");
-            console.log("duplicate reply success");
-          } catch (replyErr) {
-            const replyMsg = replyErr instanceof Error ? replyErr.message : String(replyErr);
-            console.log("duplicate reply error:", replyMsg);
-            log.error("duplicate reply failed", { error: replyMsg });
-          }
-        }
-        return {
-          eventId,
-          eventType,
-          status: "saved",
-          parsed: false,
-          pendingSessionClosed: true,
-        };
-      }
-
-      log.info("produce session final item count", {
-        finalItemCount: parsed.items.length,
-        parseErrorCount: parsed.parse_errors.length,
-      });
-
-      // Persist session
-      const { data: session, error: sessionErr } = await this.supabase
-        .from("produce_sessions")
-        .insert({
-          raw_message_id:   rawMessageId,
-          line_user_id:     lineUserId ?? undefined,
-          staff_name:       parsed.staff_name,
-          sender_name:      parsed.sender_name      ?? undefined,
-          transaction_time: parsed.transaction_time ?? undefined,
-          session_date:     parsed.date             ?? undefined,
-          session_title:    parsed.session_title    ?? undefined,
-          total_items:      parsed.items.length,
-          parser_errors:    parsed.parse_errors.length > 0 ? parsed.parse_errors : null,
-        })
-        .select("id")
-        .single();
-
-      if (sessionErr) throw new Error(`produce_session insert failed: ${sessionErr.message}`);
-
-      try {
-        for (const item of parsed.items) {
-          const { error: itemErr } = await this.supabase.from("produce_items").insert({
-            session_id:       session.id,
-            item_number:      item.item_number,
-            product_name:     item.product_name,
-            price_per_unit:   item.price_per_unit,
-            quantity:         item.quantity    ?? undefined,
-            unit:             item.unit        ?? undefined,
-            section:          item.section,
-            transaction_type: item.transaction_type,
-            item_hash:        computeItemHash(parsed, item),
-          });
-          if (itemErr) {
-            throw new Error(`produce_item insert failed for ${item.product_name}: ${itemErr.message}`);
-          }
-        }
-      } catch (err) {
-        await this.supabase.from("produce_sessions").delete().eq("id", session.id);
-        throw err;
-      }
-
-      const duplicateAfterPersist = await dedup.record(parsed, accumulatedText);
-      if (duplicateAfterPersist) {
-        await this.supabase.from("produce_sessions").delete().eq("id", session.id);
-        log.info("duplicate session recorded concurrently — removed current insert");
-        if (replyToken) await replyLineMessage(replyToken, "รายการนี้เคยบันทึกแล้ว");
-        return {
-          eventId,
-          eventType,
-          status: "saved",
-          parsed: false,
-          pendingSessionClosed: true,
-        };
-      }
-
-      await this.supabase
-        .from("raw_messages")
-        .update({ is_processed: true })
-        .eq("id", rawMessageId);
-
-      log.info("accumulated session finalized", { items: parsed.items.length, staff: parsed.staff_name });
-
-      await new DailySummaryService(this.supabase).recalculate(
-        parsed.date ?? bangkokToday(),
-        parsed.staff_name,
-        parsed.session_title ?? null,
-      );
-
-      log.info("pending session finalized", { items: parsed.items.length, staff: parsed.staff_name });
-
-      if (replyToken) {
-        console.log("reply triggered for finalized session");
-        console.log("[TRACE][finalizeAccumulated] items_before_summary:", JSON.stringify(parsed.items.map(i => ({ item_number: i.item_number, product_name: i.product_name, price_per_unit: i.price_per_unit, quantity: i.quantity, unit: i.unit, transaction_type: i.transaction_type }))));
-        const summary = buildWeighSessionSummary(parsed);
-        console.log("[TRACE][finalizeAccumulated] summary_reply_payload:", summary);
-        try {
-          await replyLineMessage(replyToken, summary);
-        } catch (e) {
-          log.error("reply failed", { error: String(e) });
-        }
-      }
-
-      return {
-        eventId,
-        eventType,
-        status: "saved",
-        parsed: true,
-        pendingSessionClosed: true,
-      };
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      log.error("finalize accumulated session failed", { error: errorMessage });
-
-      if (replyToken) {
-        try {
-          await replyLineMessage(replyToken, "ยังอ่านรายการนี้ไม่ได้ครับ กรุณาตรวจรูปแบบข้อความอีกครั้ง");
-        } catch (e) {
-          log.error("reply failed", { error: String(e) });
-        }
-      }
-
-      // Terminalize this generation rather than leaving it alive: a crash here
-      // means this exact accumulated text cannot be trusted, so keeping the
-      // generation open would let a later message append onto it and inherit
-      // the same failure.
-      return {
-        eventId,
-        eventType,
-        status: "saved",
-        parsed: false,
-        error: errorMessage,
-        pendingSessionClosed: true,
-      };
-    }
-  }
-
   // ── Single-message parser flow (backward compat) ──────────────────────────
   private async runParser(
     msgEvent:     LineMessageEvent,
@@ -1441,13 +1210,11 @@ export class WebhookService {
     log.info("running parser", { parser: parser.name, version: parser.version });
 
     try {
-      console.log("[TRACE][runParser] text_before_parse:", (msgEvent.message as import("@/lib/line/types").LineTextMessage).text);
       const result = await parser.parse(msgEvent);
 
       // Fix 2 + 3: weigh-session specific guards before any DB writes
       if (parser.name === "weigh-session" && result.data) {
         const ws = result.data as unknown as WeighSession;
-        console.log("[TRACE][runParser] parser_output:", JSON.stringify({ date: ws.date, staff_name: ws.staff_name, items_count: ws.items.length, items: ws.items, parse_errors: ws.parse_errors }, null, 2));
 
         const validationErrors = getWeighSessionFinalizationErrors(ws);
         if (validationErrors.length > 0) {
@@ -1543,8 +1310,6 @@ export class WebhookService {
           : null;
 
         if (summaryText) {
-          console.log("[TRACE][runParser] items_before_summary:", JSON.stringify((result.data as unknown as WeighSession).items.map(i => ({ item_number: i.item_number, product_name: i.product_name, price_per_unit: i.price_per_unit, quantity: i.quantity, unit: i.unit, transaction_type: i.transaction_type }))));
-          console.log("[TRACE][runParser] summary_reply_payload:", summaryText);
           try {
             await replyLineMessage(replyToken, summaryText);
           } catch (e) {

@@ -43,12 +43,26 @@ async function computeAiVerifiedTotal(
 
   const { data: checks } = await supabase
     .from("slip_checks")
-    .select("transfer_amount")
+    .select("transfer_amount, reference_id")
     .in("evidence_id", evidenceIds)
     .in("status", ["EXTRACTED", "PARTIAL_EXTRACTED"])
     .not("transfer_amount", "is", null);
 
-  return (checks ?? []).reduce((sum, c) => sum + Number(c.transfer_amount), 0);
+  // Duplicate slip guard: the same slip submitted twice (even across batches
+  // in the same business day) extracts the same bank reference_id — count each
+  // distinct reference once. Checks without a visible reference cannot be
+  // distinguished from one another and are summed individually.
+  const seenReferences = new Set<string>();
+  let total = 0;
+  for (const c of checks ?? []) {
+    const ref = typeof c.reference_id === "string" ? c.reference_id.trim() : "";
+    if (ref) {
+      if (seenReferences.has(ref)) continue;
+      seenReferences.add(ref);
+    }
+    total += Number(c.transfer_amount);
+  }
+  return total;
 }
 
 async function computeManualSlipTotal(
@@ -96,10 +110,14 @@ export async function reconcile(
     };
   }
 
-  const aiTotal     = await computeAiVerifiedTotal(supabase, sourceId, businessDate);
-  const manualTotal = await computeManualSlipTotal(supabase, sourceId, businessDate);
-  const checkedTotal = aiTotal + manualTotal;
-  const difference   = submittedTransfer - checkedTotal;
+  // Amounts are numeric(10,2) in the DB but accumulate as binary floats here —
+  // round to satang before comparing so 0.1 + 0.2 style drift never turns a
+  // genuinely matched settlement into a false mismatch.
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  const aiTotal     = round2(await computeAiVerifiedTotal(supabase, sourceId, businessDate));
+  const manualTotal = round2(await computeManualSlipTotal(supabase, sourceId, businessDate));
+  const checkedTotal = round2(aiTotal + manualTotal);
+  const difference   = round2(submittedTransfer - checkedTotal);
   const matched      = difference === 0;
 
   const result: ReconciliationResult = {

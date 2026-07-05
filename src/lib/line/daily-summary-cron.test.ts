@@ -1,10 +1,30 @@
 import { describe, expect, it } from "bun:test";
 import {
+  dailySummaryRetryKey,
   groupDailySummariesBySource,
   resolveDailySummaryDate,
   type DailySummarySourceRow,
   type DailySummaryTransactionRow,
 } from "./daily-summary-cron";
+
+describe("dailySummaryRetryKey", () => {
+  it("is a valid UUID", () => {
+    expect(dailySummaryRetryKey("2026-06-01", "group-abc")).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+  });
+
+  it("is stable for the same date and target across retries", () => {
+    expect(dailySummaryRetryKey("2026-06-01", "group-abc"))
+      .toBe(dailySummaryRetryKey("2026-06-01", "group-abc"));
+  });
+
+  it("differs across dates and targets", () => {
+    const key = dailySummaryRetryKey("2026-06-01", "group-abc");
+    expect(dailySummaryRetryKey("2026-06-02", "group-abc")).not.toBe(key);
+    expect(dailySummaryRetryKey("2026-06-01", "group-xyz")).not.toBe(key);
+  });
+});
 
 describe("resolveDailySummaryDate", () => {
   it("uses the previous Bangkok calendar date at the intended 03:58 run", () => {

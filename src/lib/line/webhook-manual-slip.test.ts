@@ -311,6 +311,5 @@ describe("market-key separation", () => {
     await svc.processEvents([event, dup], "dest");
 
     expect(db._sessions).toHaveLength(1);
-    expect(replies).toBeDefined(); // just check no throw
   });
 });

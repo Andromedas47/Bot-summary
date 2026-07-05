@@ -7,6 +7,7 @@ function makeFullSupabase(cfg: {
   transferAmounts: number[];
   closedSessions:  string[];
   entryAmounts:    number[];
+  transferRefs?:   (string | null)[]; // aligned with transferAmounts by index
 }) {
   let manualSessionCallCount = 0;
 
@@ -58,7 +59,10 @@ function makeFullSupabase(cfg: {
             in: () => ({
               in: () => ({
                 not: async () => ({
-                  data: cfg.transferAmounts.map(a => ({ transfer_amount: a })),
+                  data: cfg.transferAmounts.map((a, i) => ({
+                    transfer_amount: a,
+                    reference_id: cfg.transferRefs?.[i] ?? null,
+                  })),
                   error: null,
                 }),
               }),
@@ -134,6 +138,37 @@ describe("reconcile", () => {
     if (!result.blocked) {
       expect(result.result.matched).toBe(false);
       expect(result.result.difference).toBe(100);  // 600 - 500
+    }
+  });
+
+  it("counts a duplicated reference_id only once in the AI total", async () => {
+    const db = makeFullSupabase({
+      openSession:     false,
+      transferAmounts: [500, 500, 300],           // same slip sent twice + one distinct
+      transferRefs:    ["REF-001", "REF-001", null],
+      closedSessions:  [],
+      entryAmounts:    [],
+    });
+    const result = await reconcile(db as never, "grp1", "2026-06-17", 800);
+    expect(result.blocked).toBe(false);
+    if (!result.blocked) {
+      expect(result.result.ai_verified_total).toBe(800); // 500 + 300, duplicate skipped
+      expect(result.result.matched).toBe(true);
+    }
+  });
+
+  it("sums satang decimals without float drift (0.1 + 0.2 matches 0.3)", async () => {
+    const db = makeFullSupabase({
+      openSession:     false,
+      transferAmounts: [100.1, 200.2],
+      closedSessions:  [],
+      entryAmounts:    [],
+    });
+    const result = await reconcile(db as never, "grp1", "2026-06-17", 300.3);
+    expect(result.blocked).toBe(false);
+    if (!result.blocked) {
+      expect(result.result.matched).toBe(true);
+      expect(result.result.difference).toBe(0);
     }
   });
 

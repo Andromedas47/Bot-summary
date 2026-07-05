@@ -2,6 +2,7 @@ import type { SlipCheckStatus, SlipType } from "@/types/database";
 
 export type ValidationReason =
   | "ยอดเงินสูงผิดปกติ"
+  | "สลิปซ้ำ"
   | "วันที่รายการไม่ตรงกับรอบ"
   | "วันที่รายการไม่ถูกต้อง"
   | "ไม่พบวันที่รายการ"
@@ -140,6 +141,12 @@ export function computeMedian(values: number[]): number {
  *   Fires only when the batch has ≥ 5 valid extracted amounts.
  *   An item is flagged when amount ≥ 5,000 THB AND amount ≥ 10 × median.
  *
+ * Duplicate guard (batch-wide):
+ *   The same slip image submitted twice extracts the same bank reference_id.
+ *   The second and later terminal occurrences of a non-empty referenceId are
+ *   flagged "สลิปซ้ำ"; the first occurrence stays trusted. Items without a
+ *   visible reference are never flagged as duplicates.
+ *
  * Date guard (per-item, runs only when batchDateStr is non-null):
  *   Missing transactionTime  → "ไม่พบวันที่รายการ"
  *   Unparseable timestamp    → "วันที่รายการไม่ถูกต้อง"
@@ -159,12 +166,24 @@ export function computeValidationFlags(
     grossAmount?:     number | null;
     discountAmount?:  number | null;
     transactionTime:  string | null;
+    referenceId?:     string | null;
   }>,
   batchDateStr: string | null,
 ): EvidenceFlags[] {
   const effectiveAmounts = evidences.map((e) =>
     selectEffectiveAmount(e.slipType, e.transferAmount, e.paidAmount, e.grossAmount, e.discountAmount),
   );
+
+  // Duplicate guard: mark the 2nd+ terminal occurrence of each reference_id.
+  const seenReferences = new Set<string>();
+  const isDuplicate = evidences.map((e) => {
+    const isTerminal = e.checkStatus === "EXTRACTED" || e.checkStatus === "PARTIAL_EXTRACTED";
+    const ref = typeof e.referenceId === "string" ? e.referenceId.trim() : "";
+    if (!isTerminal || !ref) return false;
+    if (seenReferences.has(ref)) return true;
+    seenReferences.add(ref);
+    return false;
+  });
 
   // Collect valid amounts from terminal evidences to compute the batch median.
   const validAmounts: number[] = [];
@@ -184,6 +203,11 @@ export function computeValidationFlags(
     const isTerminal = e.checkStatus === "EXTRACTED" || e.checkStatus === "PARTIAL_EXTRACTED";
 
     if (isTerminal) {
+      // Duplicate guard — independent of amount validity
+      if (isDuplicate[i]) {
+        reasons.push("สลิปซ้ำ");
+      }
+
       // Amount guard
       if (amount === null) {
         reasons.push("ข้อมูลไม่ครบ");

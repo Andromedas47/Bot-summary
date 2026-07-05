@@ -196,6 +196,81 @@ describe("outlier guard", () => {
   });
 });
 
+// ── Duplicate guard ───────────────────────────────────────────────────────────
+
+function makeExtractedWithRef(
+  amount: number,
+  referenceId: string | null,
+  checkStatus: SlipCheckStatus = "EXTRACTED",
+) {
+  return {
+    checkStatus,
+    slipType:        "BANK_SLIP_QR" as SlipType,
+    transferAmount:  amount,
+    paidAmount:      null,
+    transactionTime: null,
+    referenceId,
+  };
+}
+
+describe("duplicate guard", () => {
+  it("flags the second occurrence of the same reference_id, keeps the first trusted", () => {
+    const evidences = [
+      makeExtractedWithRef(500, "REF-001"),
+      makeExtractedWithRef(500, "REF-001"), // same slip sent twice
+      makeExtractedWithRef(300, "REF-002"),
+    ];
+    const flags = computeValidationFlags(evidences, null);
+    expect(flags[0].flagged).toBe(false);
+    expect(flags[1].flagged).toBe(true);
+    expect(flags[1].flagReasons).toContain("สลิปซ้ำ");
+    expect(flags[2].flagged).toBe(false);
+  });
+
+  it("flags every repeat beyond the first (three copies → two flagged)", () => {
+    const evidences = [
+      makeExtractedWithRef(500, "REF-001"),
+      makeExtractedWithRef(500, "REF-001"),
+      makeExtractedWithRef(500, "REF-001"),
+    ];
+    const flags = computeValidationFlags(evidences, null);
+    expect(flags.map((f) => f.flagged)).toEqual([false, true, true]);
+  });
+
+  it("does not flag distinct references or missing references", () => {
+    const evidences = [
+      makeExtractedWithRef(500, "REF-001"),
+      makeExtractedWithRef(500, null),
+      makeExtractedWithRef(500, null), // two no-ref slips can be legitimate twins
+      makeExtractedWithRef(500, "  "), // whitespace-only ref is treated as missing
+      makeExtractedWithRef(500, "REF-002"),
+    ];
+    const flags = computeValidationFlags(evidences, null);
+    expect(flags.every((f) => !f.flagged)).toBe(true);
+  });
+
+  it("a FAILED check does not consume a reference for the duplicate guard", () => {
+    const evidences = [
+      makeExtractedWithRef(500, "REF-001", "FAILED"),   // non-terminal
+      makeExtractedWithRef(500, "REF-001", "EXTRACTED"), // first terminal use
+    ];
+    const flags = computeValidationFlags(evidences, null);
+    expect(flags[1].flagged).toBe(false);
+  });
+
+  it("duplicate is excluded from the batch trusted total in the summary", () => {
+    const evidences = [
+      { id: "e1", batchIndex: 1, failureReason: null, ...makeExtractedWithRef(500, "REF-001") },
+      { id: "e2", batchIndex: 2, failureReason: null, ...makeExtractedWithRef(500, "REF-001") },
+      { id: "e3", batchIndex: 3, failureReason: null, ...makeExtractedWithRef(300, "REF-002") },
+    ];
+    const message = buildBatchSummaryMessage(evidences, { slipDate: null });
+    expect(message).toContain("ยอดรวมที่อ่านได้: 800 บาท");
+    expect(message).toContain("สลิปซ้ำ");
+    expect(message).toContain("ยอดที่ถูกระงับ: 1 รายการ");
+  });
+});
+
 // ── Date guard ────────────────────────────────────────────────────────────────
 
 function makeExtractedWithTime(

@@ -1,4 +1,6 @@
-export const KNOWN_TX_TYPES = ["เบิก", "เบิกเพิ่ม", "คืน", "คืนเสีย"] as const;
+// "เสีย" is a legacy spelling of "คืนเสีย" found in imported data
+// (transaction_type has no CHECK constraint — see migration 0011).
+export const KNOWN_TX_TYPES = ["เบิก", "เบิกเพิ่ม", "คืน", "คืนเสีย", "เสีย"] as const;
 
 export type TransactionBucket = "เบิก" | "คืน" | "คืนเสีย";
 
@@ -31,7 +33,7 @@ export function emptyTransactionTotals(): TransactionTotals {
 export function transactionBucket(type: string): TransactionBucket | null {
   if (type === "เบิก" || type === "เบิกเพิ่ม") return "เบิก";
   if (type === "คืน") return "คืน";
-  if (type === "คืนเสีย") return "คืนเสีย";
+  if (type === "คืนเสีย" || type === "เสีย") return "คืนเสีย";
   return null;
 }
 

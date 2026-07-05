@@ -49,3 +49,6 @@ __pycache__/
 *.pyc
 
 .vercel
+
+# local debug scratch files
+.tmp-*

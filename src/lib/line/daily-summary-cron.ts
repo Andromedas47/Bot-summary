@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { DailySummaryMessageRow } from "@/lib/line/daily-summary-message";
 import { previousBangkokCalendarDateFromTimestamp } from "@/lib/business-date";
 
@@ -29,6 +30,20 @@ export function resolveDailySummaryDate(dateParam: string | null, timestamp = Da
     ?? new Date(timestamp - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
+// Deterministic X-Line-Retry-Key (UUID format) per summary date + target.
+// A cron retry after a partial failure reuses the same key, so LINE answers
+// 409 for targets that already received the message instead of re-delivering.
+export function dailySummaryRetryKey(summaryDate: string, sourceId: string): string {
+  const bytes = createHash("sha256")
+    .update(`daily-summary:${summaryDate}:${sourceId}`)
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50; // UUID version bits (name-based)
+  bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 function groupKey(sourceId: string, staffName: string, marketName: string): string {
   return `${sourceId}||${staffName}||${marketName}`;
 }
@@ -40,7 +55,7 @@ function addAmount(row: GroupedDailySummaryRow, tx: DailySummaryTransactionRow):
     row.borrow_total += amount;
   } else if (tx.transaction_type === "คืน") {
     row.return_total += amount;
-  } else if (tx.transaction_type === "คืนเสีย") {
+  } else if (tx.transaction_type === "คืนเสีย" || tx.transaction_type === "เสีย") {
     row.bad_return_total += amount;
   }
 

@@ -1,5 +1,6 @@
 import { afterEach, describe, it, expect, spyOn } from "bun:test";
 import {
+  buildAdditionalSessionSummary,
   buildWeighSessionSummary,
   LinePushError,
   parseRetryAfterMs,
@@ -336,5 +337,76 @@ describe("LINE push retry metadata", () => {
       "Fri, 03 Jul 2026 00:00:12 GMT",
       Date.parse("2026-07-03T00:00:00.000Z"),
     )).toBe(12_000);
+  });
+});
+
+describe("buildAdditionalSessionSummary — previous total line", () => {
+  // 10 โล × 100 = 1000
+  const ADD_ITEM = { ...BORROW_ITEM, transaction_type: "เบิก" as const };
+
+  function additionalSession(
+    declared: "เบิก" | "คืน" | "คืนเสีย",
+    items = [ADD_ITEM],
+  ) {
+    return makeSession({
+      session_kind: "additional",
+      declared_transaction_type: declared,
+      items: items.map((item) => ({ ...item, transaction_type: declared })),
+    });
+  }
+
+  it("shows previous, batch, and cumulative totals in order", () => {
+    const result = buildAdditionalSessionSummary(additionalSession("เบิก"), {
+      cumulativeTotal: 1055,
+      hasMatchingMain: true,
+    });
+
+    expect(result).toBe([
+      "บันทึกรายการเบิกเพิ่มแล้ว ✅",
+      "",
+      "เพิ่ม 1 รายการ",
+      "ยอดเดิมก่อนเพิ่ม: 55.00 บาท",
+      "ยอดเพิ่ม: 1,000.00 บาท",
+      "ยอดสะสมของวัน: 1,055.00 บาท",
+    ].join("\n"));
+  });
+
+  it.each([
+    ["เบิก", "เบิกเพิ่ม"],
+    ["คืน", "ชั่งคืนเพิ่ม"],
+    ["คืนเสีย", "คืนเสียเพิ่ม"],
+  ] as const)("labels a %s addition as %s with the same line layout", (declared, label) => {
+    const result = buildAdditionalSessionSummary(additionalSession(declared), {
+      cumulativeTotal: 1500,
+      hasMatchingMain: true,
+    });
+
+    expect(result).toContain(`บันทึกรายการ${label}แล้ว ✅\n\nเพิ่ม 1 รายการ`);
+    expect(result).toContain("ยอดเดิมก่อนเพิ่ม: 500.00 บาท");
+    expect(result).toContain("ยอดเพิ่ม: 1,000.00 บาท");
+    expect(result).toContain("ยอดสะสมของวัน: 1,500.00 บาท");
+  });
+
+  it("clamps floating-point residue in the previous total to zero", () => {
+    // First addition of the day: cumulative == batch total, but computed with
+    // a tiny floating-point residue.
+    const result = buildAdditionalSessionSummary(additionalSession("คืน"), {
+      cumulativeTotal: 1000.0000000000001,
+      hasMatchingMain: false,
+    });
+
+    expect(result).toContain("ยอดเดิมก่อนเพิ่ม: 0.00 บาท");
+    expect(result).not.toContain("-0.00");
+    expect(result).toContain("ยังไม่พบชุดหลัก");
+  });
+
+  it("formats fractional previous totals to 2 decimals", () => {
+    const result = buildAdditionalSessionSummary(additionalSession("คืนเสีย"), {
+      cumulativeTotal: 1012.345,
+      hasMatchingMain: true,
+    });
+
+    expect(result).toContain("ยอดเดิมก่อนเพิ่ม: 12.35 บาท");
+    expect(result).toContain("ยอดสะสมของวัน: 1,012.35 บาท");
   });
 });

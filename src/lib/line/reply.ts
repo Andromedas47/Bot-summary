@@ -245,9 +245,15 @@ export function buildAdditionalSessionSummary(
     : "เพิ่ม";
   const batchTotal = session.items.reduce((sum, item) => sum + weighItemTotal(item), 0);
 
+  // Previous day total before this addition; clamp floating-point residue.
+  let previousTotal = round2(day.cumulativeTotal - batchTotal);
+  if (Math.abs(previousTotal) < 0.005) previousTotal = 0;
+
   const lines = [
     `บันทึกรายการ${label}แล้ว ✅`,
+    "",
     `เพิ่ม ${session.items.length} รายการ`,
+    `ยอดเดิมก่อนเพิ่ม: ${fmt(previousTotal)} บาท`,
     `ยอดเพิ่ม: ${fmt(batchTotal)} บาท`,
     `ยอดสะสมของวัน: ${fmt(day.cumulativeTotal)} บาท`,
   ];

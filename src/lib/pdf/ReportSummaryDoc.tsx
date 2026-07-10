@@ -271,7 +271,10 @@ function DetailTable({ items, typeLabel }: { items: ReportRow[]; typeLabel: stri
           return (
             <View key={r.product_name + i} style={[S.tr, i % 2 === 1 ? S.trAlt : {}]} wrap={false}>
               <Text style={[S.td, { flex: 2 }]}>{(r.item_number ?? i + 1)}</Text>
-              <Text style={[S.td, S.tdLeft, { flex: 10 }]}>{r.product_name}</Text>
+              <Text style={[S.td, S.tdLeft, { flex: 10 }]}>
+                {r.product_name}
+                {r.session_kind === "additional" ? "  • ชุดเพิ่ม" : ""}
+              </Text>
               <Text style={[S.td, { flex: 4 }]}>{fmtQty(r.quantity ?? 0)}</Text>
               <Text style={[S.td, { flex: 3 }]}>{r.unit ?? ""}</Text>
               <Text style={[S.td, { flex: 4 }]}>{priceCell}</Text>

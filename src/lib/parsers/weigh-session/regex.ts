@@ -86,6 +86,20 @@ export const RE = {
     `^([${TH}\\s]+?)-([${MARKET}]+?)\\s+(เบิกเพิ่ม|เบิก|คืนเสีย|ชั่งคืน|คืน)`,
   ),
 
+  // Additional-batch opener — full-line anchored, all parts explicit:
+  //   "กี้-คลองเตย เบิกเพิ่ม 12/7/2569"
+  //   "กี้-คลองเตย ชั่งคืนเพิ่ม 12/7/2569"
+  //   "กี้-คลองเตย คืนเสียเพิ่ม 12/7/2569"
+  // Captures: [1]=seller, [2]=market, [3]=additional type keyword, [4]=date
+  ADDITIONAL_HEADER: new RegExp(
+    `^([${TH}\\s]+?)-([${MARKET}]+?)\\s+(เบิกเพิ่ม|ชั่งคืนเพิ่ม|คืนเสียเพิ่ม)\\s+(\\d{1,2}[\\/\\-.]\\d{1,2}[\\/\\-.](?:25)?\\d{2})\\s*$`,
+  ),
+
+  // Additional-batch closer — full-line anchored, type must match the opener,
+  // optional expected count: "จบรายการเบิกเพิ่ม" / "จบรายการชั่งคืนเพิ่ม 5 รายการ"
+  // Captures: [1]=additional type keyword, [2]=expected count (optional)
+  ADDITIONAL_END: /^จบรายการ(เบิกเพิ่ม|ชั่งคืนเพิ่ม|คืนเสียเพิ่ม)(?:\s+(\d+)\s*รายการ)?\s*$/,
+
   // Manual slip session open: "ส่งสลิปมือ 17/06/2569"
   // Anchored at ส่งสลิปมือ only — allows arbitrary prefix (e.g. sender name).
   // Captures: [1]=date string (DD/MM/YY or DD/MM/YYYY Buddhist)

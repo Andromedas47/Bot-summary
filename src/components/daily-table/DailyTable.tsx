@@ -47,6 +47,16 @@ function TxBadge({ type }: { type: string }) {
   );
 }
 
+// ชุดหลัก (main) vs ชุดเพิ่ม (append-only additional batch) marker.
+function KindBadge({ kind }: { kind: string | null | undefined }) {
+  if (kind !== "additional") return null;
+  return (
+    <span className="inline-block rounded-full px-2 py-0.5 text-xs font-medium bg-amber-50 text-amber-700 ring-1 ring-amber-200/60">
+      ชุดเพิ่ม
+    </span>
+  );
+}
+
 const TH = "px-3 py-2.5 text-left text-[0.6875rem] font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap";
 const TD = "px-3 py-2.5 text-sm";
 
@@ -77,6 +87,7 @@ export function DailyTable({ rows }: { rows: DailyRow[] }) {
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 min-w-0">
                 <TxBadge type={row.transaction_type} />
+                <KindBadge kind={row.session_kind} />
                 <span className="truncate text-sm font-medium text-slate-900">
                   {row.product_name}
                 </span>
@@ -147,7 +158,10 @@ export function DailyTable({ rows }: { rows: DailyRow[] }) {
                   {displayMarketName(row.market_name)}
                 </td>
                 <td className={TD}>
-                  <TxBadge type={row.transaction_type} />
+                  <span className="inline-flex items-center gap-1">
+                    <TxBadge type={row.transaction_type} />
+                    <KindBadge kind={row.session_kind} />
+                  </span>
                 </td>
                 <td className={`${TD} text-right tabular-nums text-slate-400`}>
                   {row.item_number ?? ""}

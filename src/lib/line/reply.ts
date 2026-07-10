@@ -1,6 +1,7 @@
 import { logger } from "@/lib/logger";
 import { formatThaiDate } from "@/lib/date";
-import type { WeighSession } from "@/lib/parsers/weigh-session/types";
+import type { WeighSession, WeighSessionItem } from "@/lib/parsers/weigh-session/types";
+import { ADDITIONAL_TYPE_LABEL } from "@/lib/parsers/weigh-session/parser";
 
 export async function replyLineMessage(replyToken: string, text: string): Promise<void> {
   let res: Response;
@@ -146,6 +147,17 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
+// Basis rows (e.g. "3โล100บาท") total round(qty * basis_price / basis_quantity, 2),
+// never (qty * price_per_unit) — price_per_unit is only a rounded display
+// approximation for those rows and multiplying it back out reintroduces
+// the rounding error.
+export function weighItemTotal(item: WeighSessionItem): number {
+  if (item.basis_quantity && item.basis_price != null) {
+    return round2((item.quantity ?? 0) * item.basis_price / item.basis_quantity);
+  }
+  return (item.price_per_unit ?? 0) * (item.quantity ?? 0);
+}
+
 export function buildWeighSessionSummary(session: WeighSession): string {
   type Item = typeof session.items[number];
 
@@ -163,16 +175,7 @@ export function buildWeighSessionSummary(session: WeighSession): string {
     }
   }
 
-  // Basis rows (e.g. "3โล100บาท") total round(qty * basis_price / basis_quantity, 2),
-  // never (qty * price_per_unit) — price_per_unit is only a rounded display
-  // approximation for those rows and multiplying it back out reintroduces
-  // the rounding error.
-  const lineTotal = (item: Item): number => {
-    if (item.basis_quantity && item.basis_price != null) {
-      return round2((item.quantity ?? 0) * item.basis_price / item.basis_quantity);
-    }
-    return (item.price_per_unit ?? 0) * (item.quantity ?? 0);
-  };
+  const lineTotal = weighItemTotal;
 
   const sumItems = (items: Item[]) =>
     items.reduce((acc, it) => acc + lineTotal(it), 0);
@@ -218,6 +221,41 @@ export function buildWeighSessionSummary(session: WeighSession): string {
 
   for (const s of sections) {
     lines.push("", ...s);
+  }
+
+  return lines.join("\n");
+}
+
+export interface AdditionalSessionDayContext {
+  /** Day total for the same date + staff + market + base transaction type,
+   *  INCLUDING this addition. */
+  cumulativeTotal:  number;
+  /** Whether any main-kind session already exists for the same grouping key. */
+  hasMatchingMain:  boolean;
+}
+
+// Reply for an append-only additional batch. Deliberately never claims the
+// original session was modified — the addition is its own session.
+export function buildAdditionalSessionSummary(
+  session: WeighSession,
+  day: AdditionalSessionDayContext,
+): string {
+  const label = session.declared_transaction_type
+    ? ADDITIONAL_TYPE_LABEL[session.declared_transaction_type]
+    : "เพิ่ม";
+  const batchTotal = session.items.reduce((sum, item) => sum + weighItemTotal(item), 0);
+
+  const lines = [
+    `บันทึกรายการ${label}แล้ว ✅`,
+    `เพิ่ม ${session.items.length} รายการ`,
+    `ยอดเพิ่ม: ${fmt(batchTotal)} บาท`,
+    `ยอดสะสมของวัน: ${fmt(day.cumulativeTotal)} บาท`,
+  ];
+
+  if (!day.hasMatchingMain) {
+    lines.push(
+      "ยังไม่พบชุดหลักของวันนี้ รายการนี้ถูกบันทึกแยกไว้ และจะรวมยอดตามวันที่ คนขาย และตลาดเดียวกัน",
+    );
   }
 
   return lines.join("\n");

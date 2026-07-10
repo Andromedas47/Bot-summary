@@ -137,6 +137,10 @@ export interface Database {
           created_at:              string;
           finalization_started_at: string | null;
           finalized_at:            string | null;
+          session_kind:            string;
+          declared_transaction_type: string | null;
+          ingest_idempotency_key:  string | null;
+          ingest_source:           string | null;
         };
         Insert: {
           id?:                      string;
@@ -152,6 +156,10 @@ export interface Database {
           created_at?:              string;
           finalization_started_at?: string | null;
           finalized_at?:            string | null;
+          session_kind?:            string;
+          declared_transaction_type?: string | null;
+          ingest_idempotency_key?:  string | null;
+          ingest_source?:           string | null;
         };
         Update: {
           id?:                      string;
@@ -167,6 +175,10 @@ export interface Database {
           created_at?:              string;
           finalization_started_at?: string | null;
           finalized_at?:            string | null;
+          session_kind?:            string;
+          declared_transaction_type?: string | null;
+          ingest_idempotency_key?:  string | null;
+          ingest_source?:           string | null;
         };
         Relationships: [];
       };
@@ -843,6 +855,9 @@ export interface Database {
           basis_unit:         string | null;
           basis_price:        number | null;
           pricing_mode:       string;
+          base_transaction_type: string;
+          session_kind:       string;
+          declared_transaction_type: string | null;
         };
         Insert: never;
         Update: never;

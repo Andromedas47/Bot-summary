@@ -39,6 +39,18 @@ export function isKnownTransactionType(type: string): boolean {
   return transactionBucket(type) !== null;
 }
 
+/**
+ * Normalizes any stored transaction type onto its accounting base type.
+ * Unlike transactionBucket (which preserves legacy totals behavior exactly),
+ * this also maps the legacy ชั่งคืนเพิ่ม/คืนเสียเพิ่ม marker rows — used for
+ * grouping additional-batch day totals, not for existing report buckets.
+ */
+export function baseTransactionType(type: string): TransactionBucket | null {
+  if (type === "ชั่งคืนเพิ่ม") return "คืน";
+  if (type === "คืนเสียเพิ่ม") return "คืนเสีย";
+  return transactionBucket(type);
+}
+
 export function addTransactionAmount<T extends TransactionTotals>(
   totals: T,
   row: TransactionAmountRow,

@@ -7,7 +7,15 @@ import {
   type PendingSession,
   type TryFinalizeResult,
 } from "@/lib/line/pending-session-service";
-import { buildWeighSessionSummary, pushLineMessage } from "@/lib/line/reply";
+import {
+  buildAdditionalSessionSummary,
+  buildWeighSessionSummary,
+  pushLineMessage,
+  weighItemTotal,
+  type AdditionalSessionDayContext,
+} from "@/lib/line/reply";
+import { baseTransactionType } from "@/lib/summary/transactions";
+import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 import {
   computeItemHash,
   computeSessionHash,
@@ -81,6 +89,41 @@ function hasHeaderInLedger(session: PendingSession, rows: Array<{ raw_text: stri
     }));
 }
 
+// Day context for the addition reply: cumulative total for the exact
+// business date + staff + market + declared base transaction type (all
+// session kinds, each item exactly once), plus whether a main batch exists.
+async function loadAdditionalDayContext(
+  supabase: Supabase,
+  parsed: WeighSession,
+): Promise<AdditionalSessionDayContext> {
+  const batchTotal = parsed.items.reduce((sum, item) => sum + weighItemTotal(item), 0);
+
+  const { data, error } = await supabase
+    .from("produce_transactions")
+    .select("transaction_type, total_amount, session_kind")
+    .eq("transaction_date", parsed.date ?? "")
+    .eq("staff_name", parsed.staff_name)
+    .eq("market_name", parsed.session_title ?? "");
+
+  if (error) throw new Error(`additional day context lookup failed: ${error.message}`);
+
+  const rows = (data ?? []) as Array<{
+    transaction_type: string;
+    total_amount: number | null;
+    session_kind?: string | null;
+  }>;
+
+  const existingTotal = rows
+    .filter((row) =>
+      baseTransactionType(row.transaction_type) === parsed.declared_transaction_type)
+    .reduce((sum, row) => sum + Number(row.total_amount ?? 0), 0);
+
+  return {
+    cumulativeTotal: existingTotal + batchTotal,
+    hasMatchingMain: rows.some((row) => (row.session_kind ?? "main") === "main"),
+  };
+}
+
 async function findCloseRawMessageId(
   supabase: Supabase,
   session: PendingSession,
@@ -145,12 +188,34 @@ export async function finalizePendingGeneration(
     new Date(snapshot.created_at).getTime(),
   );
   const parsed = parseWeighSession(finalText, bangkokBusinessDateNow(), fallbackTime);
+  const isAdditional = parsed.session_kind === "additional";
   const validationErrors = [
     ...reconstructionErrors,
     ...getWeighSessionFinalizationErrors(parsed),
   ];
+
+  // With an expected count, an additional batch must number its items exactly
+  // 1..N (the RPC checks for missing numbers; out-of-range ones are caught here,
+  // duplicates by getWeighSessionFinalizationErrors).
+  if (isAdditional && snapshot.expected_item_count != null) {
+    for (const item of parsed.items) {
+      if (item.item_number < 1 || item.item_number > snapshot.expected_item_count) {
+        validationErrors.push(
+          `item #${item.item_number} is outside the expected range 1..${snapshot.expected_item_count}`,
+        );
+      }
+    }
+  }
+
   const rawMessageId = await findCloseRawMessageId(supabase, snapshot);
   if (!rawMessageId) validationErrors.push("close raw message was not found");
+
+  // Success notification is snapshotted before the authoritative RPC. For an
+  // addition it reports batch and cumulative day totals and never claims the
+  // original session was modified.
+  const notificationPayload = isAdditional && validationErrors.length === 0
+    ? buildAdditionalSessionSummary(parsed, await loadAdditionalDayContext(supabase, parsed))
+    : buildWeighSessionSummary(parsed);
 
   const transactionTypes = [...new Set(
     parsed.items.map((item) => item.transaction_type),
@@ -165,9 +230,16 @@ export async function finalizePendingGeneration(
     transaction_types: transactionTypes,
     validation_errors: validationErrors,
     finalization_started_at: finalizationStartedAt,
-    notification_payload: buildWeighSessionSummary(parsed),
+    notification_payload: notificationPayload,
     notification_source_id: snapshot.source_id,
     correlation_id: correlationId,
+    // Session-level provenance (0036): immutable ingest/generation identity is
+    // the authoritative idempotency key — same-generation retries collapse to
+    // one session while intentional identical additions persist separately.
+    session_kind: parsed.session_kind,
+    declared_transaction_type: parsed.declared_transaction_type,
+    ingest_idempotency_key: correlationId,
+    ingest_source: "line_webhook",
   };
   const itemPayload = parsed.items.map((item) => ({
     ...item,
@@ -204,7 +276,7 @@ export async function finalizePendingGeneration(
     // Once 0034 is installed, notification_id is always returned and success
     // delivery is handled exclusively by the durable worker.
     log.warn("produce notification outbox unavailable; using direct push fallback");
-    message = buildWeighSessionSummary(parsed);
+    message = notificationPayload;
   } else if (result.status === "duplicate") {
     message = "รายการนี้เคยบันทึกแล้ว";
   }

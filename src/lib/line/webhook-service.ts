@@ -127,9 +127,11 @@ function hasSessionEnd(text: string): boolean {
 
 export function parseExpectedItemCount(text: string): number | null {
   for (const rawLine of text.split("\n")) {
-    const match = normalizeLine(rawLine).trim().match(RE.SESSION_END_COUNT);
-    if (!match) continue;
-    const count = Number.parseInt(match[1], 10);
+    const line = normalizeLine(rawLine).trim();
+    const raw = line.match(RE.SESSION_END_COUNT)?.[1]
+      ?? line.match(RE.ADDITIONAL_END)?.[2];
+    if (raw === undefined) continue;
+    const count = Number.parseInt(raw, 10);
     return Number.isSafeInteger(count) && count > 0 ? count : null;
   }
   return null;
@@ -569,7 +571,18 @@ export class WebhookService {
     // ── 5. No active pending session ──────────────────────────────────────────
     // Uses the same strict header predicate as rotation (findProduceSessionHeader)
     // so creation and rotation always agree on what counts as a valid header.
-    if (findProduceSessionHeader(normalizedText) !== null) {
+    const incomingSessionHeader = findProduceSessionHeader(normalizedText);
+    if (incomingSessionHeader !== null) {
+      if (RE.ADDITIONAL_HEADER.test(incomingSessionHeader)) {
+        // Additional batches never take the legacy direct parser/persist path —
+        // even a pasted complete block goes through pending generation →
+        // deferred finalizer → authoritative RPC → notification outbox.
+        return this.startAdditionalPendingSession(
+          msgEvent, pendingService, sessionKey, sourceId, lineUserId,
+          text, normalizedText, eventId, log,
+        );
+      }
+
       if (hasSessionEnd(normalizedText) || hasItemLine(normalizedText)) {
         // Complete single-message: has SESSION_END or item lines → parse directly
         console.log("single complete message detected — parsing directly");
@@ -627,6 +640,89 @@ export class WebhookService {
 
     log.debug("no parser matched text message — left unprocessed");
     return { eventId, eventType: event.type, status: "saved", parsed: false };
+  }
+
+  // ── Additional produce batch: open (append-only, no direct persist) ──────
+  // Creates a fresh pending generation for an additional batch and, when the
+  // message already carries its closer, marks the close so the Release B
+  // deferred finalizer picks it up. No produce rows are written here.
+  private async startAdditionalPendingSession(
+    event:          LineMessageEvent,
+    pendingService: PendingSessionService,
+    sessionKey:     string,
+    sourceId:       string,
+    lineUserId:     string | null,
+    text:           string,
+    normalizedText: string,
+    eventId:        string,
+    log:            ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const replyToken = event.replyToken ?? null;
+    const markClose = hasSessionEnd(normalizedText);
+    const expectedItemCount = markClose ? parseExpectedItemCount(normalizedText) : null;
+
+    try {
+      // create() seeds the row; replaceGeneration() then rotates to a fresh
+      // generation, registers this event in the admission/ingest ledgers, and
+      // applies the close boundary — the same tested path header rotation uses.
+      await pendingService.create(sessionKey, sourceId, text, replyToken, lineUserId);
+      const created = await pendingService.get(sessionKey);
+      if (!created) throw new Error("pending session missing after create");
+
+      const replaced = await pendingService.replaceGeneration({
+        sessionKey,
+        sourceId,
+        expectedSessionGeneration: created.session_generation,
+        text,
+        replyToken,
+        lineUserId,
+        lineEventId: eventId,
+        lineTimestampMs: event.timestamp,
+        markClose,
+        expectedItemCount: expectedItemCount ?? undefined,
+      });
+      if (!replaced) throw new Error("additional pending session lost concurrency race");
+
+      log.info("additional produce session opened as pending generation", {
+        sessionKey,
+        sessionGeneration: replaced.session_generation,
+        markClose,
+        expectedItemCount,
+      });
+
+      if (markClose && replyToken) {
+        try {
+          await this.replyMessage(replyToken, PRODUCE_CLOSE_PENDING_REPLY);
+        } catch (replyError) {
+          log.error("additional close acknowledgement failed", {
+            error: String(replyError),
+          });
+        }
+      }
+      return { eventId, eventType: event.type, status: "saved", parsed: false };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("additional pending session open failed", {
+        sessionKey,
+        error: errorMessage,
+      });
+      if (replyToken) {
+        try {
+          await this.replyMessage(replyToken, STALE_PRODUCE_SESSION_REPLY);
+        } catch (replyError) {
+          log.error("additional open fail-closed reply failed", {
+            error: String(replyError),
+          });
+        }
+      }
+      return {
+        eventId,
+        eventType: event.type,
+        status: "error",
+        parsed: false,
+        error: errorMessage,
+      };
+    }
   }
 
   // ── Manual slip session: open ─────────────────────────────────────────────

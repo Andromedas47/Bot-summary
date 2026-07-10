@@ -19,6 +19,8 @@ export interface ReportRow {
   basis_quantity: number | null;
   basis_unit: string | null;
   basis_price: number | null;
+  /** "main" (ชุดหลัก) or "additional" (ชุดเพิ่ม); absent on legacy queries. */
+  session_kind?: string | null;
 }
 
 export type SettlementMap = Record<string, {

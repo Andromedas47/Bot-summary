@@ -10,7 +10,23 @@ import type {
   WeighSession,
   WeighSessionItem,
   TransactionType,
+  SessionKind,
+  BaseTransactionType,
 } from "./types";
+
+// Additional-batch header keyword → the base transaction type its items store.
+export const ADDITIONAL_TYPE_MAP: Record<string, BaseTransactionType> = {
+  "เบิกเพิ่ม":   "เบิก",
+  "ชั่งคืนเพิ่ม": "คืน",
+  "คืนเสียเพิ่ม": "คืนเสีย",
+};
+
+// Base transaction type → additional-batch keyword (for replies/closers).
+export const ADDITIONAL_TYPE_LABEL: Record<BaseTransactionType, string> = {
+  "เบิก":   "เบิกเพิ่ม",
+  "คืน":    "ชั่งคืนเพิ่ม",
+  "คืนเสีย": "คืนเสียเพิ่ม",
+};
 
 // ── Pure parse function (exported for unit tests) ─────────────────────────────
 
@@ -32,6 +48,9 @@ export function parseWeighSession(
   let currentSection                 = "main";
   let currentTxType: TransactionType = "เบิก";
   let state: "header" | "items"      = "header";
+  let sessionKind: SessionKind       = "main";
+  let declaredTxType: BaseTransactionType | null = null;
+  let additionalOpener: string | null = null;
 
   const items:       WeighSessionItem[]        = [];
   const parseErrors: string[]                  = [];
@@ -72,6 +91,19 @@ export function parseWeighSession(
         pushOrMergeItem(items, finalizedItem);
         pendingItem = null;
       }
+      // Closer/opener discipline: an additional batch must close with its own
+      // matching จบรายการ<type>เพิ่ม closer, and additional closers are invalid
+      // for main sessions.
+      const additionalEnd = content.match(RE.ADDITIONAL_END);
+      if (sessionKind === "additional") {
+        if (!additionalEnd || additionalEnd[1] !== additionalOpener) {
+          parseErrors.push(
+            `wrong closer for additional session (expected จบรายการ${additionalOpener}): "${line}"`,
+          );
+        }
+      } else if (additionalEnd) {
+        parseErrors.push(`additional closer without an additional header: "${line}"`);
+      }
       currentSection = "main";
       continue;
     }
@@ -86,6 +118,24 @@ export function parseWeighSession(
       }
       if (headerItem) {
         pendingItem = headerItem;
+        state = "items";
+        continue;
+      }
+
+      // Additional-batch opener — must win over SELLER_MARKET (whose
+      // alternation would also match เบิกเพิ่ม). Requires full anchored
+      // "ชื่อ-ตลาด <type>เพิ่ม วันที่" — staff, market, type, and date are all
+      // explicit, with no fallback to sender name or today.
+      const addMatch = content.match(RE.ADDITIONAL_HEADER);
+      if (addMatch) {
+        staffName        = addMatch[1].trim();
+        sessionTitle     = addMatch[2].trim();
+        additionalOpener = addMatch[3];
+        declaredTxType   = ADDITIONAL_TYPE_MAP[addMatch[3]];
+        sessionKind      = "additional";
+        currentTxType    = declaredTxType;
+        const dm = addMatch[4].match(RE.DATE_IN_TEXT);
+        if (dm) date = parseBuddhistDate(dm[1], dm[2], dm[3]);
         state = "items";
         continue;
       }
@@ -152,7 +202,10 @@ export function parseWeighSession(
             pendingItem = null;
           }
           const nextTxType = detectTxType(content);
-          if (nextTxType) {
+          if (nextTxType && sessionKind === "additional") {
+            // An additional batch carries exactly one declared type end-to-end.
+            parseErrors.push(`section change not allowed in additional session: "${line}"`);
+          } else if (nextTxType) {
             currentSection = content;
             currentTxType  = nextTxType;
           } else {
@@ -187,7 +240,9 @@ export function parseWeighSession(
       pendingItem = null;
     }
     const nextTxType = detectTxType(content);
-    if (nextTxType) {
+    if (nextTxType && sessionKind === "additional") {
+      parseErrors.push(`section change not allowed in additional session: "${line}"`);
+    } else if (nextTxType) {
       currentSection = content;
       currentTxType  = nextTxType;
     } else {
@@ -202,11 +257,15 @@ export function parseWeighSession(
   }
 
   return {
-    date:             date ?? fallbackDate,
+    // Additional sessions must carry an explicit date — never fall back to
+    // the event's business date (see ADDITIONAL_HEADER, which requires one).
+    date:             sessionKind === "additional" ? date : (date ?? fallbackDate),
     staff_name:       staffName ?? senderName ?? "",
     sender_name:      senderName,
     transaction_time: txTime ?? fallbackTime ?? null,
     session_title:    sessionTitle,
+    session_kind:     sessionKind,
+    declared_transaction_type: declaredTxType,
     items,
     parse_errors:     parseErrors,
   };
@@ -225,6 +284,23 @@ export function getWeighSessionFinalizationErrors(session: WeighSession): string
       errors.push(
         `item #${item.item_number} "${item.product_name}" has invalid quantity or unit`,
       );
+    }
+  }
+
+  if (session.session_kind === "additional") {
+    if (!session.staff_name) errors.push("additional session requires an explicit staff name");
+    if (!session.session_title) errors.push("additional session requires an explicit market");
+    if (!session.date) errors.push("additional session requires an explicit date");
+    if (!session.declared_transaction_type) {
+      errors.push("additional session requires a declared base transaction type");
+    }
+
+    const seen = new Set<number>();
+    for (const item of session.items) {
+      if (seen.has(item.item_number)) {
+        errors.push(`duplicate item number #${item.item_number} in additional session`);
+      }
+      seen.add(item.item_number);
     }
   }
 

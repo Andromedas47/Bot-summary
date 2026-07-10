@@ -21,6 +21,8 @@ function makeSession(overrides: Partial<WeighSession> = {}): WeighSession {
     sender_name: null,
     transaction_time: null,
     session_title: null,
+    session_kind: "main",
+    declared_transaction_type: null,
     items: [],
     parse_errors: [],
     ...overrides,

@@ -1,5 +1,8 @@
 export type TransactionType = "เบิก" | "เบิกเพิ่ม" | "คืน" | "คืนเสีย";
 export type PricingMode     = "unit" | "basis";
+export type SessionKind     = "main" | "additional";
+/** The three accounting base types; the only values stored for new items. */
+export type BaseTransactionType = "เบิก" | "คืน" | "คืนเสีย";
 
 export interface WeighSessionItem {
   item_number:      number;
@@ -35,6 +38,10 @@ export interface WeighSession {
   /** "HH:MM" from first TIME_PREFIX in the message */
   transaction_time: string | null;
   session_title:    string | null;
+  /** "additional" for append-only เบิกเพิ่ม/ชั่งคืนเพิ่ม/คืนเสียเพิ่ม batches. */
+  session_kind:     SessionKind;
+  /** Base transaction type declared by an additional-batch header; null for main. */
+  declared_transaction_type: BaseTransactionType | null;
   items:            WeighSessionItem[];
   parse_errors:     string[];
 }

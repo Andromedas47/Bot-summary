@@ -9,12 +9,12 @@ const migrationPath = new URL(
 describe("produce finalization notification boundary", () => {
   it("snapshots the success summary before the authoritative RPC", async () => {
     const source = await Bun.file(finalizerPath).text();
-    const payload = source.indexOf(
-      "notification_payload: buildWeighSessionSummary(parsed)",
-    );
+    const payload = source.indexOf("notification_payload: notificationPayload");
+    const payloadBuild = source.indexOf("const notificationPayload =");
     const finalize = source.indexOf("service.tryFinalizeGeneration(");
 
-    expect(payload).toBeGreaterThan(0);
+    expect(payloadBuild).toBeGreaterThan(0);
+    expect(payload).toBeGreaterThan(payloadBuild);
     expect(payload).toBeLessThan(finalize);
     expect(source).toContain("notification_source_id: snapshot.source_id");
     expect(source).toContain("correlation_id: correlationId");
@@ -23,9 +23,7 @@ describe("produce finalization notification boundary", () => {
   it("uses direct success push only as a pre-migration rolling fallback", async () => {
     const source = await Bun.file(finalizerPath).text();
     const notificationBranch = source.indexOf("let message: string | null");
-    const summaryBuild = source.indexOf(
-      "notification_payload: buildWeighSessionSummary(parsed)",
-    );
+    const summaryBuild = source.indexOf("notification_payload: notificationPayload");
 
     expect(summaryBuild).toBeLessThan(notificationBranch);
     expect(source).toContain(

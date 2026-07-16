@@ -29,6 +29,7 @@ function correction(status: TransactionCorrection["status"]): TransactionCorrect
     status,
     reason_type: "wrong_price",
     reason_detail: "ลงราคาเบิกผิด",
+    requested_changes: { priceAmount: 109 },
     before_snapshot: before,
     after_snapshot: buildAfterSnapshot(before, { priceAmount: 109 }),
     requested_by: "requester",

@@ -41,6 +41,7 @@ export function snapshotFromTransaction(row: ProduceTransactionLike): Correction
   return {
     sourceTransactionId: row.id,
     sourceLineMessageId: row.raw_message_id,
+    sourceVersion: rawTargetVersion(row.id),
     productName: row.product_name,
     sourceNames: [row.product_name],
     quantity,

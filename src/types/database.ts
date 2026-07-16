@@ -244,6 +244,7 @@ export interface Database {
           status: TransactionCorrectionStatus;
           reason_type: TransactionCorrectionReasonType;
           reason_detail: string;
+          requested_changes: Json;
           before_snapshot: Json;
           after_snapshot: Json;
           requested_by: string;
@@ -261,52 +262,8 @@ export interface Database {
           created_at: string;
           updated_at: string;
         };
-        Insert: {
-          id?: string;
-          target_transaction_id: string;
-          status?: TransactionCorrectionStatus;
-          reason_type: TransactionCorrectionReasonType;
-          reason_detail: string;
-          before_snapshot: Json;
-          after_snapshot: Json;
-          requested_by: string;
-          requested_at?: string;
-          approved_by?: string | null;
-          approved_at?: string | null;
-          rejected_by?: string | null;
-          rejected_at?: string | null;
-          rejection_reason?: string | null;
-          supersedes_correction_id?: string | null;
-          source_line_message_id?: string | null;
-          evidence_url?: string | null;
-          target_version: string;
-          request_key: string;
-          created_at?: string;
-          updated_at?: string;
-        };
-        Update: {
-          id?: string;
-          target_transaction_id?: string;
-          status?: TransactionCorrectionStatus;
-          reason_type?: TransactionCorrectionReasonType;
-          reason_detail?: string;
-          before_snapshot?: Json;
-          after_snapshot?: Json;
-          requested_by?: string;
-          requested_at?: string;
-          approved_by?: string | null;
-          approved_at?: string | null;
-          rejected_by?: string | null;
-          rejected_at?: string | null;
-          rejection_reason?: string | null;
-          supersedes_correction_id?: string | null;
-          source_line_message_id?: string | null;
-          evidence_url?: string | null;
-          target_version?: string;
-          request_key?: string;
-          created_at?: string;
-          updated_at?: string;
-        };
+        Insert: never;
+        Update: never;
         Relationships: [
           {
             foreignKeyName: "transaction_corrections_target_transaction_id_fkey";
@@ -1004,6 +961,18 @@ export interface Database {
     Functions: {
       approve_transaction_correction: {
         Args: { p_correction_id: string; p_expected_target_version: string };
+        Returns: Json;
+      };
+      request_transaction_correction: {
+        Args: {
+          p_target_transaction_id: string;
+          p_reason_type: string;
+          p_reason_detail: string;
+          p_requested_changes: Json;
+          p_idempotency_key: string;
+          p_source_line_message_id?: string | null;
+          p_evidence_url?: string | null;
+        };
         Returns: Json;
       };
       reject_transaction_correction: {

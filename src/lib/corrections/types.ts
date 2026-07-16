@@ -13,6 +13,7 @@ export type CorrectionReasonType = (typeof CORRECTION_REASON_TYPES)[number];
 export interface CorrectionSnapshot {
   sourceTransactionId: string;
   sourceLineMessageId: string | null;
+  sourceVersion: string;
   productName: string;
   sourceNames: string[];
   quantity: number;
@@ -33,6 +34,7 @@ export interface TransactionCorrection {
   status: CorrectionStatus;
   reason_type: CorrectionReasonType;
   reason_detail: string;
+  requested_changes: CorrectionDraftChanges;
   before_snapshot: CorrectionSnapshot;
   after_snapshot: CorrectionSnapshot;
   requested_by: string;

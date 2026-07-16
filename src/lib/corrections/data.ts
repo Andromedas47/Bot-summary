@@ -2,17 +2,46 @@ import "server-only";
 
 import { createServiceClient } from "@/lib/supabase/server";
 import { correctionTargetVersion, rawTargetVersion, snapshotFromTransaction } from "@/lib/corrections/effective-transactions";
-import type { CorrectionSnapshot, ProduceTransactionLike, TransactionCorrection } from "@/lib/corrections/types";
+import type {
+  CorrectionDraftChanges,
+  CorrectionSnapshot,
+  ProduceTransactionLike,
+  TransactionCorrection,
+} from "@/lib/corrections/types";
 import type { TransactionCorrectionRow } from "@/types/database";
 
 function rowToCorrection(row: TransactionCorrectionRow): TransactionCorrection {
-  return { ...row, before_snapshot: row.before_snapshot as unknown as CorrectionSnapshot, after_snapshot: row.after_snapshot as unknown as CorrectionSnapshot };
+  return {
+    ...row,
+    requested_changes: row.requested_changes as unknown as CorrectionDraftChanges,
+    before_snapshot: row.before_snapshot as unknown as CorrectionSnapshot,
+    after_snapshot: row.after_snapshot as unknown as CorrectionSnapshot,
+  };
 }
 
 export async function getCorrection(id: string): Promise<TransactionCorrection | null> {
   const { data, error } = await createServiceClient().from("transaction_corrections").select("*").eq("id", id).maybeSingle();
   if (error) throw new Error(error.message);
   return data ? rowToCorrection(data) : null;
+}
+
+export async function getCorrectionAuditRecord(id: string): Promise<{
+  correction: TransactionCorrection;
+  supersededById: string | null;
+} | null> {
+  const correction = await getCorrection(id);
+  if (!correction) return null;
+
+  const { data, error } = await createServiceClient()
+    .from("transaction_corrections")
+    .select("id")
+    .eq("supersedes_correction_id", id)
+    .in("status", ["approved", "superseded"])
+    .order("approved_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  return { correction, supersededById: data?.id ?? null };
 }
 
 export async function listCorrections(filters: { date?: string; worker?: string; status?: string; reason?: string }): Promise<TransactionCorrection[]> {
@@ -42,9 +71,15 @@ export async function getCorrectionTarget(transactionId: string): Promise<{
   if (rawError) throw new Error(rawError.message);
   if (correctionError) throw new Error(correctionError.message);
   const source = raw as ProduceTransactionLike;
+  const current = active
+    ? {
+        ...(active.after_snapshot as unknown as CorrectionSnapshot),
+        sourceVersion: correctionTargetVersion(active.id),
+      }
+    : snapshotFromTransaction(source);
   return {
     raw: source,
-    current: active ? (active.after_snapshot as unknown as CorrectionSnapshot) : snapshotFromTransaction(source),
+    current,
     targetVersion: active ? correctionTargetVersion(active.id) : rawTargetVersion(transactionId),
     supersedesCorrectionId: active?.id ?? null,
   };

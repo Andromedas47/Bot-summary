@@ -7,10 +7,13 @@ import {
   processDueProduceNotifications,
   resendProduceNotification,
 } from "@/lib/line/produce-notification-delivery";
+import { createSweepCoordinator } from "./sweep-coordinator";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
+
+const sweepCoordinator = createSweepCoordinator();
 
 export async function GET(req: NextRequest) {
   const auth = checkCronAuth(
@@ -30,17 +33,34 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const supabase = createServiceClient();
-    const result = await finalizeDuePendingGenerations(supabase);
-    const notifications = await processDueProduceNotifications(supabase);
+    const coordinated = await sweepCoordinator.run(async () => {
+      const supabase = createServiceClient();
+      const result = await finalizeDuePendingGenerations(supabase);
+      const notifications = await processDueProduceNotifications(supabase);
+      return { result, notifications };
+    });
+    if (coordinated.status === "rate_limited") {
+      logger.warn("pending produce finalizer skipped frequent invocation", {
+        retryAfterMs: coordinated.retryAfterMs,
+      });
+      return NextResponse.json({
+        ok: true,
+        skipped: "rate_limited",
+        retryAfterMs: coordinated.retryAfterMs,
+      });
+    }
+
+    const { result, notifications } = coordinated.value;
     logger.info("pending produce finalizer completed", {
       ...result,
       notifications,
+      coordination: coordinated.status,
     });
     return NextResponse.json({
       ok: true,
       ...result,
       notifications,
+      coordination: coordinated.status,
       triggeredAt: new Date().toISOString(),
     });
   } catch (error) {

@@ -58,6 +58,7 @@ export default async function ReconciliationPage({ searchParams }: PageProps) {
   if (market) exportParams.set("market", market);
   if (status) exportParams.set("status", status);
   const exportUrl = `/api/export/reconciliation?${exportParams}`;
+  const pdfUrl = `/api/pdf/reconciliation?${exportParams}`;
 
   const moneyIcon = (
     <svg className="size-5" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24">
@@ -116,6 +117,12 @@ export default async function ReconciliationPage({ searchParams }: PageProps) {
               <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
             </svg>
             ส่งออก Excel
+          </a>
+          <a
+            href={pdfUrl}
+            className="flex h-9 items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3 text-sm font-medium text-red-700 transition-colors hover:bg-red-100"
+          >
+            ส่งออก PDF
           </a>
         </div>
 

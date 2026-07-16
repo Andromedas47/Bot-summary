@@ -53,4 +53,26 @@
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+
+.compare-a4-page {
+  width: min(100%, 210mm);
+  min-height: 297mm;
+  margin-inline: auto;
+}
+
+@media print {
+  @page { size: A4 portrait; margin: 10mm; }
+  nav, aside, button { display: none !important; }
+  body { background: white !important; }
+  .compare-a4-page {
+    width: 190mm;
+    min-height: 277mm;
+    break-after: page;
+    page-break-after: always;
+  }
+  .compare-a4-page:last-child { break-after: auto; page-break-after: auto; }
+  .compare-a4-page tr { break-inside: avoid; page-break-inside: avoid; }
+  .compare-a4-page thead { display: table-header-group; }
+  main { padding: 0 !important; }
+}
 }

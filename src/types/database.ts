@@ -31,6 +31,8 @@ export type SlipBatchStatus =
 export type ManualSlipSessionStatus      = "open" | "closed";
 export type SettlementFinalizationStatus = "pending" | "sending" | "sent" | "failed" | "ambiguous";
 export type ProduceNotificationStatus = "pending" | "sending" | "sent" | "failed";
+export type TransactionCorrectionStatus = "pending" | "approved" | "rejected" | "superseded" | "cancelled";
+export type TransactionCorrectionReasonType = "wrong_price" | "wrong_quantity" | "wrong_unit" | "wrong_product" | "duplicate" | "other";
 
 // ─── Database schema ──────────────────────────────────────────────────
 export interface Database {
@@ -233,6 +235,94 @@ export interface Database {
           basis_price?:      number | null;
         };
         Relationships: [];
+      };
+
+      transaction_corrections: {
+        Row: {
+          id: string;
+          target_transaction_id: string;
+          status: TransactionCorrectionStatus;
+          reason_type: TransactionCorrectionReasonType;
+          reason_detail: string;
+          before_snapshot: Json;
+          after_snapshot: Json;
+          requested_by: string;
+          requested_at: string;
+          approved_by: string | null;
+          approved_at: string | null;
+          rejected_by: string | null;
+          rejected_at: string | null;
+          rejection_reason: string | null;
+          supersedes_correction_id: string | null;
+          source_line_message_id: string | null;
+          evidence_url: string | null;
+          target_version: string;
+          request_key: string;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          target_transaction_id: string;
+          status?: TransactionCorrectionStatus;
+          reason_type: TransactionCorrectionReasonType;
+          reason_detail: string;
+          before_snapshot: Json;
+          after_snapshot: Json;
+          requested_by: string;
+          requested_at?: string;
+          approved_by?: string | null;
+          approved_at?: string | null;
+          rejected_by?: string | null;
+          rejected_at?: string | null;
+          rejection_reason?: string | null;
+          supersedes_correction_id?: string | null;
+          source_line_message_id?: string | null;
+          evidence_url?: string | null;
+          target_version: string;
+          request_key: string;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          target_transaction_id?: string;
+          status?: TransactionCorrectionStatus;
+          reason_type?: TransactionCorrectionReasonType;
+          reason_detail?: string;
+          before_snapshot?: Json;
+          after_snapshot?: Json;
+          requested_by?: string;
+          requested_at?: string;
+          approved_by?: string | null;
+          approved_at?: string | null;
+          rejected_by?: string | null;
+          rejected_at?: string | null;
+          rejection_reason?: string | null;
+          supersedes_correction_id?: string | null;
+          source_line_message_id?: string | null;
+          evidence_url?: string | null;
+          target_version?: string;
+          request_key?: string;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "transaction_corrections_target_transaction_id_fkey";
+            columns: ["target_transaction_id"];
+            isOneToOne: false;
+            referencedRelation: "produce_items";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "transaction_corrections_supersedes_correction_id_fkey";
+            columns: ["supersedes_correction_id"];
+            isOneToOne: false;
+            referencedRelation: "transaction_corrections";
+            referencedColumns: ["id"];
+          },
+        ];
       };
 
       produce_session_notifications: {
@@ -863,8 +953,67 @@ export interface Database {
         Update: never;
         Relationships: [];
       };
+      effective_produce_transactions: {
+        Row: {
+          id: string;
+          item_number: number | null;
+          product_name: string;
+          price_per_unit: number | null;
+          quantity: number | null;
+          total_amount: number | null;
+          unit: string | null;
+          section: string;
+          transaction_type: string;
+          item_hash: string | null;
+          item_created_at: string;
+          session_id: string;
+          transaction_date: string | null;
+          transaction_time: string | null;
+          market_name: string | null;
+          staff_name: string;
+          sender_name: string | null;
+          session_created_at: string;
+          raw_message_id: string;
+          source_message: string | null;
+          basis_quantity: number | null;
+          basis_unit: string | null;
+          basis_price: number | null;
+          pricing_mode: string;
+          base_transaction_type: string;
+          session_kind: string;
+          declared_transaction_type: string | null;
+          is_corrected: boolean;
+          correction_id: string | null;
+          correction_reason_type: TransactionCorrectionReasonType | null;
+          correction_reason_detail: string | null;
+          correction_requested_by: string | null;
+          correction_approved_by: string | null;
+          correction_approved_at: string | null;
+          original_product_name: string;
+          original_quantity: number | null;
+          original_unit: string | null;
+          original_price_amount: number | null;
+          original_price_quantity: number | null;
+          original_total_amount: number | null;
+        };
+        Insert: never;
+        Update: never;
+        Relationships: [];
+      };
     };
     Functions: {
+      approve_transaction_correction: {
+        Args: { p_correction_id: string; p_expected_target_version: string };
+        Returns: Json;
+      };
+      reject_transaction_correction: {
+        Args: { p_correction_id: string; p_rejection_reason: string };
+        Returns: Json;
+      };
+      is_transaction_correction_approver: {
+        Args: Record<PropertyKey, never>;
+        Returns: boolean;
+      };
       attach_evidence_to_slip_batch: {
         Args: { p_batch_id: string; p_evidence_id: string };
         Returns: number;
@@ -915,3 +1064,4 @@ export type ManualSlipSessionRow         = Database["public"]["Tables"]["manual_
 export type ManualSlipEntryRow           = Database["public"]["Tables"]["manual_slip_entries"]["Row"];
 export type TransferReconciliationRow      = Database["public"]["Tables"]["transfer_reconciliations"]["Row"];
 export type SettlementFinalizationRow      = Database["public"]["Tables"]["settlement_finalizations"]["Row"];
+export type TransactionCorrectionRow = Database["public"]["Tables"]["transaction_corrections"]["Row"];

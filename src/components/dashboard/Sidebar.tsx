@@ -47,6 +47,15 @@ const operationalItems: NavItem[] = [
     ),
   },
   {
+    href:  "/reports/compare",
+    label: "รายงานเปรียบเทียบ",
+    icon: (
+      <svg className="size-4.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 3v18M16.5 3v18M3 7.5h18M3 16.5h18" />
+      </svg>
+    ),
+  },
+  {
     href:  "/reconciliation",
     label: "กระทบยอดการเงิน",
     icon: (
@@ -58,6 +67,16 @@ const operationalItems: NavItem[] = [
 ];
 
 const adminItems: NavItem[] = [
+  {
+    href:  "/corrections",
+    label: "รายการปรับแก้",
+    icon: (
+      <svg className="size-4.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897L16.862 4.487Z" />
+        <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 7.125V18A2.625 2.625 0 0 1 16.875 20.625H5.625A2.625 2.625 0 0 1 3 18V6.75a2.625 2.625 0 0 1 2.625-2.625H16.5" />
+      </svg>
+    ),
+  },
   {
     href:  "/admin/messages",
     label: "ข้อความดิบ LINE",
@@ -109,7 +128,7 @@ function NavSection({
       </p>
       <div className="space-y-0.5">
         {items.map((item) => {
-          const isActive = pathname === item.href;
+          const isActive = pathname === item.href || (item.href !== "/" && pathname.startsWith(`${item.href}/`));
           return (
             <Link
               key={item.href}

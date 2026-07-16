@@ -26,7 +26,7 @@ async function getRows(
   seller?: string,
 ): Promise<ReportRow[]> {
   let query = supabase
-    .from("produce_transactions")
+    .from("effective_produce_transactions")
     .select(
       "transaction_date, market_name, staff_name, product_name, quantity, unit, price_per_unit, total_amount, transaction_type, item_number, basis_quantity, basis_unit, basis_price, session_kind",
     )

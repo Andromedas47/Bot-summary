@@ -12,7 +12,7 @@ export async function GET(req: NextRequest) {
   const supabase = await createServiceClient();
 
   let query = supabase
-    .from("produce_transactions")
+    .from("effective_produce_transactions")
     .select("transaction_type, total_amount")
     .eq("transaction_date", date)
     .in("transaction_type", KNOWN_TX_TYPES as unknown as string[]);

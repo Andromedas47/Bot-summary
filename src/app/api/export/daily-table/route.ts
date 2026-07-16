@@ -27,7 +27,7 @@ export async function GET(req: NextRequest) {
   const supabase = await createServiceClient();
 
   let query = supabase
-    .from("produce_transactions")
+    .from("effective_produce_transactions")
     .select("*")
     .order("session_created_at", { ascending: false })
     .order("item_number",        { ascending: true,  nullsFirst: false })

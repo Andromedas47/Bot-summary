@@ -101,7 +101,7 @@ async function findSourceIdForContext(
   params: { date: string; market: string; seller: string },
 ): Promise<string | undefined> {
   const { data: transactions, error } = await supabase
-    .from("produce_transactions")
+    .from("effective_produce_transactions")
     .select("raw_message_id")
     .eq("transaction_date", params.date)
     .eq("market_name", params.market)

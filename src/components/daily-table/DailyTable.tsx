@@ -3,7 +3,7 @@
 import type { Database } from "@/types/database";
 import { displayMarketName } from "@/lib/market";
 
-export type DailyRow = Database["public"]["Views"]["produce_transactions"]["Row"];
+export type DailyRow = Database["public"]["Views"]["effective_produce_transactions"]["Row"];
 
 function fmt(n: number | null | undefined, decimals = 2): string {
   if (n == null) return "—";
@@ -58,6 +58,15 @@ function KindBadge({ kind }: { kind: string | null | undefined }) {
 }
 
 const TH = "px-3 py-2.5 text-left text-[0.6875rem] font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap";
+function CorrectionBadge({ corrected }: { corrected: boolean | null | undefined }) {
+  if (!corrected) return null;
+  return (
+    <span className="inline-block rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 ring-1 ring-amber-200">
+      แก้ไขแล้ว
+    </span>
+  );
+}
+
 const TD = "px-3 py-2.5 text-sm";
 
 export function DailyTable({ rows }: { rows: DailyRow[] }) {
@@ -88,6 +97,7 @@ export function DailyTable({ rows }: { rows: DailyRow[] }) {
               <div className="flex items-center gap-2 min-w-0">
                 <TxBadge type={row.transaction_type} />
                 <KindBadge kind={row.session_kind} />
+                <CorrectionBadge corrected={row.is_corrected} />
                 <span className="truncate text-sm font-medium text-slate-900">
                   {row.product_name}
                 </span>
@@ -161,6 +171,7 @@ export function DailyTable({ rows }: { rows: DailyRow[] }) {
                   <span className="inline-flex items-center gap-1">
                     <TxBadge type={row.transaction_type} />
                     <KindBadge kind={row.session_kind} />
+                    <CorrectionBadge corrected={row.is_corrected} />
                   </span>
                 </td>
                 <td className={`${TD} text-right tabular-nums text-slate-400`}>

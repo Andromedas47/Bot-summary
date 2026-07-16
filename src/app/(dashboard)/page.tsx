@@ -35,7 +35,7 @@ async function getTransactions(
   const to   = from + PAGE_SIZE - 1;
 
   let query = supabase
-    .from("produce_transactions")
+    .from("effective_produce_transactions")
     .select("*", { count: "exact" })
     .order("session_created_at", { ascending: false })
     .order("item_number",        { ascending: true,  nullsFirst: false })

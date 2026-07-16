@@ -106,7 +106,7 @@ async function fetchAllTxRows(
 
   while (true) {
     const { data, error } = await supabase
-      .from("produce_transactions")
+      .from("effective_produce_transactions")
       .select("transaction_date, transaction_time, market_name, staff_name, transaction_type, total_amount, raw_message_id")
       .gte("transaction_date", from)
       .lt("transaction_date",  toExclusive)

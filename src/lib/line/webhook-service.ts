@@ -10,7 +10,7 @@ import type { Database, LineMessageType } from "@/types/database";
 import { getSourceId, getUserId, getPendingSessionKey } from "@/lib/line/verify";
 import { parserRegistry } from "@/lib/parsers/registry";
 import { logger } from "@/lib/logger";
-import { replyLineMessage, buildWeighSessionSummary } from "@/lib/line/reply";
+import { replyLineMessage, replyLineMessages, buildWeighSessionSummary } from "@/lib/line/reply";
 import {
   parseWeighSession,
   parseBuddhistDate,
@@ -40,7 +40,7 @@ import { SlipBatchService, type SlipBatchIngestor } from "@/lib/slips/batch-serv
 import { tryFinalizeSettlement } from "@/lib/settlement-finalizer";
 import { parseRemainingFruitCommandFromMessage } from "@/lib/summary/remaining-fruit-command";
 import { fetchRemainingFruitRows } from "@/lib/summary/remaining-fruit-data";
-import { buildRemainingFruitMessageFromRows } from "@/lib/summary/remaining-fruit-message";
+import { buildRemainingFruitMessagesFromRows } from "@/lib/summary/remaining-fruit-message";
 import {
   SlipSessionService,
   parseSlipSessionHeader,
@@ -917,11 +917,11 @@ export class WebhookService {
         businessDate,
         command.marketFilter,
       );
-      const message = buildRemainingFruitMessageFromRows(businessDate, rows, {
+      const messages = buildRemainingFruitMessagesFromRows(businessDate, rows, {
         marketFilter: command.marketFilter,
         includeOverall: !command.marketFilter,
       });
-      if (replyToken) await this.replyMessage(replyToken, message);
+      if (replyToken) await replyLineMessages(replyToken, messages);
       return { eventId, eventType, status: "saved", parsed: false };
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);

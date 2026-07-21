@@ -3,9 +3,11 @@ import {
   buildAdditionalSessionSummary,
   buildWeighSessionSummary,
   LinePushError,
+  measureLineText,
   parseRetryAfterMs,
   pushLineMessage,
   replyLineMessage,
+  replyLineMessages,
 } from "./reply";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 
@@ -271,7 +273,7 @@ describe("pushLineMessage — X-Line-Retry-Key and 409 handling", () => {
 });
 
 describe("LINE API error logging", () => {
-  it("does not log or throw the LINE reply response body", async () => {
+  it("logs reply response body and message metrics without exposing them in thrown errors", async () => {
     const sensitiveBody = '{"message":"sensitive LINE detail"}';
     globalThis.fetch = (async () =>
       new Response(sensitiveBody, { status: 401 })) as unknown as typeof fetch;
@@ -284,9 +286,48 @@ describe("LINE API error logging", () => {
     const logged = errorLog.mock.calls.flat().join(" ");
     expect(logged).toContain("authentication_error");
     expect(logged).toContain("reply");
-    expect(logged).not.toContain(sensitiveBody);
-    expect(logged).not.toContain("sensitive LINE detail");
+    expect(logged).toContain("responseBody");
+    expect(logged).toContain("messageCount");
+    expect(logged).toContain("codePoints");
+    expect(logged).toContain("utf8Bytes");
+    expect(logged).toContain("sensitive LINE detail");
+
+    let thrown: unknown;
+    try {
+      await replyLineMessage("reply-token", "message");
+    } catch (error) {
+      thrown = error;
+    }
+    expect(String(thrown)).not.toContain(sensitiveBody);
     errorLog.mockRestore();
+  });
+
+  it("replyLineMessages sends multiple text objects and logs each message length", async () => {
+    type CapturedReplyBody = { messages: Array<{ type: string; text: string }> };
+    let capturedBody: CapturedReplyBody | null = null;
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      capturedBody = JSON.parse(String(init?.body)) as CapturedReplyBody;
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    const infoLog = spyOn(console, "log").mockImplementation(() => {});
+
+    await replyLineMessages("reply-token", ["part one", "part two"]);
+
+    expect(capturedBody).not.toBeNull();
+    expect(capturedBody!.messages).toEqual([
+      { type: "text", text: "part one" },
+      { type: "text", text: "part two" },
+    ]);
+
+    const logged = infoLog.mock.calls.flat().join(" ");
+    expect(logged).toContain("messageCount");
+    expect(logged).toContain("codePoints");
+    infoLog.mockRestore();
+  });
+
+  it("measureLineText counts Unicode code points and UTF-8 bytes", () => {
+    expect(measureLineText("abc")).toEqual({ codePoints: 3, utf8Bytes: 3 });
+    expect(measureLineText("👋")).toEqual({ codePoints: 1, utf8Bytes: 4 });
   });
 
   it("does not log or throw the LINE push response body", async () => {

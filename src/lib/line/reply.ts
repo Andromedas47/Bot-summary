@@ -3,7 +3,28 @@ import { formatThaiDate } from "@/lib/date";
 import type { WeighSession, WeighSessionItem } from "@/lib/parsers/weigh-session/types";
 import { ADDITIONAL_TYPE_LABEL } from "@/lib/parsers/weigh-session/parser";
 
-export async function replyLineMessage(replyToken: string, text: string): Promise<void> {
+export function measureLineText(text: string): { codePoints: number; utf8Bytes: number } {
+  return {
+    codePoints: [...text].length,
+    utf8Bytes: new TextEncoder().encode(text).length,
+  };
+}
+
+function logLineTextMetrics(
+  operation: "reply" | "push",
+  texts: string[],
+): Array<{ index: number; codePoints: number; utf8Bytes: number }> {
+  return texts.map((text, index) => ({ index, ...measureLineText(text) }));
+}
+
+export async function replyLineMessages(replyToken: string, texts: string[]): Promise<void> {
+  const messages = texts.map((text) => ({ type: "text" as const, text }));
+  logger.info("LINE reply sending", {
+    operation: "reply",
+    messageCount: messages.length,
+    messages: logLineTextMetrics("reply", texts),
+  });
+
   let res: Response;
   try {
     res = await fetch("https://api.line.me/v2/bot/message/reply", {
@@ -12,27 +33,34 @@ export async function replyLineMessage(replyToken: string, text: string): Promis
         Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        replyToken,
-        messages: [{ type: "text", text }],
-      }),
+      body: JSON.stringify({ replyToken, messages }),
     });
   } catch {
     logger.error("LINE API request failed", {
       operation: "reply",
       category: "network_error",
+      messageCount: messages.length,
+      messages: logLineTextMetrics("reply", texts),
     });
     throw new Error("LINE reply network error");
   }
 
   if (!res.ok) {
+    const responseBody = await res.text();
     logger.error("LINE API request failed", {
       operation: "reply",
       status: res.status,
       category: lineHttpErrorCategory(res.status),
+      responseBody,
+      messageCount: messages.length,
+      messages: logLineTextMetrics("reply", texts),
     });
     throw new Error(`LINE reply HTTP ${res.status}`);
   }
+}
+
+export async function replyLineMessage(replyToken: string, text: string): Promise<void> {
+  await replyLineMessages(replyToken, [text]);
 }
 
 export type PushResult = { status: "delivered" | "already_accepted" };

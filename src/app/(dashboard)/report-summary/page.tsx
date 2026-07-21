@@ -6,8 +6,11 @@ import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/Card";
 import { DateInput } from "@/components/ui/DateInput";
 import { SearchInput } from "@/components/ui/SearchInput";
 import { ReportSummary } from "@/components/report-summary/ReportSummary";
+import { RemainingFruitSection } from "@/components/report-summary/RemainingFruitSection";
 import type { ReportRow, SettlementMap } from "@/lib/summary/report";
 import { displayMarketName } from "@/lib/market";
+import { buildRemainingFruitReport } from "@/lib/summary/remaining-fruit";
+import { fetchRemainingFruitRows } from "@/lib/summary/remaining-fruit-data";
 
 interface PageProps {
   searchParams: Promise<{
@@ -104,6 +107,15 @@ export default async function ReportSummaryPage({ searchParams }: PageProps) {
     ? await timed("report-summary:list", () => getRows(supabase, date, market, seller))
     : [];
 
+  const remainingReport = date
+    ? buildRemainingFruitReport(
+        await timed("report-summary:remaining-fruit", () =>
+          fetchRemainingFruitRows(supabase, date, market ?? null),
+        ),
+        { marketFilter: market ?? null },
+      )
+    : null;
+
   const uniqueDates = [...new Set(rows.map(r => r.transaction_date).filter(Boolean) as string[])];
   const settlements = await timed("report-summary:settlements", () =>
     getSettlements(supabase, uniqueDates),
@@ -150,6 +162,20 @@ export default async function ReportSummaryPage({ searchParams }: PageProps) {
             <ReportSummary rows={rows} settlements={settlements} pdfUrl={pdfUrl} />
           </CardContent>
         </Card>
+
+        {remainingReport && (
+          <Card>
+            <CardHeader>
+              <CardTitle>ผลไม้คงเหลือขายต่อ</CardTitle>
+              <p className="text-sm text-slate-500 mt-0.5">
+                สรุปจากข้อมูลชั่งคืน — เลือกวันที่{market ? " และตลาด" : ""} ด้านบนเพื่อกรอง
+              </p>
+            </CardHeader>
+            <CardContent>
+              <RemainingFruitSection report={remainingReport} />
+            </CardContent>
+          </Card>
+        )}
       </div>
     </>
   );

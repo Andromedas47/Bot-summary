@@ -38,6 +38,9 @@ import {
 } from "@/lib/slips/check-service";
 import { SlipBatchService, type SlipBatchIngestor } from "@/lib/slips/batch-service";
 import { tryFinalizeSettlement } from "@/lib/settlement-finalizer";
+import { parseRemainingFruitCommand } from "@/lib/summary/remaining-fruit-command";
+import { fetchRemainingFruitRows } from "@/lib/summary/remaining-fruit-data";
+import { buildRemainingFruitMessageFromRows } from "@/lib/summary/remaining-fruit-message";
 import {
   SlipSessionService,
   parseSlipSessionHeader,
@@ -336,6 +339,17 @@ export class WebhookService {
       msgEvent, text, message.id, eventId, event.type, log,
     );
     if (manualEntryResult !== null) return manualEntryResult;
+
+    const remainingCmd = parseRemainingFruitCommand(text.trim());
+    if (remainingCmd) {
+      return this.processRemainingFruitCommand(
+        msgEvent,
+        remainingCmd,
+        eventId,
+        event.type,
+        log,
+      );
+    }
 
     // ── 3.5. Slip session commands (checked before produce session logic) ─────
     if (isSlipCloseCommand(text)) {
@@ -877,6 +891,44 @@ export class WebhookService {
           `${prefix}รับ ${amounts.length} รายการ รวม ${runTotal.toLocaleString("th-TH")} บาท\nพิมพ์ จบสลิปมือ เมื่อส่งครบ`,
         );
       }
+    }
+  }
+
+  // ── Remaining fruit summary command ───────────────────────────────────────
+  private async processRemainingFruitCommand(
+    event:         LineMessageEvent,
+    command:       ReturnType<typeof parseRemainingFruitCommand> & object,
+    eventId:       string,
+    eventType:     string,
+    log:           ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const replyToken   = event.replyToken;
+    const businessDate = command.businessDate ?? bangkokToday();
+
+    log.info("remaining fruit command", {
+      businessDate,
+      marketFilter: command.marketFilter,
+    });
+
+    try {
+      const rows = await fetchRemainingFruitRows(
+        this.supabase,
+        businessDate,
+        command.marketFilter,
+      );
+      const message = buildRemainingFruitMessageFromRows(businessDate, rows, {
+        marketFilter: command.marketFilter,
+        includeOverall: !command.marketFilter,
+      });
+      if (replyToken) await this.replyMessage(replyToken, message);
+      return { eventId, eventType, status: "saved", parsed: false };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("remaining fruit command failed", { error: errorMessage });
+      if (replyToken) {
+        await this.replyMessage(replyToken, "ไม่สามารถสร้างสรุปคงเหลือได้ กรุณาลองใหม่");
+      }
+      return { eventId, eventType, status: "error", parsed: false, error: errorMessage };
     }
   }
 

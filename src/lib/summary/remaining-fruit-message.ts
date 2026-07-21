@@ -9,6 +9,7 @@ import {
 } from "@/lib/summary/remaining-fruit";
 
 const LINE_TEXT_LIMIT = 5000;
+const TRUNCATION_NOTICE = "\n\n(ข้อความยาวเกินไป — ดูเพิ่มเติมในเว็บ)";
 
 function formatQtyLine(quantity: number, unit: string): string {
   return `${formatQuantity(quantity)} ${displayRemainingUnit(unit)}`.trim();
@@ -71,8 +72,9 @@ export function buildRemainingFruitMessage(
   const text = lines.join("\n");
   if (text.length <= LINE_TEXT_LIMIT) return text;
 
-  const truncated = text.slice(0, LINE_TEXT_LIMIT - 20).trimEnd();
-  return `${truncated}\n\n(ข้อความยาวเกินไป — ดูเพิ่มเติมในเว็บ)`;
+  const maxBodyLength = LINE_TEXT_LIMIT - TRUNCATION_NOTICE.length;
+  const truncated = text.slice(0, maxBodyLength).trimEnd();
+  return `${truncated}${TRUNCATION_NOTICE}`;
 }
 
 export function buildRemainingFruitMessageFromRows(

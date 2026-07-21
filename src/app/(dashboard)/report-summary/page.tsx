@@ -9,7 +9,7 @@ import { ReportSummary } from "@/components/report-summary/ReportSummary";
 import { RemainingFruitSection } from "@/components/report-summary/RemainingFruitSection";
 import type { ReportRow, SettlementMap } from "@/lib/summary/report";
 import { displayMarketName } from "@/lib/market";
-import { buildRemainingFruitReport } from "@/lib/summary/remaining-fruit";
+import { buildRemainingFruitReport, REMAINING_STOCK_REPORT_TITLE } from "@/lib/summary/remaining-fruit";
 import { fetchRemainingFruitRows } from "@/lib/summary/remaining-fruit-data";
 
 interface PageProps {
@@ -166,7 +166,7 @@ export default async function ReportSummaryPage({ searchParams }: PageProps) {
         {remainingReport && (
           <Card>
             <CardHeader>
-              <CardTitle>ผลไม้คงเหลือขายต่อ</CardTitle>
+              <CardTitle>{REMAINING_STOCK_REPORT_TITLE}</CardTitle>
               <p className="text-sm text-slate-500 mt-0.5">
                 สรุปจากข้อมูลชั่งคืน — เลือกวันที่{market ? " และตลาด" : ""} ด้านบนเพื่อกรอง
               </p>

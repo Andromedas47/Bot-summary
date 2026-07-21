@@ -5,6 +5,7 @@ import {
   requiresFreshPendingGeneration,
 } from "./webhook-service";
 import type { LineMessageEvent } from "./types";
+import { REMAINING_STOCK_REPORT_TITLE } from "@/lib/summary/remaining-fruit";
 
 type Row = Record<string, unknown>;
 type QueryMode = "select" | "insert" | "update" | "delete" | "upsert";
@@ -632,7 +633,7 @@ describe("remaining fruit command routing", () => {
 
     expect(db.appendCalls).toBe(0);
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("\u0E2A\u0E23\u0E38\u0E1B\u0E2A\u0E34\u0E19\u0E04\u0E49\u0E32\u0E04\u0E07\u0E40\u0E2B\u0E25\u0E37\u0E2D");
+    expect(replies[0]).toContain(REMAINING_STOCK_REPORT_TITLE);
   });
 
   it("still appends normal produce item lines to an active pending session", async () => {

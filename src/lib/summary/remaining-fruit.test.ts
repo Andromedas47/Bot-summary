@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildRemainingFruitReport,
+  dedupeRemainingSourceRows,
   UNIDENTIFIED_MARKET_SECTION,
   type RemainingFruitSourceRow,
 } from "./remaining-fruit";
@@ -13,6 +14,7 @@ const UNIT_KG = "\u0E42\u0E25";
 const WATERMELON = "\u0E41\u0E15\u0E07\u0E42\u0E21";
 const MARKET_KEE = "\u0E15\u0E25\u0E32\u0E14\u0E01\u0E35\u0E49";
 const MARKET_NOI = "\u0E15\u0E25\u0E32\u0E14\u0E19\u0E49\u0E2D\u0E22";
+const MARKET_WAT = "\u0E27\u0E31\u0E14\u0E17\u0E38\u0E48\u0E07\u0E25\u0E32\u0E19\u0E19\u0E32";
 
 function row(
   overrides: Partial<RemainingFruitSourceRow> & Pick<RemainingFruitSourceRow, "product_name">,
@@ -219,5 +221,264 @@ describe("buildRemainingFruitReport", () => {
       row.marketBreakdown.every((entry) => entry.marketName === "\u0E15\u0E25\u0E32\u0E14\u0E01\u0E35\u0E49"),
     )).toBe(true);
     expect(report.overall.every((row) => row.totalRemainingForResale > 0)).toBe(true);
+  });
+
+  test("2026-07-01 production shape suppresses the real duplicate session's return rows, keeps everything else", async () => {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) return;
+
+    const { createClient } = await import("@supabase/supabase-js");
+    const { fetchRemainingFruitRows } = await import("./remaining-fruit-data");
+    const rows = await fetchRemainingFruitRows(createClient(url, key), "2026-07-01");
+
+    // 3bfda846 (unidentified, session_time 14:19:00) is a proven duplicate of 25f702ad
+    // (\u0E27\u0E31\u0E14\u0E17\u0E38\u0E48\u0E07\u0E25\u0E32\u0E19\u0E19\u0E32, session_time 14:14:09): same LINE source, 16 of its
+    // 16 \u0E04\u0E37\u0E19 rows are an exact subset of the identified session's 19 \u0E04\u0E37\u0E19 rows (16/19 \u2248 0.84 >= 0.8 coverage).
+    const deduped = dedupeRemainingSourceRows(rows);
+    expect(rows.length - deduped.length).toBe(16);
+
+    const report = buildRemainingFruitReport(rows);
+
+    // exact remaining totals for MARKET_WAT, confirmed unaffected by dedup (single contributing session per fruit)
+    const watTotals: Record<string, number> = {
+      "\u0E41\u0E01\u0E49\u0E27\u0E21\u0E31\u0E07\u0E01\u0E23": 11.3,
+      "\u0E40\u0E07\u0E32\u0E30": 12.1,
+      "\u0E0A\u0E30\u0E19\u0E35": 4.4,
+      "\u0E21\u0E31\u0E07\u0E04\u0E38\u0E14": 9.9,
+      "\u0E25\u0E2D\u0E07\u0E01\u0E2D\u0E07": 18.3,
+      "\u0E2B\u0E21\u0E2D\u0E19\u0E17\u0E2D\u0E07": 13.5,
+      "\u0E41\u0E2D\u0E1B\u0E40\u0E1B\u0E34\u0E49\u0E25": 12,
+    };
+
+    const wat = report.markets.find((m) => m.marketName === MARKET_WAT);
+    const unidItems = report.unidentified?.markets[0]?.items ?? [];
+
+    for (const [fruit, total] of Object.entries(watTotals)) {
+      expect(wat?.items.find((i) => i.fruitName === fruit)?.remainingForResaleQuantity).toBe(total);
+      expect(unidItems.some((i) => i.fruitName === fruit)).toBe(false);
+    }
+    expect(report.unidentified?.overall ?? []).toHaveLength(0);
+
+    // 3bfda846 also has unrelated \u0E40\u0E1A\u0E34\u0E01 (withdrawal) rows that are never touched by dedup \u2014 they must
+    // still surface under the unidentified section, just with no remaining-for-resale quantity.
+    const longkong = unidItems.find((i) => i.fruitName === "\u0E25\u0E2D\u0E07\u0E01\u0E2D\u0E07");
+    expect(longkong?.withdrawnQuantity).toBe(7.9);
+    expect(longkong?.hasReturnGoodData).toBe(false);
+  });
+});
+
+describe("dedupeRemainingSourceRows (session-aware duplicate suppression)", () => {
+  const SOURCE_A = "Csource-a";
+  const SOURCE_B = "Csource-b";
+  const SENDER_A = "\u0E41\u0E21\u0E48\u0E04\u0E49\u0E32\u0E40\u0E2D";
+  const SENDER_B = "\u0E41\u0E21\u0E48\u0E04\u0E49\u0E32\u0E1A\u0E35";
+  const BASE_TIME = "2026-07-01T14:00:00.000Z";
+
+  function isoPlusMinutes(minutes: number): string {
+    return new Date(new Date(BASE_TIME).getTime() + minutes * 60_000).toISOString();
+  }
+
+  function identifiedRow(
+    overrides: Partial<RemainingFruitSourceRow> & Pick<RemainingFruitSourceRow, "product_name" | "quantity">,
+  ): RemainingFruitSourceRow {
+    return row({
+      session_id: "session-identified",
+      source_id: SOURCE_A,
+      session_time: BASE_TIME,
+      market_name: MARKET_WAT,
+      transaction_type: TX_RETURN,
+      unit: UNIT_KG,
+      ...overrides,
+    });
+  }
+
+  function unidentifiedRow(
+    overrides: Partial<RemainingFruitSourceRow> & Pick<RemainingFruitSourceRow, "product_name" | "quantity">,
+  ): RemainingFruitSourceRow {
+    return row({
+      session_id: "session-unidentified",
+      source_id: SOURCE_A,
+      session_time: isoPlusMinutes(4),
+      market_name: "",
+      transaction_type: TX_RETURN,
+      unit: UNIT_KG,
+      ...overrides,
+    });
+  }
+
+  test("suppresses an exact-match unidentified twin session (same source, sender unknown on both sides, within window)", () => {
+    const duplicatePairs = [
+      ["\u0E41\u0E01\u0E49\u0E27\u0E21\u0E31\u0E07\u0E01\u0E23", 11.3],
+      ["\u0E40\u0E07\u0E32\u0E30", 12.1],
+      ["\u0E0A\u0E30\u0E19\u0E35", 4.4],
+      ["\u0E21\u0E31\u0E07\u0E04\u0E38\u0E14", 9.9],
+      ["\u0E25\u0E2D\u0E07\u0E01\u0E2D\u0E07", 18.3],
+      ["\u0E2B\u0E21\u0E2D\u0E19\u0E17\u0E2D\u0E07", 13.5],
+      ["\u0E41\u0E2D\u0E1B\u0E40\u0E1B\u0E34\u0E49\u0E25", 12],
+    ] as const;
+
+    const source: RemainingFruitSourceRow[] = duplicatePairs.flatMap(([product, quantity]) => [
+      identifiedRow({ product_name: product, quantity, unit: product === "\u0E41\u0E2D\u0E1B\u0E40\u0E1B\u0E34\u0E49\u0E25" ? UNIT_PIECE : UNIT_KG }),
+      unidentifiedRow({ product_name: product, quantity, unit: product === "\u0E41\u0E2D\u0E1B\u0E40\u0E1B\u0E34\u0E49\u0E25" ? UNIT_PIECE : UNIT_KG }),
+    ]);
+
+    expect(dedupeRemainingSourceRows(source)).toHaveLength(duplicatePairs.length);
+
+    const report = buildRemainingFruitReport(source);
+    const wat = report.markets.find((m) => m.marketName === MARKET_WAT);
+    const unid = report.unidentified?.markets[0];
+
+    for (const [product] of duplicatePairs) {
+      expect(wat?.items.find((i) => i.fruitName === product)?.remainingForResaleQuantity).toBeDefined();
+      expect(unid?.items.find((i) => i.fruitName === product)).toBeUndefined();
+    }
+    expect(report.unidentified?.overall ?? []).toHaveLength(0);
+  });
+
+  test("suppresses a proper subset twin session at exactly the 80% coverage boundary", () => {
+    // identified: 5 distinct products; unidentified: same 4 of them (missing the 5th) => 4/5 = 0.80
+    const source: RemainingFruitSourceRow[] = [
+      identifiedRow({ product_name: "A1", quantity: 1 }),
+      identifiedRow({ product_name: "A2", quantity: 2 }),
+      identifiedRow({ product_name: "A3", quantity: 3 }),
+      identifiedRow({ product_name: "A4", quantity: 4 }),
+      identifiedRow({ product_name: "A5", quantity: 5 }),
+      unidentifiedRow({ product_name: "A1", quantity: 1 }),
+      unidentifiedRow({ product_name: "A2", quantity: 2 }),
+      unidentifiedRow({ product_name: "A3", quantity: 3 }),
+      unidentifiedRow({ product_name: "A4", quantity: 4 }),
+    ];
+
+    const deduped = dedupeRemainingSourceRows(source);
+    expect(deduped).toHaveLength(5);
+    expect(deduped.every((r) => r.market_name === MARKET_WAT)).toBe(true);
+  });
+
+  test("does not dedupe across a different LINE source/group", () => {
+    const source: RemainingFruitSourceRow[] = [
+      identifiedRow({ product_name: WATERMELON, quantity: 10, unit: UNIT_PIECE }),
+      identifiedRow({ product_name: "\u0E40\u0E07\u0E32\u0E30", quantity: 5 }),
+      unidentifiedRow({ product_name: WATERMELON, quantity: 10, unit: UNIT_PIECE, source_id: SOURCE_B }),
+      unidentifiedRow({ product_name: "\u0E40\u0E07\u0E32\u0E30", quantity: 5, source_id: SOURCE_B }),
+    ];
+
+    expect(dedupeRemainingSourceRows(source)).toHaveLength(source.length);
+  });
+
+  test("does not dedupe when both sides have a known, differing sender/seller", () => {
+    const source: RemainingFruitSourceRow[] = [
+      identifiedRow({ product_name: WATERMELON, quantity: 10, unit: UNIT_PIECE, sender_name: SENDER_A }),
+      identifiedRow({ product_name: "\u0E40\u0E07\u0E32\u0E30", quantity: 5, sender_name: SENDER_A }),
+      unidentifiedRow({ product_name: WATERMELON, quantity: 10, unit: UNIT_PIECE, sender_name: SENDER_B }),
+      unidentifiedRow({ product_name: "\u0E40\u0E07\u0E32\u0E30", quantity: 5, sender_name: SENDER_B }),
+    ];
+
+    expect(dedupeRemainingSourceRows(source)).toHaveLength(source.length);
+  });
+
+  test("does not dedupe when sessions are more than 10 minutes apart", () => {
+    const source: RemainingFruitSourceRow[] = [
+      identifiedRow({ product_name: WATERMELON, quantity: 10, unit: UNIT_PIECE }),
+      identifiedRow({ product_name: "\u0E40\u0E07\u0E32\u0E30", quantity: 5 }),
+      unidentifiedRow({ product_name: WATERMELON, quantity: 10, unit: UNIT_PIECE, session_time: isoPlusMinutes(11) }),
+      unidentifiedRow({ product_name: "\u0E40\u0E07\u0E32\u0E30", quantity: 5, session_time: isoPlusMinutes(11) }),
+    ];
+
+    expect(dedupeRemainingSourceRows(source)).toHaveLength(source.length);
+  });
+
+  test("never touches rows shared between two identified markets", () => {
+    const source: RemainingFruitSourceRow[] = [
+      identifiedRow({ product_name: WATERMELON, quantity: 10, unit: UNIT_PIECE, session_id: "session-a", market_name: MARKET_KEE }),
+      identifiedRow({ product_name: WATERMELON, quantity: 10, unit: UNIT_PIECE, session_id: "session-b", market_name: MARKET_NOI, session_time: isoPlusMinutes(1) }),
+    ];
+
+    expect(dedupeRemainingSourceRows(source)).toHaveLength(2);
+  });
+
+  test("preserves duplicate-line multiplicity: two matching copies suppressed, only one is not enough", () => {
+    const source: RemainingFruitSourceRow[] = [
+      identifiedRow({ product_name: "A1", quantity: 5 }),
+      identifiedRow({ product_name: "A1", quantity: 5 }),
+      identifiedRow({ product_name: "A2", quantity: 2 }),
+      unidentifiedRow({ product_name: "A1", quantity: 5 }),
+      unidentifiedRow({ product_name: "A1", quantity: 5 }),
+      unidentifiedRow({ product_name: "A2", quantity: 2 }),
+    ];
+
+    expect(dedupeRemainingSourceRows(source)).toHaveLength(3);
+  });
+
+  test("refuses to dedupe when the unidentified session has more copies of an item than the identified one", () => {
+    const source: RemainingFruitSourceRow[] = [
+      identifiedRow({ product_name: "A1", quantity: 5 }),
+      identifiedRow({ product_name: "A2", quantity: 2 }),
+      unidentifiedRow({ product_name: "A1", quantity: 5 }),
+      unidentifiedRow({ product_name: "A1", quantity: 5 }),
+      unidentifiedRow({ product_name: "A2", quantity: 2 }),
+    ];
+
+    expect(dedupeRemainingSourceRows(source)).toHaveLength(source.length);
+  });
+
+  test("does not dedupe below the 80% subset coverage threshold", () => {
+    // identified: 6 distinct products; unidentified matches only 4 => 4/6 \u2248 0.667 < 0.8
+    const source: RemainingFruitSourceRow[] = [
+      identifiedRow({ product_name: "A1", quantity: 1 }),
+      identifiedRow({ product_name: "A2", quantity: 2 }),
+      identifiedRow({ product_name: "A3", quantity: 3 }),
+      identifiedRow({ product_name: "A4", quantity: 4 }),
+      identifiedRow({ product_name: "A5", quantity: 5 }),
+      identifiedRow({ product_name: "A6", quantity: 6 }),
+      unidentifiedRow({ product_name: "A1", quantity: 1 }),
+      unidentifiedRow({ product_name: "A2", quantity: 2 }),
+      unidentifiedRow({ product_name: "A3", quantity: 3 }),
+      unidentifiedRow({ product_name: "A4", quantity: 4 }),
+    ];
+
+    expect(dedupeRemainingSourceRows(source)).toHaveLength(source.length);
+  });
+
+  test("a single coincidentally matching item is never enough to suppress", () => {
+    const source: RemainingFruitSourceRow[] = [
+      identifiedRow({ product_name: WATERMELON, quantity: 10, unit: UNIT_PIECE }),
+      unidentifiedRow({ product_name: WATERMELON, quantity: 10, unit: UNIT_PIECE }),
+    ];
+
+    expect(dedupeRemainingSourceRows(source)).toHaveLength(source.length);
+  });
+
+  test("does not dedupe when multiple identified sessions could equally explain the unidentified one (ambiguous)", () => {
+    const source: RemainingFruitSourceRow[] = [
+      identifiedRow({ product_name: "A1", quantity: 1, session_id: "session-i1", market_name: MARKET_KEE }),
+      identifiedRow({ product_name: "A2", quantity: 2, session_id: "session-i1", market_name: MARKET_KEE }),
+      identifiedRow({ product_name: "A1", quantity: 1, session_id: "session-i2", market_name: MARKET_NOI }),
+      identifiedRow({ product_name: "A2", quantity: 2, session_id: "session-i2", market_name: MARKET_NOI }),
+      unidentifiedRow({ product_name: "A1", quantity: 1 }),
+      unidentifiedRow({ product_name: "A2", quantity: 2 }),
+    ];
+
+    expect(dedupeRemainingSourceRows(source)).toHaveLength(source.length);
+  });
+
+  test("does not use a session with conflicting resolved markets as an identified candidate", () => {
+    const source: RemainingFruitSourceRow[] = [
+      identifiedRow({ product_name: "A1", quantity: 1, session_id: "session-conflicted", market_name: MARKET_KEE }),
+      identifiedRow({ product_name: "A2", quantity: 2, session_id: "session-conflicted", market_name: MARKET_NOI }),
+      unidentifiedRow({ product_name: "A1", quantity: 1 }),
+      unidentifiedRow({ product_name: "A2", quantity: 2 }),
+    ];
+
+    expect(dedupeRemainingSourceRows(source)).toHaveLength(source.length);
+  });
+
+  test("leaves rows with no session_id untouched (never guesses)", () => {
+    const source: RemainingFruitSourceRow[] = [
+      row({ market_name: MARKET_WAT, product_name: WATERMELON, quantity: 10, unit: UNIT_PIECE, transaction_type: TX_RETURN }),
+      row({ market_name: "", product_name: WATERMELON, quantity: 10, unit: UNIT_PIECE, transaction_type: TX_RETURN }),
+    ];
+
+    expect(dedupeRemainingSourceRows(source)).toHaveLength(2);
   });
 });

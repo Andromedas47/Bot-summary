@@ -35,6 +35,50 @@ function formatItemLines(item: RemainingFruitItem, index: number): string[] {
   return lines;
 }
 
+function appendOverallSection(lines: string[], report: RemainingFruitReport): void {
+  lines.push("", "สรุปคงเหลือรวมทุกตลาด");
+  for (const row of report.overall) {
+    lines.push(
+      "",
+      row.fruitName,
+      `เหลือขายต่อทั้งหมด: ${formatQtyLine(row.totalRemainingForResale, row.unit)}`,
+    );
+    for (const entry of row.marketBreakdown) {
+      lines.push(`- ${entry.marketName}: ${formatQtyLine(entry.quantity, row.unit)}`);
+    }
+  }
+}
+
+function appendMarketSections(lines: string[], report: RemainingFruitReport): void {
+  for (const section of report.markets) {
+    lines.push("", section.marketName);
+    section.items.forEach((item, i) => {
+      lines.push("", ...formatItemLines(item, i + 1));
+    });
+  }
+}
+
+/** Truncate before maxLength, preferring a blank-line or line boundary. */
+function truncateAtEntryBoundary(text: string, maxLength: number): string {
+  let cut = text.slice(0, maxLength);
+  const blankLine = cut.lastIndexOf("\n\n");
+  if (blankLine > 0) {
+    cut = cut.slice(0, blankLine);
+  } else {
+    const lastNewline = cut.lastIndexOf("\n");
+    if (lastNewline > 0) cut = cut.slice(0, lastNewline);
+  }
+  return cut.trimEnd();
+}
+
+function applyLineLimit(text: string): string {
+  if (text.length <= LINE_TEXT_LIMIT) return text;
+
+  const maxBodyLength = LINE_TEXT_LIMIT - TRUNCATION_NOTICE.length;
+  const truncated = truncateAtEntryBoundary(text, maxBodyLength);
+  return `${truncated}${TRUNCATION_NOTICE}`;
+}
+
 export function buildRemainingFruitMessage(
   date: string,
   report: RemainingFruitReport,
@@ -48,33 +92,11 @@ export function buildRemainingFruitMessage(
     return lines.join("\n");
   }
 
-  for (const section of report.markets) {
-    lines.push("", section.marketName);
-    section.items.forEach((item, i) => {
-      lines.push("", ...formatItemLines(item, i + 1));
-    });
-  }
+  const showOverall = includeOverall && report.overall.length > 0;
+  if (showOverall) appendOverallSection(lines, report);
+  appendMarketSections(lines, report);
 
-  if (includeOverall && report.overall.length > 0) {
-    lines.push("", "สรุปคงเหลือรวมทุกตลาด");
-    for (const row of report.overall) {
-      lines.push(
-        "",
-        row.fruitName,
-        `เหลือขายต่อทั้งหมด: ${formatQtyLine(row.totalRemainingForResale, row.unit)}`,
-      );
-      for (const entry of row.marketBreakdown) {
-        lines.push(`- ${entry.marketName}: ${formatQtyLine(entry.quantity, row.unit)}`);
-      }
-    }
-  }
-
-  const text = lines.join("\n");
-  if (text.length <= LINE_TEXT_LIMIT) return text;
-
-  const maxBodyLength = LINE_TEXT_LIMIT - TRUNCATION_NOTICE.length;
-  const truncated = text.slice(0, maxBodyLength).trimEnd();
-  return `${truncated}${TRUNCATION_NOTICE}`;
+  return applyLineLimit(lines.join("\n"));
 }
 
 export function buildRemainingFruitMessageFromRows(

@@ -57,6 +57,11 @@ describe("buildRemainingFruitMessageFromRows", () => {
 
     expect(message).toContain("\u0E2A\u0E23\u0E38\u0E1B\u0E04\u0E07\u0E40\u0E2B\u0E25\u0E37\u0E2D\u0E23\u0E27\u0E21\u0E17\u0E38\u0E01\u0E15\u0E25\u0E32\u0E14");
     expect(message).toContain("35 \u0E25\u0E39\u0E01");
+    const overallIdx = message.indexOf("\u0E2A\u0E23\u0E38\u0E1B\u0E04\u0E07\u0E40\u0E2B\u0E25\u0E37\u0E2D\u0E23\u0E27\u0E21\u0E17\u0E38\u0E01\u0E15\u0E25\u0E32\u0E14");
+    const marketIdx = message.indexOf(MARKET_KEE);
+    expect(overallIdx).toBeGreaterThan(-1);
+    expect(marketIdx).toBeGreaterThan(-1);
+    expect(overallIdx).toBeLessThan(marketIdx);
   });
 
   test("truncated all-market message stays within LINE text limit", () => {
@@ -117,7 +122,15 @@ describe("buildRemainingFruitMessageFromRows", () => {
       includeOverall: true,
     });
 
+    const overallHeading = "\u0E2A\u0E23\u0E38\u0E1B\u0E04\u0E07\u0E40\u0E2B\u0E25\u0E37\u0E2D\u0E23\u0E27\u0E21\u0E17\u0E38\u0E01\u0E15\u0E25\u0E32\u0E14";
+    const overallIdx = message.indexOf(overallHeading);
+    const firstMarketIdx = message.indexOf("\u0E01\u0E35\u0E49 \u0E15\u0E25\u0E32\u0E14\u0E01\u0E35\u0E49");
+
     expect(message.length).toBeLessThanOrEqual(LINE_TEXT_LIMIT);
     expect(message.endsWith(TRUNCATION_NOTICE)).toBe(true);
+    expect(overallIdx).toBeGreaterThan(-1);
+    expect(firstMarketIdx).toBeGreaterThan(overallIdx);
+    expect(message).toContain("\u0E40\u0E2B\u0E25\u0E37\u0E02\u0E02\u0E32\u0E22\u0E15\u0E48\u0E2D\u0E17\u0E31\u0E49\u0E07\u0E2B\u0E21\u0E14");
+    expect(message.indexOf("\u0E40\u0E2B\u0E25\u0E37\u0E02\u0E02\u0E32\u0E22\u0E15\u0E48\u0E2D\u0E17\u0E31\u0E49\u0E07\u0E2B\u0E21\u0E14")).toBeLessThan(firstMarketIdx);
   });
 });

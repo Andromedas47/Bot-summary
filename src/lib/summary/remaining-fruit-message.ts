@@ -3,6 +3,8 @@ import {
   buildRemainingFruitReport,
   displayRemainingUnit,
   formatQuantity,
+  REMAINING_STOCK_REPORT_TITLE,
+  UNIDENTIFIED_MARKET_SECTION,
   type RemainingFruitItem,
   type RemainingFruitReport,
   type RemainingFruitSourceRow,
@@ -52,23 +54,39 @@ function overallFruitBlock(row: RemainingFruitReport["overall"][number]): string
   return lines.join("\n");
 }
 
-function buildOverallBlocks(header: string, report: RemainingFruitReport): string[] {
-  const blocks = [header, "สรุปคงเหลือรวมทุกตลาด"];
+function buildConfirmedOverallBlocks(header: string, report: RemainingFruitReport): string[] {
+  const blocks = [header, "\u0E2A\u0E23\u0E38\u0E1B\u0E04\u0E07\u0E40\u0E2B\u0E25\u0E37\u0E2D\u0E23\u0E27\u0E21\u0E17\u0E38\u0E01\u0E15\u0E25\u0E32\u0E14"];
   for (const row of report.overall) {
     blocks.push(overallFruitBlock(row));
   }
   return blocks;
 }
 
-function buildMarketBlocks(report: RemainingFruitReport): string[] {
+function buildUnidentifiedOverallBlocks(report: RemainingFruitReport): string[] {
+  if (!report.unidentified || report.unidentified.overall.length === 0) return [];
+  const blocks = [UNIDENTIFIED_MARKET_SECTION];
+  for (const row of report.unidentified.overall) {
+    blocks.push(overallFruitBlock(row));
+  }
+  return blocks;
+}
+
+function buildMarketBlocks(sections: RemainingFruitReport["markets"]): string[] {
   const blocks: string[] = [];
-  for (const section of report.markets) {
+  for (const section of sections) {
     blocks.push(section.marketName);
     section.items.forEach((item, i) => {
       blocks.push(formatItemBlock(item, i + 1));
     });
   }
   return blocks;
+}
+
+function buildAllDetailBlocks(report: RemainingFruitReport): string[] {
+  return [
+    ...buildMarketBlocks(report.markets),
+    ...(report.unidentified ? buildMarketBlocks(report.unidentified.markets) : []),
+  ];
 }
 
 function joinBlocks(blocks: string[]): string {
@@ -155,28 +173,33 @@ export function buildRemainingFruitMessages(
   options: { includeOverall?: boolean } = {},
 ): string[] {
   const includeOverall = options.includeOverall ?? report.markets.length !== 1;
-  const header = `สรุปผลไม้คงเหลือ ${formatThaiDate(date)}`;
+  const header = `${REMAINING_STOCK_REPORT_TITLE} ${formatThaiDate(date)}`;
 
-  if (report.markets.length === 0) {
-    return [`${header}\n\nไม่พบข้อมูลสำหรับวันที่เลือก`];
+  const hasIdentified = report.markets.length > 0 || report.overall.length > 0;
+  const hasUnidentified = !!report.unidentified?.markets.length;
+  if (!hasIdentified && !hasUnidentified) {
+    return [`${header}\n\n\u0E44\u0E21\u0E48\u0E1E\u0E1A\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E2A\u0E33\u0E2B\u0E23\u0E31\u0E1A\u0E27\u0E31\u0E19\u0E17\u0E35\u0E48\u0E40\u0E25\u0E37\u0E2D\u0E01`];
   }
 
   const messages: string[] = [];
-  const showOverall = includeOverall && report.overall.length > 0;
+  const showOverall = includeOverall && (report.overall.length > 0 || !!report.unidentified?.overall.length);
 
   if (showOverall) {
-    const overallBlocks = buildOverallBlocks(header, report);
-    const overallMessage = joinBlocks(overallBlocks);
-    if (countCodePoints(overallMessage) <= LINE_MESSAGE_MAX_CODE_POINTS) {
-      messages.push(overallMessage);
+    const summaryBlocks = [
+      ...buildConfirmedOverallBlocks(header, report),
+      ...buildUnidentifiedOverallBlocks(report),
+    ];
+    const summaryMessage = joinBlocks(summaryBlocks);
+    if (countCodePoints(summaryMessage) <= LINE_MESSAGE_MAX_CODE_POINTS) {
+      messages.push(summaryMessage);
     } else {
-      messages.push(...chunkBlocks(overallBlocks, LINE_MESSAGE_MAX_CODE_POINTS));
+      messages.push(...chunkBlocks(summaryBlocks, LINE_MESSAGE_MAX_CODE_POINTS));
     }
-    messages.push(...chunkBlocks(buildMarketBlocks(report), LINE_MESSAGE_MAX_CODE_POINTS));
+    messages.push(...chunkBlocks(buildAllDetailBlocks(report), LINE_MESSAGE_MAX_CODE_POINTS));
     return capAtMaxMessages(messages);
   }
 
-  messages.push(...chunkBlocks([header, ...buildMarketBlocks(report)], LINE_MESSAGE_MAX_CODE_POINTS));
+  messages.push(...chunkBlocks([header, ...buildAllDetailBlocks(report)], LINE_MESSAGE_MAX_CODE_POINTS));
   return capAtMaxMessages(messages);
 }
 

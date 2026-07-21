@@ -52,6 +52,7 @@ import {
 type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
 type ReplyLineMessage = (replyToken: string, text: string) => Promise<void>;
+type ReplyLineMessages = (replyToken: string, texts: string[]) => Promise<void>;
 type ScheduleBackgroundTask = (task: () => Promise<void>) => void;
 
 const BATCH_FIRST_IMAGE_REPLY = [
@@ -104,6 +105,7 @@ interface WebhookServiceDependencies {
   batchService?: SlipBatchIngestor;
   slipSessionService?: SlipSessionIngestor;
   replyMessage?: ReplyLineMessage;
+  replyMessages?: ReplyLineMessages;
   scheduleBackgroundTask?: ScheduleBackgroundTask;
 }
 
@@ -212,6 +214,7 @@ export class WebhookService {
   private readonly batchService: SlipBatchIngestor;
   private readonly slipSessionService: SlipSessionIngestor;
   private readonly replyMessage: ReplyLineMessage;
+  private readonly replyMessages: ReplyLineMessages;
   private readonly scheduleBackgroundTask: ScheduleBackgroundTask;
 
   constructor(
@@ -227,6 +230,7 @@ export class WebhookService {
     this.slipSessionService =
       dependencies.slipSessionService ?? new SlipSessionService(supabase);
     this.replyMessage = dependencies.replyMessage ?? replyLineMessage;
+    this.replyMessages = dependencies.replyMessages ?? replyLineMessages;
     this.scheduleBackgroundTask =
       dependencies.scheduleBackgroundTask
       ?? ((task) => {
@@ -921,7 +925,7 @@ export class WebhookService {
         marketFilter: command.marketFilter,
         includeOverall: !command.marketFilter,
       });
-      if (replyToken) await replyLineMessages(replyToken, messages);
+      if (replyToken) await this.replyMessages(replyToken, messages);
       return { eventId, eventType, status: "saved", parsed: false };
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);

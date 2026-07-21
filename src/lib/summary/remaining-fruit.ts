@@ -1,6 +1,9 @@
 import { normalizeUnitAlias } from "@/lib/parsers/weigh-session/units";
-import { displayMarketName } from "@/lib/market";
+import { cleanMarketName } from "@/lib/market";
 import { transactionBucket, type TransactionBucket } from "@/lib/summary/transactions";
+
+export const REMAINING_STOCK_REPORT_TITLE = "\u0E2A\u0E23\u0E38\u0E1B\u0E2A\u0E34\u0E19\u0E04\u0E49\u0E32\u0E04\u0E07\u0E40\u0E2B\u0E25\u0E37\u0E2D";
+export const UNIDENTIFIED_MARKET_SECTION = "\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E17\u0E35\u0E48\u0E22\u0E31\u0E07\u0E23\u0E30\u0E1A\u0E38\u0E15\u0E25\u0E32\u0E14\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49";
 
 export const PRODUCT_ALIASES: Record<string, string> = {
   "\u0E40\u0E1E\u0E34\u0E48\u0E21\u0E16\u0E31\u0E48\u0E27\u0E1E\u0E39": "\u0E16\u0E31\u0E48\u0E27\u0E1E\u0E39",
@@ -77,6 +80,10 @@ export interface RemainingFruitOverallItem {
 export interface RemainingFruitReport {
   markets: RemainingFruitMarketSection[];
   overall: RemainingFruitOverallItem[];
+  unidentified: {
+    markets: RemainingFruitMarketSection[];
+    overall: RemainingFruitOverallItem[];
+  } | null;
 }
 
 interface AggregateCell {
@@ -149,7 +156,57 @@ function emptyCell(fruitName: string, unit: string): AggregateCell {
 }
 
 function shouldIncludeItem(cell: AggregateCell): boolean {
+  if (!cell.unit || displayRemainingUnit(cell.unit) === "\u2014") return false;
+  if (cell.hasReturnGoodData && cell.returnGoodQuantity <= 0) return false;
   return cell.hasReturnGoodData || cell.hasWithdrawnData || cell.hasDamagedData;
+}
+
+function shouldIncludeInOverall(item: RemainingFruitItem): boolean {
+  return (
+    item.hasReturnGoodData &&
+    item.remainingForResaleQuantity > 0 &&
+    !!item.unit &&
+    displayRemainingUnit(item.unit) !== "\u2014"
+  );
+}
+
+function buildOverallFromSections(sections: RemainingFruitMarketSection[]): RemainingFruitOverallItem[] {
+  const overallMap = new Map<string, RemainingFruitOverallItem>();
+
+  for (const section of sections) {
+    for (const item of section.items) {
+      if (!shouldIncludeInOverall(item)) continue;
+
+      const key = `${item.fruitName}||${item.unit}`;
+      let overall = overallMap.get(key);
+      if (!overall) {
+        overall = {
+          fruitName: item.fruitName,
+          unit: item.unit,
+          totalRemainingForResale: 0,
+          marketBreakdown: [],
+        };
+        overallMap.set(key, overall);
+      }
+
+      overall.totalRemainingForResale += item.remainingForResaleQuantity;
+      overall.marketBreakdown.push({
+        marketName: section.marketName,
+        quantity: item.remainingForResaleQuantity,
+      });
+    }
+  }
+
+  return [...overallMap.values()]
+    .map((row) => ({
+      ...row,
+      marketBreakdown: row.marketBreakdown.sort((a, b) =>
+        a.marketName.localeCompare(b.marketName, "th"),
+      ),
+    }))
+    .sort((a, b) =>
+      a.fruitName.localeCompare(b.fruitName, "th") || a.unit.localeCompare(b.unit, "th"),
+    );
 }
 
 function sortItems(a: RemainingFruitItem, b: RemainingFruitItem): number {
@@ -184,10 +241,14 @@ export function buildRemainingFruitReport(
     const bucket = transactionBucket(row.transaction_type);
     if (!bucket) continue;
 
-    const market = displayMarketName(row.market_name, "ไม่ระบุตลาด");
-    if (marketFilter && !market.toLowerCase().includes(marketFilter.toLowerCase())) {
-      continue;
+    const rawMarket = row.market_name ?? "";
+    const resolvedMarket = cleanMarketName(rawMarket);
+    if (marketFilter) {
+      const haystack = `${rawMarket} ${resolvedMarket ?? ""}`.toLowerCase();
+      if (!haystack.includes(marketFilter.toLowerCase())) continue;
     }
+
+    const market = resolvedMarket ?? UNIDENTIFIED_MARKET_SECTION;
 
     const fruitName = normalizeProductName(row.product_name, aliases, pass1Names);
     const unit = normalizeRemainingUnit(row.unit);
@@ -210,7 +271,7 @@ export function buildRemainingFruitReport(
     addQuantity(cell, bucket, qty);
   }
 
-  const markets: RemainingFruitMarketSection[] = [...byMarket.entries()]
+  const allSections: RemainingFruitMarketSection[] = [...byMarket.entries()]
     .sort(([a], [b]) => a.localeCompare(b, "th"))
     .map(([marketName, cells]) => ({
       marketName,
@@ -221,42 +282,20 @@ export function buildRemainingFruitReport(
     }))
     .filter((section) => section.items.length > 0);
 
-  const overallMap = new Map<string, RemainingFruitOverallItem>();
+  const markets = allSections.filter((section) => section.marketName !== UNIDENTIFIED_MARKET_SECTION);
+  const unidentifiedSections = allSections.filter(
+    (section) => section.marketName === UNIDENTIFIED_MARKET_SECTION,
+  );
 
-  for (const section of markets) {
-    for (const item of section.items) {
-      if (!item.hasReturnGoodData) continue;
+  const overall = buildOverallFromSections(markets);
+  const unidentifiedOverall = buildOverallFromSections(unidentifiedSections);
 
-      const key = `${item.fruitName}||${item.unit}`;
-      let overall = overallMap.get(key);
-      if (!overall) {
-        overall = {
-          fruitName: item.fruitName,
-          unit: item.unit,
-          totalRemainingForResale: 0,
-          marketBreakdown: [],
-        };
-        overallMap.set(key, overall);
-      }
-
-      overall.totalRemainingForResale += item.remainingForResaleQuantity;
-      overall.marketBreakdown.push({
-        marketName: section.marketName,
-        quantity: item.remainingForResaleQuantity,
-      });
-    }
-  }
-
-  const overall = [...overallMap.values()]
-    .map((row) => ({
-      ...row,
-      marketBreakdown: row.marketBreakdown.sort((a, b) =>
-        a.marketName.localeCompare(b.marketName, "th"),
-      ),
-    }))
-    .sort((a, b) =>
-      a.fruitName.localeCompare(b.fruitName, "th") || a.unit.localeCompare(b.unit, "th"),
-    );
-
-  return { markets, overall };
+  return {
+    markets,
+    overall,
+    unidentified:
+      unidentifiedSections.length > 0
+        ? { markets: unidentifiedSections, overall: unidentifiedOverall }
+        : null,
+  };
 }

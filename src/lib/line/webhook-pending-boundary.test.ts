@@ -363,6 +363,7 @@ function textEvent(
 function service(db: BoundaryDatabase, replies: string[] = []) {
   return new WebhookService(db as never, {
     replyMessage: async (_token, text) => { replies.push(text); },
+    replyMessages: async (_token, texts) => { replies.push(texts.join("\n\n")); },
   });
 }
 
@@ -631,7 +632,7 @@ describe("remaining fruit command routing", () => {
 
     expect(db.appendCalls).toBe(0);
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("สรุปผลไม้คงเหลือ");
+    expect(replies[0]).toContain("\u0E2A\u0E23\u0E38\u0E1B\u0E2A\u0E34\u0E19\u0E04\u0E49\u0E32\u0E04\u0E07\u0E40\u0E2B\u0E25\u0E37\u0E2D");
   });
 
   it("still appends normal produce item lines to an active pending session", async () => {

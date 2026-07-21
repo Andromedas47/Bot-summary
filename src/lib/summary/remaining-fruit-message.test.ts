@@ -8,6 +8,7 @@ import {
   OVERFLOW_NOTICE,
 } from "./remaining-fruit-message";
 import { fetchRemainingFruitRows } from "./remaining-fruit-data";
+import { REMAINING_STOCK_REPORT_TITLE, UNIDENTIFIED_MARKET_SECTION } from "./remaining-fruit";
 
 const TX_WITHDRAW = "\u0E40\u0E1A\u0E34\u0E01";
 const TX_RETURN = "\u0E04\u0E37\u0E19";
@@ -123,7 +124,34 @@ describe("buildRemainingFruitMessagesFromRows", () => {
 
     expect(messages).toHaveLength(1);
     expect(messages[0]).not.toContain(OVERFLOW_NOTICE);
-    expect(messages[0]).toContain("\u0E41\u0E15\u0E07\u0E42\u0E21");
+    expect(messages[0]).toContain(MARKET_KEE);
+    assertWithinLineLimits(messages);
+  });
+
+  test("separates confirmed and unidentified totals in all-market report", () => {
+    const messages = buildRemainingFruitMessagesFromRows("2026-06-23", [
+      {
+        market_name: "\u0E01\u0E35\u0E49 \u0E15\u0E25\u0E32\u0E14\u0E01\u0E35\u0E49 \u0E0A\u0E31\u0E48\u0E07\u0E04\u0E37\u0E19 23/06/2569",
+        product_name: WATERMELON,
+        quantity: 20,
+        unit: "\u0E25\u0E39\u0E01",
+        transaction_type: TX_RETURN,
+      },
+      {
+        market_name: "\u0E23\u0E32\u0E22\u0E01\u0E32\u0E23\u0E0A\u0E31\u0E48\u0E07\u0E40\u0E1A\u0E34\u0E01",
+        product_name: "\u0E40\u0E07\u0E32\u0E30",
+        quantity: 12,
+        unit: "\u0E42\u0E25",
+        transaction_type: TX_RETURN,
+      },
+    ]);
+
+    const joined = messages.join("\n\n");
+    expect(joined).toContain(MARKET_KEE);
+    expect(joined).toContain(UNIDENTIFIED_MARKET_SECTION);
+    expect(joined).not.toContain("\u0E44\u0E21\u0E48\u0E23\u0E30\u0E1A\u0E38\u0E15\u0E25\u0E32\u0E14");
+    expect(joined).not.toContain("\u0E01\u0E35\u0E49 \u0E15\u0E25\u0E32\u0E14\u0E01\u0E35\u0E49 \u0E0A\u0E31\u0E48\u0E07");
+    expect(joined.indexOf(OVERALL_HEADING)).toBeLessThan(joined.indexOf(UNIDENTIFIED_MARKET_SECTION));
     assertWithinLineLimits(messages);
   });
 
@@ -185,9 +213,13 @@ describe("buildRemainingFruitMessagesFromRows", () => {
     assertWithinLineLimits(messages);
     assertNoMidFruitEntrySplit(messages);
 
-    expect(messages[0]).toContain("\u0E2A\u0E23\u0E38\u0E1B\u0E1C\u0E25\u0E44\u0E21\u0E49\u0E04\u0E07\u0E40\u0E2B\u0E25\u0E37\u0E2D");
+    expect(messages[0]).toContain(REMAINING_STOCK_REPORT_TITLE);
     expect(messages[0]).toContain(OVERALL_HEADING);
     expect(messages.join("\n\n")).toContain("\u0E40\u0E2B\u0E25\u0E37\u0E02\u0E02\u0E32\u0E22\u0E15\u0E48\u0E2D\u0E17\u0E31\u0E49\u0E07\u0E2B\u0E21\u0E14");
+    expect(messages.join("\n\n")).not.toContain("\u0E44\u0E21\u0E48\u0E23\u0E30\u0E1A\u0E38\u0E15\u0E25\u0E32\u0E14");
+    expect(messages.join("\n\n")).not.toMatch(/- \u0E0A\u0E31\u0E48\u0E07:/);
+    expect(messages.join("\n\n")).not.toMatch(/- \u0E0A\u0E48\u0E32\u0E07:/);
+    expect(messages.join("\n\n")).toContain(UNIDENTIFIED_MARKET_SECTION);
 
     const marketIdx = firstMarketDetailIndex(messages);
     expect(marketIdx).toBeGreaterThan(0);

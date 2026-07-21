@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildRemainingFruitReport,
+  UNIDENTIFIED_MARKET_SECTION,
   type RemainingFruitSourceRow,
 } from "./remaining-fruit";
 
@@ -148,5 +149,75 @@ describe("buildRemainingFruitReport", () => {
     expect(report.markets).toHaveLength(1);
     expect(report.markets[0].marketName).toBe(MARKET_KEE);
     expect(report.overall[0]?.totalRemainingForResale).toBe(20);
+  });
+
+  test("normalizes malformed session title to real market label", () => {
+    const report = buildRemainingFruitReport([
+      row({
+        market_name: "\u0E01\u0E35\u0E49 \u0E15\u0E25\u0E32\u0E14\u0E01\u0E35\u0E49 \u0E0A\u0E31\u0E48\u0E07\u0E04\u0E37\u0E19 23/06/2569",
+        product_name: WATERMELON,
+        quantity: 20,
+        transaction_type: TX_RETURN,
+      }),
+    ]);
+
+    expect(report.markets).toHaveLength(1);
+    expect(report.markets[0].marketName).toBe(MARKET_KEE);
+    expect(report.unidentified).toBeNull();
+  });
+
+  test("keeps transaction-only session titles in unidentified section", () => {
+    const report = buildRemainingFruitReport([
+      row({
+        market_name: "\u0E23\u0E32\u0E22\u0E01\u0E32\u0E23\u0E0A\u0E31\u0E48\u0E07\u0E40\u0E1A\u0E34\u0E01",
+        product_name: WATERMELON,
+        quantity: 100,
+        transaction_type: TX_WITHDRAW,
+      }),
+      row({
+        market_name: MARKET_KEE,
+        product_name: WATERMELON,
+        quantity: 20,
+        transaction_type: TX_RETURN,
+      }),
+    ]);
+
+    expect(report.markets).toHaveLength(1);
+    expect(report.markets[0].marketName).toBe(MARKET_KEE);
+    expect(report.unidentified?.markets).toHaveLength(1);
+    expect(report.unidentified?.markets[0].marketName).toBe(UNIDENTIFIED_MARKET_SECTION);
+    expect(report.overall[0]?.totalRemainingForResale).toBe(20);
+    expect(report.unidentified?.overall ?? []).toHaveLength(0);
+  });
+
+  test("omits explicit zero remaining from summary list", () => {
+    const report = buildRemainingFruitReport([
+      row({ product_name: WATERMELON, quantity: 0, transaction_type: TX_RETURN }),
+      row({ product_name: "\u0E40\u0E07\u0E32\u0E30", quantity: 5, transaction_type: TX_RETURN }),
+    ]);
+
+    expect(report.markets[0]?.items).toHaveLength(1);
+    expect(report.markets[0]?.items[0]?.fruitName).toBe("\u0E40\u0E07\u0E32\u0E30");
+    expect(report.overall).toHaveLength(1);
+    expect(report.overall[0]?.totalRemainingForResale).toBe(5);
+  });
+
+  test("2026-06-23 production shape separates identified and unidentified markets", async () => {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) return;
+
+    const { createClient } = await import("@supabase/supabase-js");
+    const { fetchRemainingFruitRows } = await import("./remaining-fruit-data");
+    const rows = await fetchRemainingFruitRows(createClient(url, key), "2026-06-23");
+    const report = buildRemainingFruitReport(rows);
+
+    expect(report.markets.map((m) => m.marketName)).toEqual(["\u0E15\u0E25\u0E32\u0E14\u0E01\u0E35\u0E49"]);
+    expect(report.unidentified?.markets).toHaveLength(1);
+    expect(report.unidentified?.markets[0].marketName).toBe(UNIDENTIFIED_MARKET_SECTION);
+    expect(report.overall.every((row) =>
+      row.marketBreakdown.every((entry) => entry.marketName === "\u0E15\u0E25\u0E32\u0E14\u0E01\u0E35\u0E49"),
+    )).toBe(true);
+    expect(report.overall.every((row) => row.totalRemainingForResale > 0)).toBe(true);
   });
 });

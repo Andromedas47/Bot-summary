@@ -3,6 +3,7 @@
 import {
   displayRemainingUnit,
   formatQuantity,
+  UNIDENTIFIED_MARKET_SECTION,
   type RemainingFruitItem,
   type RemainingFruitReport,
 } from "@/lib/summary/remaining-fruit";
@@ -33,7 +34,7 @@ function ItemTable({ items }: { items: RemainingFruitItem[] }) {
       <table className="min-w-full text-sm">
         <thead className="bg-slate-50 text-left text-slate-600">
           <tr>
-            <th className="px-3 py-2 font-semibold">ผลไม้</th>
+            <th className="px-3 py-2 font-semibold">สินค้า</th>
             <th className="px-3 py-2 font-semibold">หน่วย</th>
             <th className="px-3 py-2 text-right font-semibold">เบิกทั้งหมด</th>
             <th className="px-3 py-2 text-right font-semibold">เหลือขายต่อ</th>
@@ -58,8 +59,64 @@ function ItemTable({ items }: { items: RemainingFruitItem[] }) {
   );
 }
 
+function MarketSections({ sections }: { sections: RemainingFruitReport["markets"] }) {
+  return sections.map((section) => (
+    <div key={section.marketName} className="space-y-2">
+      <h3 className="text-sm font-semibold text-slate-800">{section.marketName}</h3>
+      <ItemTable items={section.items} />
+    </div>
+  ));
+}
+
+function OverallTable({
+  title,
+  rows,
+}: {
+  title: string;
+  rows: RemainingFruitReport["overall"];
+}) {
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="space-y-2">
+      <h3 className="text-sm font-semibold text-slate-800">{title}</h3>
+      <div className="overflow-x-auto rounded-lg border border-slate-200">
+        <table className="min-w-full text-sm">
+          <thead className="bg-slate-50 text-left text-slate-600">
+            <tr>
+              <th className="px-3 py-2 font-semibold">สินค้า</th>
+              <th className="px-3 py-2 font-semibold">หน่วย</th>
+              <th className="px-3 py-2 text-right font-semibold">เหลือขายต่อทั้งหมด</th>
+              <th className="px-3 py-2 font-semibold">แยกตามตลาด</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={`${row.fruitName}||${row.unit}`} className="border-t border-slate-100">
+                <td className="px-3 py-2">{row.fruitName}</td>
+                <td className="px-3 py-2">{displayRemainingUnit(row.unit)}</td>
+                <td className="px-3 py-2 text-right tabular-nums font-medium text-emerald-700">
+                  {formatQuantity(row.totalRemainingForResale)}
+                </td>
+                <td className="px-3 py-2 text-slate-600">
+                  {row.marketBreakdown
+                    .map((entry) =>
+                      `${entry.marketName}: ${formatQuantity(entry.quantity)} ${displayRemainingUnit(row.unit)}`,
+                    )
+                    .join(" · ")}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 export function RemainingFruitSection({ report }: { report: RemainingFruitReport }) {
-  if (report.markets.length === 0 && report.overall.length === 0) {
+  const hasUnidentified = !!report.unidentified?.markets.length;
+  if (report.markets.length === 0 && report.overall.length === 0 && !hasUnidentified) {
     return (
       <p className="text-sm text-slate-500">
         ไม่พบข้อมูลเบิก/ชั่งคืน/คืนเสียสำหรับวันที่เลือก
@@ -70,52 +127,20 @@ export function RemainingFruitSection({ report }: { report: RemainingFruitReport
   return (
     <div className="space-y-6">
       <p className="text-sm text-slate-600">
-        ตัวเลข <span className="font-medium">เหลือขายต่อ</span> มาจากผลไม้ที่ชั่งคืนและยังขายต่อได้
+        ตัวเลข <span className="font-medium">เหลือขายต่อ</span> มาจากสินค้าที่ชั่งคืนและยังขายต่อได้
         — ไม่ใช่ยอดคลังสินค้าทั้งหมด
       </p>
 
-      {report.markets.map((section) => (
-        <div key={section.marketName} className="space-y-2">
-          <h3 className="text-sm font-semibold text-slate-800">{section.marketName}</h3>
-          <ItemTable items={section.items} />
-        </div>
-      ))}
+      <OverallTable title="สรุปคงเหลือรวมทุกตลาด" rows={report.overall} />
 
-      {report.overall.length > 0 && (
-        <div className="space-y-2">
-          <h3 className="text-sm font-semibold text-slate-800">สรุปคงเหลือรวมทุกตลาด</h3>
-          <div className="overflow-x-auto rounded-lg border border-slate-200">
-            <table className="min-w-full text-sm">
-              <thead className="bg-slate-50 text-left text-slate-600">
-                <tr>
-                  <th className="px-3 py-2 font-semibold">ผลไม้</th>
-                  <th className="px-3 py-2 font-semibold">หน่วย</th>
-                  <th className="px-3 py-2 text-right font-semibold">เหลือขายต่อทั้งหมด</th>
-                  <th className="px-3 py-2 font-semibold">แยกตามตลาด</th>
-                </tr>
-              </thead>
-              <tbody>
-                {report.overall.map((row) => (
-                  <tr key={`${row.fruitName}||${row.unit}`} className="border-t border-slate-100">
-                    <td className="px-3 py-2">{row.fruitName}</td>
-                    <td className="px-3 py-2">{displayRemainingUnit(row.unit)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums font-medium text-emerald-700">
-                      {formatQuantity(row.totalRemainingForResale)}
-                    </td>
-                    <td className="px-3 py-2 text-slate-600">
-                      {row.marketBreakdown
-                        .map((entry) =>
-                          `${entry.marketName}: ${formatQuantity(entry.quantity)} ${displayRemainingUnit(row.unit)}`,
-                        )
-                        .join(" · ")}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+      {report.unidentified && (
+        <>
+          <OverallTable title={UNIDENTIFIED_MARKET_SECTION} rows={report.unidentified.overall} />
+          <MarketSections sections={report.unidentified.markets} />
+        </>
       )}
+
+      <MarketSections sections={report.markets} />
     </div>
   );
 }

@@ -38,7 +38,7 @@ import {
 } from "@/lib/slips/check-service";
 import { SlipBatchService, type SlipBatchIngestor } from "@/lib/slips/batch-service";
 import { tryFinalizeSettlement } from "@/lib/settlement-finalizer";
-import { parseRemainingFruitCommand } from "@/lib/summary/remaining-fruit-command";
+import { parseRemainingFruitCommandFromMessage } from "@/lib/summary/remaining-fruit-command";
 import { fetchRemainingFruitRows } from "@/lib/summary/remaining-fruit-data";
 import { buildRemainingFruitMessageFromRows } from "@/lib/summary/remaining-fruit-message";
 import {
@@ -340,7 +340,8 @@ export class WebhookService {
     );
     if (manualEntryResult !== null) return manualEntryResult;
 
-    const remainingCmd = parseRemainingFruitCommand(text.trim());
+    // Read-only report command — must bypass pending produce-session append/close.
+    const remainingCmd = parseRemainingFruitCommandFromMessage(text);
     if (remainingCmd) {
       return this.processRemainingFruitCommand(
         msgEvent,
@@ -897,7 +898,7 @@ export class WebhookService {
   // ── Remaining fruit summary command ───────────────────────────────────────
   private async processRemainingFruitCommand(
     event:         LineMessageEvent,
-    command:       ReturnType<typeof parseRemainingFruitCommand> & object,
+    command:       ReturnType<typeof parseRemainingFruitCommandFromMessage> & object,
     eventId:       string,
     eventType:     string,
     log:           ChildLogger,

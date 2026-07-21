@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { parseRemainingFruitCommand } from "./remaining-fruit-command";
+import {
+  parseRemainingFruitCommand,
+  parseRemainingFruitCommandFromMessage,
+} from "./remaining-fruit-command";
 
 describe("parseRemainingFruitCommand", () => {
   test("parses global command with date", () => {
@@ -29,5 +32,19 @@ describe("parseRemainingFruitCommand", () => {
 
   test("returns null for invalid date", () => {
     expect(parseRemainingFruitCommand("\u0E2A\u0E23\u0E38\u0E1B\u0E04\u0E07\u0E40\u0E2B\u0E25\u0E37\u0E2D 99/99/2569")).toBeNull();
+  });
+
+  test("parses command from LINE export-style prefixed line", () => {
+    expect(parseRemainingFruitCommandFromMessage("16:25 user \u0E2A\u0E23\u0E38\u0E1B\u0E04\u0E07\u0E40\u0E2B\u0E25\u0E37\u0E2D 21/07/2569")).toEqual({
+      businessDate: "2026-07-21",
+      marketFilter: null,
+    });
+  });
+
+  test("parses market command from prefixed line", () => {
+    expect(parseRemainingFruitCommandFromMessage("16:25 user \u0E15\u0E25\u0E32\u0E14\u0E01\u0E35\u0E49 \u0E2A\u0E23\u0E38\u0E1B\u0E04\u0E07\u0E40\u0E2B\u0E25\u0E37\u0E2D 21/07/2569")).toEqual({
+      businessDate: "2026-07-21",
+      marketFilter: "\u0E15\u0E25\u0E32\u0E14\u0E01\u0E35\u0E49",
+    });
   });
 });

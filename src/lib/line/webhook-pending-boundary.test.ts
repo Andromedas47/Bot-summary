@@ -12,6 +12,8 @@ type QueryMode = "select" | "insert" | "update" | "delete" | "upsert";
 class MemoryQuery {
   private filters: Array<(row: Row) => boolean> = [];
   private maxRows: number | null = null;
+  private rangeFrom: number | null = null;
+  private rangeTo: number | null = null;
   private returning = false;
 
   constructor(
@@ -55,6 +57,12 @@ class MemoryQuery {
     return this;
   }
 
+  range(from: number, to: number): this {
+    this.rangeFrom = from;
+    this.rangeTo = to;
+    return this;
+  }
+
   async single() {
     const result = this.execute();
     return {
@@ -79,7 +87,10 @@ class MemoryQuery {
     const matches = () => rows.filter((row) => this.filters.every((filter) => filter(row)));
 
     if (this.mode === "select") {
-      const selected = matches();
+      let selected = matches();
+      if (this.rangeFrom !== null && this.rangeTo !== null) {
+        selected = selected.slice(this.rangeFrom, this.rangeTo + 1);
+      }
       return { data: this.maxRows === null ? selected : selected.slice(0, this.maxRows), error: null };
     }
 
@@ -204,6 +215,9 @@ class BoundaryDatabase {
       if (!pending) {
         return { data: { accepted: false, reason: "not_found" }, error: null };
       }
+      if (pending.terminalized) {
+        return { data: { accepted: false, reason: "terminalized", session: pending }, error: null };
+      }
       if (
         args.p_expected_session_generation != null
         && pending.session_generation !== args.p_expected_session_generation
@@ -315,6 +329,14 @@ function pendingSession(accumulatedText: string, generation = "11111111-1111-411
     close_session_generation: null,
     expected_item_count: null,
     ingest_revision: 0,
+  };
+}
+
+function staleTerminalizedPendingSession(accumulatedText: string): PendingSession {
+  return {
+    ...pendingSession(accumulatedText),
+    updated_at: "2026-07-10T08:00:00.000Z",
+    terminalized: true,
   };
 }
 
@@ -591,5 +613,38 @@ describe("produce pending-session generation boundary", () => {
     expect(db.rows("produce_items")).toHaveLength(0);
     expect(db.rows("pending_sessions")).toHaveLength(1);
     expect(db.rows("pending_sessions")[0].close_event_timestamp_ms).toBe(3_000);
+  });
+});
+
+describe("remaining fruit command routing", () => {
+  it("handles remaining summary before stale terminalized pending session append", async () => {
+    const db = new BoundaryDatabase(
+      staleTerminalizedPendingSession("โอม-พาซิโอ้ผลไม้ เบิก 10/07/2569"),
+    );
+    const replies: string[] = [];
+    const webhook = service(db, replies);
+
+    await webhook.processEvents(
+      [textEvent("16:25 user สรุปคงเหลือ 21/07/2569", Date.now(), "remaining-reply")],
+      "destination",
+    );
+
+    expect(db.appendCalls).toBe(0);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("สรุปผลไม้คงเหลือ");
+  });
+
+  it("still appends normal produce item lines to an active pending session", async () => {
+    const db = new BoundaryDatabase(
+      pendingSession("โอม-พาซิโอ้ผลไม้ เบิก 30/06/2569"),
+    );
+    const webhook = service(db);
+
+    await webhook.processEvents(
+      [textEvent("1.ทุเรียน100บาท\n2\u0E42\u0E25", 2_000)],
+      "destination",
+    );
+
+    expect(db.appendCalls).toBe(1);
   });
 });

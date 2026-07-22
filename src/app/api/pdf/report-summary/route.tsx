@@ -8,6 +8,8 @@ import { registerFonts } from "@/lib/pdf/fonts";
 import { ReportSummaryDoc } from "@/lib/pdf/ReportSummaryDoc";
 import type { ReportRow, SettlementMap } from "@/lib/summary/report";
 import { displayMarketName } from "@/lib/market";
+import { logger } from "@/lib/logger";
+import { pdfContentDisposition } from "@/lib/pdf/content-disposition";
 
 // ── Data fetchers (mirror report-summary page) ────────────────────────────────
 
@@ -72,6 +74,17 @@ async function getSettlements(
   return map;
 }
 
+async function renderReportPdf(
+  rows: ReportRow[],
+  settlements: SettlementMap,
+  filterLabel: string,
+): Promise<Buffer> {
+  registerFonts();
+  return renderToBuffer(
+    <ReportSummaryDoc rows={rows} settlements={settlements} filterLabel={filterLabel} />,
+  );
+}
+
 // ── Route ─────────────────────────────────────────────────────────────────────
 
 export async function GET(req: NextRequest) {
@@ -84,30 +97,28 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "at least one filter required" }, { status: 400 });
   }
 
-  let rows: ReportRow[];
-  let settlements: SettlementMap;
-  try {
-    const supabase = await createServiceClient();
-    rows = await getRows(supabase, date, market, seller);
-    const uniqueDates = [...new Set(rows.map((r) => r.transaction_date).filter(Boolean) as string[])];
-    settlements = await getSettlements(supabase, uniqueDates);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "unknown error";
-    return NextResponse.json({ error: msg }, { status: 500 });
-  }
-
   const filterLabel = [date, market, seller].filter(Boolean).join("-");
 
-  registerFonts();
-  const buffer = await renderToBuffer(
-    <ReportSummaryDoc rows={rows} settlements={settlements} filterLabel={filterLabel} />,
-  );
+  try {
+    const supabase = await createServiceClient();
+    const rows = await getRows(supabase, date, market, seller);
+    const uniqueDates = [...new Set(rows.map((r) => r.transaction_date).filter(Boolean) as string[])];
+    const settlements = await getSettlements(supabase, uniqueDates);
 
-  return new NextResponse(new Uint8Array(buffer), {
-    headers: {
-      "Content-Type":        "application/pdf",
-      "Content-Disposition": `attachment; filename="รายงานสรุป-${filterLabel}.pdf"`,
-      "Cache-Control":       "no-store",
-    },
-  });
+    const buffer = await renderReportPdf(rows, settlements, filterLabel);
+
+    return new NextResponse(new Uint8Array(buffer), {
+      headers: {
+        "Content-Type":        "application/pdf",
+        "Content-Disposition": pdfContentDisposition(`รายงานสรุป-${filterLabel}.pdf`),
+        "Cache-Control":       "no-store",
+      },
+    });
+  } catch (err) {
+    logger.error("pdf.report-summary.failed", {
+      date, market, seller,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return NextResponse.json({ error: "failed to generate report PDF" }, { status: 500 });
+  }
 }

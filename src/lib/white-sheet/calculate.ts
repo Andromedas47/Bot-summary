@@ -1,6 +1,6 @@
 import { normalizeUnitAlias } from "@/lib/parsers/weigh-session/units";
 import { normalizeProductName } from "@/lib/summary/remaining-fruit";
-import { baseTransactionType, type TransactionBucket } from "@/lib/summary/transactions";
+import { baseTransactionType } from "@/lib/summary/transactions";
 import { classifyProduct } from "./category";
 import type {
   DigitalWhiteSheetCalculation,
@@ -14,7 +14,7 @@ import type {
 
 const QUANTITY_SCALE = 3;
 const MONEY_SCALE = 2;
-const MILLIQUANTITY_PER_UNIT = 1_000n;
+const MILLIQUANTITY_PER_UNIT = BigInt(1_000);
 
 interface PriceLot {
   quantity: bigint;
@@ -57,13 +57,13 @@ function fail(
 }
 
 function powerOfTen(exponent: number): bigint {
-  return 10n ** BigInt(exponent);
+  return BigInt(10) ** BigInt(exponent);
 }
 
 function roundDivide(value: bigint, divisor: bigint): bigint {
   const quotient = value / divisor;
   const remainder = value % divisor;
-  return remainder * 2n >= divisor ? quotient + 1n : quotient;
+  return remainder * BigInt(2) >= divisor ? quotient + BigInt(1) : quotient;
 }
 
 /** Convert a finite non-negative decimal to an integer scale without float arithmetic. */
@@ -91,7 +91,7 @@ function toScaledInteger(
 }
 
 function fromScaledInteger(value: bigint, scale: number): number {
-  const absolute = value < 0n ? -value : value;
+  const absolute = value < BigInt(0) ? -value : value;
   if (absolute > BigInt(Number.MAX_SAFE_INTEGER)) {
     fail("invalid_money", "calculated value exceeds the safe integration range");
   }
@@ -142,7 +142,7 @@ function allocateReturnsFifo(group: ItemAggregate): {
   distinctUnitPrices: bigint[];
 } {
   let returnsRemaining = group.goodReturn + group.damagedReturn;
-  let expectedMilliSatang = 0n;
+  let expectedMilliSatang = BigInt(0);
 
   for (const lot of group.priceLots) {
     const consumed = returnsRemaining < lot.quantity ? returnsRemaining : lot.quantity;
@@ -192,9 +192,9 @@ function buildItemCalculationParts(
       businessDate,
       normalizedProduct,
       normalizedUnit,
-      withdrawn: 0n,
-      goodReturn: 0n,
-      damagedReturn: 0n,
+      withdrawn: BigInt(0),
+      goodReturn: BigInt(0),
+      damagedReturn: BigInt(0),
       priceLots: [],
     };
 
@@ -226,11 +226,11 @@ function buildItemCalculationParts(
 
   const items: WhiteSheetItemCalculation[] = [];
   const warnings: string[] = [];
-  let expectedMilliSatang = 0n;
+  let expectedMilliSatang = BigInt(0);
 
   for (const [key, group] of groups) {
     const sold = group.withdrawn - group.goodReturn - group.damagedReturn;
-    if (sold < 0n) {
+    if (sold < BigInt(0)) {
       fail(
         "negative_sold_quantity",
         `returns exceed withdrawals for ${groupLabel(group)}`,
@@ -335,7 +335,11 @@ export function calculateDigitalWhiteSheet(
   const expenseParts = normalizedExpenses(input.expenses);
   const expectedCash = itemParts.expectedSales - verifiedTransfers - expenseParts.total;
   const difference = actualCashSubmitted - expectedCash;
-  const status = difference < 0n ? "shortage" : difference > 0n ? "overage" : "matched";
+  const status = difference < BigInt(0)
+    ? "shortage"
+    : difference > BigInt(0)
+      ? "overage"
+      : "matched";
 
   return {
     marketKey,

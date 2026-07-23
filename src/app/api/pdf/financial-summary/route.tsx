@@ -5,6 +5,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { renderToBuffer } from "@react-pdf/renderer";
 import { createServiceClient } from "@/lib/supabase/server";
 import { registerFonts } from "@/lib/pdf/fonts";
+import { pdfContentDisposition } from "@/lib/pdf/content-disposition";
 import { FinancialSummaryDoc } from "@/lib/pdf/FinancialSummaryDoc";
 import type { GroupRow, SettlementEntry } from "@/components/financial-summary/FinancialTable";
 import {
@@ -114,7 +115,7 @@ export async function GET(req: NextRequest) {
   return new NextResponse(new Uint8Array(buffer), {
     headers: {
       "Content-Type":        "application/pdf",
-      "Content-Disposition": `attachment; filename="สรุปการเงิน-${y}-${m}.pdf"`,
+      "Content-Disposition": pdfContentDisposition(`สรุปการเงิน-${y}-${m}.pdf`),
       "Cache-Control":       "no-store",
     },
   });

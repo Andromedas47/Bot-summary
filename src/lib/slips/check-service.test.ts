@@ -214,8 +214,32 @@ describe("SlipCheckService", () => {
       status: "EXTRACTED",
       reference_id: "004999",
     });
+    // Only the current check (check-1) is ever written — the original
+    // accepted record (check-original) is never touched by this flow.
+    expect(fake.updatedChecks).toHaveLength(1);
     expect(pushes).toHaveLength(1);
     expect(pushes[0].text).toContain("สลิปนี้ถูกส่งและตรวจสอบแล้วในกลุ่มนี้");
     expect(pushes[0].text).not.toContain("ยอดโอน 315 บาท");
+  });
+
+  it("marks the check FAILED and pushes no duplicate warning when the provider fails (no verified entry)", async () => {
+    const fake = createFakeSupabase({
+      // Even if this reference id would otherwise be a duplicate elsewhere,
+      // a provider failure must never reach the dedupe check at all.
+      duplicateChecks: [{ id: "check-original", evidence_id: "ev-original", created_at: "2026-06-05T00:00:00Z" }],
+    });
+    const pushes: Array<{ to: string; text: string }> = [];
+    const service = new SlipCheckService(
+      fake.client,
+      { async extract() { throw new Error("Image extraction provider returned HTTP 500"); } },
+      async (to, text) => { pushes.push({ to, text }); },
+    );
+
+    await service.processEvidence("evidence-1");
+
+    expect(fake.updatedChecks).toHaveLength(1);
+    expect(fake.updatedChecks[0]).toMatchObject({ status: "FAILED" });
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0].text).not.toContain("สลิปนี้ถูกส่งและตรวจสอบแล้วในกลุ่มนี้");
   });
 });

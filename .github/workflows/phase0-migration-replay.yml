@@ -1,0 +1,326 @@
+name: Phase 0 migration replay
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    name: Replay migrations on empty local Supabase
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SUPABASE_VERSION: 2.109.1
+      EVIDENCE_DIR: phase0-migration-replay-evidence
+
+    steps:
+      - name: Check out audit commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Initialize evidence directory
+        run: mkdir -p "$EVIDENCE_DIR"
+
+      - name: Capture environment
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            echo "Runner: $RUNNER_OS"
+            echo "Node: $(node --version)"
+            echo "Supabase CLI:"
+            npx --yes "supabase@$SUPABASE_VERSION" --version
+            echo
+            echo "Docker:"
+            docker version
+            echo
+            echo "Docker Compose:"
+            docker compose version
+          } > "$EVIDENCE_DIR/environment.txt" 2>&1
+          cat "$EVIDENCE_DIR/environment.txt"
+
+      - name: Start local Supabase stack
+        id: supabase_start
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          npx --yes "supabase@$SUPABASE_VERSION" start > supabase-start.raw.log 2>&1
+          status=$?
+          set -e
+
+          sed -E \
+            -e '/(API URL|GraphQL URL|Storage URL|DB URL|Studio URL|Inbucket URL|Mailpit URL|JWT secret|anon key|service_role key|Publishable key|Secret key|S3 Access Key|S3 Secret Key|password|postgres(ql)?:\/\/|Authorization:)/Id' \
+            supabase-start.raw.log > "$EVIDENCE_DIR/supabase-start.log"
+          rm -f supabase-start.raw.log
+
+          cat "$EVIDENCE_DIR/supabase-start.log"
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Reset empty database and replay migrations without seed
+        id: migration_replay
+        if: steps.supabase_start.outputs.exit_code == '0'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          npx --yes "supabase@$SUPABASE_VERSION" db reset --local --no-seed > supabase-db-reset.raw.log 2>&1
+          status=$?
+          set -e
+
+          sed -E \
+            -e '/(DB URL|database URL|password|postgres(ql)?:\/\/|Authorization:|anon key|service_role key|Publishable key|Secret key)/Id' \
+            supabase-db-reset.raw.log > "$EVIDENCE_DIR/supabase-db-reset.log"
+          rm -f supabase-db-reset.raw.log
+
+          cat "$EVIDENCE_DIR/supabase-db-reset.log"
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Capture local migration history
+        id: migration_history
+        if: steps.migration_replay.outputs.exit_code == '0'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          npx --yes "supabase@$SUPABASE_VERSION" db query --local \
+            "select * from supabase_migrations.schema_migrations order by version;" \
+            > "$EVIDENCE_DIR/local-schema-migrations.txt" 2>&1
+          status=$?
+          set -e
+
+          if [ "$status" -ne 0 ]; then
+            sed -i '1iQUERY_FAILED' "$EVIDENCE_DIR/local-schema-migrations.txt"
+          fi
+          cat "$EVIDENCE_DIR/local-schema-migrations.txt"
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Capture local produce_transactions view
+        id: view_definition
+        if: steps.migration_replay.outputs.exit_code == '0'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          npx --yes "supabase@$SUPABASE_VERSION" db query --local \
+            "select pg_get_viewdef('public.produce_transactions'::regclass, true);" \
+            > "$EVIDENCE_DIR/local-produce-transactions-view.txt" 2>&1
+          status=$?
+          set -e
+
+          if [ "$status" -ne 0 ]; then
+            sed -i '1iQUERY_FAILED' "$EVIDENCE_DIR/local-produce-transactions-view.txt"
+          fi
+          cat "$EVIDENCE_DIR/local-produce-transactions-view.txt"
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Capture local drift-object presence
+        id: object_presence
+        if: steps.migration_replay.outputs.exit_code == '0'
+        continue-on-error: true
+        shell: bash
+        run: |
+          read -r -d '' presence_sql <<'SQL' || true
+          select 'public.work_rounds' as object_name,
+                 case when to_regclass('public.work_rounds') is null then 'ABSENT' else 'PRESENT' end as status
+          union all
+          select 'public.produce_round_events',
+                 case when to_regclass('public.produce_round_events') is null then 'ABSENT' else 'PRESENT' end
+          union all
+          select 'public.work_round_selections',
+                 case when to_regclass('public.work_round_selections') is null then 'ABSENT' else 'PRESENT' end
+          union all
+          select 'public.settlement_drafts',
+                 case when to_regclass('public.settlement_drafts') is null then 'ABSENT' else 'PRESENT' end
+          union all
+          select 'public.settlement_draft_history',
+                 case when to_regclass('public.settlement_draft_history') is null then 'ABSENT' else 'PRESENT' end
+          union all
+          select 'public.produce_sessions.work_round_id',
+                 case when exists (
+                   select 1 from information_schema.columns
+                   where table_schema = 'public'
+                     and table_name = 'produce_sessions'
+                     and column_name = 'work_round_id'
+                 ) then 'PRESENT' else 'ABSENT' end
+          union all
+          select 'public.produce_sessions.is_append_session',
+                 case when exists (
+                   select 1 from information_schema.columns
+                   where table_schema = 'public'
+                     and table_name = 'produce_sessions'
+                     and column_name = 'is_append_session'
+                 ) then 'PRESENT' else 'ABSENT' end
+          order by object_name;
+          SQL
+
+          read -r -d '' relationships_sql <<'SQL' || true
+          with related_columns as (
+            select format('%I.%I.%I', table_schema, table_name, column_name) as object_name
+            from information_schema.columns
+            where table_schema = 'public'
+              and table_name ~* '(slip|manual|settlement|reconcil)'
+              and column_name ~* '(work_?round|round_id)'
+          )
+          select object_name, 'PRESENT' as status
+          from related_columns
+          union all
+          select 'work-round columns in slip/manual slip/settlement/reconciliation tables', 'ABSENT'
+          where not exists (select 1 from related_columns)
+          order by object_name;
+          SQL
+
+          set +e
+          (
+            echo "Known drift objects:"
+            npx --yes "supabase@$SUPABASE_VERSION" db query --local "$presence_sql"
+            first_status=$?
+            echo
+            echo "Work-round relationships:"
+            npx --yes "supabase@$SUPABASE_VERSION" db query --local "$relationships_sql"
+            second_status=$?
+            exit $((first_status || second_status))
+          ) > "$EVIDENCE_DIR/local-object-presence.txt" 2>&1
+          status=$?
+          set -e
+
+          if [ "$status" -ne 0 ]; then
+            sed -i '1iQUERY_FAILED' "$EVIDENCE_DIR/local-object-presence.txt"
+          fi
+          cat "$EVIDENCE_DIR/local-object-presence.txt"
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Run configured seed separately
+        id: seed
+        if: steps.migration_replay.outputs.exit_code == '0'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          npx --yes "supabase@$SUPABASE_VERSION" db query --local \
+            --file supabase/seed.sql > "$EVIDENCE_DIR/supabase-seed.log" 2>&1
+          status=$?
+          set -e
+
+          cat "$EVIDENCE_DIR/supabase-seed.log"
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Write replay summary
+        if: always()
+        shell: bash
+        env:
+          START_EXIT: ${{ steps.supabase_start.outputs.exit_code }}
+          RESET_EXIT: ${{ steps.migration_replay.outputs.exit_code }}
+          HISTORY_EXIT: ${{ steps.migration_history.outputs.exit_code }}
+          VIEW_EXIT: ${{ steps.view_definition.outputs.exit_code }}
+          OBJECT_EXIT: ${{ steps.object_presence.outputs.exit_code }}
+          SEED_EXIT: ${{ steps.seed.outputs.exit_code }}
+        run: |
+          start_exit="${START_EXIT:-NOT_RUN}"
+          reset_exit="${RESET_EXIT:-NOT_RUN}"
+          history_exit="${HISTORY_EXIT:-NOT_RUN}"
+          view_exit="${VIEW_EXIT:-NOT_RUN}"
+          object_exit="${OBJECT_EXIT:-NOT_RUN}"
+          seed_exit="${SEED_EXIT:-NOT_RUN}"
+
+          if [ "$reset_exit" = "0" ]; then
+            replay_result="PASS"
+          elif [ "$reset_exit" = "NOT_RUN" ]; then
+            replay_result="NOT RUN"
+          else
+            replay_result="FAIL"
+          fi
+
+          if [ "$seed_exit" = "0" ]; then
+            seed_result="PASS"
+          elif [ "$seed_exit" = "NOT_RUN" ]; then
+            seed_result="NOT RUN"
+          else
+            seed_result="FAIL"
+          fi
+
+          applied_count=0
+          first_applied="none"
+          last_applied="none"
+          first_failing="none"
+          if [ -f "$EVIDENCE_DIR/supabase-db-reset.log" ]; then
+            mapfile -t applied < <(
+              grep -Eo 'Applying migration [^[:space:]]+' "$EVIDENCE_DIR/supabase-db-reset.log" \
+                | sed -E 's/^Applying migration //' || true
+            )
+            applied_count="${#applied[@]}"
+            if [ "$applied_count" -gt 0 ]; then
+              first_applied="${applied[0]}"
+              last_applied="${applied[$((applied_count - 1))]}"
+              if [ "$reset_exit" != "0" ]; then
+                first_failing="$last_applied"
+              fi
+            fi
+          fi
+
+          {
+            echo "# Phase 0 migration replay summary"
+            echo
+            echo "- Audit commit: \`$GITHUB_SHA\`"
+            echo "- Runner: \`$RUNNER_OS\`"
+            echo "- Supabase CLI: \`$SUPABASE_VERSION\`"
+            echo "- Supabase start exit: \`$start_exit\`"
+            echo "- Migration replay: **$replay_result**"
+            echo "- Seed execution: **$seed_result**"
+            echo "- Applied migration log entries: \`$applied_count\`"
+            echo "- First applied migration: \`$first_applied\`"
+            echo "- Last applied migration: \`$last_applied\`"
+            echo "- First failing migration: \`$first_failing\`"
+            echo "- Migration-history query exit: \`$history_exit\`"
+            echo "- View-definition query exit: \`$view_exit\`"
+            echo "- Object-presence query exit: \`$object_exit\`"
+            echo
+            echo "Secret-bearing local connection output was removed before artifact upload."
+            echo "No remote Supabase project, repository secret, or Production credential was used."
+          } > "$EVIDENCE_DIR/replay-summary.md"
+
+          cat "$EVIDENCE_DIR/replay-summary.md"
+
+      - name: Stop local Supabase stack
+        if: always()
+        continue-on-error: true
+        run: npx --yes "supabase@$SUPABASE_VERSION" stop --no-backup
+
+      - name: Enforce audit result
+        if: always()
+        shell: bash
+        env:
+          START_EXIT: ${{ steps.supabase_start.outputs.exit_code }}
+          RESET_EXIT: ${{ steps.migration_replay.outputs.exit_code }}
+          HISTORY_EXIT: ${{ steps.migration_history.outputs.exit_code }}
+          VIEW_EXIT: ${{ steps.view_definition.outputs.exit_code }}
+          OBJECT_EXIT: ${{ steps.object_presence.outputs.exit_code }}
+        run: |
+          test "${START_EXIT:-1}" = "0"
+          test "${RESET_EXIT:-1}" = "0"
+          test "${HISTORY_EXIT:-1}" = "0"
+          test "${VIEW_EXIT:-1}" = "0"
+          test "${OBJECT_EXIT:-1}" = "0"
+
+      - name: Upload migration replay evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase0-migration-replay-evidence
+          path: phase0-migration-replay-evidence/
+          if-no-files-found: error
+          retention-days: 14

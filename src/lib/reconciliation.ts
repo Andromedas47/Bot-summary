@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { normalizeTransactionId, resolveGloballyAcceptedCheckIds } from "@/lib/slips/transaction-dedupe";
 import type { Database, TransferReconciliationRow } from "@/types/database";
 
 type Supabase = SupabaseClient<Database>;
@@ -43,10 +44,22 @@ async function computeAiVerifiedTotal(
 
   const { data: checks } = await supabase
     .from("slip_checks")
-    .select("transfer_amount, reference_id")
+    .select("id, transfer_amount, reference_id")
     .in("evidence_id", evidenceIds)
     .in("status", ["EXTRACTED", "PARTIAL_EXTRACTED"])
     .not("transfer_amount", "is", null);
+
+  // Cross-group/cross-market guard: the same bank transaction id may have
+  // already been accepted under a different source_id or business_date.
+  // ponytail: best-effort (no unique constraint on reference_id backs this
+  // yet — see schema gap report), but a single batched query resolves the
+  // globally-earliest accepted check per distinct reference id in this scope.
+  const distinctRefs = [...new Set(
+    (checks ?? [])
+      .map((c) => normalizeTransactionId(c.reference_id))
+      .filter((ref): ref is string => ref !== null),
+  )];
+  const globalWinners = await resolveGloballyAcceptedCheckIds(supabase, distinctRefs);
 
   // Duplicate slip guard: the same slip submitted twice (even across batches
   // in the same business day) extracts the same bank reference_id — count each
@@ -55,10 +68,11 @@ async function computeAiVerifiedTotal(
   const seenReferences = new Set<string>();
   let total = 0;
   for (const c of checks ?? []) {
-    const ref = typeof c.reference_id === "string" ? c.reference_id.trim() : "";
+    const ref = normalizeTransactionId(c.reference_id);
     if (ref) {
       if (seenReferences.has(ref)) continue;
       seenReferences.add(ref);
+      if (globalWinners.size > 0 && !globalWinners.has(c.id)) continue;
     }
     total += Number(c.transfer_amount);
   }

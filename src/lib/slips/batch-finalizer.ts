@@ -5,6 +5,10 @@ import { logger } from "@/lib/logger";
 import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
 import { tryFinalizeSettlement } from "@/lib/settlement-finalizer";
 import {
+  normalizeTransactionId,
+  resolveGloballyAcceptedCheckIds,
+} from "@/lib/slips/transaction-dedupe";
+import {
   computeValidationFlags,
   parseBatchDate,
   type EvidenceFlags,
@@ -79,8 +83,9 @@ export type FinalizeResult =
   | { delivered: true; persisted: true }
   | { delivered: true; persisted: false; persistError: string };
 
-interface EvidenceWithCheck {
+export interface EvidenceWithCheck {
   id:              string;
+  checkId?:         string | null;
   batchIndex:      number | null;
   checkStatus:     SlipCheckStatus | null;
   slipType:        SlipType | null;
@@ -90,6 +95,7 @@ interface EvidenceWithCheck {
   discountAmount?: number | null;
   transactionTime: string | null;
   referenceId?:    string | null;
+  globallyDuplicate?: boolean;
   failureReason:   string | null;
 }
 
@@ -289,10 +295,11 @@ export async function finalizeSlipBatch(
   let messageSent = false;
 
   try {
-    const [batchRow, evidences] = await Promise.all([
+    const [batchRow, loadedEvidences] = await Promise.all([
       loadBatchRow(supabase, batchId),
       loadBatchEvidences(supabase, batchId),
     ]);
+    const evidences = await applyGlobalDuplicateExclusions(supabase, loadedEvidences);
 
     // Idempotency guard: if summary_sent_at is already set, another worker
     // (or a previous retry) already delivered the summary — skip silently.
@@ -432,7 +439,7 @@ async function loadBatchEvidences(
 
   const { data: checkData, error: checkError } = await supabase
     .from("slip_checks")
-    .select("evidence_id, status, slip_type, gross_amount, discount_amount, transfer_amount, paid_amount, transaction_time, reference_id, failure_reason")
+    .select("id, evidence_id, status, slip_type, gross_amount, discount_amount, transfer_amount, paid_amount, transaction_time, reference_id, failure_reason")
     .in("evidence_id", evidenceIds);
 
   if (checkError) throw new Error(`loadBatchEvidences checks: ${checkError.message}`);
@@ -446,6 +453,7 @@ async function loadBatchEvidences(
     const check = checkByEvidenceId.get(ev.id);
     return {
       id:              ev.id,
+      checkId:         check?.id ?? null,
       batchIndex:      ev.batch_index,
       checkStatus:     (check?.status ?? null) as SlipCheckStatus | null,
       slipType:        (check?.slip_type ?? null) as SlipType | null,
@@ -456,6 +464,41 @@ async function loadBatchEvidences(
       transactionTime: check?.transaction_time ?? null,
       referenceId:     check?.reference_id ?? null,
       failureReason:   check?.failure_reason ?? null,
+    };
+  });
+}
+
+/**
+ * Read-time batch guard backed by the same global winner resolver used by
+ * reconciliation. It does not claim uniqueness and therefore remains
+ * best-effort until slip_checks.reference_id has an approved unique index.
+ */
+export async function applyGlobalDuplicateExclusions(
+  supabase: Supabase,
+  evidences: readonly EvidenceWithCheck[],
+): Promise<EvidenceWithCheck[]> {
+  const candidateReferences = [...new Set(
+    evidences
+      .filter((e) => e.checkId)
+      .map((e) => normalizeTransactionId(e.referenceId))
+      .filter((reference): reference is string => reference !== null),
+  )];
+  if (candidateReferences.length === 0) return evidences.map((e) => ({ ...e }));
+
+  const acceptedCheckIds = await resolveGloballyAcceptedCheckIds(
+    supabase,
+    candidateReferences,
+  );
+  if (acceptedCheckIds.size === 0) return evidences.map((e) => ({ ...e }));
+
+  return evidences.map((evidence) => {
+    const reference = normalizeTransactionId(evidence.referenceId);
+    return {
+      ...evidence,
+      globallyDuplicate:
+        reference !== null
+        && evidence.checkId != null
+        && !acceptedCheckIds.has(evidence.checkId),
     };
   });
 }

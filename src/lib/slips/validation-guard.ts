@@ -167,6 +167,7 @@ export function computeValidationFlags(
     discountAmount?:  number | null;
     transactionTime:  string | null;
     referenceId?:     string | null;
+    globallyDuplicate?: boolean;
   }>,
   batchDateStr: string | null,
 ): EvidenceFlags[] {
@@ -204,7 +205,7 @@ export function computeValidationFlags(
 
     if (isTerminal) {
       // Duplicate guard — independent of amount validity
-      if (isDuplicate[i]) {
+      if (isDuplicate[i] || e.globallyDuplicate === true) {
         reasons.push("สลิปซ้ำ");
       }
 

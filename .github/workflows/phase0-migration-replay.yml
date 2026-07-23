@@ -2,6 +2,11 @@ name: Phase 0 migration replay
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - audit/phase0-migration-replay-gha
+    paths:
+      - ".github/workflows/phase0-migration-replay.yml"
 
 permissions:
   contents: read

@@ -1,0 +1,258 @@
+import { describe, expect, test } from "bun:test";
+import {
+  calculateDigitalWhiteSheet,
+  calculateWhiteSheetItems,
+  WhiteSheetValidationError,
+} from "./calculate";
+import type {
+  DigitalWhiteSheetInput,
+  WhiteSheetExpenses,
+  WhiteSheetTransactionRow,
+} from "./types";
+
+const MARKET_KEY = "market-72";
+const BUSINESS_DATE = "2026-07-23";
+
+function transaction(
+  overrides: Partial<WhiteSheetTransactionRow> = {},
+): WhiteSheetTransactionRow {
+  return {
+    marketKey: MARKET_KEY,
+    businessDate: BUSINESS_DATE,
+    productName: "ผักกาดขาว",
+    unit: "โล",
+    quantity: 10,
+    transactionType: "เบิก",
+    unitPrice: 25,
+    ...overrides,
+  };
+}
+
+function expenses(overrides: Partial<WhiteSheetExpenses> = {}): WhiteSheetExpenses {
+  return {
+    labor: 0,
+    locationFee: 0,
+    bag: 0,
+    snack: 0,
+    other: 0,
+    ...overrides,
+  };
+}
+
+function input(
+  overrides: Partial<DigitalWhiteSheetInput> = {},
+): DigitalWhiteSheetInput {
+  return {
+    marketKey: MARKET_KEY,
+    marketLabel: "ตลาด 72",
+    businessDate: BUSINESS_DATE,
+    transactions: [transaction()],
+    verifiedTransfers: 0,
+    expenses: expenses(),
+    actualCashSubmitted: 0,
+    ...overrides,
+  };
+}
+
+describe("calculateWhiteSheetItems", () => {
+  test("subtracts good and damaged returns from withdrawals", () => {
+    const items = calculateWhiteSheetItems([
+      transaction({ quantity: 10, unitPrice: 25 }),
+      transaction({ quantity: 2, transactionType: "คืน", unitPrice: 999 }),
+      transaction({ quantity: 1, transactionType: "คืนเสีย", unitPrice: null }),
+    ]);
+
+    expect(items).toEqual([
+      expect.objectContaining({
+        withdrawnQuantity: 10,
+        goodReturnQuantity: 2,
+        damagedReturnQuantity: 1,
+        soldQuantity: 7,
+        expectedSales: 175,
+      }),
+    ]);
+  });
+
+  test("treats missing and explicit zero returns as zero", () => {
+    const missing = calculateWhiteSheetItems([transaction({ quantity: 4, unitPrice: 12.5 })]);
+    const explicitZero = calculateWhiteSheetItems([
+      transaction({ quantity: 4, unitPrice: 12.5 }),
+      transaction({ quantity: 0, transactionType: "คืน", unitPrice: null }),
+      transaction({ quantity: 0, transactionType: "คืนเสีย", unitPrice: null }),
+    ]);
+
+    expect(missing[0]).toMatchObject({
+      goodReturnQuantity: 0,
+      damagedReturnQuantity: 0,
+      soldQuantity: 4,
+      expectedSales: 50,
+    });
+    expect(explicitZero).toEqual(missing);
+  });
+
+  test("sums duplicate product rows", () => {
+    const [item] = calculateWhiteSheetItems([
+      transaction({ quantity: 2, unitPrice: 10 }),
+      transaction({ quantity: 3, unitPrice: 10 }),
+      transaction({ quantity: 1, transactionType: "คืน", unitPrice: null }),
+    ]);
+
+    expect(item).toMatchObject({
+      withdrawnQuantity: 5,
+      goodReturnQuantity: 1,
+      soldQuantity: 4,
+      expectedSales: 40,
+    });
+  });
+
+  test("preserves decimal kilogram precision", () => {
+    const [item] = calculateWhiteSheetItems([
+      transaction({ quantity: 1.25, unitPrice: 100 }),
+      transaction({ quantity: 0.15, transactionType: "คืน", unitPrice: null }),
+      transaction({ quantity: 0.1, transactionType: "คืนเสีย", unitPrice: null }),
+    ]);
+
+    expect(item).toMatchObject({
+      withdrawnQuantity: 1.25,
+      goodReturnQuantity: 0.15,
+      damagedReturnQuantity: 0.1,
+      soldQuantity: 1,
+      expectedSales: 100,
+    });
+  });
+
+  test("keeps incompatible units on separate rows", () => {
+    const items = calculateWhiteSheetItems([
+      transaction({ quantity: 2, unit: "โล", unitPrice: 100 }),
+      transaction({ quantity: 3, unit: "ลูก", unitPrice: 10 }),
+    ]);
+
+    expect(items).toHaveLength(2);
+    expect(items.find((item) => item.normalizedUnit === "โล")).toMatchObject({
+      soldQuantity: 2,
+      expectedSales: 200,
+    });
+    expect(items.find((item) => item.normalizedUnit === "ลูก")).toMatchObject({
+      soldQuantity: 3,
+      expectedSales: 30,
+    });
+  });
+
+  test("fails closed when returns make sold quantity negative", () => {
+    const source = [
+      transaction({ quantity: 1, unitPrice: 10 }),
+      transaction({ quantity: 1.001, transactionType: "คืน", unitPrice: null }),
+    ];
+
+    expect(() => calculateWhiteSheetItems(source)).toThrow(WhiteSheetValidationError);
+    try {
+      calculateWhiteSheetItems(source);
+      throw new Error("expected validation failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(WhiteSheetValidationError);
+      expect((error as WhiteSheetValidationError).issues[0]?.code).toBe("negative_sold_quantity");
+    }
+  });
+
+  test("uses FIFO withdrawal price lots without averaging conflicting prices", () => {
+    const result = calculateDigitalWhiteSheet(input({
+      transactions: [
+        transaction({ quantity: 2, unitPrice: 10 }),
+        transaction({ quantity: 3, unitPrice: 20 }),
+        transaction({ quantity: 1, transactionType: "คืน", unitPrice: null }),
+      ],
+      actualCashSubmitted: 70,
+    }));
+
+    expect(result.items[0]).toMatchObject({
+      soldQuantity: 4,
+      withdrawalUnitPrices: [10, 20],
+      expectedSales: 70,
+    });
+    expect(result.expectedSales).toBe(70);
+    expect(result.warnings).toContain(
+      "Conflicting withdrawal prices for ผักกาดขาว (โล); FIFO source-order lots applied: 10.00, 20.00",
+    );
+  });
+});
+
+describe("calculateDigitalWhiteSheet", () => {
+  test("warns about uncategorized products without excluding them", () => {
+    const result = calculateDigitalWhiteSheet(input({
+      transactions: [transaction({ productName: "ปลาทูเค็ม", quantity: 2, unitPrice: 30 })],
+      actualCashSubmitted: 60,
+    }));
+
+    expect(result.expectedSales).toBe(60);
+    expect(result.items[0]?.category).toBe("uncategorized");
+    expect(result.warnings).toEqual(["Uncategorized product: ปลาทูเค็ม (โล)"]);
+  });
+
+  test("calculates expense total and expected cash", () => {
+    const result = calculateDigitalWhiteSheet(input({
+      transactions: [transaction({ quantity: 10, unitPrice: 10 })],
+      verifiedTransfers: 20,
+      expenses: expenses({ labor: 2, locationFee: 3, bag: 1, snack: 1, other: 3 }),
+      actualCashSubmitted: 70,
+    }));
+
+    expect(result.expenseTotal).toBe(10);
+    expect(result.expectedCash).toBe(70);
+  });
+
+  for (const scenario of [
+    { name: "shortage", actualCashSubmitted: 60, difference: -10 },
+    { name: "matched", actualCashSubmitted: 70, difference: 0 },
+    { name: "overage", actualCashSubmitted: 75, difference: 5 },
+  ] as const) {
+    test(`reports ${scenario.name}`, () => {
+      const result = calculateDigitalWhiteSheet(input({
+        transactions: [transaction({ quantity: 10, unitPrice: 10 })],
+        verifiedTransfers: 20,
+        expenses: expenses({ labor: 10 }),
+        actualCashSubmitted: scenario.actualCashSubmitted,
+      }));
+
+      expect(result.expectedCash).toBe(70);
+      expect(result.difference).toBe(scenario.difference);
+      expect(result.status).toBe(scenario.name);
+    });
+  }
+
+  test("rounds monetary boundaries in integer satang without float drift", () => {
+    const result = calculateDigitalWhiteSheet(input({
+      transactions: [
+        transaction({ quantity: 0.1, unitPrice: 0.1 }),
+        transaction({ quantity: 0.2, unitPrice: 0.1 }),
+      ],
+      verifiedTransfers: 0,
+      expenses: expenses({ other: 0.1 + 0.2 }),
+      actualCashSubmitted: 0,
+    }));
+
+    expect(result.expectedSales).toBe(0.03);
+    expect(result.expenses.other).toBe(0.3);
+    expect(result.expenseTotal).toBe(0.3);
+    expect(result.expectedCash).toBe(-0.27);
+    expect(result.difference).toBe(0.27);
+    expect(result.status).toBe("overage");
+  });
+
+  test("does not mutate input arrays or source records", () => {
+    const transactions = [
+      Object.freeze(transaction({ quantity: 3, unitPrice: 10 })),
+      Object.freeze(transaction({ quantity: 1, transactionType: "คืน", unitPrice: null })),
+    ] as const;
+    const expenseInput = Object.freeze(expenses({ other: 5, otherNote: "parking" }));
+    const source = Object.freeze(input({
+      transactions: Object.freeze(transactions),
+      expenses: expenseInput,
+      actualCashSubmitted: 15,
+    }));
+    const before = JSON.parse(JSON.stringify(source));
+
+    calculateDigitalWhiteSheet(source);
+
+    expect(source).toEqual(before);
+  });
+});

@@ -4,10 +4,17 @@ import { SlipCheckService } from "@/lib/slips/check-service";
 import type { SlipExtraction } from "@/lib/slips/extraction-schema";
 import type { Database } from "@/types/database";
 
-function createFakeSupabase() {
+function createFakeSupabase(opts: {
+  // Rows returned by the transaction-dedupe lookup's slip_checks select —
+  // empty means "no duplicate found" (the default for existing tests).
+  duplicateChecks?: Array<{ id: string; evidence_id: string; created_at: string }>;
+  evidenceSourceId?: string;
+} = {}) {
   const insertedChecks: Array<Record<string, unknown>> = [];
   const updatedChecks: Array<Record<string, unknown>> = [];
   const downloads: Array<{ bucket: string; path: string }> = [];
+  const duplicateChecks = opts.duplicateChecks ?? [];
+  const evidenceSourceId = opts.evidenceSourceId ?? "group-1";
 
   const client = {
     storage: {
@@ -45,7 +52,14 @@ function createFakeSupabase() {
                     };
                   },
                   async maybeSingle() {
-                    return { data: { source_id: "group-1" }, error: null };
+                    return {
+                      data: {
+                        source_id: evidenceSourceId,
+                        received_at: "2026-06-06T01:00:00Z",
+                        batch_id: null,
+                      },
+                      error: null,
+                    };
                   },
                 };
               },
@@ -75,6 +89,16 @@ function createFakeSupabase() {
                 return { error: null };
               },
             };
+          },
+          // Used by the transaction-dedupe lookup after a successful extraction.
+          select() {
+            const chain = {
+              eq: () => chain,
+              in: () => chain,
+              order: () => chain,
+              then: (resolve: (v: unknown) => void) => resolve({ data: duplicateChecks, error: null }),
+            };
+            return chain;
           },
         };
       }
@@ -167,5 +191,31 @@ describe("SlipCheckService", () => {
       status: "EXTRACTED",
       slip_type: "BANK_SLIP_NO_QR",
     });
+  });
+
+  it("pushes a duplicate-transaction warning instead of the summary, and keeps the check EXTRACTED", async () => {
+    const fake = createFakeSupabase({
+      duplicateChecks: [{ id: "check-original", evidence_id: "ev-original", created_at: "2026-06-05T00:00:00Z" }],
+      evidenceSourceId: "group-1", // same source as this evidence => duplicate_same_source
+    });
+    const pushes: Array<{ to: string; text: string }> = [];
+    const service = new SlipCheckService(
+      fake.client,
+      { async extract() { return extraction; } },
+      async (to, text) => { pushes.push({ to, text }); },
+    );
+
+    await service.processEvidence("evidence-1");
+
+    // The original accepted record and the newly extracted check both keep
+    // their real, unmodified status — duplication is a messaging/total
+    // concern, not a status the schema has a slot for.
+    expect(fake.updatedChecks[0]).toMatchObject({
+      status: "EXTRACTED",
+      reference_id: "004999",
+    });
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0].text).toContain("สลิปนี้ถูกส่งและตรวจสอบแล้วในกลุ่มนี้");
+    expect(pushes[0].text).not.toContain("ยอดโอน 315 บาท");
   });
 });

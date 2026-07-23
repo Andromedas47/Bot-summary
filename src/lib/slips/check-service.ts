@@ -11,6 +11,8 @@ import {
   type SlipExtractor,
 } from "@/lib/slips/extractor";
 import { buildSlipLineSummary } from "@/lib/slips/line-summary";
+import { findSlipTransactionDuplicate } from "@/lib/slips/transaction-dedupe";
+import { buildSlipTransactionDuplicateWarning } from "@/lib/slips/transaction-duplicate-warning";
 import type { Database } from "@/types/database";
 
 type Supabase = SupabaseClient<Database>;
@@ -86,11 +88,19 @@ export class SlipCheckService implements SlipCheckProcessor {
       });
 
       // Skip per-image LINE push when the evidence is part of a batch.
-      // The batch finalizer will aggregate results and send one summary.
+      // The batch finalizer will aggregate results and send one summary
+      // (it has its own in-batch duplicate flag via validation-guard.ts).
       if (!isInBatch) {
+        const duplicateWarning = await this.checkTransactionDuplicate(
+          checkId,
+          status,
+          extraction.referenceId,
+          evidence.source_id,
+          log,
+        );
         await this.pushSummary(
           evidence.source_id,
-          buildSlipLineSummary(extraction, status),
+          duplicateWarning ?? buildSlipLineSummary(extraction, status),
           log,
         );
       }
@@ -196,6 +206,47 @@ export class SlipCheckService implements SlipCheckProcessor {
       await this.pushMessage(sourceId, text);
     } catch {
       log.error("slip summary push failed", { reason: "line_push_failed" });
+    }
+  }
+
+  // Returns a duplicate-warning message to push instead of the normal
+  // summary, or null when the slip is unique / has no reference id to
+  // check. A lookup failure fails open (falls back to the normal summary)
+  // rather than re-throwing — the extraction itself already succeeded and
+  // was saved, so this must not flip the check to FAILED.
+  private async checkTransactionDuplicate(
+    checkId: string,
+    status: ReturnType<typeof determineSlipCheckStatus>,
+    referenceId: string | null,
+    sourceId: string,
+    log: ReturnType<typeof logger.child>,
+  ): Promise<string | null> {
+    if (status !== "EXTRACTED" && status !== "PARTIAL_EXTRACTED") return null;
+    if (!referenceId) return null;
+
+    try {
+      const duplicate = await findSlipTransactionDuplicate(this.supabase, {
+        rawTransactionId: referenceId,
+        sourceId,
+        excludeCheckId: checkId,
+      });
+
+      if (duplicate.status !== "duplicate_same_source" && duplicate.status !== "duplicate_cross_source") {
+        return null;
+      }
+
+      log.warn("slip transaction duplicate detected", {
+        checkId,
+        duplicateStatus: duplicate.status,
+        originalRecordId: duplicate.originalRecordId,
+      });
+      return buildSlipTransactionDuplicateWarning(duplicate);
+    } catch (error) {
+      log.error("slip transaction duplicate lookup failed", {
+        checkId,
+        reason: error instanceof Error ? error.message : "unknown",
+      });
+      return null;
     }
   }
 }

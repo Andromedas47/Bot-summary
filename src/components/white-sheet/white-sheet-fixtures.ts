@@ -1,6 +1,6 @@
-import type { DigitalWhiteSheetViewModel } from "./types";
+import type { DigitalWhiteSheetSummary } from "@/lib/white-sheet";
 
-export const matchedWhiteSheetFixture: DigitalWhiteSheetViewModel = {
+export const matchedWhiteSheetFixture: DigitalWhiteSheetSummary = {
   marketKey: "wat-thung-lan-na",
   marketLabel: "วัดทุ่งลานนา",
   businessDate: "2026-06-01",
@@ -21,7 +21,7 @@ export const matchedWhiteSheetFixture: DigitalWhiteSheetViewModel = {
   warnings: [],
 };
 
-export const shortageWhiteSheetFixture: DigitalWhiteSheetViewModel = {
+export const shortageWhiteSheetFixture: DigitalWhiteSheetSummary = {
   marketKey: "talad-kee",
   marketLabel: "ตลาดกี้",
   businessDate: "2026-06-15",
@@ -38,12 +38,12 @@ export const shortageWhiteSheetFixture: DigitalWhiteSheetViewModel = {
   expenseTotal: 1_540,
   expectedCash: 2_160,
   actualCashSubmitted: 1_850,
-  difference: 310,
+  difference: -310,
   status: "shortage",
   warnings: ["พบสลิปโอนซ้ำในช่วงเวลาเดียวกัน"],
 };
 
-export const overageWhiteSheetFixture: DigitalWhiteSheetViewModel = {
+export const overageWhiteSheetFixture: DigitalWhiteSheetSummary = {
   marketKey: "bang-sue",
   marketLabel: "บางซื่อ",
   businessDate: "2026-07-01",
@@ -64,7 +64,7 @@ export const overageWhiteSheetFixture: DigitalWhiteSheetViewModel = {
   warnings: [],
 };
 
-export const uncategorizedWarningFixture: DigitalWhiteSheetViewModel = {
+export const uncategorizedWarningFixture: DigitalWhiteSheetSummary = {
   ...shortageWhiteSheetFixture,
   warnings: ["มีรายการที่ยังไม่ได้จัดหมวด"],
 };

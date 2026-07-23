@@ -1,4 +1,5 @@
-import type { DigitalWhiteSheetViewModel, WhiteSheetExpenseInput } from "./types";
+import type { DigitalWhiteSheetSummary as DigitalWhiteSheetSummaryContract } from "@/lib/white-sheet";
+import type { WhiteSheetExpenseInput } from "./types";
 import { DigitalWhiteSheetExpensesForm } from "./DigitalWhiteSheetExpensesForm";
 import { DigitalWhiteSheetSummary } from "./DigitalWhiteSheetSummary";
 
@@ -7,7 +8,7 @@ export function DigitalWhiteSheetPanel({
   onSubmitExpenses,
   isSubmitting,
 }: {
-  viewModel: DigitalWhiteSheetViewModel;
+  viewModel: DigitalWhiteSheetSummaryContract;
   onSubmitExpenses: (input: WhiteSheetExpenseInput) => void | Promise<void>;
   isSubmitting?: boolean;
 }) {

@@ -19,6 +19,8 @@ const MILLIQUANTITY_PER_UNIT = BigInt(1_000);
 interface PriceLot {
   quantity: bigint;
   unitPrice: bigint;
+  basisQuantity: bigint | null;
+  basisPrice: bigint | null;
 }
 
 interface ItemAggregate {
@@ -148,7 +150,12 @@ function allocateReturnsFifo(group: ItemAggregate): {
     const consumed = returnsRemaining < lot.quantity ? returnsRemaining : lot.quantity;
     const soldFromLot = lot.quantity - consumed;
     returnsRemaining -= consumed;
-    expectedMilliSatang += soldFromLot * lot.unitPrice;
+    expectedMilliSatang += lot.basisQuantity !== null && lot.basisPrice !== null
+      ? roundDivide(
+          soldFromLot * lot.basisPrice * MILLIQUANTITY_PER_UNIT,
+          lot.basisQuantity,
+        )
+      : soldFromLot * lot.unitPrice;
   }
 
   return {
@@ -213,8 +220,42 @@ function buildItemCalculationParts(
         "invalid_money",
         rowIndex,
       );
+      const hasBasisQuantity = row.basisQuantity !== null && row.basisQuantity !== undefined;
+      const hasBasisPrice = row.basisPrice !== null && row.basisPrice !== undefined;
+      if (hasBasisQuantity !== hasBasisPrice) {
+        fail(
+          "invalid_money",
+          `basisQuantity and basisPrice must be supplied together at row ${rowIndex}`,
+          { rowIndex, groupKey: key },
+        );
+      }
+      const basisQuantity = hasBasisQuantity
+        ? toScaledInteger(
+            row.basisQuantity as number,
+            QUANTITY_SCALE,
+            `basisQuantity at row ${rowIndex}`,
+            "invalid_quantity",
+            rowIndex,
+          )
+        : null;
+      if (basisQuantity === BigInt(0)) {
+        fail(
+          "invalid_quantity",
+          `basisQuantity must be greater than zero at row ${rowIndex}`,
+          { rowIndex, groupKey: key },
+        );
+      }
+      const basisPrice = hasBasisPrice
+        ? toScaledInteger(
+            row.basisPrice as number,
+            MONEY_SCALE,
+            `basisPrice at row ${rowIndex}`,
+            "invalid_money",
+            rowIndex,
+          )
+        : null;
       group.withdrawn += quantity;
-      group.priceLots.push({ quantity, unitPrice });
+      group.priceLots.push({ quantity, unitPrice, basisQuantity, basisPrice });
     } else if (transactionType === "คืน") {
       group.goodReturn += quantity;
     } else {

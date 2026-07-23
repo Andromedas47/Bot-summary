@@ -1,6 +1,6 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { formatThaiDate } from "@/lib/date";
-import type { DigitalWhiteSheetViewModel } from "./types";
+import type { DigitalWhiteSheetSummary as DigitalWhiteSheetSummaryContract } from "@/lib/white-sheet";
 import { DigitalWhiteSheetStatus } from "./DigitalWhiteSheetStatus";
 import { formatWhiteSheetMoney } from "./white-sheet-presentation";
 
@@ -27,7 +27,11 @@ function MoneyRow({
   );
 }
 
-export function DigitalWhiteSheetSummary({ viewModel }: { viewModel: DigitalWhiteSheetViewModel }) {
+export function DigitalWhiteSheetSummary({
+  viewModel,
+}: {
+  viewModel: DigitalWhiteSheetSummaryContract;
+}) {
   const { expenses, warnings } = viewModel;
 
   return (

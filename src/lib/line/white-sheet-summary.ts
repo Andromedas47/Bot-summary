@@ -5,7 +5,7 @@ import {
   LINE_MESSAGE_MAX_CODE_POINTS,
   LINE_REPLY_MAX_MESSAGES,
 } from "@/lib/summary/remaining-fruit-message";
-import type { DigitalWhiteSheetViewModel, WhiteSheetStatus } from "@/components/white-sheet/types";
+import type { DigitalWhiteSheetSummary, WhiteSheetStatus } from "@/lib/white-sheet";
 
 function fmt(amount: number): string {
   return amount.toLocaleString("th-TH", {
@@ -25,8 +25,8 @@ function formatDifferenceLine(status: WhiteSheetStatus, difference: number): str
   return `ผลต่าง: ${label} ${fmt(Math.abs(difference))} บาท`;
 }
 
-function buildExpenseSection(viewModel: DigitalWhiteSheetViewModel): string[] {
-  const { expenses } = viewModel;
+function buildExpenseSection(summary: DigitalWhiteSheetSummary): string[] {
+  const { expenses } = summary;
   const lines = [
     "ค่าใช้จ่าย",
     `- ค่าแรง: ${fmt(expenses.labor)} บาท`,
@@ -40,30 +40,30 @@ function buildExpenseSection(viewModel: DigitalWhiteSheetViewModel): string[] {
     lines.push(`  (${expenses.otherNote.trim()})`);
   }
 
-  lines.push(`รวมค่าใช้จ่าย: ${fmt(viewModel.expenseTotal)} บาท`);
+  lines.push(`รวมค่าใช้จ่าย: ${fmt(summary.expenseTotal)} บาท`);
   return lines;
 }
 
-export function buildWhiteSheetSummaryMessage(viewModel: DigitalWhiteSheetViewModel): string {
-  const market = displayMarketName(viewModel.marketLabel, viewModel.marketLabel);
+export function buildWhiteSheetSummaryMessage(summary: DigitalWhiteSheetSummary): string {
+  const market = displayMarketName(summary.marketLabel, summary.marketLabel);
 
   const lines = [
     `สรุปปิดยอด ${market}`,
-    `วันที่ ${formatThaiDate(viewModel.businessDate)}`,
+    `วันที่ ${formatThaiDate(summary.businessDate)}`,
     "",
-    `ยอดขายที่ควรได้: ${fmt(viewModel.expectedSales)} บาท`,
-    `เงินโอนที่ตรวจแล้ว: ${fmt(viewModel.verifiedTransfers)} บาท`,
+    `ยอดขายที่ควรได้: ${fmt(summary.expectedSales)} บาท`,
+    `เงินโอนที่ตรวจแล้ว: ${fmt(summary.verifiedTransfers)} บาท`,
     "",
-    ...buildExpenseSection(viewModel),
+    ...buildExpenseSection(summary),
     "",
-    `เงินสดที่ควรส่ง: ${fmt(viewModel.expectedCash)} บาท`,
-    `เงินสดส่งจริง: ${fmt(viewModel.actualCashSubmitted)} บาท`,
+    `เงินสดที่ควรส่ง: ${fmt(summary.expectedCash)} บาท`,
+    `เงินสดส่งจริง: ${fmt(summary.actualCashSubmitted)} บาท`,
     "",
-    formatDifferenceLine(viewModel.status, viewModel.difference),
+    formatDifferenceLine(summary.status, summary.difference),
   ];
 
-  if (viewModel.warnings.length > 0) {
-    lines.push("", "— คำเตือน —", ...viewModel.warnings);
+  if (summary.warnings.length > 0) {
+    lines.push("", "— คำเตือน —", ...summary.warnings);
   }
 
   return lines.join("\n");
@@ -86,9 +86,9 @@ function splitMessageAtNewline(text: string, maxCodePoints: number): [string, st
 }
 
 export function buildWhiteSheetSummaryMessages(
-  viewModel: DigitalWhiteSheetViewModel,
+  summary: DigitalWhiteSheetSummary,
 ): string[] {
-  const full = buildWhiteSheetSummaryMessage(viewModel);
+  const full = buildWhiteSheetSummaryMessage(summary);
   if (countCodePoints(full) <= LINE_MESSAGE_MAX_CODE_POINTS) {
     return [full];
   }

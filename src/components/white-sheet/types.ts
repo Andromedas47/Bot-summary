@@ -1,37 +1,10 @@
-export type WhiteSheetStatus = "shortage" | "matched" | "overage";
+import type { WhiteSheetExpenses } from "@/lib/white-sheet";
 
-export type DigitalWhiteSheetViewModel = {
-  marketKey: string;
-  marketLabel: string;
-  businessDate: string;
-
-  expectedSales: number;
-  verifiedTransfers: number;
-
-  expenses: {
-    labor: number;
-    locationFee: number;
-    bag: number;
-    snack: number;
-    other: number;
-    otherNote?: string;
-  };
-
-  expenseTotal: number;
-  expectedCash: number;
-  actualCashSubmitted: number;
-
-  difference: number;
-  status: WhiteSheetStatus;
-  warnings: string[];
-};
-
-export type WhiteSheetExpenseInput = {
-  labor: number;
-  locationFee: number;
-  bag: number;
-  snack: number;
-  other: number;
-  otherNote?: string;
+/**
+ * Presentation-only input. The calculated output contract lives exclusively
+ * in src/lib/white-sheet; this type only combines editable expense fields with
+ * the submitted cash value before recalculation.
+ */
+export type WhiteSheetExpenseInput = WhiteSheetExpenses & {
   actualCashSubmitted: number;
 };

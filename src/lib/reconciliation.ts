@@ -23,7 +23,12 @@ export function businessDateToUtcRange(businessDate: string): { startUtc: string
   };
 }
 
-async function computeAiVerifiedTotal(
+/**
+ * Read-only verified-transfer loader shared by reconciliation and white-sheet
+ * reporting. It keeps the globally earliest accepted check per non-empty
+ * reference ID and deliberately makes no duplicate claim for missing IDs.
+ */
+export async function loadAiVerifiedTransferTotal(
   supabase:     Supabase,
   sourceId:     string,
   businessDate: string,
@@ -32,22 +37,28 @@ async function computeAiVerifiedTotal(
 
   // ponytail: validation flags (outlier, date-mismatch) are not persisted — can't filter here.
   // Tighten this query if/when validation flags are stored on slip_checks.
-  const { data: evidences } = await supabase
+  const { data: evidences, error: evidenceError } = await supabase
     .from("slip_evidences")
     .select("id")
     .eq("source_id", sourceId)
     .gte("received_at", startUtc)
     .lt("received_at", endUtc);
+  if (evidenceError) {
+    throw new Error(`slip evidence query failed: ${evidenceError.message}`);
+  }
 
   const evidenceIds = (evidences ?? []).map(e => e.id);
   if (evidenceIds.length === 0) return 0;
 
-  const { data: checks } = await supabase
+  const { data: checks, error: checkError } = await supabase
     .from("slip_checks")
     .select("id, transfer_amount, reference_id")
     .in("evidence_id", evidenceIds)
     .in("status", ["EXTRACTED", "PARTIAL_EXTRACTED"])
     .not("transfer_amount", "is", null);
+  if (checkError) {
+    throw new Error(`slip check query failed: ${checkError.message}`);
+  }
 
   // Cross-group/cross-market guard: the same bank transaction id may have
   // already been accepted under a different source_id or business_date.
@@ -128,7 +139,7 @@ export async function reconcile(
   // round to satang before comparing so 0.1 + 0.2 style drift never turns a
   // genuinely matched settlement into a false mismatch.
   const round2 = (n: number) => Math.round(n * 100) / 100;
-  const aiTotal     = round2(await computeAiVerifiedTotal(supabase, sourceId, businessDate));
+  const aiTotal     = round2(await loadAiVerifiedTransferTotal(supabase, sourceId, businessDate));
   const manualTotal = round2(await computeManualSlipTotal(supabase, sourceId, businessDate));
   const checkedTotal = round2(aiTotal + manualTotal);
   const difference   = round2(submittedTransfer - checkedTotal);

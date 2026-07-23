@@ -1,4 +1,5 @@
-import type { WhiteSheetExpenseInput, WhiteSheetStatus } from "./types";
+import type { WhiteSheetStatus } from "@/lib/white-sheet";
+import type { WhiteSheetExpenseInput } from "./types";
 
 export function formatWhiteSheetMoney(amount: number): string {
   return amount.toLocaleString("th-TH", {

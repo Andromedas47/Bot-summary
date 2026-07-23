@@ -2,7 +2,8 @@
 
 import { useState, useTransition } from "react";
 import { Button } from "@/components/ui/Button";
-import type { DigitalWhiteSheetViewModel, WhiteSheetExpenseInput } from "./types";
+import type { DigitalWhiteSheetSummary } from "@/lib/white-sheet";
+import type { WhiteSheetExpenseInput } from "./types";
 import {
   parseWhiteSheetMoneyInput,
   validateWhiteSheetExpensesInput,
@@ -13,7 +14,7 @@ const INPUT_CLS =
   "placeholder:text-slate-400 focus:border-[#06C755] focus:outline-none focus:ring-2 focus:ring-[#06C755]/20";
 
 function expenseDefaults(
-  viewModel?: Pick<DigitalWhiteSheetViewModel, "expenses" | "actualCashSubmitted">,
+  viewModel?: Pick<DigitalWhiteSheetSummary, "expenses" | "actualCashSubmitted">,
 ): WhiteSheetExpenseInput {
   return {
     labor: viewModel?.expenses.labor ?? 0,
@@ -31,7 +32,7 @@ export function DigitalWhiteSheetExpensesForm({
   onSubmitExpenses,
   isSubmitting = false,
 }: {
-  viewModel?: Pick<DigitalWhiteSheetViewModel, "expenses" | "actualCashSubmitted">;
+  viewModel?: Pick<DigitalWhiteSheetSummary, "expenses" | "actualCashSubmitted">;
   onSubmitExpenses: (input: WhiteSheetExpenseInput) => void | Promise<void>;
   isSubmitting?: boolean;
 }) {

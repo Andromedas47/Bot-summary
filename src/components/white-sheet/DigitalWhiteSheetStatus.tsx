@@ -1,5 +1,5 @@
 import { Badge } from "@/components/ui/Badge";
-import type { DigitalWhiteSheetViewModel } from "./types";
+import type { DigitalWhiteSheetSummary } from "@/lib/white-sheet";
 import {
   formatWhiteSheetDifferenceLine,
   formatWhiteSheetMoney,
@@ -10,7 +10,7 @@ import {
 export function DigitalWhiteSheetStatus({
   status,
   difference,
-}: Pick<DigitalWhiteSheetViewModel, "status" | "difference">) {
+}: Pick<DigitalWhiteSheetSummary, "status" | "difference">) {
   const label = WHITE_SHEET_STATUS_LABELS[status];
   const variant = getWhiteSheetStatusVariant(status);
   const differenceText = formatWhiteSheetDifferenceLine(status, difference);

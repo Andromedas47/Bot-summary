@@ -121,6 +121,39 @@ describe("calculateWhiteSheetItems", () => {
     });
   });
 
+  test("uses the exact persisted basis price instead of rounded price_per_unit", () => {
+    const items = calculateWhiteSheetItems([
+      transaction({
+        productName: "ข้าวโพด",
+        unit: "หัว",
+        quantity: 7,
+        unitPrice: 33.33,
+        basisQuantity: 3,
+        basisPrice: 100,
+      }),
+      transaction({
+        productName: "ข้าวโพด",
+        unit: "หัว",
+        quantity: 1,
+        transactionType: "คืน",
+        unitPrice: null,
+      }),
+    ]);
+
+    expect(items[0]).toMatchObject({
+      soldQuantity: 6,
+      expectedSales: 200,
+    });
+  });
+
+  test("fails closed when only half of a persisted basis price is supplied", () => {
+    expect(() =>
+      calculateWhiteSheetItems([
+        transaction({ basisQuantity: 3, basisPrice: null }),
+      ]),
+    ).toThrow(WhiteSheetValidationError);
+  });
+
   test("keeps incompatible units on separate rows", () => {
     const items = calculateWhiteSheetItems([
       transaction({ quantity: 2, unit: "โล", unitPrice: 100 }),

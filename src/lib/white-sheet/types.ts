@@ -25,6 +25,14 @@ export interface WhiteSheetTransactionRow {
   transactionType: string;
   /** Required for withdrawal rows; ignored for return rows. */
   unitPrice: number | null;
+  /**
+   * Exact persisted basis price, when pricing_mode is "basis".
+   * Example: basisQuantity=3 and basisPrice=100 means 100 baht per 3 units.
+   * Both fields must be present together; calculation never relies on the
+   * rounded price_per_unit approximation for these rows.
+   */
+  basisQuantity?: number | null;
+  basisPrice?: number | null;
 }
 
 export interface WhiteSheetItemCalculation {

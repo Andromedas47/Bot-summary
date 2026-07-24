@@ -19,8 +19,9 @@ export class CentralPriceError extends Error {
  * Sentinel `set_by` actor for BR-01 auto-seeded prices — distinguishes a
  * price the system derived from the first withdrawal (never confirmed by a
  * human) from one an admin explicitly set/corrected (BR-04). Only the
- * former can produce a fail-closed price conflict — see
- * resolveCentralPricesForDate in ./load.ts.
+ * former can produce a fail-closed price conflict — see the read-only
+ * conflict scan in resolveCentralPricesForDate (./load.ts). Seeding itself
+ * happens on withdrawal write via seedCentralPricesFromPersistedWithdrawals.
  */
 export const SYSTEM_WITHDRAWAL_SEED_ACTOR = "system:first-withdrawal";
 
@@ -171,8 +172,8 @@ export interface CentralPriceMapEntry {
 /**
  * Loads every central price set for one business date, keyed by
  * `${productKey} ${unitKey}` — retains setBy so callers can distinguish a
- * BR-01 auto-seeded price from an admin-set/corrected one (BR-04); see
- * resolveCentralPricesForDate in ./load.ts.
+ * BR-01 auto-seeded price from an admin-set/corrected one (BR-04) during the
+ * read-only White Sheet conflict scan.
  */
 export async function loadCentralPriceDetailsForDate(
   supabase: Supabase,

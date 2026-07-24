@@ -7,7 +7,6 @@ import {
   centralPriceKey,
   centralPriceMapKey,
   loadCentralPriceDetailsForDate,
-  seedCentralPriceFromWithdrawal,
   SYSTEM_WITHDRAWAL_SEED_ACTOR,
 } from "./pricing";
 import type {
@@ -240,22 +239,18 @@ function unresolvedMarketWarnings(
 }
 
 /**
- * BR-01 seed rule: the first valid withdrawal of a business date establishes
- * the central price automatically. dateRows spans every market/source for
- * the date (fetched before any market/source filter) — the correct scope,
- * since central_selling_prices has no market or source column at all.
- * dateRows already arrives ordered by item_created_at, id (fetchProduceRows),
- * so the first เบิก row seen per product/unit group here is genuinely the
- * earliest of the date. Good/damaged returns never seed or overwrite —
- * only "เบิก" rows are considered.
+ * Read-only central-price resolution for White Sheet load.
  *
- * A later withdrawal whose own price disagrees with a price the system
- * itself auto-seeded (never confirmed by an admin) is a real conflict: the
- * price is left unchanged and the identity is marked disputed so calculate.ts
- * fails closed for every market touching it. Once an admin has set/corrected
- * the price (setCentralPrice / set_central_selling_price), a mismatching
- * withdrawal is downgraded to the existing informational "varied lot
- * prices" warning — the admin decision is final, not re-litigated forever.
+ * Seeding happens on successful withdrawal persistence (see
+ * seedCentralPricesFromPersistedWithdrawals) — this path never creates,
+ * seeds, corrects, or mutates central_selling_prices.
+ *
+ * dateRows spans every market/source for the date (fetched before any
+ * market/source filter) so conflict detection is global: a later withdrawal
+ * whose own price disagrees with a system-auto-seeded central price marks
+ * the identity disputed and calculate.ts fails closed for every market
+ * touching it. Once an admin has set/corrected the price, a mismatching
+ * withdrawal is informational only — the admin decision is final.
  */
 async function resolveCentralPricesForDate(
   supabase: Supabase,
@@ -273,26 +268,15 @@ async function resolveCentralPricesForDate(
 
     const key = centralPriceKey({ productName, unit: rawUnit, businessDate });
     const mapKey = centralPriceMapKey(key.productKey, key.unitKey);
+    const existing = details.get(mapKey);
+    if (!existing) continue;
+
     const priceBaht = resolveWithdrawalUnitPriceBaht({
       unit: rawUnit,
       unitPrice: Number(row.price_per_unit),
       basisQuantity: row.basis_quantity === null ? null : Number(row.basis_quantity),
     });
     const priceSatang = Math.round(priceBaht * 100);
-
-    const existing = details.get(mapKey);
-    if (!existing) {
-      const seeded = await seedCentralPriceFromWithdrawal(supabase, {
-        identity: { productName, unit: rawUnit, businessDate },
-        priceSatang,
-        actor: SYSTEM_WITHDRAWAL_SEED_ACTOR,
-      });
-      details.set(mapKey, { priceSatang: seeded.priceSatang, setBy: seeded.record.setBy });
-      if (seeded.conflict && seeded.record.setBy === SYSTEM_WITHDRAWAL_SEED_ACTOR) {
-        conflicts.add(mapKey);
-      }
-      continue;
-    }
 
     if (existing.setBy === SYSTEM_WITHDRAWAL_SEED_ACTOR && existing.priceSatang !== priceSatang) {
       conflicts.add(mapKey);

@@ -44,6 +44,8 @@ export type {
   CentralPriceRecord,
   CentralPriceSeedResult,
 } from "./pricing";
+export { seedCentralPricesFromPersistedWithdrawals } from "./seed-from-withdrawal";
+export type { PersistedWithdrawalSeedItem } from "./seed-from-withdrawal";
 export {
   loadDigitalWhiteSheetPageModel,
   requireSubmittedWhiteSheetSummary,

@@ -28,6 +28,7 @@ import {
 } from "@/lib/parsers/weigh-session/parser";
 import { RE } from "@/lib/parsers/weigh-session/regex";
 import { logger } from "@/lib/logger";
+import { seedCentralPricesFromPersistedWithdrawals } from "@/lib/white-sheet/seed-from-withdrawal";
 
 type Supabase = SupabaseClient<Database>;
 type PushMessage = (to: string, text: string) => Promise<unknown>;
@@ -295,6 +296,22 @@ export async function finalizePendingGeneration(
   }
 
   if (result.status === "finalized") {
+    // BR-01: seed central prices only after the authoritative RPC persisted
+    // the withdrawal. Returns/damaged returns are skipped inside the helper.
+    // Best-effort like daily summary — the produce write already committed.
+    try {
+      if (parsed.date) {
+        await seedCentralPricesFromPersistedWithdrawals(supabase, {
+          businessDate: parsed.date,
+          items: parsed.items,
+        });
+      }
+    } catch (error) {
+      log.error("central price seeding failed after produce finalization", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
     try {
       await new DailySummaryService(supabase).recalculate(
         parsed.date ?? bangkokBusinessDateNow(),

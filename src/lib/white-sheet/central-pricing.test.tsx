@@ -7,6 +7,7 @@ import { buildWhiteSheetSummaryMessagesFromPageModel } from "@/lib/line/white-sh
 import { requireTrustedWhiteSheetSummary, WhiteSheetHardStopError } from "./compose";
 import { loadDigitalWhiteSheetCalculation } from "./load";
 import { SYSTEM_WITHDRAWAL_SEED_ACTOR } from "./pricing";
+import { seedCentralPricesFromPersistedWithdrawals } from "./seed-from-withdrawal";
 
 const SOURCE_ID = "group-central-pricing";
 const BUSINESS_DATE = "2026-07-24";
@@ -51,15 +52,19 @@ function fullPriceRow(row: CentralPriceRowInput, idSuffix: string) {
 /**
  * Shared, mutable fake central_selling_prices table — a single instance is
  * reused across multiple loadDigitalWhiteSheetCalculation calls (one per
- * market) so a seed written while loading Market A's White Sheet is visible
- * when Market B's is loaded next, exactly like two requests hitting the
+ * market) so a seed written on withdrawal persist is visible when any
+ * market's White Sheet is loaded next, exactly like two requests hitting the
  * same real Postgres table.
  */
 function makeCentralPriceTable(initial: CentralPriceRowInput[]) {
   const rows = initial.map((row, i) => fullPriceRow(row, `seed-${i}`));
   let counter = 0;
+  let seedRpcCalls = 0;
   return {
     rows,
+    get seedRpcCalls() {
+      return seedRpcCalls;
+    },
     select: () => ({ eq: async () => ({ data: rows, error: null }) }),
     rpc: async (fn: string, args: Record<string, unknown>) => {
       if (fn !== "seed_central_selling_price" && fn !== "set_central_selling_price") {
@@ -71,6 +76,7 @@ function makeCentralPriceTable(initial: CentralPriceRowInput[]) {
           && r.business_date === args.p_business_date,
       );
       if (fn === "seed_central_selling_price") {
+        seedRpcCalls += 1;
         if (existing) return { data: existing, error: null };
         const created = fullPriceRow(
           {
@@ -157,6 +163,26 @@ function makeDatabase(options: {
   return database as unknown as SupabaseClient<Database>;
 }
 
+/** Simulate the write-path seed that runs after a successful withdrawal persist. */
+async function seedFromWithdrawalWrite(
+  database: SupabaseClient<Database>,
+  rows: readonly ProduceRowInput[],
+) {
+  await seedCentralPricesFromPersistedWithdrawals(database, {
+    businessDate: BUSINESS_DATE,
+    items: rows
+      .filter((row) => (row.base_transaction_type ?? "เบิก") === "เบิก")
+      .map((row) => ({
+        product_name: row.product_name,
+        unit: row.unit,
+        price_per_unit: row.price_per_unit,
+        transaction_type: "เบิก",
+        basis_quantity: null,
+        basis_price: null,
+      })),
+  });
+}
+
 const ZERO_EXPENSES = { expenses: { labor: 0, locationFee: 0, bag: 0, snack: 0, other: 0 }, actualCashSubmitted: 0 };
 
 describe("Phase 12: cross-market central price", () => {
@@ -240,26 +266,15 @@ describe("Phase 13: old/carried stock vs current business date", () => {
 });
 
 describe("Phase 14: missing central price fails closed", () => {
-  it("known sold quantity with no central price and no withdrawal to seed from blocks trusted matched/short/over and the LINE formatter", async () => {
-    // A return-only row with no accompanying withdrawal never seeds a price
-    // (BR-01: only withdrawals seed/overwrite) — it also cannot legitimately
-    // exist without a prior withdrawal (returns would exceed withdrawals),
-    // so this exercises the fail-closed path via a bare, unseeded product
-    // that still needs pricing at the calculate.ts level. The load.ts-level
-    // proof of "first withdrawal seeds, no manual price required" lives in
-    // the "BR-01 seed rule" describe block below.
+  it("known sold quantity with no central price blocks trusted matched/short/over and the LINE formatter", async () => {
+    // Withdrawal rows exist but write-path seeding never ran — White Sheet
+    // load is read-only and must fail closed rather than invent a price.
     const MARKET = "ตลาดไม่มีราคา";
     const database = makeDatabase({
       produceRows: [
         { id: "item-1", product_name: "ทุเรียน", quantity: 10, unit: "โล", price_per_unit: 20, market_name: MARKET, session_id: "sess-1", raw_message_id: "raw-1" },
       ],
-      // A conflict is the only way load.ts can still emit a fail-closed
-      // result for a group that HAS a withdrawal (which now always seeds) —
-      // simulate it by pre-seeding a system price that this withdrawal's own
-      // price (20) disagrees with.
-      centralPriceTable: makeCentralPriceTable([
-        { product_key: "ทุเรียน", unit_key: "โล", price_satang: 1500, set_by: SYSTEM_WITHDRAWAL_SEED_ACTOR },
-      ]),
+      centralPriceTable: makeCentralPriceTable([]),
     });
 
     const calculation = await loadDigitalWhiteSheetCalculation(
@@ -269,9 +284,7 @@ describe("Phase 14: missing central price fails closed", () => {
     );
 
     expect(calculation.expectedSales).toBe(0); // never a guessed price
-    expect(calculation.warnings).toContain(
-      "ราคากลางขัดแย้งกันสำหรับ ทุเรียน (โล) วันที่ 2026-07-24 ต้องรอผู้ดูแลระบบยืนยันราคาก่อนใช้ยอดสรุป",
-    );
+    expect(calculation.warnings.some((w) => w.includes("ไม่พบราคากลางสำหรับ"))).toBe(true);
 
     const pageModel = { entryStatus: "submitted" as const, summary: calculation };
     expect(() => requireTrustedWhiteSheetSummary(pageModel)).toThrow(WhiteSheetHardStopError);
@@ -285,15 +298,19 @@ describe("Phase 14: missing central price fails closed", () => {
   });
 });
 
-describe("BR-01 seed rule: first withdrawal establishes the central price automatically", () => {
-  it("A: the first withdrawal of the date seeds the central price — no manual admin step required", async () => {
+describe("BR-01 seed rule: first withdrawal establishes the central price on write", () => {
+  it("A: the first withdrawal write seeds the central price — no manual admin step required", async () => {
     const MARKET = "ตลาดกี้";
-    const database = makeDatabase({
-      produceRows: [
-        { id: "item-1", product_name: "แตงโม", quantity: 2, unit: "ลูก", price_per_unit: 40, market_name: MARKET, session_id: "sess-1", raw_message_id: "raw-1" },
-      ],
-      centralPriceTable: makeCentralPriceTable([]),
-    });
+    const rows: ProduceRowInput[] = [
+      { id: "item-1", product_name: "แตงโม", quantity: 2, unit: "ลูก", price_per_unit: 40, market_name: MARKET, session_id: "sess-1", raw_message_id: "raw-1" },
+    ];
+    const centralPriceTable = makeCentralPriceTable([]);
+    const database = makeDatabase({ produceRows: rows, centralPriceTable });
+
+    await seedFromWithdrawalWrite(database, rows);
+    expect(centralPriceTable.rows).toHaveLength(1);
+    expect(centralPriceTable.rows[0]?.price_satang).toBe(4000);
+    const seedsAfterWrite = centralPriceTable.seedRpcCalls;
 
     const calculation = await loadDigitalWhiteSheetCalculation(
       database,
@@ -301,8 +318,9 @@ describe("BR-01 seed rule: first withdrawal establishes the central price automa
       ZERO_EXPENSES,
     );
 
-    expect(calculation.expectedSales).toBe(80); // 2 × 40, auto-seeded, no missing-price warning
+    expect(calculation.expectedSales).toBe(80); // 2 × 40
     expect(calculation.warnings).toEqual([]);
+    expect(centralPriceTable.seedRpcCalls).toBe(seedsAfterWrite); // load did not seed
   });
 
   it("B: a later withdrawal in a different market at the SAME price is not a conflict", async () => {
@@ -310,18 +328,20 @@ describe("BR-01 seed rule: first withdrawal establishes the central price automa
     const MARKET_NOI = "ตลาดน้อย";
     const centralPriceTable = makeCentralPriceTable([]);
 
-    const dbKi = makeDatabase({
-      produceRows: [
-        { id: "item-ki", product_name: "แตงโม", quantity: 2, unit: "ลูก", price_per_unit: 40, market_name: MARKET_KI, session_id: "sess-ki", raw_message_id: "raw-ki" },
-      ],
-      centralPriceTable,
-    });
-    const dbNoi = makeDatabase({
-      produceRows: [
-        { id: "item-noi", product_name: "แตงโม", quantity: 3, unit: "ลูก", price_per_unit: 40, market_name: MARKET_NOI, session_id: "sess-noi", raw_message_id: "raw-noi" },
-      ],
-      centralPriceTable,
-    });
+    const rowsKi: ProduceRowInput[] = [
+      { id: "item-ki", product_name: "แตงโม", quantity: 2, unit: "ลูก", price_per_unit: 40, market_name: MARKET_KI, session_id: "sess-ki", raw_message_id: "raw-ki" },
+    ];
+    const rowsNoi: ProduceRowInput[] = [
+      { id: "item-noi", product_name: "แตงโม", quantity: 3, unit: "ลูก", price_per_unit: 40, market_name: MARKET_NOI, session_id: "sess-noi", raw_message_id: "raw-noi" },
+    ];
+
+    const dbKi = makeDatabase({ produceRows: rowsKi, centralPriceTable });
+    const dbNoi = makeDatabase({ produceRows: rowsNoi, centralPriceTable });
+
+    await seedFromWithdrawalWrite(dbKi, rowsKi);
+    await seedFromWithdrawalWrite(dbNoi, rowsNoi);
+    expect(centralPriceTable.rows).toHaveLength(1);
+    expect(centralPriceTable.rows[0]?.price_satang).toBe(4000);
 
     const calcKi = await loadDigitalWhiteSheetCalculation(
       dbKi,
@@ -340,38 +360,34 @@ describe("BR-01 seed rule: first withdrawal establishes the central price automa
     expect(calcNoi.warnings).toEqual([]);
   });
 
-  it("C/D: a later withdrawal (same or different market) at a DIFFERENT price is a conflict — central price stays unchanged and every affected market fails closed", async () => {
+  it("C/D: a later withdrawal at a DIFFERENT price is a conflict — central price stays unchanged and every affected market fails closed", async () => {
     const MARKET_KI = "ตลาดกี้";
     const MARKET_DAM = "ตลาดดำ";
     const centralPriceTable = makeCentralPriceTable([]);
 
-    // Same underlying produce_transactions pool as the real loader would see
-    // (all markets for the date) — both markets' rows are visible to the
-    // seeding/conflict scan regardless of which market's White Sheet is
-    // being loaded.
     const allRows: ProduceRowInput[] = [
       { id: "item-ki", product_name: "แตงโม", quantity: 2, unit: "ลูก", price_per_unit: 40, market_name: MARKET_KI, session_id: "sess-ki", raw_message_id: "raw-ki", item_created_at: "2026-07-24T01:00:00Z" },
       { id: "item-dam", product_name: "แตงโม", quantity: 1, unit: "ลูก", price_per_unit: 35, market_name: MARKET_DAM, session_id: "sess-dam", raw_message_id: "raw-dam", item_created_at: "2026-07-24T02:00:00Z" },
     ];
 
-    const dbKi = makeDatabase({ produceRows: allRows, centralPriceTable });
+    const db = makeDatabase({ produceRows: allRows, centralPriceTable });
+    await seedFromWithdrawalWrite(db, [allRows[0]!]);
+    await seedFromWithdrawalWrite(db, [allRows[1]!]);
+    expect(centralPriceTable.rows[0]?.price_satang).toBe(4000);
+
     const calcKi = await loadDigitalWhiteSheetCalculation(
-      dbKi,
+      db,
       { sourceId: SOURCE_ID, marketKey: "ki", marketLabel: MARKET_KI, businessDate: BUSINESS_DATE },
       ZERO_EXPENSES,
     );
 
-    // The 40-baht withdrawal seeded the price; the 35-baht withdrawal is a
-    // conflict. Market A's OWN rows all match 40, yet its White Sheet still
-    // fails closed because the identity itself is disputed.
     expect(calcKi.expectedSales).toBe(0);
     expect(calcKi.warnings).toContain(
       "ราคากลางขัดแย้งกันสำหรับ แตงโม (ลูก) วันที่ 2026-07-24 ต้องรอผู้ดูแลระบบยืนยันราคาก่อนใช้ยอดสรุป",
     );
 
-    const dbDam = makeDatabase({ produceRows: allRows, centralPriceTable });
     const calcDam = await loadDigitalWhiteSheetCalculation(
-      dbDam,
+      db,
       { sourceId: SOURCE_ID, marketKey: "dam", marketLabel: MARKET_DAM, businessDate: BUSINESS_DATE },
       ZERO_EXPENSES,
     );
@@ -380,23 +396,33 @@ describe("BR-01 seed rule: first withdrawal establishes the central price automa
     expect(calcDam.warnings).toContain(
       "ราคากลางขัดแย้งกันสำหรับ แตงโม (ลูก) วันที่ 2026-07-24 ต้องรอผู้ดูแลระบบยืนยันราคาก่อนใช้ยอดสรุป",
     );
-
-    // The central price itself was never overwritten by the conflicting
-    // withdrawal — it is still 40 (the first-seeded value).
     expect(centralPriceTable.rows[0]?.price_satang).toBe(4000);
   });
 
   it("E/F: returns and damaged returns never seed or overwrite the central price", async () => {
     const MARKET = "ตลาดคืน";
     const centralPriceTable = makeCentralPriceTable([]);
-    const database = makeDatabase({
-      produceRows: [
-        { id: "item-withdraw", product_name: "มะม่วง", quantity: 5, unit: "ลูก", price_per_unit: 5, market_name: MARKET, session_id: "sess-1", raw_message_id: "raw-1", item_created_at: "2026-07-24T01:00:00Z" },
-        { id: "item-return", product_name: "มะม่วง", quantity: 1, unit: "ลูก", price_per_unit: 999, market_name: MARKET, session_id: "sess-1", raw_message_id: "raw-1", item_created_at: "2026-07-24T02:00:00Z", base_transaction_type: "คืน" },
-        { id: "item-damaged", product_name: "มะม่วง", quantity: 1, unit: "ลูก", price_per_unit: 999, market_name: MARKET, session_id: "sess-1", raw_message_id: "raw-1", item_created_at: "2026-07-24T03:00:00Z", base_transaction_type: "คืนเสีย" },
-      ],
-      centralPriceTable,
+    const produceRows: ProduceRowInput[] = [
+      { id: "item-withdraw", product_name: "มะม่วง", quantity: 5, unit: "ลูก", price_per_unit: 5, market_name: MARKET, session_id: "sess-1", raw_message_id: "raw-1", item_created_at: "2026-07-24T01:00:00Z" },
+      { id: "item-return", product_name: "มะม่วง", quantity: 1, unit: "ลูก", price_per_unit: 999, market_name: MARKET, session_id: "sess-1", raw_message_id: "raw-1", item_created_at: "2026-07-24T02:00:00Z", base_transaction_type: "คืน" },
+      { id: "item-damaged", product_name: "มะม่วง", quantity: 1, unit: "ลูก", price_per_unit: 999, market_name: MARKET, session_id: "sess-1", raw_message_id: "raw-1", item_created_at: "2026-07-24T03:00:00Z", base_transaction_type: "คืนเสีย" },
+    ];
+    const database = makeDatabase({ produceRows, centralPriceTable });
+
+    await seedCentralPricesFromPersistedWithdrawals(database, {
+      businessDate: BUSINESS_DATE,
+      items: produceRows.map((row) => ({
+        product_name: row.product_name,
+        unit: row.unit,
+        price_per_unit: row.price_per_unit,
+        transaction_type: row.base_transaction_type ?? "เบิก",
+        basis_quantity: null,
+        basis_price: null,
+      })),
     });
+
+    expect(centralPriceTable.rows).toHaveLength(1);
+    expect(centralPriceTable.rows[0]?.price_satang).toBe(500);
 
     const calculation = await loadDigitalWhiteSheetCalculation(
       database,
@@ -404,9 +430,6 @@ describe("BR-01 seed rule: first withdrawal establishes the central price automa
       ZERO_EXPENSES,
     );
 
-    // Seeded from the withdrawal's price (5), not the return/damaged rows'
-    // 999 — and no conflict, since return/damaged rows are never compared
-    // against the central price either.
     expect(calculation.warnings).toEqual([]);
     expect(calculation.expectedSales).toBe(15); // (5 - 1 - 1) sold × 5
   });
@@ -418,7 +441,6 @@ describe("BR-01 seed rule: first withdrawal establishes the central price automa
       { product_key: "แตงโม", unit_key: "ลูก", price_satang: 4000, set_by: SYSTEM_WITHDRAWAL_SEED_ACTOR },
     ]);
 
-    // Admin corrects the auto-seeded 40 baht to 45 baht for every market.
     await centralPriceTable.rpc("set_central_selling_price", {
       p_product_key: "แตงโม",
       p_unit_key: "ลูก",
@@ -452,10 +474,6 @@ describe("BR-01 seed rule: first withdrawal establishes the central price automa
       ZERO_EXPENSES,
     );
 
-    // Both markets recompute using the corrected 45 baht, not the original
-    // seeded 40 or their own withdrawal's recorded 40 — and neither market's
-    // mismatched withdrawal (40 vs corrected 45) is treated as a conflict,
-    // because the price is now admin-set (final), only informational.
     expect(calcA.expectedSales).toBe(90); // 2 × 45
     expect(calcB.expectedSales).toBe(135); // 3 × 45
     expect(calcA.warnings.some((w) => w.startsWith("ราคากลางขัดแย้งกันสำหรับ"))).toBe(false);
@@ -484,10 +502,7 @@ describe("BR-01 seed rule: first withdrawal establishes the central price automa
     });
 
     expect((first.data as { price_satang: number }).price_satang).toBe(4000);
-    // The second attempt's own price (3500) never wins — it reads back the
-    // first attempt's authoritative row unchanged.
     expect((second.data as { price_satang: number }).price_satang).toBe(4000);
-
-    expect(centralPriceTable.rows).toHaveLength(1); // exactly one central price exists — no duplicate row
+    expect(centralPriceTable.rows).toHaveLength(1);
   });
 });

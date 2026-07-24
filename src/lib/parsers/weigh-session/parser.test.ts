@@ -306,6 +306,30 @@ const PRODUCTION_ITEM_14_EXCERPT = `\
 14.8.โล
 จบรายการเบิก`;
 
+/** Minimal seed RPC stub — persist now seeds central prices after item writes. */
+function seedRpcStub() {
+  return {
+    async rpc(fn: string, args: Record<string, unknown>) {
+      if (fn !== "seed_central_selling_price") {
+        return { data: null, error: { message: `unexpected rpc: ${fn}` } };
+      }
+      return {
+        data: {
+          product_key: args.p_product_key,
+          unit_key: args.p_unit_key,
+          business_date: args.p_business_date,
+          price_satang: args.p_price_satang,
+          set_by: args.p_actor,
+          set_reason: args.p_reason ?? null,
+          created_at: "2026-06-29T00:00:00Z",
+          updated_at: "2026-06-29T00:00:00Z",
+        },
+        error: null,
+      };
+    },
+  };
+}
+
 async function parseAndPersistItems(text: string, eventSuffix: string) {
   const event: LineMessageEvent = {
     type: "message",
@@ -345,6 +369,7 @@ async function parseAndPersistItems(text: string, eventSuffix: string) {
         },
       };
     },
+    ...seedRpcStub(),
   };
 
   await result.persist(database as never, `raw-message-${eventSuffix}`);
@@ -410,6 +435,7 @@ describe("edge cases", () => {
           },
         };
       },
+      ...seedRpcStub(),
     };
 
     await parserResult.persist(database as never, "raw-message-1");
@@ -535,6 +561,7 @@ describe("edge cases", () => {
           },
         };
       },
+      ...seedRpcStub(),
     };
 
     await result.persist(database as never, "raw-message-legacy-units");

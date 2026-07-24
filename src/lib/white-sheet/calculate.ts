@@ -125,10 +125,10 @@ function moneyLabel(value: bigint): string {
 /**
  * A withdrawal row's own effective unit price, in baht — rescaled by the
  * unit's conversion factor for legacy (non-basis) rows exactly as the group
- * loop below does, so a seeding step (see resolveCentralPricesForDate in
- * ./load.ts) can derive the SAME candidate price this function would use
- * for informational display/conflict comparison. One authoritative
- * derivation, never a second parallel pricing algorithm.
+ * loop below does, so write-path seeding and the read-only White Sheet
+ * conflict scan derive the SAME candidate price this function would use
+ * for informational display. One authoritative derivation, never a second
+ * parallel pricing algorithm.
  */
 export function resolveWithdrawalUnitPriceBaht(row: {
   unit: string;

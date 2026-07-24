@@ -3,7 +3,11 @@ import type { LineMessageEvent, LineTextMessage } from "@/lib/line/types";
 import { getUserId } from "@/lib/line/verify";
 import { logger } from "@/lib/logger";
 import { computeItemHash } from "@/lib/line/session-dedup-service";
-import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
+import {
+  bangkokBusinessDateFromTimestamp,
+  bangkokBusinessDateNow,
+} from "@/lib/business-date";
+import { seedCentralPricesFromPersistedWithdrawals } from "@/lib/white-sheet/seed-from-withdrawal";
 import { RE } from "./regex";
 import { conversionFactor, isKnownUnit, normalizeUnitAlias, resolveUnitQuantity } from "./units";
 import type {
@@ -653,6 +657,14 @@ export class WeighSessionParser extends BaseParser {
           await supabase.from("produce_sessions").delete().eq("id", session.id);
           throw err;
         }
+
+        // BR-01: seed central prices only after withdrawal rows are persisted.
+        // Failures here leave the session intact (withdrawal already committed);
+        // White Sheet fails closed on missing price until an admin intervenes.
+        await seedCentralPricesFromPersistedWithdrawals(supabase, {
+          businessDate: parsed.date ?? bangkokBusinessDateNow(),
+          items: parsed.items,
+        });
       },
     };
   }

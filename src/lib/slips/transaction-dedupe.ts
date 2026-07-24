@@ -1,10 +1,19 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
-import type { Database } from "@/types/database";
+import type { Database, SlipCheckStatus } from "@/types/database";
 
 type Supabase = SupabaseClient<Database>;
 
-const TERMINAL_STATUSES = ["EXTRACTED", "PARTIAL_EXTRACTED"] as const;
+export const VERIFIED_SLIP_CHECK_STATUSES = [
+  "EXTRACTED",
+  "PARTIAL_EXTRACTED",
+] as const satisfies readonly SlipCheckStatus[];
+
+export function isVerifiedSlipCheckStatus(
+  status: SlipCheckStatus | null | undefined,
+): status is (typeof VERIFIED_SLIP_CHECK_STATUSES)[number] {
+  return VERIFIED_SLIP_CHECK_STATUSES.some((verifiedStatus) => verifiedStatus === status);
+}
 
 export type SlipDuplicateResult =
   | {
@@ -69,7 +78,7 @@ export async function findSlipTransactionDuplicate(
     .from("slip_checks")
     .select("id, evidence_id, created_at")
     .eq("reference_id", transactionId)
-    .in("status", TERMINAL_STATUSES)
+    .in("status", VERIFIED_SLIP_CHECK_STATUSES)
     .order("created_at", { ascending: true })
     .order("id", { ascending: true });
 
@@ -128,7 +137,7 @@ export async function resolveGloballyAcceptedCheckIds(
     .from("slip_checks")
     .select("id, reference_id, created_at")
     .in("reference_id", referenceIds)
-    .in("status", TERMINAL_STATUSES)
+    .in("status", VERIFIED_SLIP_CHECK_STATUSES)
     .order("created_at", { ascending: true })
     .order("id", { ascending: true });
 

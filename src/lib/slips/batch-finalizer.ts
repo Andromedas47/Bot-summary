@@ -5,6 +5,7 @@ import { logger } from "@/lib/logger";
 import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
 import { tryFinalizeSettlement } from "@/lib/settlement-finalizer";
 import {
+  isVerifiedSlipCheckStatus,
   normalizeTransactionId,
   resolveGloballyAcceptedCheckIds,
 } from "@/lib/slips/transaction-dedupe";
@@ -345,7 +346,7 @@ export async function finalizeSlipBatch(
     const validationFlags = computeValidationFlags(evidences, slipDate);
     const successCount = evidences.filter(
       (e, i) =>
-        (e.checkStatus === "EXTRACTED" || e.checkStatus === "PARTIAL_EXTRACTED") &&
+        isVerifiedSlipCheckStatus(e.checkStatus) &&
         !validationFlags[i].flagged,
     ).length;
     const failedCount = evidences.length - successCount;
@@ -479,7 +480,7 @@ export async function applyGlobalDuplicateExclusions(
 ): Promise<EvidenceWithCheck[]> {
   const candidateReferences = [...new Set(
     evidences
-      .filter((e) => e.checkId)
+      .filter((e) => e.checkId && isVerifiedSlipCheckStatus(e.checkStatus))
       .map((e) => normalizeTransactionId(e.referenceId))
       .filter((reference): reference is string => reference !== null),
   )];
@@ -496,7 +497,8 @@ export async function applyGlobalDuplicateExclusions(
     return {
       ...evidence,
       globallyDuplicate:
-        reference !== null
+        isVerifiedSlipCheckStatus(evidence.checkStatus)
+        && reference !== null
         && evidence.checkId != null
         && !acceptedCheckIds.has(evidence.checkId),
     };
@@ -545,11 +547,12 @@ export function buildBatchSummaryMessage(
   type Enriched = EvidenceWithCheck & { flags: EvidenceFlags };
   const enriched: Enriched[] = evidences.map((e, i) => ({ ...e, flags: flags[i] }));
 
-  const isTerminal = (e: Enriched) =>
-    e.checkStatus === "EXTRACTED" || e.checkStatus === "PARTIAL_EXTRACTED";
-
-  const trusted    = enriched.filter((e) =>  isTerminal(e) && !e.flags.flagged);
-  const flagged    = enriched.filter((e) =>  isTerminal(e) &&  e.flags.flagged);
+  const trusted    = enriched.filter(
+    (e) => isVerifiedSlipCheckStatus(e.checkStatus) && !e.flags.flagged,
+  );
+  const flagged    = enriched.filter(
+    (e) => isVerifiedSlipCheckStatus(e.checkStatus) && e.flags.flagged,
+  );
   const failedEvs  = enriched.filter((e) => e.checkStatus === "FAILED");
   const needReview = enriched.filter((e) => e.checkStatus === "NEED_REVIEW");
   const pending    = enriched.filter(

@@ -215,7 +215,14 @@ function multipleSessionWarnings(rows: readonly ProduceTransactionRow[]): string
     : [];
 }
 
-function normalizedMarketLabel(marketName: string | null): string {
+/**
+ * Canonical normalization for the market label identity component shared by
+ * the calculation loader and the White Sheet cash/expense persistence layer
+ * (src/lib/white-sheet/persist.ts). Both must derive the same normalized
+ * label from the same raw market name, or a persisted entry could silently
+ * stop matching the row it was saved against.
+ */
+export function normalizedMarketLabel(marketName: string | null): string {
   return displayMarketName(marketName, "").normalize("NFC").trim();
 }
 

@@ -5,6 +5,17 @@ import {
   type DigitalWhiteSheetCashInput,
   type DigitalWhiteSheetScope,
 } from "./load";
+import {
+  loadWhiteSheetCashEntry,
+  saveWhiteSheetCashEntry,
+  type WhiteSheetCashEntryIdentity,
+  type WhiteSheetCashEntryInput,
+  type WhiteSheetCashEntryState,
+} from "./persist";
+import {
+  loadDigitalWhiteSheetPageModel,
+  type DigitalWhiteSheetPageModel,
+} from "./compose";
 import type { DigitalWhiteSheetSummary } from "./types";
 
 /**
@@ -16,4 +27,22 @@ export async function loadServerDigitalWhiteSheetSummary(
   cashInput: DigitalWhiteSheetCashInput,
 ): Promise<DigitalWhiteSheetSummary> {
   return loadDigitalWhiteSheetSummary(createServiceClient(), scope, cashInput);
+}
+
+export async function loadServerWhiteSheetCashEntry(
+  identity: WhiteSheetCashEntryIdentity,
+): Promise<WhiteSheetCashEntryState> {
+  return loadWhiteSheetCashEntry(createServiceClient(), identity);
+}
+
+export async function saveServerWhiteSheetCashEntry(
+  input: WhiteSheetCashEntryInput,
+): Promise<WhiteSheetCashEntryState> {
+  return saveWhiteSheetCashEntry(createServiceClient(), input);
+}
+
+export async function loadServerDigitalWhiteSheetPageModel(
+  scope: DigitalWhiteSheetScope,
+): Promise<DigitalWhiteSheetPageModel> {
+  return loadDigitalWhiteSheetPageModel(createServiceClient(), scope);
 }

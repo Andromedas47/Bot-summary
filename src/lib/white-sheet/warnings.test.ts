@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { hasHardStopWarning, isHardStopWarning, splitWhiteSheetWarnings } from "./warnings";
+import {
+  hasHardStopWarning,
+  isHardStopWarning,
+  splitWhiteSheetWarnings,
+  UNATTRIBUTED_VERIFIED_TRANSFER_WARNING,
+} from "./warnings";
 
 const HARD_STOP_WARNING =
   "Multiple completed main produce sessions (2) exist for this market and business date; " +
@@ -27,6 +32,14 @@ describe("hasHardStopWarning", () => {
 
   it("is true when the hard-stop warning is present alongside others", () => {
     expect(hasHardStopWarning([SOFT_WARNING, HARD_STOP_WARNING])).toBe(true);
+  });
+
+  it("is true for unattributed verified transfer warning", () => {
+    expect(hasHardStopWarning([UNATTRIBUTED_VERIFIED_TRANSFER_WARNING])).toBe(true);
+    expect(isHardStopWarning(UNATTRIBUTED_VERIFIED_TRANSFER_WARNING)).toBe(true);
+    expect(isHardStopWarning(
+      `${UNATTRIBUTED_VERIFIED_TRANSFER_WARNING} (1 รายการ, 50.00 บาท)`,
+    )).toBe(true);
   });
 });
 

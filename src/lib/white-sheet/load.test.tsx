@@ -18,8 +18,10 @@ type ProduceRow = Database["public"]["Views"]["produce_transactions"]["Row"];
 function makeIntegrationDatabase(options?: {
   checks?: Array<{
     id: string;
+    evidence_id?: string;
     transfer_amount: number;
     reference_id: string | null;
+    created_at?: string;
   }>;
   globalWinners?: Array<{
     id: string;
@@ -119,23 +121,33 @@ function makeIntegrationDatabase(options?: {
     { id: "raw-2", source_id: SOURCE_ID },
     { id: "raw-3", source_id: SOURCE_ID },
   ];
-  const checks = options?.checks ?? [
+  const checks = (options?.checks ?? [
     {
       id: "check-duplicate",
+      evidence_id: "evidence-1",
       transfer_amount: 400,
       reference_id: "DUP-REF-001",
+      created_at: "2026-07-23T00:01:00Z",
     },
     {
       id: "check-original",
+      evidence_id: "evidence-2",
       transfer_amount: 400,
       reference_id: "DUP-REF-001",
+      created_at: "2026-07-23T00:00:00Z",
     },
     {
       id: "check-without-reference",
+      evidence_id: "evidence-3",
       transfer_amount: 100,
       reference_id: null,
+      created_at: "2026-07-23T00:02:00Z",
     },
-  ];
+  ]).map((check, index) => ({
+    evidence_id: `evidence-${index + 1}`,
+    created_at: `2026-07-23T00:0${index}:00Z`,
+    ...check,
+  }));
 
   const database = {
     from(table: string) {
@@ -166,7 +178,11 @@ function makeIntegrationDatabase(options?: {
             eq: () => ({
               gte: () => ({
                 lt: async () => ({
-                  data: [{ id: "evidence-1" }, { id: "evidence-2" }, { id: "evidence-3" }],
+                  data: [
+                    { id: "evidence-1", market_label_normalized: MARKET_LABEL },
+                    { id: "evidence-2", market_label_normalized: MARKET_LABEL },
+                    { id: "evidence-3", market_label_normalized: MARKET_LABEL },
+                  ],
                   error: null,
                 }),
               }),
@@ -382,7 +398,7 @@ describe("digital white-sheet real-data integration", () => {
       expect(dashboardHtml).toContain(expectedValue);
       expect(lineMessage).toContain(expectedValue);
     }
-    expect(dashboardHtml).toContain("เงินขาด");
+    expect(dashboardHtml).toContain("white-sheet-status-blocked");
     expect(lineMessage).toContain("เงินขาด");
     expect({ produceRows, rawMessages, checks }).toEqual(sourceSnapshot);
   });
@@ -508,13 +524,17 @@ describe("digital white-sheet real-data integration", () => {
       checks: [
         {
           id: "check-local-duplicate",
+          evidence_id: "evidence-1",
           transfer_amount: 400,
           reference_id: "CROSS-SOURCE-REF",
+          created_at: "2026-07-23T00:01:00Z",
         },
         {
           id: "check-without-reference",
+          evidence_id: "evidence-2",
           transfer_amount: 100,
           reference_id: null,
+          created_at: "2026-07-23T00:02:00Z",
         },
       ],
       globalWinners: [

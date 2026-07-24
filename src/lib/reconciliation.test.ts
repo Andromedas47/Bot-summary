@@ -50,7 +50,7 @@ function makeFullSupabase(cfg: {
             eq: () => ({
               gte: () => ({
                 lt: async () => ({
-                  data: ["ev1"].map(id => ({ id })),
+                  data: [{ id: "ev1", market_label_normalized: null }],
                   error: null,
                 }),
               }),
@@ -62,6 +62,7 @@ function makeFullSupabase(cfg: {
       if (table === "slip_checks") {
         const allScopedChecks = cfg.transferAmounts.map((a, i) => ({
           id: `check-${i}`,
+          evidence_id: "ev1",
           transfer_amount: a,
           reference_id: cfg.transferRefs?.[i] ?? null,
           created_at: `2026-01-01T00:00:${String(i).padStart(2, "0")}Z`,

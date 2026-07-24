@@ -38,6 +38,15 @@ const operationalItems: NavItem[] = [
     ),
   },
   {
+    href:  "/white-sheet",
+    label: "ใบขาวดิจิทัล",
+    icon: (
+      <svg className="size-4.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 3h6m-7.5 6h9a2.25 2.25 0 0 0 2.25-2.25V6.75A2.25 2.25 0 0 0 16.5 4.5h-9A2.25 2.25 0 0 0 5.25 6.75v10.5A2.25 2.25 0 0 0 7.5 19.5Z" />
+      </svg>
+    ),
+  },
+  {
     href:  "/report-summary",
     label: "รายงานสรุป",
     icon: (

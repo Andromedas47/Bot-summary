@@ -6,6 +6,10 @@ import {
   LINE_REPLY_MAX_MESSAGES,
 } from "@/lib/summary/remaining-fruit-message";
 import type { DigitalWhiteSheetSummary, WhiteSheetStatus } from "@/lib/white-sheet";
+import {
+  requireTrustedWhiteSheetSummary,
+  type DigitalWhiteSheetPageModel,
+} from "@/lib/white-sheet/compose";
 
 function fmt(amount: number): string {
   return amount.toLocaleString("th-TH", {
@@ -122,6 +126,24 @@ export function buildWhiteSheetSummaryMessages(
   }
 
   return messages.length > 0 ? messages : [full.slice(0, LINE_MESSAGE_MAX_CODE_POINTS)];
+}
+
+/**
+ * Builds the White Sheet LINE messages directly from the composed page
+ * model, guarded so it can never run against a not-yet-submitted entry or a
+ * HARD STOP (multiple completed main sessions) result — see
+ * requireTrustedWhiteSheetSummary. This is the ready building block for
+ * STEP 12; no automatic trigger calls it yet. Wiring it to an actual
+ * "send now" action (button, close/finalization event) is the remaining
+ * step — there is no existing close/finalization boundary specific to the
+ * White Sheet cash entry (settlement_finalizations is a different,
+ * unrelated persisted entity), so this integration does not invent one.
+ */
+export function buildWhiteSheetSummaryMessagesFromPageModel(
+  pageModel: DigitalWhiteSheetPageModel,
+): string[] {
+  const summary = requireTrustedWhiteSheetSummary(pageModel);
+  return buildWhiteSheetSummaryMessages(summary);
 }
 
 export { LINE_MESSAGE_MAX_CODE_POINTS, LINE_REPLY_MAX_MESSAGES, countCodePoints };

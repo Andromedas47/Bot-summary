@@ -68,8 +68,10 @@ export function DigitalWhiteSheetExpensesForm({
           ...form,
           otherNote: form.otherNote?.trim() || undefined,
         });
-      } catch {
-        setSubmitError("บันทึกไม่สำเร็จ กรุณาลองใหม่");
+      } catch (err) {
+        setSubmitError(
+          err instanceof Error && err.message ? err.message : "บันทึกไม่สำเร็จ กรุณาลองใหม่",
+        );
       }
     });
   }

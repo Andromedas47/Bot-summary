@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
   buildWhiteSheetSummaryMessage,
   buildWhiteSheetSummaryMessages,
+  buildWhiteSheetSummaryMessagesFromPageModel,
   countCodePoints,
   LINE_MESSAGE_MAX_CODE_POINTS,
   LINE_REPLY_MAX_MESSAGES,
@@ -13,6 +14,7 @@ import {
   uncategorizedWarningFixture,
 } from "@/components/white-sheet/white-sheet-fixtures";
 import { formatThaiDate } from "@/lib/date";
+import { WhiteSheetHardStopError, WhiteSheetNotSubmittedError } from "@/lib/white-sheet/compose";
 
 function assertWithinLineLimits(messages: string[]) {
   expect(messages.length).toBeGreaterThanOrEqual(1);
@@ -90,5 +92,42 @@ describe("buildWhiteSheetSummaryMessage", () => {
     const messages = buildWhiteSheetSummaryMessages(longWarningFixture);
     assertWithinLineLimits(messages);
     expect(messages.length).toBeGreaterThan(1);
+  });
+});
+
+describe("buildWhiteSheetSummaryMessagesFromPageModel", () => {
+  it("builds messages for a submitted, trustworthy page model", () => {
+    const messages = buildWhiteSheetSummaryMessagesFromPageModel({
+      entryStatus: "submitted",
+      summary: matchedWhiteSheetFixture,
+    });
+    assertWithinLineLimits(messages);
+    expect(messages[0]).toContain("สรุปปิดยอด วัดทุ่งลานนา");
+  });
+
+  it("refuses to build messages for a not-submitted entry", () => {
+    expect(() =>
+      buildWhiteSheetSummaryMessagesFromPageModel({
+        entryStatus: "not_submitted",
+        summary: matchedWhiteSheetFixture,
+      }),
+    ).toThrow(WhiteSheetNotSubmittedError);
+  });
+
+  it("refuses to build messages when the HARD STOP warning is present", () => {
+    const hardStopSummary = {
+      ...matchedWhiteSheetFixture,
+      warnings: [
+        "Multiple completed main produce sessions (2) exist for this market and business " +
+          "date; current schema has no void/supersede marker, so duplicate business data " +
+          "may still be included.",
+      ],
+    };
+    expect(() =>
+      buildWhiteSheetSummaryMessagesFromPageModel({
+        entryStatus: "submitted",
+        summary: hardStopSummary,
+      }),
+    ).toThrow(WhiteSheetHardStopError);
   });
 });

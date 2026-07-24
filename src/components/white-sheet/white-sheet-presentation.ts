@@ -1,5 +1,8 @@
 import type { WhiteSheetStatus } from "@/lib/white-sheet";
+import { splitWhiteSheetWarnings } from "@/lib/white-sheet/warnings";
 import type { WhiteSheetExpenseInput } from "./types";
+
+export { splitWhiteSheetWarnings };
 
 export function formatWhiteSheetMoney(amount: number): string {
   return amount.toLocaleString("th-TH", {

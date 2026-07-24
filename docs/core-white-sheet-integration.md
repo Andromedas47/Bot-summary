@@ -76,7 +76,7 @@ then, no white-sheet persistence key is approved.
 ## Settlement persistence gap (Local MVP status: implemented)
 
 The proposal below was implemented as a LOCAL-ONLY additive migration:
-`supabase/migrations/0037_digital_white_sheet_cash_entries.sql`, persisted
+`supabase/migrations/0038_digital_white_sheet_cash_entries.sql`, persisted
 through `src/lib/white-sheet/persist.ts`, composed with the operational
 loader in `src/lib/white-sheet/compose.ts`, exposed at
 `GET/POST /api/white-sheet`, and wired to `DigitalWhiteSheetExpensesForm` at

@@ -209,4 +209,74 @@ describe("resolveGloballyAcceptedCheckIds", () => {
       ),
     ).rejects.toThrow("incomplete for 1 reference id");
   });
+
+  it("deduplicates a repeated reference id before chunking, without changing the winner", async () => {
+    const supabase = makeSupabase({
+      checks: [
+        { id: "check-early", evidence_id: "ev-1", created_at: "2026-06-06T01:00:00Z", reference_id: "REF-001" },
+        { id: "check-late", evidence_id: "ev-2", created_at: "2026-06-06T02:00:00Z", reference_id: "REF-001" },
+      ],
+    });
+    const winners = await resolveGloballyAcceptedCheckIds(
+      supabase as never,
+      ["REF-001", "REF-001", "REF-001"],
+    );
+    expect(winners).toEqual(new Set(["check-early"]));
+  });
+
+  it("resolves winners correctly across many chunks, with references spanning different chunks deduping correctly", async () => {
+    const CHUNK_SIZE = 500; // must match REFERENCE_LOOKUP_CHUNK_SIZE in transaction-dedupe.ts
+    const referenceIdCount = CHUNK_SIZE * 2 + 137; // forces 3 chunks, uneven last chunk
+
+    const referenceIds = Array.from({ length: referenceIdCount }, (_, i) => `REF-${i}`);
+    // Two checks per reference id: an earlier winner and a later duplicate,
+    // exactly mirroring the single-chunk "earliest wins" test above but at a
+    // scale that requires resolveGloballyAcceptedCheckIds to issue multiple
+    // chunked queries under REFERENCE_LOOKUP_CHUNK_SIZE.
+    const checksByReference = new Map<string, Array<{ id: string; created_at: string; reference_id: string }>>();
+    for (const referenceId of referenceIds) {
+      checksByReference.set(referenceId, [
+        { id: `${referenceId}-early`, created_at: "2026-06-06T01:00:00Z", reference_id: referenceId },
+        { id: `${referenceId}-late`, created_at: "2026-06-06T02:00:00Z", reference_id: referenceId },
+      ]);
+    }
+
+    let queryCount = 0;
+    const observedChunkSizes: number[] = [];
+    const supabase = {
+      from(table: string) {
+        if (table !== "slip_checks") throw new Error(`unexpected table: ${table}`);
+        const builder = {
+          select: () => builder,
+          in: (column: string, values: string[]) => {
+            if (column === "reference_id") {
+              queryCount += 1;
+              observedChunkSizes.push(values.length);
+              builder._matched = values.flatMap((v) => checksByReference.get(v) ?? []);
+            }
+            return builder;
+          },
+          order: () => builder,
+          _matched: [] as Array<{ id: string; created_at: string; reference_id: string }>,
+          then: (resolve: (v: unknown) => void) => resolve({ data: builder._matched, error: null }),
+        };
+        return builder;
+      },
+    };
+
+    const winners = await resolveGloballyAcceptedCheckIds(supabase as never, referenceIds);
+
+    // Multiple chunks were actually issued (not one unbounded query).
+    expect(queryCount).toBeGreaterThan(1);
+    expect(observedChunkSizes.every((size) => size <= CHUNK_SIZE)).toBe(true);
+    expect(observedChunkSizes.reduce((a, b) => a + b, 0)).toBe(referenceIdCount);
+
+    // Every reference id resolved to its earlier check across every chunk —
+    // no silent partial result, no cross-chunk mixups.
+    expect(winners.size).toBe(referenceIdCount);
+    for (const referenceId of referenceIds) {
+      expect(winners.has(`${referenceId}-early`)).toBe(true);
+      expect(winners.has(`${referenceId}-late`)).toBe(false);
+    }
+  });
 });

@@ -15,6 +15,20 @@ export function isVerifiedSlipCheckStatus(
   return VERIFIED_SLIP_CHECK_STATUSES.some((verifiedStatus) => verifiedStatus === status);
 }
 
+// Supabase/PostgREST `.in()` filters have a practical URL-length limit; chunk
+// the reference id list the same way load.ts chunks raw_message_id lookups
+// (see SOURCE_LOOKUP_CHUNK_SIZE in src/lib/white-sheet/load.ts) rather than
+// sending one unbounded query.
+const REFERENCE_LOOKUP_CHUNK_SIZE = 500;
+
+function chunkReferenceIds<T>(values: readonly T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let offset = 0; offset < values.length; offset += size) {
+    result.push(values.slice(offset, offset + size));
+  }
+  return result;
+}
+
 export type SlipDuplicateResult =
   | {
       status: "unique";
@@ -123,9 +137,20 @@ export async function findSlipTransactionDuplicate(
  * the globally-earliest accepted record for each id — across every source
  * and business date, not just the caller's scope.
  *
- * ponytail: one batched query rather than one lookup per reference id.
- * Still a read-then-decide check, not an atomic claim (same caveat as
- * findSlipTransactionDuplicate above).
+ * ponytail: batched queries (chunked, see REFERENCE_LOOKUP_CHUNK_SIZE) rather
+ * than one lookup per reference id. Still a read-then-decide check, not an
+ * atomic claim (same caveat as findSlipTransactionDuplicate above).
+ *
+ * Chunking safety: the input reference id list — not the result rows — is
+ * partitioned into disjoint chunks, so every row for a given reference id
+ * always comes back from exactly one chunk's query. Each chunk query keeps
+ * the same ORDER BY (created_at, id) as before chunking, so the earliest
+ * accepted row per reference id is still resolved correctly; chunks are
+ * combined in a fixed, deterministic order (the order distinctReferenceIds
+ * was chunked in) so re-running against unchanged data always yields the
+ * same winners. Failure is not silently partial: any per-chunk query error
+ * propagates immediately, and the fail-closed "incomplete resolution" check
+ * runs once against the full merged result across every chunk.
  */
 export async function resolveGloballyAcceptedCheckIds(
   supabase: Supabase,
@@ -133,23 +158,29 @@ export async function resolveGloballyAcceptedCheckIds(
 ): Promise<Set<string>> {
   if (referenceIds.length === 0) return new Set();
 
-  const { data, error } = await supabase
-    .from("slip_checks")
-    .select("id, reference_id, created_at")
-    .in("reference_id", referenceIds)
-    .in("status", VERIFIED_SLIP_CHECK_STATUSES)
-    .order("created_at", { ascending: true })
-    .order("id", { ascending: true });
-
-  if (error) throw new Error(`global reference resolution failed: ${error.message}`);
-
+  const distinctReferenceIds = [...new Set(referenceIds)];
   const winners = new Map<string, string>();
-  for (const row of data ?? []) {
-    if (!row.reference_id) continue;
-    if (!winners.has(row.reference_id)) winners.set(row.reference_id, row.id);
+
+  for (const chunk of chunkReferenceIds(distinctReferenceIds, REFERENCE_LOOKUP_CHUNK_SIZE)) {
+    const { data, error } = await supabase
+      .from("slip_checks")
+      .select("id, reference_id, created_at")
+      .in("reference_id", chunk)
+      .in("status", VERIFIED_SLIP_CHECK_STATUSES)
+      .order("created_at", { ascending: true })
+      .order("id", { ascending: true });
+
+    if (error) throw new Error(`global reference resolution failed: ${error.message}`);
+
+    for (const row of data ?? []) {
+      if (!row.reference_id) continue;
+      if (!winners.has(row.reference_id)) winners.set(row.reference_id, row.id);
+    }
   }
 
-  const unresolvedCount = referenceIds.filter((referenceId) => !winners.has(referenceId)).length;
+  const unresolvedCount = distinctReferenceIds.filter(
+    (referenceId) => !winners.has(referenceId),
+  ).length;
   if (unresolvedCount > 0) {
     throw new Error(
       `global reference resolution incomplete for ${unresolvedCount} reference id(s)`,

@@ -24,16 +24,27 @@ const CLOSE_LINE = "จบปิดยอด";
 const MONEY_WITH_COMMAS = /^\d{1,3}(,\d{3})*(\.\d{1,2})?$/;
 const MONEY_PLAIN = /^\d+(\.\d{1,2})?$/;
 
+/**
+ * Parsed LINE closing fields. Expense keys use `undefined` when the line was
+ * omitted so the close service can preserve an existing SUBMITTED value on
+ * resubmission. An explicit `0` (or explicit `ค่าอื่น 0`) means the operator
+ * intentionally set that field to zero.
+ */
 export interface WhiteSheetCloseCommand {
   marketLabel: string;
   marketLabelNormalized: string;
   businessDate: string;
-  labor: number;
-  locationFee: number;
-  bag: number;
-  snack: number;
-  other: number;
-  otherNote: string | null;
+  /** `undefined` = omitted; number (including 0) = explicitly supplied. */
+  labor: number | undefined;
+  locationFee: number | undefined;
+  bag: number | undefined;
+  snack: number | undefined;
+  /**
+   * `undefined` = ค่าอื่น line omitted (preserve other + otherNote on resubmit).
+   * Present = replace both amount and note from this submission.
+   */
+  other: { amount: number; note: string | null } | undefined;
+  /** Always required — every closing message must include เงินสด. */
   actualCashSubmitted: number;
 }
 
@@ -268,12 +279,11 @@ export function parseWhiteSheetCloseCommand(text: string): WhiteSheetCloseParseR
       marketLabel: marketLabelNormalized,
       marketLabelNormalized,
       businessDate,
-      labor: labor[0] ?? 0,
-      locationFee: locationFee[0] ?? 0,
-      bag: bag[0] ?? 0,
-      snack: snack[0] ?? 0,
-      other: other[0]?.amount ?? 0,
-      otherNote: other[0]?.note ?? null,
+      labor: labor[0],
+      locationFee: locationFee[0],
+      bag: bag[0],
+      snack: snack[0],
+      other: other[0],
       actualCashSubmitted: actualCash[0],
     },
   };

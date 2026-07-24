@@ -4,11 +4,14 @@ import { logger } from "@/lib/logger";
 import {
   listKnownProduceMarketLabels,
   loadDigitalWhiteSheetPageModel,
+  loadWhiteSheetCashEntry,
   requireTrustedWhiteSheetSummary,
   saveWhiteSheetCashEntry,
   splitWhiteSheetWarnings,
   WhiteSheetHardStopError,
   WhiteSheetPersistenceError,
+  type WhiteSheetCashEntryInput,
+  type WhiteSheetCashEntryState,
 } from "@/lib/white-sheet";
 import type { WhiteSheetCloseCommand } from "@/lib/line/white-sheet-close-command";
 import {
@@ -38,6 +41,66 @@ function isFinalizedPersistenceError(error: unknown): boolean {
     error instanceof WhiteSheetPersistenceError &&
     error.message.includes("finalized")
   );
+}
+
+/**
+ * Merges parsed LINE closing fields with any existing SUBMITTED entry.
+ *
+ * - First submission (not_submitted): omitted expenses initialize as 0.
+ * - Resubmission (submitted): omitted expenses preserve persisted values;
+ *   explicit values (including 0) replace. Explicit ค่าอื่น replaces both
+ *   amount and note (ค่าอื่น 0 with no note clears a stale otherNote).
+ * - เงินสด is always required and always replaces actualCashSubmitted.
+ */
+export function mergeWhiteSheetCloseInput(
+  sourceId: string,
+  command: WhiteSheetCloseCommand,
+  existing: WhiteSheetCashEntryState,
+): WhiteSheetCashEntryInput {
+  const identity = {
+    sourceId,
+    marketLabelNormalized: command.marketLabelNormalized,
+    businessDate: command.businessDate,
+  };
+
+  if (existing.status === "not_submitted") {
+    const other = command.other;
+    return {
+      ...identity,
+      labor: command.labor ?? 0,
+      locationFee: command.locationFee ?? 0,
+      bag: command.bag ?? 0,
+      snack: command.snack ?? 0,
+      other: other?.amount ?? 0,
+      otherNote: other?.note ?? null,
+      actualCashSubmitted: command.actualCashSubmitted,
+    };
+  }
+
+  const prior = existing.expenses;
+  const other =
+    command.other !== undefined
+      ? {
+          amount: command.other.amount,
+          // Explicit ค่าอื่น 0 with no note clears a stale note; any supplied
+          // note (including with amount 0) replaces the persisted note.
+          note: command.other.note,
+        }
+      : {
+          amount: prior.other,
+          note: prior.otherNote ?? null,
+        };
+
+  return {
+    ...identity,
+    labor: command.labor ?? prior.labor,
+    locationFee: command.locationFee ?? prior.locationFee,
+    bag: command.bag ?? prior.bag,
+    snack: command.snack ?? prior.snack,
+    other: other.amount,
+    otherNote: other.note,
+    actualCashSubmitted: command.actualCashSubmitted,
+  };
 }
 
 /**
@@ -85,19 +148,39 @@ export async function processWhiteSheetCloseCommand(
     };
   }
 
+  let existing: WhiteSheetCashEntryState;
   try {
-    await saveWhiteSheetCashEntry(supabase, {
+    existing = await loadWhiteSheetCashEntry(supabase, {
       sourceId,
       marketLabelNormalized: command.marketLabelNormalized,
       businessDate: command.businessDate,
-      labor: command.labor,
-      locationFee: command.locationFee,
-      bag: command.bag,
-      snack: command.snack,
-      other: command.other,
-      otherNote: command.otherNote,
-      actualCashSubmitted: command.actualCashSubmitted,
     });
+  } catch (error) {
+    log.error("white sheet close existing-entry load failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return {
+      replyMessages: [GENERIC_SAVE_ERROR],
+      persisted: false,
+      trusted: false,
+    };
+  }
+
+  // Reject FINALIZED before any merge/write so omitted-field merge cannot
+  // appear to mutate a locked row.
+  if (existing.status === "finalized") {
+    log.info("white sheet close rejected — finalized");
+    return {
+      replyMessages: [FINALIZED_REPLY],
+      persisted: false,
+      trusted: false,
+    };
+  }
+
+  const merged = mergeWhiteSheetCloseInput(sourceId, command, existing);
+
+  try {
+    await saveWhiteSheetCashEntry(supabase, merged);
   } catch (error) {
     if (isFinalizedPersistenceError(error)) {
       log.info("white sheet close rejected — finalized");

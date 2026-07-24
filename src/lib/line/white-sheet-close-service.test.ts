@@ -2,7 +2,10 @@ import { describe, expect, it } from "bun:test";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/database";
 import { parseWhiteSheetCloseCommand } from "./white-sheet-close-command";
-import { processWhiteSheetCloseCommand } from "./white-sheet-close-service";
+import {
+  mergeWhiteSheetCloseInput,
+  processWhiteSheetCloseCommand,
+} from "./white-sheet-close-service";
 import {
   finalizeWhiteSheetCashEntry,
   loadWhiteSheetCashEntry,
@@ -420,6 +423,211 @@ describe("processWhiteSheetCloseCommand", () => {
     expect([...cashEntries.values()][0].id).toBe(firstId);
     expect([...cashEntries.values()][0].actual_cash_submitted).toBe(1100);
     expect(second.replyMessages.join("\n")).toContain("เงินสดที่ส่งจริง 1,100.00 บาท");
+  });
+
+  it("A. first submission with omitted expenses initializes them as 0", async () => {
+    const { supabase, cashEntries } = makeCloseDatabase();
+    await processWhiteSheetCloseCommand(supabase, {
+      sourceId: SOURCE_ID,
+      command: mustParse(
+        `${MARKET_GEE} ปิดยอด 24/07/2569\nเงินสด 16\nจบปิดยอด`,
+      ),
+    });
+    const row = [...cashEntries.values()][0];
+    expect(row.labor).toBe(0);
+    expect(row.location_fee).toBe(0);
+    expect(row.bag).toBe(0);
+    expect(row.snack).toBe(0);
+    expect(row.other).toBe(0);
+    expect(row.other_note).toBeNull();
+    expect(row.actual_cash_submitted).toBe(16);
+  });
+
+  it("B. cash-only resubmission preserves all expenses and otherNote", async () => {
+    const { supabase, cashEntries } = makeCloseDatabase();
+    await processWhiteSheetCloseCommand(supabase, {
+      sourceId: SOURCE_ID,
+      command: mustParse(MATCHED_CLOSE),
+    });
+
+    const outcome = await processWhiteSheetCloseCommand(supabase, {
+      sourceId: SOURCE_ID,
+      command: mustParse(
+        `${MARKET_GEE} ปิดยอด 24/07/2569\nเงินสด 20\nจบปิดยอด`,
+      ),
+    });
+
+    expect(cashEntries.size).toBe(1);
+    const row = [...cashEntries.values()][0];
+    expect(row.labor).toBe(30);
+    expect(row.location_fee).toBe(20);
+    expect(row.bag).toBe(5);
+    expect(row.snack).toBe(5);
+    expect(row.other).toBe(10);
+    expect(row.other_note).toBeNull(); // MATCHED_CLOSE has no note
+    expect(row.actual_cash_submitted).toBe(20);
+    expect(outcome.persisted).toBe(true);
+    expect(outcome.trusted).toBe(true);
+    // G: canonical result uses merged expenses (70), not parser zeros.
+    // expectedCash = 286 - 200 - 70 = 16; actual 20 → overage 4
+    const text = outcome.replyMessages.join("\n");
+    expect(text).toContain("รวมค่าใช้จ่าย 70.00 บาท");
+    expect(text).toContain("เงินสดที่ควรส่ง 16.00 บาท");
+    expect(text).toContain("เงินสดที่ส่งจริง 20.00 บาท");
+    expect(text).toContain("เงินเกิน 4.00 บาท");
+    expect(text).not.toContain("✅ ยอดตรง");
+  });
+
+  it("C. explicit ค่าแรง 0 clears labor while preserving omitted expenses", async () => {
+    const { supabase, cashEntries } = makeCloseDatabase();
+    await processWhiteSheetCloseCommand(supabase, {
+      sourceId: SOURCE_ID,
+      command: mustParse(MATCHED_CLOSE),
+    });
+
+    await processWhiteSheetCloseCommand(supabase, {
+      sourceId: SOURCE_ID,
+      command: mustParse(
+        `${MARKET_GEE} ปิดยอด 24/07/2569\nค่าแรง 0\nเงินสด 46\nจบปิดยอด`,
+      ),
+    });
+
+    const row = [...cashEntries.values()][0];
+    expect(row.labor).toBe(0);
+    expect(row.location_fee).toBe(20);
+    expect(row.bag).toBe(5);
+    expect(row.snack).toBe(5);
+    expect(row.other).toBe(10);
+    expect(row.actual_cash_submitted).toBe(46);
+  });
+
+  it("D. omitting ค่าอื่น preserves other amount and note", async () => {
+    const { supabase, cashEntries } = makeCloseDatabase();
+    await processWhiteSheetCloseCommand(supabase, {
+      sourceId: SOURCE_ID,
+      command: mustParse(
+        [
+          `${MARKET_GEE} ปิดยอด 24/07/2569`,
+          "ค่าแรง 30",
+          "ค่าที่ 20",
+          "ค่าถุง 5",
+          "ค่าขนม 5",
+          "ค่าอื่น 10 ค่าน้ำแข็ง",
+          "เงินสด 16",
+          "จบปิดยอด",
+        ].join("\n"),
+      ),
+    });
+
+    await processWhiteSheetCloseCommand(supabase, {
+      sourceId: SOURCE_ID,
+      command: mustParse(
+        `${MARKET_GEE} ปิดยอด 24/07/2569\nเงินสด 16\nจบปิดยอด`,
+      ),
+    });
+
+    const row = [...cashEntries.values()][0];
+    expect(row.other).toBe(10);
+    expect(row.other_note).toBe("ค่าน้ำแข็ง");
+  });
+
+  it("E. explicit ค่าอื่น 0 clears other and stale otherNote", async () => {
+    const { supabase, cashEntries } = makeCloseDatabase();
+    await processWhiteSheetCloseCommand(supabase, {
+      sourceId: SOURCE_ID,
+      command: mustParse(
+        [
+          `${MARKET_GEE} ปิดยอด 24/07/2569`,
+          "ค่าอื่น 10 ค่าน้ำแข็ง",
+          "เงินสด 16",
+          "จบปิดยอด",
+        ].join("\n"),
+      ),
+    });
+
+    await processWhiteSheetCloseCommand(supabase, {
+      sourceId: SOURCE_ID,
+      command: mustParse(
+        `${MARKET_GEE} ปิดยอด 24/07/2569\nค่าอื่น 0\nเงินสด 16\nจบปิดยอด`,
+      ),
+    });
+
+    const row = [...cashEntries.values()][0];
+    expect(row.other).toBe(0);
+    expect(row.other_note).toBeNull();
+  });
+
+  it("F. FINALIZED rejects without merge mutation", async () => {
+    const { supabase, cashEntries } = makeCloseDatabase();
+    await processWhiteSheetCloseCommand(supabase, {
+      sourceId: SOURCE_ID,
+      command: mustParse(
+        [
+          `${MARKET_GEE} ปิดยอด 24/07/2569`,
+          "ค่าอื่น 10 ค่าน้ำแข็ง",
+          "เงินสด 16",
+          "จบปิดยอด",
+        ].join("\n"),
+      ),
+    });
+    await finalizeWhiteSheetCashEntry(
+      supabase,
+      {
+        sourceId: SOURCE_ID,
+        marketLabelNormalized: normalizedMarketLabel(MARKET_GEE),
+        businessDate: BUSINESS_DATE,
+      },
+      "admin-1",
+    );
+    const before = { ...[...cashEntries.values()][0] };
+
+    const outcome = await processWhiteSheetCloseCommand(supabase, {
+      sourceId: SOURCE_ID,
+      command: mustParse(
+        `${MARKET_GEE} ปิดยอด 24/07/2569\nค่าแรง 0\nเงินสด 9999\nจบปิดยอด`,
+      ),
+    });
+
+    expect(outcome.persisted).toBe(false);
+    expect(outcome.replyMessages.join("\n")).toContain("FINALIZED");
+    expect([...cashEntries.values()][0]).toEqual(before);
+  });
+
+  it("mergeWhiteSheetCloseInput unit: omitted vs explicit zero", () => {
+    const submitted = {
+      status: "submitted" as const,
+      expenses: {
+        labor: 30,
+        locationFee: 20,
+        bag: 5,
+        snack: 5,
+        other: 10,
+        otherNote: "ค่าน้ำแข็ง",
+      },
+      actualCashSubmitted: 16,
+      updatedAt: "2026-07-24T00:00:00Z",
+    };
+    const cashOnly = mustParse(
+      `${MARKET_GEE} ปิดยอด 24/07/2569\nเงินสด 20\nจบปิดยอด`,
+    );
+    expect(mergeWhiteSheetCloseInput(SOURCE_ID, cashOnly, submitted)).toEqual({
+      sourceId: SOURCE_ID,
+      marketLabelNormalized: MARKET_GEE,
+      businessDate: BUSINESS_DATE,
+      labor: 30,
+      locationFee: 20,
+      bag: 5,
+      snack: 5,
+      other: 10,
+      otherNote: "ค่าน้ำแข็ง",
+      actualCashSubmitted: 20,
+    });
+
+    const zeroLabor = mustParse(
+      `${MARKET_GEE} ปิดยอด 24/07/2569\nค่าแรง 0\nเงินสด 20\nจบปิดยอด`,
+    );
+    expect(mergeWhiteSheetCloseInput(SOURCE_ID, zeroLabor, submitted).labor).toBe(0);
+    expect(mergeWhiteSheetCloseInput(SOURCE_ID, zeroLabor, submitted).locationFee).toBe(20);
   });
 
   it("P. FINALIZED rejects LINE overwrite with no mutation", async () => {

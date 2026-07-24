@@ -35,7 +35,7 @@ describe("parseCloseMoneyAmount", () => {
 });
 
 describe("parseWhiteSheetCloseCommand", () => {
-  it("A. parses a complete valid message", () => {
+  it("A. complete valid message keeps explicit expense values", () => {
     const result = parseWhiteSheetCloseCommand(VALID_FULL);
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") return;
@@ -47,8 +47,7 @@ describe("parseWhiteSheetCloseCommand", () => {
       locationFee: 200,
       bag: 50,
       snack: 40,
-      other: 100,
-      otherNote: "ค่าน้ำแข็ง",
+      other: { amount: 100, note: "ค่าน้ำแข็ง" },
       actualCashSubmitted: 4850,
     });
   });
@@ -80,28 +79,38 @@ describe("parseWhiteSheetCloseCommand", () => {
     expect(result.command.actualCashSubmitted).toBe(1250.5);
   });
 
-  it("E. captures ค่าอื่น note", () => {
+  it("E. captures ค่าอื่น note as explicit other payload", () => {
     const result = parseWhiteSheetCloseCommand(
       "ตลาดกี้ ปิดยอด 24/07/2569\nค่าอื่น 100 ค่าน้ำแข็ง\nเงินสด 10\nจบปิดยอด",
     );
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") return;
-    expect(result.command.other).toBe(100);
-    expect(result.command.otherNote).toBe("ค่าน้ำแข็ง");
+    expect(result.command.other).toEqual({ amount: 100, note: "ค่าน้ำแข็ง" });
   });
 
-  it("F. omitted optional expenses become 0", () => {
+  it("F. omitted optional expenses stay undefined (not silently zeroed)", () => {
     const result = parseWhiteSheetCloseCommand(
       "ตลาดกี้ ปิดยอด 24/07/2569\nเงินสด 16\nจบปิดยอด",
     );
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") return;
+    expect(result.command.labor).toBeUndefined();
+    expect(result.command.locationFee).toBeUndefined();
+    expect(result.command.bag).toBeUndefined();
+    expect(result.command.snack).toBeUndefined();
+    expect(result.command.other).toBeUndefined();
+    expect(result.command.actualCashSubmitted).toBe(16);
+  });
+
+  it("distinguishes explicit zero from omitted expense fields", () => {
+    const result = parseWhiteSheetCloseCommand(
+      "ตลาดกี้ ปิดยอด 24/07/2569\nค่าแรง 0\nค่าอื่น 0\nเงินสด 16\nจบปิดยอด",
+    );
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
     expect(result.command.labor).toBe(0);
-    expect(result.command.locationFee).toBe(0);
-    expect(result.command.bag).toBe(0);
-    expect(result.command.snack).toBe(0);
-    expect(result.command.other).toBe(0);
-    expect(result.command.otherNote).toBeNull();
+    expect(result.command.locationFee).toBeUndefined();
+    expect(result.command.other).toEqual({ amount: 0, note: null });
   });
 
   it("G. rejects missing เงินสด", () => {

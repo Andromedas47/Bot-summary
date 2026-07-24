@@ -34,8 +34,27 @@ class MemoryQuery {
     return this;
   }
 
+  is(column: string, value: unknown): this {
+    this.filters.push((row) => row[column] === value);
+    return this;
+  }
+
+  not(column: string, operator: string, value: unknown): this {
+    if (operator === "is") {
+      this.filters.push((row) => row[column] !== value);
+      return this;
+    }
+    this.filters.push((row) => row[column] !== value);
+    return this;
+  }
+
   gte(column: string, value: unknown): this {
     this.filters.push((row) => String(row[column]) >= String(value));
+    return this;
+  }
+
+  lt(column: string, value: unknown): this {
+    this.filters.push((row) => String(row[column]) < String(value));
     return this;
   }
 
@@ -77,39 +96,47 @@ class MemoryQuery {
   }
 
   then<TResult1 = unknown, TResult2 = never>(
-    onfulfilled?: ((value: { data: Row[] | Row | null; error: null }) => TResult1 | PromiseLike<TResult1>) | null,
+    onfulfilled?: ((value: {
+      data: Row[] | Row | null;
+      error: null;
+      count: number | null;
+    }) => TResult1 | PromiseLike<TResult1>) | null,
     onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
   ): Promise<TResult1 | TResult2> {
     return Promise.resolve(this.execute()).then(onfulfilled, onrejected);
   }
 
-  private execute(): { data: Row[] | Row | null; error: null } {
+  private execute(): { data: Row[] | Row | null; error: null; count: number | null } {
     const rows = this.db.rows(this.table);
     const matches = () => rows.filter((row) => this.filters.every((filter) => filter(row)));
 
     if (this.mode === "select") {
-      let selected = matches();
+      const matched = matches();
+      let selected = matched;
       if (this.rangeFrom !== null && this.rangeTo !== null) {
-        selected = selected.slice(this.rangeFrom, this.rangeTo + 1);
+        selected = matched.slice(this.rangeFrom, this.rangeTo + 1);
       }
-      return { data: this.maxRows === null ? selected : selected.slice(0, this.maxRows), error: null };
+      if (this.maxRows !== null) {
+        selected = selected.slice(0, this.maxRows);
+      }
+      return { data: selected, error: null, count: matched.length };
     }
 
     if (this.mode === "insert" || this.mode === "upsert") {
       const payloads = Array.isArray(this.payload) ? this.payload : [this.payload ?? {}];
       const inserted = payloads.map((payload) => this.db.insert(this.table, payload, this.mode));
-      return { data: this.returning ? inserted : null, error: null };
+      return { data: this.returning ? inserted : null, error: null, count: null };
     }
 
     if (this.mode === "update") {
       const updated = matches();
       for (const row of updated) Object.assign(row, this.payload);
-      return { data: this.returning ? updated : null, error: null };
+      return { data: this.returning ? updated : null, error: null, count: null };
     }
 
     const removed = matches();
     this.db.remove(this.table, new Set(removed));
-    return { data: this.returning ? removed : null, error: null };
+    return { data: this.returning ? removed : null, error: null, count: null };
   }
 }
 
@@ -163,6 +190,14 @@ class BoundaryDatabase {
       row.ingest_revision = row.ingest_revision ?? 0;
     }
     if (table === "produce_sessions") row.id = row.id ?? `produce-${rows.length + 1}`;
+    if (table === "digital_white_sheet_cash_entries") {
+      row.id = row.id ?? `cash-${rows.length + 1}`;
+      row.created_at = row.created_at ?? new Date().toISOString();
+      row.updated_at = row.updated_at ?? new Date().toISOString();
+      row.finalized_at = row.finalized_at ?? null;
+      row.finalized_by = row.finalized_by ?? null;
+      row.other_note = row.other_note ?? null;
+    }
     rows.push(row);
     return row;
   }
@@ -654,14 +689,49 @@ describe("remaining fruit command routing", () => {
 describe("white sheet close command routing", () => {
   const CLOSE_TEXT = [
     "ตลาดกี้ ปิดยอด 24/07/2569",
-    "ค่าแรง 30",
-    "เงินสด 16",
+    "เงินสด 100",
     "จบปิดยอด",
   ].join("\n");
 
-  it("does not append a closing message into an active pending produce session", async () => {
+  /** Deterministic produce + price seed so close completes (not early mock failure). */
+  function seedCloseableMarket(db: BoundaryDatabase) {
+    db.rows("produce_transactions").push({
+      id: "item-ws-1",
+      product_name: "มะม่วง",
+      quantity: 20,
+      unit: "ลูก",
+      price_per_unit: 5,
+      transaction_type: "เบิก",
+      base_transaction_type: "เบิก",
+      item_created_at: "2026-07-24T02:00:00Z",
+      session_id: "main-ws",
+      transaction_date: "2026-07-24",
+      market_name: "ตลาดกี้",
+      raw_message_id: "raw-ws-produce",
+      basis_quantity: null,
+      basis_price: null,
+      session_kind: "main",
+    });
+    db.rows("raw_messages").push({
+      id: "raw-ws-produce",
+      source_id: "group-1",
+    });
+    db.rows("central_selling_prices").push({
+      product_key: "มะม่วง",
+      unit_key: "ลูก",
+      business_date: "2026-07-24",
+      price_satang: 500,
+      set_by: "admin",
+      set_reason: null,
+      created_at: "2026-07-24T00:00:00Z",
+      updated_at: "2026-07-24T00:00:00Z",
+    });
+  }
+
+  it("successfully closes via LINE while an active pending produce session is open", async () => {
     const original = "โอม-พาซิโอ้ผลไม้ เบิก 30/06/2569\n1.ทุเรียน100บาท\n2โล";
     const db = new BoundaryDatabase(pendingSession(original));
+    seedCloseableMarket(db);
     const replies: string[] = [];
     const webhook = service(db, replies);
 
@@ -672,20 +742,25 @@ describe("white sheet close command routing", () => {
 
     expect(db.appendCalls).toBe(0);
     expect(db.rows("pending_sessions")[0].accumulated_text).toBe(original);
-    expect(replies.length).toBeGreaterThan(0);
+    expect(db.rows("digital_white_sheet_cash_entries")).toHaveLength(1);
+    expect(db.rows("digital_white_sheet_cash_entries")[0].actual_cash_submitted).toBe(100);
     const reply = replies.join("\n");
+    expect(reply).toContain("สรุปปิดยอด — ตลาดกี้");
+    expect(reply).toContain("✅ ยอดตรง");
     expect(reply).not.toContain("รับจบรายการ");
     expect(reply).not.toMatch(/รับ\s+\d+\s+รายการ/);
+    expect(reply).not.toContain("บันทึกปิดยอดไม่สำเร็จ");
   });
 
-  it("does not treat LINE-export-prefixed closing text as produce/manual-slip input", async () => {
+  it("successfully closes LINE-export-prefixed text without pending/manual-slip capture", async () => {
     const original = "โอม-พาซิโอ้ผลไม้ เบิก 30/06/2569";
     const db = new BoundaryDatabase(pendingSession(original));
+    seedCloseableMarket(db);
     const replies: string[] = [];
     const webhook = service(db, replies);
     const exported = [
       "10:15 ผู้ขาย ตลาดกี้ ปิดยอด 24/07/2569",
-      "10:15 ผู้ขาย เงินสด 16",
+      "10:15 ผู้ขาย เงินสด 100",
       "10:15 ผู้ขาย จบปิดยอด",
     ].join("\n");
 
@@ -696,7 +771,10 @@ describe("white sheet close command routing", () => {
 
     expect(db.appendCalls).toBe(0);
     expect(db.rows("pending_sessions")[0].accumulated_text).toBe(original);
-    expect(replies.length).toBeGreaterThan(0);
+    expect(db.rows("digital_white_sheet_cash_entries")).toHaveLength(1);
+    const reply = replies.join("\n");
+    expect(reply).toContain("สรุปปิดยอด — ตลาดกี้");
+    expect(reply).toContain("✅ ยอดตรง");
   });
 
   it("validation errors stay on the close path (no pending append)", async () => {

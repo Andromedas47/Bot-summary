@@ -5,8 +5,8 @@ type Supabase = SupabaseClient<Database>;
 
 /**
  * Void/supersede for produce_sessions (BR-03). Integrates the protected
- * 0037 produce-session void schema's intent (mirrored locally in
- * 0041_produce_session_void.sql — see that file's header): ACTIVE -> VOID is
+ * 0037 produce-session void schema's intent (this branch's own
+ * 0037_produce_session_void.sql — see that file's header): ACTIVE -> VOID is
  * the only transition, hard delete is forbidden, and the original row
  * remains readable via produce_transactions_all for audit while
  * produce_transactions (the operational view every financial loader reads)

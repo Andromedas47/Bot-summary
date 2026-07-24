@@ -6,7 +6,7 @@ import { createClient, createServiceClient } from "@/lib/supabase/server";
 /**
  * BR-03: void a produce session. Admin-only, server-authorized (UI hiding is
  * never the authorization boundary). Requires a non-empty reason; records
- * actor/timestamp/reason on the row itself (see 0041_produce_session_void.sql).
+ * actor/timestamp/reason on the row itself (see 0037_produce_session_void.sql).
  * Hard delete is never performed — produce_transactions_all keeps the row
  * visible for audit while produce_transactions (every financial loader)
  * excludes it.

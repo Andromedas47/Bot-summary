@@ -1,22 +1,21 @@
 -- Void/supersede mechanism for produce_sessions (BR-03).
 --
--- This integration worktree's migration chain currently has no local 0037 —
--- that number is reserved for the protected primary workspace's
--- 0037_produce_session_void.sql (C:\GitHub\Bot-summary), which this branch
--- has not yet merged/rebased onto. Per task instruction, that file is
--- inspected READ-ONLY and never copied or edited in place.
+-- Fills this integration branch's own 0037 slot — the canonical intended
+-- chronology is 0037 produce session void, 0038 digital white sheet cash
+-- entries, 0039 slip evidence market attribution (0038/0039 already exist on
+-- this branch; only 0037 was missing until now).
 --
--- This migration reproduces the IDENTICAL DDL (same column names, same
--- constraint names, same view bodies) as the protected 0037, so this
--- integration worktree gets working void support NOW without waiting for a
--- merge. This is safe specifically because every statement in the protected
--- 0037 is idempotent by construction (ADD COLUMN IF NOT EXISTS, constraint
--- guards checked against pg_constraint, CREATE INDEX IF NOT EXISTS, CREATE OR
--- REPLACE VIEW) — when this branch is eventually merged with the real 0037
--- already applied, running this migration's identical statements a second
--- time is a guaranteed no-op, not a conflict. Whoever performs that merge
--- should reconcile the two files (e.g. drop this one) at that time; this is
--- noted as a remaining step, not solved here.
+-- This file's DDL is IDENTICAL (same column names, same constraint names,
+-- same view bodies) to the protected primary workspace's own
+-- 0037_produce_session_void.sql (C:\GitHub\Bot-summary), which was inspected
+-- READ-ONLY and never copied or edited in place — this file was written
+-- independently to match its intent. Every statement here is idempotent by
+-- construction (ADD COLUMN IF NOT EXISTS, constraint guards checked against
+-- pg_constraint, CREATE INDEX IF NOT EXISTS, CREATE OR REPLACE VIEW), so when
+-- this branch is eventually merged with the primary workspace's 0037 already
+-- applied, re-running these identical statements is a guaranteed no-op, not
+-- a conflict. Reconciling the two files at merge time (they should become
+-- one) remains a step for whoever performs that merge, not solved here.
 --
 -- Scope (additive only — no DELETE / TRUNCATE / DROP, no mutation of
 -- produce_items, and no mutation of existing produce_sessions rows other

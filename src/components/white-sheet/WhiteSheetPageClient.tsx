@@ -7,7 +7,7 @@ import { DigitalWhiteSheetPanel } from "./DigitalWhiteSheetPanel";
 import type { WhiteSheetExpenseInput } from "./types";
 
 interface DigitalWhiteSheetPageModelResponse {
-  entryStatus: "submitted" | "not_submitted";
+  entryStatus: "submitted" | "finalized" | "not_submitted";
   summary: DigitalWhiteSheetSummary;
 }
 

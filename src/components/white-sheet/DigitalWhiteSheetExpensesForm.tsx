@@ -31,10 +31,13 @@ export function DigitalWhiteSheetExpensesForm({
   viewModel,
   onSubmitExpenses,
   isSubmitting = false,
+  readOnly = false,
 }: {
   viewModel?: Pick<DigitalWhiteSheetSummary, "expenses" | "actualCashSubmitted">;
   onSubmitExpenses: (input: WhiteSheetExpenseInput) => void | Promise<void>;
   isSubmitting?: boolean;
+  /** BR-06: true once the entry is FINALIZED — normal operators can no longer submit. */
+  readOnly?: boolean;
 }) {
   const [form, setForm] = useState<WhiteSheetExpenseInput>(() => expenseDefaults(viewModel));
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -80,6 +83,11 @@ export function DigitalWhiteSheetExpensesForm({
 
   return (
     <div className="space-y-4 max-w-lg" data-testid="white-sheet-expenses-form">
+      {readOnly && (
+        <p className="text-sm text-slate-600" data-testid="white-sheet-form-locked">
+          ปิดยอดแล้ว — ต้องให้ผู้ดูแลระบบเปิดใหม่ก่อนจึงจะแก้ไขได้
+        </p>
+      )}
       <div className="grid grid-cols-2 gap-4">
         {(
           [
@@ -101,6 +109,7 @@ export function DigitalWhiteSheetExpensesForm({
               value={Number.isFinite(form[key]) && form[key] !== 0 ? form[key] : ""}
               placeholder="0"
               onChange={(e) => updateNumberField(key, e.target.value)}
+              disabled={readOnly}
               className={INPUT_CLS + " text-right tabular-nums"}
               aria-invalid={fieldErrors[key] ? true : undefined}
             />
@@ -121,6 +130,7 @@ export function DigitalWhiteSheetExpensesForm({
             onChange={(e) => setForm((prev) => ({ ...prev, otherNote: e.target.value }))}
             placeholder="หมายเหตุ (ถ้ามี)"
             rows={2}
+            disabled={readOnly}
             className={INPUT_CLS + " resize-none"}
           />
         </div>
@@ -140,6 +150,7 @@ export function DigitalWhiteSheetExpensesForm({
             }
             placeholder="0"
             onChange={(e) => updateNumberField("actualCashSubmitted", e.target.value)}
+            disabled={readOnly}
             className={INPUT_CLS + " text-right tabular-nums"}
             aria-invalid={fieldErrors.actualCashSubmitted ? true : undefined}
           />
@@ -151,16 +162,18 @@ export function DigitalWhiteSheetExpensesForm({
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-3">
-        <Button isLoading={loading} onClick={handleSubmit}>
-          บันทึกค่าใช้จ่าย
-        </Button>
-        {submitError && (
-          <span className="text-sm font-medium text-red-600" role="alert">
-            {submitError}
-          </span>
-        )}
-      </div>
+      {!readOnly && (
+        <div className="flex flex-wrap items-center gap-3">
+          <Button isLoading={loading} onClick={handleSubmit}>
+            บันทึกค่าใช้จ่าย
+          </Button>
+          {submitError && (
+            <span className="text-sm font-medium text-red-600" role="alert">
+              {submitError}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -38,12 +38,14 @@ export function DigitalWhiteSheetSummary({
    * still come from real persisted transactions, but expenses/expenseTotal/
    * expectedCash/actualCashSubmitted/status on `viewModel` are placeholder
    * zeros in that state — they are intentionally NOT rendered here, so a
-   * missing entry can never be misread as "$0 submitted, ยอดตรง".
+   * missing entry can never be misread as "$0 submitted, ยอดตรง". "finalized"
+   * is a lifecycle state (BR-06), separate from the financial result status —
+   * it renders the same detail section as "submitted" plus a locked badge.
    */
-  entryStatus?: "submitted" | "not_submitted";
+  entryStatus?: "submitted" | "finalized" | "not_submitted";
 }) {
   const { expenses, warnings } = viewModel;
-  const submitted = entryStatus === "submitted";
+  const submitted = entryStatus !== "not_submitted";
   const { hardStopWarnings, otherWarnings } = splitWhiteSheetWarnings(warnings);
 
   return (
@@ -53,6 +55,14 @@ export function DigitalWhiteSheetSummary({
         <p className="text-sm text-slate-500">
           วันที่ {formatThaiDate(viewModel.businessDate)}
         </p>
+        {entryStatus === "finalized" && (
+          <p
+            className="mt-1 inline-block rounded-full bg-slate-800 px-2 py-0.5 text-xs font-semibold text-white"
+            data-testid="white-sheet-finalized-badge"
+          >
+            ปิดยอดแล้ว
+          </p>
+        )}
       </CardHeader>
 
       <CardContent className="space-y-5 pt-4">

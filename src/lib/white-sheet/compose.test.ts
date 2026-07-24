@@ -99,6 +99,16 @@ function makeComposedDatabase(cashEntry?: CashEntryRow, options?: { duplicateMai
           }),
         };
       }
+      if (table === "central_selling_prices") {
+        return {
+          select: () => ({
+            eq: async () => ({
+              data: [{ product_key: "มะม่วง", unit_key: "โล", price_satang: 5000 }],
+              error: null,
+            }),
+          }),
+        };
+      }
       if (table === "digital_white_sheet_cash_entries") {
         return {
           select: () => {
@@ -165,6 +175,8 @@ describe("loadDigitalWhiteSheetPageModel", () => {
       actual_cash_submitted: 300,
       created_at: "2026-07-24T00:00:00Z",
       updated_at: "2026-07-24T00:00:00Z",
+      finalized_at: null,
+      finalized_by: null,
     });
 
     const pageModel = await loadDigitalWhiteSheetPageModel(database, SCOPE);
@@ -232,6 +244,8 @@ describe("requireSubmittedWhiteSheetSummary", () => {
       actual_cash_submitted: 500,
       created_at: "2026-07-24T00:00:00Z",
       updated_at: "2026-07-24T00:00:00Z",
+      finalized_at: null,
+      finalized_by: null,
     });
     const pageModel = await loadDigitalWhiteSheetPageModel(database, SCOPE);
     expect(requireSubmittedWhiteSheetSummary(pageModel)).toBe(pageModel.summary);
@@ -250,6 +264,8 @@ const SUBMITTED_ENTRY: CashEntryRow = {
   other: 0,
   other_note: null,
   actual_cash_submitted: 500,
+  finalized_at: null,
+  finalized_by: null,
   created_at: "2026-07-24T00:00:00Z",
   updated_at: "2026-07-24T00:00:00Z",
 };

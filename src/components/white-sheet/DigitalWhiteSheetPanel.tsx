@@ -10,7 +10,7 @@ export function DigitalWhiteSheetPanel({
   isSubmitting,
 }: {
   viewModel: DigitalWhiteSheetSummaryContract;
-  entryStatus?: "submitted" | "not_submitted";
+  entryStatus?: "submitted" | "finalized" | "not_submitted";
   onSubmitExpenses: (input: WhiteSheetExpenseInput) => void | Promise<void>;
   isSubmitting?: boolean;
 }) {
@@ -18,9 +18,10 @@ export function DigitalWhiteSheetPanel({
     <div className="space-y-6" data-testid="white-sheet-panel">
       <DigitalWhiteSheetSummary viewModel={viewModel} entryStatus={entryStatus} />
       <DigitalWhiteSheetExpensesForm
-        viewModel={entryStatus === "submitted" ? viewModel : undefined}
+        viewModel={entryStatus !== "not_submitted" ? viewModel : undefined}
         onSubmitExpenses={onSubmitExpenses}
         isSubmitting={isSubmitting}
+        readOnly={entryStatus === "finalized"}
       />
     </div>
   );

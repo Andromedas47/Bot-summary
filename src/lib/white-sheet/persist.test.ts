@@ -2,7 +2,9 @@ import { describe, expect, it } from "bun:test";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/database";
 import {
+  finalizeWhiteSheetCashEntry,
   loadWhiteSheetCashEntry,
+  reopenWhiteSheetCashEntry,
   saveWhiteSheetCashEntry,
   WhiteSheetPersistenceError,
 } from "./persist";
@@ -19,65 +21,134 @@ function rowKey(sourceId: string, marketLabelNormalized: string, businessDate: s
   return `${sourceId}::${marketLabelNormalized}::${businessDate}`;
 }
 
+let nextId = 1;
+
 /**
- * In-memory fake mirroring the real table's uniqueness key. Supports the
- * exact chain shapes persist.ts calls: select().eq().eq().eq().maybeSingle()
- * for reads, upsert().select().single() for writes.
+ * In-memory fake mirroring the real table. Supports every chain shape
+ * persist.ts calls: select().eq().eq().eq().maybeSingle() for reads,
+ * insert().select().single() for first-time saves,
+ * update().eq().is().select().maybeSingle() for corrections/finalize/reopen.
+ * Filters are matched generically (eq/is) against the full row, not just the
+ * composite key, so the id-based update path used by finalize/reopen works
+ * the same way the real table would.
  */
-function makeFakeSupabase(seed: Row[] = []) {
+function makeFakeSupabase(seed: Array<Partial<Row> & Pick<Row, "source_id" | "market_label_normalized" | "business_date">> = []) {
   const rows = new Map<string, Row>(
-    seed.map((row) => [rowKey(row.source_id, row.market_label_normalized, row.business_date), row]),
+    seed.map((row) => {
+      const full: Row = {
+        id: `seed-${rowKey(row.source_id, row.market_label_normalized, row.business_date)}`,
+        labor: 0,
+        location_fee: 0,
+        bag: 0,
+        snack: 0,
+        other: 0,
+        other_note: null,
+        actual_cash_submitted: 0,
+        created_at: "2026-07-24T00:00:00Z",
+        updated_at: "2026-07-24T00:00:00Z",
+        finalized_at: null,
+        finalized_by: null,
+        ...row,
+      };
+      return [full.id, full];
+    }),
   );
+
+  type Filter = { op: "eq" | "is" | "not"; column: string; value: unknown };
+
+  function matches(row: Row, filters: Filter[]): boolean {
+    return filters.every(({ op, column, value }) => {
+      const actual = (row as Record<string, unknown>)[column];
+      return op === "not" ? actual !== value : actual === value;
+    });
+  }
+
+  const lifecycleEvents: Array<{ event: string; actor: string; reason?: string | null }> = [];
 
   const database = {
     from(table: string) {
+      if (table === "white_sheet_lifecycle_events") {
+        return {
+          insert: (values: { event: string; actor: string; reason?: string | null }) => {
+            lifecycleEvents.push(values);
+            return Promise.resolve({ error: null });
+          },
+        };
+      }
       if (table !== "digital_white_sheet_cash_entries") {
         throw new Error(`unexpected table: ${table}`);
       }
 
       return {
         select: () => {
-          const filters: Record<string, string> = {};
+          const filters: Filter[] = [];
           const builder = {
-            eq: (column: string, value: string) => {
-              filters[column] = value;
+            eq: (column: string, value: unknown) => {
+              filters.push({ op: "eq", column, value });
+              return builder;
+            },
+            is: (column: string, value: unknown) => {
+              filters.push({ op: "is", column, value });
               return builder;
             },
             maybeSingle: async () => {
-              const key = rowKey(
-                filters.source_id,
-                filters.market_label_normalized,
-                filters.business_date,
-              );
-              return { data: rows.get(key) ?? null, error: null };
+              const found = [...rows.values()].find((row) => matches(row, filters));
+              return { data: found ?? null, error: null };
             },
           };
           return builder;
         },
-        upsert: (values: Partial<Row>) => ({
+        insert: (values: Partial<Row>) => ({
           select: () => ({
             single: async () => {
-              const key = rowKey(
-                values.source_id!,
-                values.market_label_normalized!,
-                values.business_date!,
-              );
-              const existing = rows.get(key);
+              const id = `new-${nextId++}`;
               const merged: Row = {
-                id: existing?.id ?? "new-id",
-                created_at: existing?.created_at ?? "2026-07-24T00:00:00Z",
+                id,
+                created_at: "2026-07-24T00:00:00Z",
+                updated_at: "2026-07-24T00:00:00Z",
+                other_note: null,
+                finalized_at: null,
+                finalized_by: null,
                 ...values,
               } as Row;
-              rows.set(key, merged);
+              rows.set(id, merged);
               return { data: merged, error: null };
             },
           }),
         }),
+        update: (values: Partial<Row>) => {
+          const filters: Filter[] = [];
+          const builder = {
+            eq: (column: string, value: unknown) => {
+              filters.push({ op: "eq", column, value });
+              return builder;
+            },
+            is: (column: string, value: unknown) => {
+              filters.push({ op: "is", column, value });
+              return builder;
+            },
+            not: (column: string, _isOp: string, value: unknown) => {
+              filters.push({ op: "not", column, value });
+              return builder;
+            },
+            select: () => ({
+              maybeSingle: async () => {
+                const found = [...rows.entries()].find(([, row]) => matches(row, filters));
+                if (!found) return { data: null, error: null };
+                const [id, existing] = found;
+                const merged: Row = { ...existing, ...values, updated_at: "2026-07-24T01:00:00Z" } as Row;
+                rows.set(id, merged);
+                return { data: merged, error: null };
+              },
+            }),
+          };
+          return builder;
+        },
       };
     },
   };
 
-  return { database: database as unknown as SupabaseClient<Database>, rows };
+  return { database: database as unknown as SupabaseClient<Database>, rows, lifecycleEvents };
 }
 
 // ── loadWhiteSheetCashEntry ─────────────────────────────────────────────────
@@ -336,5 +407,114 @@ describe("saveWhiteSheetCashEntry", () => {
     if (result.status === "submitted") {
       expect(result.expenses.labor).toBe(20);
     }
+  });
+});
+
+// ── BR-06 lifecycle: SUBMITTED -> FINALIZED -> (reopen) -> SUBMITTED ────────
+
+describe("White Sheet lifecycle (finalize/reopen)", () => {
+  it("NOT_SUBMITTED -> SUBMITTED via normal save", async () => {
+    const { database } = makeFakeSupabase();
+    const submitted = await loadWhiteSheetCashEntry(database, IDENTITY);
+    expect(submitted).toEqual({ status: "not_submitted" });
+
+    const result = await saveWhiteSheetCashEntry(database, VALID_SAVE_INPUT);
+    expect(result.status).toBe("submitted");
+  });
+
+  it("allows normal correction while SUBMITTED", async () => {
+    const { database } = makeFakeSupabase();
+    await saveWhiteSheetCashEntry(database, VALID_SAVE_INPUT);
+    const corrected = await saveWhiteSheetCashEntry(database, { ...VALID_SAVE_INPUT, labor: 500 });
+    expect(corrected.status).toBe("submitted");
+    if (corrected.status === "submitted") {
+      expect(corrected.expenses.labor).toBe(500);
+    }
+  });
+
+  it("admin finalize transitions SUBMITTED -> FINALIZED and records an audit event", async () => {
+    const { database, lifecycleEvents } = makeFakeSupabase();
+    await saveWhiteSheetCashEntry(database, VALID_SAVE_INPUT);
+
+    const finalized = await finalizeWhiteSheetCashEntry(database, IDENTITY, "admin-1");
+    expect(finalized.status).toBe("finalized");
+    if (finalized.status === "finalized") {
+      expect(finalized.finalizedBy).toBe("admin-1");
+    }
+    expect(lifecycleEvents.map(({ event, actor }) => ({ event, actor }))).toEqual([
+      { event: "finalized", actor: "admin-1" },
+    ]);
+
+    const reloaded = await loadWhiteSheetCashEntry(database, IDENTITY);
+    expect(reloaded.status).toBe("finalized");
+  });
+
+  it("rejects finalize when there is no SUBMITTED entry", async () => {
+    const { database } = makeFakeSupabase();
+    await expect(finalizeWhiteSheetCashEntry(database, IDENTITY, "admin-1")).rejects.toThrow(
+      WhiteSheetPersistenceError,
+    );
+  });
+
+  it("rejects finalize when already finalized", async () => {
+    const { database } = makeFakeSupabase();
+    await saveWhiteSheetCashEntry(database, VALID_SAVE_INPUT);
+    await finalizeWhiteSheetCashEntry(database, IDENTITY, "admin-1");
+    await expect(finalizeWhiteSheetCashEntry(database, IDENTITY, "admin-2")).rejects.toThrow(
+      WhiteSheetPersistenceError,
+    );
+  });
+
+  it("normal resubmission is rejected after FINALIZED", async () => {
+    const { database } = makeFakeSupabase();
+    await saveWhiteSheetCashEntry(database, VALID_SAVE_INPUT);
+    await finalizeWhiteSheetCashEntry(database, IDENTITY, "admin-1");
+
+    await expect(
+      saveWhiteSheetCashEntry(database, { ...VALID_SAVE_INPUT, labor: 999 }),
+    ).rejects.toThrow(WhiteSheetPersistenceError);
+
+    const stillFinalized = await loadWhiteSheetCashEntry(database, IDENTITY);
+    expect(stillFinalized.status).toBe("finalized");
+    if (stillFinalized.status === "finalized") {
+      expect(stillFinalized.expenses.labor).toBe(100);
+    }
+  });
+
+  it("explicit privileged reopen returns the entry to SUBMITTED and records a reason", async () => {
+    const { database, lifecycleEvents } = makeFakeSupabase();
+    await saveWhiteSheetCashEntry(database, VALID_SAVE_INPUT);
+    await finalizeWhiteSheetCashEntry(database, IDENTITY, "admin-1");
+
+    const reopened = await reopenWhiteSheetCashEntry(database, IDENTITY, "admin-2", "operator reported a typo");
+    expect(reopened.status).toBe("submitted");
+    expect(lifecycleEvents.map(({ event, actor, reason }) => ({ event, actor, reason }))).toEqual([
+      { event: "finalized", actor: "admin-1", reason: undefined },
+      { event: "reopened", actor: "admin-2", reason: "operator reported a typo" },
+    ]);
+
+    // Normal submission works again after reopen.
+    const corrected = await saveWhiteSheetCashEntry(database, { ...VALID_SAVE_INPUT, labor: 700 });
+    expect(corrected.status).toBe("submitted");
+    if (corrected.status === "submitted") {
+      expect(corrected.expenses.labor).toBe(700);
+    }
+  });
+
+  it("rejects reopen with an empty reason", async () => {
+    const { database } = makeFakeSupabase();
+    await saveWhiteSheetCashEntry(database, VALID_SAVE_INPUT);
+    await finalizeWhiteSheetCashEntry(database, IDENTITY, "admin-1");
+    await expect(reopenWhiteSheetCashEntry(database, IDENTITY, "admin-2", "  ")).rejects.toThrow(
+      WhiteSheetPersistenceError,
+    );
+  });
+
+  it("rejects reopen when the entry is not finalized", async () => {
+    const { database } = makeFakeSupabase();
+    await saveWhiteSheetCashEntry(database, VALID_SAVE_INPUT);
+    await expect(
+      reopenWhiteSheetCashEntry(database, IDENTITY, "admin-2", "no reason needed"),
+    ).rejects.toThrow(WhiteSheetPersistenceError);
   });
 });

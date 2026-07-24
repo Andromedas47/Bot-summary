@@ -69,7 +69,7 @@ export async function loadDigitalWhiteSheetPageModel(
     businessDate: scope.businessDate,
   });
 
-  const cashInput = entry.status === "submitted"
+  const cashInput = entry.status !== "not_submitted"
     ? { expenses: entry.expenses, actualCashSubmitted: entry.actualCashSubmitted }
     : { expenses: ZERO_EXPENSES, actualCashSubmitted: 0 };
 
@@ -85,7 +85,7 @@ export async function loadDigitalWhiteSheetPageModel(
 export function requireSubmittedWhiteSheetSummary(
   pageModel: DigitalWhiteSheetPageModel,
 ): DigitalWhiteSheetSummary {
-  if (pageModel.entryStatus !== "submitted") {
+  if (pageModel.entryStatus === "not_submitted") {
     throw new WhiteSheetNotSubmittedError();
   }
   return pageModel.summary;

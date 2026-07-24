@@ -30,6 +30,13 @@ export interface WhiteSheetCashEntryIdentity {
   businessDate: string;
 }
 
+/**
+ * BR-06: lifecycle is a separate concept from financial result status
+ * (matched/shortage/overage — computed in calculate.ts). NOT_SUBMITTED has
+ * no row. SUBMITTED and FINALIZED both have real operator-entered data;
+ * FINALIZED additionally records who finalized it and when, and blocks the
+ * normal operator upsert path (see saveWhiteSheetCashEntry).
+ */
 export type WhiteSheetCashEntryState =
   | { status: "not_submitted" }
   | {
@@ -37,6 +44,14 @@ export type WhiteSheetCashEntryState =
       expenses: WhiteSheetExpenses;
       actualCashSubmitted: number;
       updatedAt: string;
+    }
+  | {
+      status: "finalized";
+      expenses: WhiteSheetExpenses;
+      actualCashSubmitted: number;
+      updatedAt: string;
+      finalizedAt: string;
+      finalizedBy: string;
     };
 
 export interface WhiteSheetCashEntryInput extends WhiteSheetCashEntryIdentity {
@@ -114,6 +129,25 @@ function toExpenses(row: CashEntryRow): WhiteSheetExpenses {
   };
 }
 
+function toEntryState(row: CashEntryRow): WhiteSheetCashEntryState {
+  if (row.finalized_at) {
+    return {
+      status: "finalized",
+      expenses: toExpenses(row),
+      actualCashSubmitted: Number(row.actual_cash_submitted),
+      updatedAt: row.updated_at,
+      finalizedAt: row.finalized_at,
+      finalizedBy: row.finalized_by as string,
+    };
+  }
+  return {
+    status: "submitted",
+    expenses: toExpenses(row),
+    actualCashSubmitted: Number(row.actual_cash_submitted),
+    updatedAt: row.updated_at,
+  };
+}
+
 /**
  * Reads the operator-entered White Sheet cash/expense entry for one
  * source/market/business-date identity. A missing row is reported as
@@ -133,7 +167,9 @@ export async function loadWhiteSheetCashEntry(
 
   const { data, error } = await supabase
     .from(TABLE)
-    .select("labor, location_fee, bag, snack, other, other_note, actual_cash_submitted, updated_at")
+    .select(
+      "labor, location_fee, bag, snack, other, other_note, actual_cash_submitted, updated_at, finalized_at, finalized_by",
+    )
     .eq("source_id", sourceId)
     .eq("market_label_normalized", marketLabelNormalized)
     .eq("business_date", businessDate)
@@ -144,19 +180,16 @@ export async function loadWhiteSheetCashEntry(
   }
   if (!data) return { status: "not_submitted" };
 
-  const row = data as CashEntryRow;
-  return {
-    status: "submitted",
-    expenses: toExpenses(row),
-    actualCashSubmitted: Number(row.actual_cash_submitted),
-    updatedAt: row.updated_at,
-  };
+  return toEntryState(data as CashEntryRow);
 }
 
 /**
  * Validates and upserts one White Sheet cash/expense entry, keyed on
- * (source_id, market_label_normalized, business_date). Last-write-wins —
- * no audit history in Local MVP (see task scope: deferred).
+ * (source_id, market_label_normalized, business_date). Last-write-wins for a
+ * SUBMITTED entry — no audit history for ordinary corrections in Local MVP
+ * (see task scope: deferred). BR-06: rejects the write outright if the
+ * existing entry is FINALIZED — normal operator submission can never alter
+ * finalized financial inputs; only an explicit privileged reopen can.
  */
 export async function saveWhiteSheetCashEntry(
   supabase: Supabase,
@@ -177,36 +210,175 @@ export async function saveWhiteSheetCashEntry(
   const actualCashSubmitted = requireMoney(rawInput.actualCashSubmitted, "actualCashSubmitted");
   const otherNote = requireOtherNote(rawInput.otherNote);
 
+  const { data: existing, error: existingError } = await supabase
+    .from(TABLE)
+    .select("id, finalized_at")
+    .eq("source_id", sourceId)
+    .eq("market_label_normalized", marketLabelNormalized)
+    .eq("business_date", businessDate)
+    .maybeSingle();
+
+  if (existingError) {
+    throw new WhiteSheetPersistenceError(`white sheet cash entry query failed: ${existingError.message}`);
+  }
+
+  const SELECT_COLUMNS =
+    "labor, location_fee, bag, snack, other, other_note, actual_cash_submitted, updated_at, finalized_at, finalized_by";
+  const writeValues = {
+    labor,
+    location_fee: locationFee,
+    bag,
+    snack,
+    other,
+    other_note: otherNote,
+    actual_cash_submitted: actualCashSubmitted,
+    updated_at: new Date().toISOString(),
+  };
+
+  if (existing) {
+    // Atomic guard: the UPDATE only matches while finalized_at is still NULL
+    // at write time, so a finalize racing with a resubmission cannot both
+    // succeed — one of them loses.
+    const { data, error } = await supabase
+      .from(TABLE)
+      .update(writeValues)
+      .eq("id", existing.id)
+      .is("finalized_at", null)
+      .select(SELECT_COLUMNS)
+      .maybeSingle();
+
+    if (error) {
+      throw new WhiteSheetPersistenceError(`white sheet cash entry save failed: ${error.message}`);
+    }
+    if (!data) {
+      throw new WhiteSheetPersistenceError(
+        "this White Sheet entry is finalized and cannot be changed through normal submission — an admin must reopen it first",
+      );
+    }
+    return toEntryState(data as CashEntryRow);
+  }
+
   const { data, error } = await supabase
     .from(TABLE)
-    .upsert(
-      {
-        source_id: sourceId,
-        market_label_normalized: marketLabelNormalized,
-        business_date: businessDate,
-        labor,
-        location_fee: locationFee,
-        bag,
-        snack,
-        other,
-        other_note: otherNote,
-        actual_cash_submitted: actualCashSubmitted,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "source_id,market_label_normalized,business_date" },
-    )
-    .select("labor, location_fee, bag, snack, other, other_note, actual_cash_submitted, updated_at")
+    .insert({
+      source_id: sourceId,
+      market_label_normalized: marketLabelNormalized,
+      business_date: businessDate,
+      ...writeValues,
+    })
+    .select(SELECT_COLUMNS)
     .single();
 
   if (error) {
     throw new WhiteSheetPersistenceError(`white sheet cash entry save failed: ${error.message}`);
   }
+  return toEntryState(data as CashEntryRow);
+}
 
-  const row = data as CashEntryRow;
-  return {
-    status: "submitted",
-    expenses: toExpenses(row),
-    actualCashSubmitted: Number(row.actual_cash_submitted),
-    updatedAt: row.updated_at,
-  };
+const SELECT_WITH_LIFECYCLE =
+  "labor, location_fee, bag, snack, other, other_note, actual_cash_submitted, updated_at, finalized_at, finalized_by";
+
+/**
+ * BR-06: admin-only transition SUBMITTED -> FINALIZED. Callers must call
+ * requireAdminActor() first (see src/lib/auth/admin.ts) and pass its actor
+ * id. Requires a SUBMITTED entry to already exist — there is nothing to
+ * finalize for NOT_SUBMITTED. Atomic: the UPDATE only matches while
+ * finalized_at is still NULL, so it cannot finalize twice or race another
+ * finalize.
+ */
+export async function finalizeWhiteSheetCashEntry(
+  supabase: Supabase,
+  rawIdentity: WhiteSheetCashEntryIdentity,
+  actor: string,
+): Promise<WhiteSheetCashEntryState> {
+  const sourceId = requireIdentityField(rawIdentity.sourceId, "sourceId");
+  const marketLabelNormalized = requireIdentityField(
+    rawIdentity.marketLabelNormalized,
+    "marketLabelNormalized",
+  );
+  const businessDate = requireBusinessDate(rawIdentity.businessDate);
+  const actorId = requireIdentityField(actor, "actor");
+
+  const finalizedAt = new Date().toISOString();
+  const { data, error } = await supabase
+    .from(TABLE)
+    .update({ finalized_at: finalizedAt, finalized_by: actorId })
+    .eq("source_id", sourceId)
+    .eq("market_label_normalized", marketLabelNormalized)
+    .eq("business_date", businessDate)
+    .is("finalized_at", null)
+    .select(SELECT_WITH_LIFECYCLE)
+    .maybeSingle();
+
+  if (error) {
+    throw new WhiteSheetPersistenceError(`finalize failed: ${error.message}`);
+  }
+  if (!data) {
+    throw new WhiteSheetPersistenceError(
+      "no SUBMITTED White Sheet entry found for this identity, or it is already finalized",
+    );
+  }
+
+  await supabase.from("white_sheet_lifecycle_events").insert({
+    source_id: sourceId,
+    market_label_normalized: marketLabelNormalized,
+    business_date: businessDate,
+    event: "finalized",
+    actor: actorId,
+  });
+
+  return toEntryState(data as CashEntryRow);
+}
+
+/**
+ * BR-06/BR-05: explicit privileged reopen — the only way a FINALIZED entry
+ * ever becomes editable again. Never a silent overwrite: requires a
+ * non-empty reason and records an audit event. Callers must call
+ * requireAdminActor() first.
+ */
+export async function reopenWhiteSheetCashEntry(
+  supabase: Supabase,
+  rawIdentity: WhiteSheetCashEntryIdentity,
+  actor: string,
+  reason: string,
+): Promise<WhiteSheetCashEntryState> {
+  const sourceId = requireIdentityField(rawIdentity.sourceId, "sourceId");
+  const marketLabelNormalized = requireIdentityField(
+    rawIdentity.marketLabelNormalized,
+    "marketLabelNormalized",
+  );
+  const businessDate = requireBusinessDate(rawIdentity.businessDate);
+  const actorId = requireIdentityField(actor, "actor");
+  const trimmedReason = reason.trim();
+  if (!trimmedReason) {
+    throw new WhiteSheetPersistenceError("reason is required to reopen a finalized entry");
+  }
+
+  const { data, error } = await supabase
+    .from(TABLE)
+    .update({ finalized_at: null, finalized_by: null })
+    .eq("source_id", sourceId)
+    .eq("market_label_normalized", marketLabelNormalized)
+    .eq("business_date", businessDate)
+    .not("finalized_at", "is", null)
+    .select(SELECT_WITH_LIFECYCLE)
+    .maybeSingle();
+
+  if (error) {
+    throw new WhiteSheetPersistenceError(`reopen failed: ${error.message}`);
+  }
+  if (!data) {
+    throw new WhiteSheetPersistenceError("no FINALIZED White Sheet entry found for this identity");
+  }
+
+  await supabase.from("white_sheet_lifecycle_events").insert({
+    source_id: sourceId,
+    market_label_normalized: marketLabelNormalized,
+    business_date: businessDate,
+    event: "reopened",
+    actor: actorId,
+    reason: trimmedReason,
+  });
+
+  return toEntryState(data as CashEntryRow);
 }

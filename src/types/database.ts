@@ -1162,6 +1162,27 @@ export interface Database {
           updated_at:    string;
         };
       };
+      seed_central_selling_price: {
+        Args: {
+          p_product_key:    string;
+          p_unit_key:       string;
+          p_business_date:  string;
+          p_price_satang:   number;
+          p_actor:          string;
+          p_reason:         string | null;
+        };
+        Returns: {
+          id:            string;
+          product_key:   string;
+          unit_key:      string;
+          business_date: string;
+          price_satang:  number;
+          set_by:        string;
+          set_reason:    string | null;
+          created_at:    string;
+          updated_at:    string;
+        };
+      };
     };
     CompositeTypes: { [_ in never]: never };
     Enums: {

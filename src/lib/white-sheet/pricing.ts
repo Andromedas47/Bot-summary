@@ -15,6 +15,15 @@ export class CentralPriceError extends Error {
   }
 }
 
+/**
+ * Sentinel `set_by` actor for BR-01 auto-seeded prices — distinguishes a
+ * price the system derived from the first withdrawal (never confirmed by a
+ * human) from one an admin explicitly set/corrected (BR-04). Only the
+ * former can produce a fail-closed price conflict — see
+ * resolveCentralPricesForDate in ./load.ts.
+ */
+export const SYSTEM_WITHDRAWAL_SEED_ACTOR = "system:first-withdrawal";
+
 export interface CentralPriceIdentity {
   productName: string;
   unit: string;
@@ -154,15 +163,21 @@ export async function getCentralPrice(
   return data ? toRecord(data as CentralPriceRow) : null;
 }
 
+export interface CentralPriceMapEntry {
+  priceSatang: number;
+  setBy: string;
+}
+
 /**
  * Loads every central price set for one business date, keyed by
- * `${productKey} ${unitKey}` — used by the White Sheet loader to price
- * every item group for a date in one round trip.
+ * `${productKey} ${unitKey}` — retains setBy so callers can distinguish a
+ * BR-01 auto-seeded price from an admin-set/corrected one (BR-04); see
+ * resolveCentralPricesForDate in ./load.ts.
  */
-export async function loadCentralPricesForDate(
+export async function loadCentralPriceDetailsForDate(
   supabase: Supabase,
   businessDate: string,
-): Promise<Map<string, number>> {
+): Promise<Map<string, CentralPriceMapEntry>> {
   const date = requireBusinessDate(businessDate);
   const { data, error } = await supabase
     .from("central_selling_prices")
@@ -173,17 +188,34 @@ export async function loadCentralPricesForDate(
     throw new CentralPriceError(`central price query failed: ${error.message}`);
   }
 
-  const prices = new Map<string, number>();
+  const details = new Map<string, CentralPriceMapEntry>();
   for (const row of (data ?? []) as CentralPriceRow[]) {
     const mapKey = centralPriceMapKey(row.product_key, row.unit_key);
     // The DB UNIQUE constraint should make this impossible; fail closed
     // rather than silently picking one price if it is ever violated.
-    if (prices.has(mapKey)) {
+    if (details.has(mapKey)) {
       throw new CentralPriceError(
         `conflicting central price rows for ${row.product_key} (${row.unit_key}) on ${date}`,
       );
     }
-    prices.set(mapKey, row.price_satang);
+    details.set(mapKey, { priceSatang: row.price_satang, setBy: row.set_by });
+  }
+  return details;
+}
+
+/**
+ * Loads every central price set for one business date, keyed by
+ * `${productKey} ${unitKey}` — used by the White Sheet loader to price
+ * every item group for a date in one round trip.
+ */
+export async function loadCentralPricesForDate(
+  supabase: Supabase,
+  businessDate: string,
+): Promise<Map<string, number>> {
+  const details = await loadCentralPriceDetailsForDate(supabase, businessDate);
+  const prices = new Map<string, number>();
+  for (const [mapKey, entry] of details) {
+    prices.set(mapKey, entry.priceSatang);
   }
   return prices;
 }
@@ -226,6 +258,67 @@ export async function setCentralPrice(
     throw new CentralPriceError("set_central_selling_price returned no row");
   }
   return toRecord(row);
+}
+
+export interface CentralPriceSeedResult {
+  record: CentralPriceRecord;
+  /** Authoritative price in satang after the call — may differ from the
+   * priceSatang this call attempted to seed (see `conflict`). */
+  priceSatang: number;
+  /** True when a price already existed and it does not match the price this
+   * call attempted to seed (BR-01: seeding never overwrites). */
+  conflict: boolean;
+}
+
+/**
+ * BR-01 seed rule: establishes the central price from the first valid
+ * withdrawal of a business date. Delegates to seed_central_selling_price(...),
+ * which never overwrites an existing price — it always returns the row that
+ * is authoritative after the call, so the caller compares it against the
+ * price it attempted to seed to detect a conflict.
+ *
+ * Takes priceSatang directly (not priceBaht) because a withdrawal price
+ * derived through unit-conversion arithmetic (see
+ * resolveWithdrawalUnitPriceBaht in ./calculate) may not round-trip to an
+ * exact 2-decimal baht value — the same tolerance calculate.ts already
+ * applies when scaling money, rather than setCentralPrice's stricter
+ * keying-error check meant for admin-entered values.
+ */
+export async function seedCentralPriceFromWithdrawal(
+  supabase: Supabase,
+  input: {
+    identity: CentralPriceIdentity;
+    priceSatang: number;
+    actor?: string;
+  },
+): Promise<CentralPriceSeedResult> {
+  const key = centralPriceKey(input.identity);
+  if (!Number.isInteger(input.priceSatang) || input.priceSatang < 0) {
+    throw new CentralPriceError("priceSatang must be a non-negative integer");
+  }
+  const actor = requireActor(input.actor ?? SYSTEM_WITHDRAWAL_SEED_ACTOR);
+
+  const { data, error } = await supabase.rpc("seed_central_selling_price", {
+    p_product_key: key.productKey,
+    p_unit_key: key.unitKey,
+    p_business_date: key.businessDate,
+    p_price_satang: input.priceSatang,
+    p_actor: actor,
+    p_reason: "auto-seeded from first withdrawal of the business date",
+  });
+
+  if (error) {
+    throw new CentralPriceError(`failed to seed central price: ${error.message}`);
+  }
+  const row = (Array.isArray(data) ? data[0] : data) as CentralPriceRow;
+  if (!row) {
+    throw new CentralPriceError("seed_central_selling_price returned no row");
+  }
+  return {
+    record: toRecord(row),
+    priceSatang: row.price_satang,
+    conflict: row.price_satang !== input.priceSatang,
+  };
 }
 
 /** Full correction/set audit history for one identity, oldest first. */

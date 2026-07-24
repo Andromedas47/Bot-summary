@@ -3,7 +3,7 @@ import { normalizeProductName } from "@/lib/summary/remaining-fruit";
 import { baseTransactionType } from "@/lib/summary/transactions";
 import { classifyProduct } from "./category";
 import { centralPriceMapKey } from "./pricing";
-import { missingCentralPriceWarning } from "./warnings";
+import { centralPriceConflictWarning, missingCentralPriceWarning } from "./warnings";
 import type {
   DigitalWhiteSheetCalculation,
   DigitalWhiteSheetInput,
@@ -122,6 +122,26 @@ function moneyLabel(value: bigint): string {
   return fromScaledInteger(value, MONEY_SCALE).toFixed(MONEY_SCALE);
 }
 
+/**
+ * A withdrawal row's own effective unit price, in baht — rescaled by the
+ * unit's conversion factor for legacy (non-basis) rows exactly as the group
+ * loop below does, so a seeding step (see resolveCentralPricesForDate in
+ * ./load.ts) can derive the SAME candidate price this function would use
+ * for informational display/conflict comparison. One authoritative
+ * derivation, never a second parallel pricing algorithm.
+ */
+export function resolveWithdrawalUnitPriceBaht(row: {
+  unit: string;
+  unitPrice: number;
+  basisQuantity: number | null;
+}): number {
+  const hasBasisQuantity = row.basisQuantity !== null && row.basisQuantity !== undefined;
+  const rowConversionFactor = conversionFactor(row.unit);
+  return !hasBasisQuantity && rowConversionFactor !== 1
+    ? row.unitPrice / rowConversionFactor
+    : row.unitPrice;
+}
+
 function distinctPrices(prices: readonly bigint[]): bigint[] {
   const seen = new Set<string>();
   const distinct: bigint[] = [];
@@ -139,6 +159,7 @@ function distinctPrices(prices: readonly bigint[]): bigint[] {
 function buildItemCalculationParts(
   rows: readonly WhiteSheetTransactionRow[],
   centralPrices: ReadonlyMap<string, number>,
+  priceConflicts: ReadonlySet<string> = new Set(),
 ): ItemCalculationParts {
   const groups = new Map<string, ItemAggregate>();
 
@@ -157,7 +178,6 @@ function buildItemCalculationParts(
     // sheet. Units with no known conversion (kg vs pieces, pack vs pieces,
     // etc.) pass through unchanged — no conversion is ever guessed here.
     const unitConversion = resolveUnitQuantity(row.quantity, rawUnit);
-    const rowConversionFactor = conversionFactor(rawUnit);
     const normalizedUnit = unitConversion.unit;
     const transactionType = baseTransactionType(row.transactionType);
 
@@ -211,10 +231,11 @@ function buildItemCalculationParts(
       // parser). Kept for the informational withdrawalUnitPrices display only
       // — BR-01: central daily price, never withdrawal-lot price, prices
       // expected sales.
-      const adjustedUnitPrice =
-        !hasBasisQuantity && rowConversionFactor !== 1
-          ? row.unitPrice / rowConversionFactor
-          : row.unitPrice;
+      const adjustedUnitPrice = resolveWithdrawalUnitPriceBaht({
+        unit: rawUnit,
+        unitPrice: row.unitPrice,
+        basisQuantity: hasBasisQuantity ? (row.basisQuantity as number) : null,
+      });
       const unitPrice = toScaledInteger(
         adjustedUnitPrice,
         MONEY_SCALE,
@@ -284,11 +305,18 @@ function buildItemCalculationParts(
     // BR-01: central daily price is the sole trusted source for expected
     // sales — never withdrawal-lot/FIFO price. Missing price fails closed:
     // the group contributes 0 (never guessed) and a HARD-STOP warning names
-    // exactly which product/unit/date needs a central price.
+    // exactly which product/unit/date needs a central price. A price
+    // conflict (BR-01 seed rule: a withdrawal disagreed with the
+    // system-auto-seeded price and no admin has confirmed one yet) also
+    // fails closed, even if this market's own rows happen to match the
+    // disputed price — the identity is disputed for every market until an
+    // admin resolves it.
     const priceKey = centralPriceMapKey(group.normalizedProduct, group.normalizedUnit);
     const priceSatang = centralPrices.get(priceKey);
     let expectedSales = BigInt(0);
-    if (priceSatang === undefined) {
+    if (priceConflicts.has(priceKey)) {
+      warnings.push(centralPriceConflictWarning(group.normalizedProduct, group.normalizedUnit, group.businessDate));
+    } else if (priceSatang === undefined) {
       warnings.push(missingCentralPriceWarning(group.normalizedProduct, group.normalizedUnit, group.businessDate));
     } else {
       const groupMilliSatang = sold * BigInt(priceSatang);
@@ -335,8 +363,9 @@ function buildItemCalculationParts(
 export function calculateWhiteSheetItems(
   rows: readonly WhiteSheetTransactionRow[],
   centralPrices: ReadonlyMap<string, number> = new Map(),
+  priceConflicts: ReadonlySet<string> = new Set(),
 ): WhiteSheetItemCalculation[] {
-  return buildItemCalculationParts(rows, centralPrices).items;
+  return buildItemCalculationParts(rows, centralPrices, priceConflicts).items;
 }
 
 function moneyInput(value: number, field: string): bigint {
@@ -383,7 +412,11 @@ export function calculateDigitalWhiteSheet(
     }
   });
 
-  const itemParts = buildItemCalculationParts(input.transactions, input.centralPrices ?? new Map());
+  const itemParts = buildItemCalculationParts(
+    input.transactions,
+    input.centralPrices ?? new Map(),
+    input.priceConflicts ?? new Set(),
+  );
   const verifiedTransfers = moneyInput(input.verifiedTransfers, "verifiedTransfers");
   const actualCashSubmitted = moneyInput(input.actualCashSubmitted, "actualCashSubmitted");
   const expenseParts = normalizedExpenses(input.expenses);

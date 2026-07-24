@@ -2,8 +2,14 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { normalizedMarketLabel } from "@/lib/market";
 import { loadMarketScopedAiVerifiedTransfers } from "@/lib/reconciliation";
 import type { Database } from "@/types/database";
-import { calculateDigitalWhiteSheet } from "./calculate";
-import { loadCentralPricesForDate } from "./pricing";
+import { calculateDigitalWhiteSheet, resolveWithdrawalUnitPriceBaht } from "./calculate";
+import {
+  centralPriceKey,
+  centralPriceMapKey,
+  loadCentralPriceDetailsForDate,
+  seedCentralPriceFromWithdrawal,
+  SYSTEM_WITHDRAWAL_SEED_ACTOR,
+} from "./pricing";
 import type {
   DigitalWhiteSheetCalculation,
   DigitalWhiteSheetSummary,
@@ -233,6 +239,73 @@ function unresolvedMarketWarnings(
     : [];
 }
 
+/**
+ * BR-01 seed rule: the first valid withdrawal of a business date establishes
+ * the central price automatically. dateRows spans every market/source for
+ * the date (fetched before any market/source filter) — the correct scope,
+ * since central_selling_prices has no market or source column at all.
+ * dateRows already arrives ordered by item_created_at, id (fetchProduceRows),
+ * so the first เบิก row seen per product/unit group here is genuinely the
+ * earliest of the date. Good/damaged returns never seed or overwrite —
+ * only "เบิก" rows are considered.
+ *
+ * A later withdrawal whose own price disagrees with a price the system
+ * itself auto-seeded (never confirmed by an admin) is a real conflict: the
+ * price is left unchanged and the identity is marked disputed so calculate.ts
+ * fails closed for every market touching it. Once an admin has set/corrected
+ * the price (setCentralPrice / set_central_selling_price), a mismatching
+ * withdrawal is downgraded to the existing informational "varied lot
+ * prices" warning — the admin decision is final, not re-litigated forever.
+ */
+async function resolveCentralPricesForDate(
+  supabase: Supabase,
+  businessDate: string,
+  dateRows: readonly ProduceTransactionRow[],
+): Promise<{ prices: Map<string, number>; conflicts: Set<string> }> {
+  const details = await loadCentralPriceDetailsForDate(supabase, businessDate);
+  const conflicts = new Set<string>();
+
+  for (const row of dateRows) {
+    if (row.base_transaction_type?.trim() !== "เบิก") continue;
+    const productName = row.product_name?.trim();
+    const rawUnit = row.unit?.trim();
+    if (!productName || !rawUnit || row.price_per_unit === null) continue;
+
+    const key = centralPriceKey({ productName, unit: rawUnit, businessDate });
+    const mapKey = centralPriceMapKey(key.productKey, key.unitKey);
+    const priceBaht = resolveWithdrawalUnitPriceBaht({
+      unit: rawUnit,
+      unitPrice: Number(row.price_per_unit),
+      basisQuantity: row.basis_quantity === null ? null : Number(row.basis_quantity),
+    });
+    const priceSatang = Math.round(priceBaht * 100);
+
+    const existing = details.get(mapKey);
+    if (!existing) {
+      const seeded = await seedCentralPriceFromWithdrawal(supabase, {
+        identity: { productName, unit: rawUnit, businessDate },
+        priceSatang,
+        actor: SYSTEM_WITHDRAWAL_SEED_ACTOR,
+      });
+      details.set(mapKey, { priceSatang: seeded.priceSatang, setBy: seeded.record.setBy });
+      if (seeded.conflict && seeded.record.setBy === SYSTEM_WITHDRAWAL_SEED_ACTOR) {
+        conflicts.add(mapKey);
+      }
+      continue;
+    }
+
+    if (existing.setBy === SYSTEM_WITHDRAWAL_SEED_ACTOR && existing.priceSatang !== priceSatang) {
+      conflicts.add(mapKey);
+    }
+  }
+
+  const prices = new Map<string, number>();
+  for (const [mapKey, entry] of details) {
+    prices.set(mapKey, entry.priceSatang);
+  }
+  return { prices, conflicts };
+}
+
 export function toDigitalWhiteSheetSummary(
   calculation: DigitalWhiteSheetCalculation,
 ): DigitalWhiteSheetSummary {
@@ -285,7 +358,11 @@ export async function loadDigitalWhiteSheetCalculation(
     (row) => normalizedMarketLabel(row.market_name) === targetMarket,
   );
   const transactions = rows.map((row) => adaptTransactionRow(row, scope));
-  const centralPrices = await loadCentralPricesForDate(supabase, scope.businessDate);
+  const { prices: centralPrices, conflicts: priceConflicts } = await resolveCentralPricesForDate(
+    supabase,
+    scope.businessDate,
+    dateRows,
+  );
   const verifiedTransferResult = await loadMarketScopedAiVerifiedTransfers(
     supabase,
     scope.sourceId,
@@ -317,6 +394,7 @@ export async function loadDigitalWhiteSheetCalculation(
     businessDate: scope.businessDate,
     transactions,
     centralPrices,
+    priceConflicts,
     verifiedTransfers: verifiedTransferResult.attributedTotal,
     expenses: cashInput.expenses,
     actualCashSubmitted: cashInput.actualCashSubmitted,

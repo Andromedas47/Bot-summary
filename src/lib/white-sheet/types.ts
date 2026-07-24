@@ -86,6 +86,15 @@ export interface DigitalWhiteSheetInput {
    * falling back to any withdrawal-lot price.
    */
   centralPrices?: ReadonlyMap<string, number>;
+  /**
+   * BR-01 seed rule: set of centralPriceMapKey(productKey, unitKey) values
+   * whose price is disputed — a withdrawal disagreed with a system-auto-
+   * seeded price and no admin has confirmed one yet. Fails closed even if
+   * this market's own rows match the disputed price (see
+   * resolveCentralPricesForDate in ./load.ts, which derives this across all
+   * markets for the business date).
+   */
+  priceConflicts?: ReadonlySet<string>;
   verifiedTransfers: number;
   expenses: Readonly<WhiteSheetExpenses>;
   actualCashSubmitted: number;

@@ -24,11 +24,23 @@ export const PENDING_REFERENCE_VERIFIED_TRANSFER_WARNING =
 export const MISSING_CENTRAL_PRICE_WARNING_PREFIX =
   "ไม่พบราคากลางสำหรับ";
 
+/**
+ * BR-01 seed rule: a withdrawal's own price disagrees with the price the
+ * system auto-seeded from an earlier (or another market's) withdrawal for
+ * the same product/unit/date, and no admin has confirmed a price yet. The
+ * central price is left unchanged (never silently overwritten) and every
+ * White Sheet touching this identity/date fails closed until an admin
+ * resolves it via the existing price-correction path.
+ */
+export const CENTRAL_PRICE_CONFLICT_WARNING_PREFIX =
+  "ราคากลางขัดแย้งกันสำหรับ";
+
 export function isHardStopWarning(warning: string): boolean {
   return warning.startsWith(HARD_STOP_WARNING_PREFIX)
     || warning.startsWith(UNATTRIBUTED_VERIFIED_TRANSFER_WARNING)
     || warning.startsWith(PENDING_REFERENCE_VERIFIED_TRANSFER_WARNING)
-    || warning.startsWith(MISSING_CENTRAL_PRICE_WARNING_PREFIX);
+    || warning.startsWith(MISSING_CENTRAL_PRICE_WARNING_PREFIX)
+    || warning.startsWith(CENTRAL_PRICE_CONFLICT_WARNING_PREFIX);
 }
 
 export function hasHardStopWarning(warnings: readonly string[]): boolean {
@@ -71,4 +83,13 @@ export function missingCentralPriceWarning(
   businessDate: string,
 ): string {
   return `${MISSING_CENTRAL_PRICE_WARNING_PREFIX} ${productKey} (${unitKey}) วันที่ ${businessDate}`;
+}
+
+export function centralPriceConflictWarning(
+  productKey: string,
+  unitKey: string,
+  businessDate: string,
+): string {
+  return `${CENTRAL_PRICE_CONFLICT_WARNING_PREFIX} ${productKey} (${unitKey}) วันที่ ${businessDate} `
+    + "ต้องรอผู้ดูแลระบบยืนยันราคาก่อนใช้ยอดสรุป";
 }

@@ -371,6 +371,22 @@ describe("calculateDigitalWhiteSheet", () => {
     expect(result.warnings).toContain("ไม่พบราคากลางสำหรับ ผักกาดขาว (โล) วันที่ 2026-07-23");
   });
 
+  test("BR-01 seed rule: a price conflict fails closed even though a central price is present", () => {
+    const conflictKey = centralPriceMapKey(
+      normalizeProductName("ผักกาดขาว"),
+      resolveUnitQuantity(1, "โล").unit,
+    );
+    const result = calculateDigitalWhiteSheet(input({
+      centralPrices: priceMap([{ product: "ผักกาดขาว", unit: "โล", priceBaht: 25 }]),
+      priceConflicts: new Set([conflictKey]),
+    }));
+
+    expect(result.expectedSales).toBe(0);
+    expect(result.warnings).toContain(
+      "ราคากลางขัดแย้งกันสำหรับ ผักกาดขาว (โล) วันที่ 2026-07-23 ต้องรอผู้ดูแลระบบยืนยันราคาก่อนใช้ยอดสรุป",
+    );
+  });
+
   test("warns about uncategorized products without excluding them", () => {
     const result = calculateDigitalWhiteSheet(input({
       transactions: [transaction({ productName: "ปลาทูเค็ม", quantity: 2, unitPrice: 30 })],

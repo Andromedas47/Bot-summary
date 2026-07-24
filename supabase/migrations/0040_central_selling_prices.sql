@@ -134,3 +134,73 @@ COMMENT ON FUNCTION public.set_central_selling_price IS
   'Atomically sets or corrects the central selling price for one identity and records an audit row. '
   'SELECT ... FOR UPDATE serializes concurrent corrections on an existing row; the UNIQUE constraint '
   'on central_selling_prices is the backstop preventing two concurrent first-sets for a new identity.';
+
+-- seed_central_selling_price(...): the BR-01 seed rule. The first valid
+-- withdrawal of a business date establishes the central price automatically
+-- — this function NEVER overwrites an existing price (unlike
+-- set_central_selling_price, which is the admin correction path). It always
+-- returns the row that is authoritative after the call: on a fresh identity
+-- that is the just-inserted row; on an identity that already has a price,
+-- that is the unchanged existing row (which may differ from p_price_satang
+-- — the caller detects this by comparing the two and treats it as a price
+-- conflict requiring admin resolution).
+--
+-- INSERT ... ON CONFLICT DO NOTHING is what makes the race case (two first
+-- withdrawals for the same identity landing concurrently) safe without any
+-- explicit row lock: Postgres resolves the unique-index conflict atomically,
+-- so exactly one caller's INSERT wins and the other observes NOT FOUND.
+CREATE OR REPLACE FUNCTION public.seed_central_selling_price(
+  p_product_key   text,
+  p_unit_key      text,
+  p_business_date date,
+  p_price_satang  integer,
+  p_actor         text,
+  p_reason        text
+) RETURNS public.central_selling_prices
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_row public.central_selling_prices;
+BEGIN
+  IF p_product_key IS NULL OR btrim(p_product_key) = '' THEN
+    RAISE EXCEPTION 'product_key must not be empty';
+  END IF;
+  IF p_unit_key IS NULL OR btrim(p_unit_key) = '' THEN
+    RAISE EXCEPTION 'unit_key must not be empty';
+  END IF;
+  IF p_actor IS NULL OR btrim(p_actor) = '' THEN
+    RAISE EXCEPTION 'actor is required';
+  END IF;
+  IF p_price_satang IS NULL OR p_price_satang < 0 THEN
+    RAISE EXCEPTION 'price_satang must be a non-negative integer';
+  END IF;
+
+  INSERT INTO public.central_selling_prices
+    (product_key, unit_key, business_date, price_satang, set_by, set_reason)
+  VALUES
+    (p_product_key, p_unit_key, p_business_date, p_price_satang, p_actor, p_reason)
+  ON CONFLICT (product_key, unit_key, business_date) DO NOTHING
+  RETURNING * INTO v_row;
+
+  IF FOUND THEN
+    INSERT INTO public.central_selling_price_corrections
+      (price_id, product_key, unit_key, business_date, previous_price_satang, new_price_satang, actor, reason)
+    VALUES
+      (v_row.id, p_product_key, p_unit_key, p_business_date, NULL, p_price_satang, p_actor, p_reason);
+    RETURN v_row;
+  END IF;
+
+  SELECT * INTO v_row
+  FROM public.central_selling_prices
+  WHERE product_key = p_product_key
+    AND unit_key = p_unit_key
+    AND business_date = p_business_date;
+
+  RETURN v_row;
+END;
+$$;
+
+COMMENT ON FUNCTION public.seed_central_selling_price IS
+  'BR-01 seed rule: establishes the central price from the first valid withdrawal of a business date. '
+  'Never overwrites an existing price — always returns the authoritative row so the caller can detect '
+  'a conflict (returned price differs from the price it attempted to seed).';

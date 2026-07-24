@@ -7,8 +7,11 @@ import {
   CentralPriceError,
   getCentralPrice,
   getCentralPriceHistory,
+  loadCentralPriceDetailsForDate,
   loadCentralPricesForDate,
+  seedCentralPriceFromWithdrawal,
   setCentralPrice,
+  SYSTEM_WITHDRAWAL_SEED_ACTOR,
 } from "./pricing";
 
 type PriceRow = Database["public"]["Tables"]["central_selling_prices"]["Row"];
@@ -288,5 +291,140 @@ describe("loadCentralPricesForDate / centralPriceMapKey", () => {
     } as unknown as SupabaseClient<Database>;
 
     await expect(loadCentralPricesForDate(patched, "2026-07-24")).rejects.toBeInstanceOf(CentralPriceError);
+  });
+});
+
+describe("loadCentralPriceDetailsForDate", () => {
+  it("retains setBy alongside priceSatang so callers can tell a system seed from an admin set", async () => {
+    const patched = {
+      from: (table: string) => {
+        if (table === "central_selling_prices") {
+          return {
+            select: () => ({
+              eq: async () => ({
+                data: [
+                  { product_key: "แตงโม", unit_key: "โล", price_satang: 2000, set_by: SYSTEM_WITHDRAWAL_SEED_ACTOR },
+                  { product_key: "มะม่วง", unit_key: "ลูก", price_satang: 500, set_by: "admin-1" },
+                ],
+                error: null,
+              }),
+            }),
+          };
+        }
+        throw new Error(`unexpected table: ${table}`);
+      },
+    } as unknown as SupabaseClient<Database>;
+
+    const details = await loadCentralPriceDetailsForDate(patched, "2026-07-24");
+    expect(details.get(centralPriceMapKey("แตงโม", "โล"))).toEqual({
+      priceSatang: 2000,
+      setBy: SYSTEM_WITHDRAWAL_SEED_ACTOR,
+    });
+    expect(details.get(centralPriceMapKey("มะม่วง", "ลูก"))).toEqual({ priceSatang: 500, setBy: "admin-1" });
+  });
+});
+
+function makeSeedFakeSupabase(existing?: PriceRow) {
+  let row: PriceRow | undefined = existing;
+  return {
+    from: (table: string) => {
+      if (table !== "central_selling_prices") throw new Error(`unexpected table: ${table}`);
+      return { select: () => ({ eq: async () => ({ data: row ? [row] : [], error: null }) }) };
+    },
+    rpc: async (fn: string, args: unknown) => {
+      if (fn !== "seed_central_selling_price") return { data: null, error: { message: "unexpected rpc" } };
+      const a = args as { p_product_key: string; p_unit_key: string; p_business_date: string; p_price_satang: number; p_actor: string; p_reason: string | null };
+      if (row) return { data: row, error: null };
+      row = {
+        id: "seed-1",
+        product_key: a.p_product_key,
+        unit_key: a.p_unit_key,
+        business_date: a.p_business_date,
+        price_satang: a.p_price_satang,
+        set_by: a.p_actor,
+        set_reason: a.p_reason,
+        created_at: "2026-07-24T00:00:00Z",
+        updated_at: "2026-07-24T00:00:00Z",
+      };
+      return { data: row, error: null };
+    },
+  } as unknown as SupabaseClient<Database>;
+}
+
+describe("seedCentralPriceFromWithdrawal (BR-01 seed rule)", () => {
+  it("seeds a fresh identity and defaults the actor to the system sentinel", async () => {
+    const database = makeSeedFakeSupabase();
+    const result = await seedCentralPriceFromWithdrawal(database, {
+      identity: { productName: "แตงโม", unit: "โล", businessDate: "2026-07-24" },
+      priceSatang: 4000,
+    });
+    expect(result.priceSatang).toBe(4000);
+    expect(result.conflict).toBe(false);
+    expect(result.record.setBy).toBe(SYSTEM_WITHDRAWAL_SEED_ACTOR);
+  });
+
+  it("never overwrites an existing price and reports a conflict when the attempted price differs", async () => {
+    const existing: PriceRow = {
+      id: "existing-1",
+      product_key: "แตงโม",
+      unit_key: "โล",
+      business_date: "2026-07-24",
+      price_satang: 4000,
+      set_by: SYSTEM_WITHDRAWAL_SEED_ACTOR,
+      set_reason: null,
+      created_at: "2026-07-24T00:00:00Z",
+      updated_at: "2026-07-24T00:00:00Z",
+    };
+    const database = makeSeedFakeSupabase(existing);
+
+    const result = await seedCentralPriceFromWithdrawal(database, {
+      identity: { productName: "แตงโม", unit: "โล", businessDate: "2026-07-24" },
+      priceSatang: 3500,
+    });
+
+    expect(result.priceSatang).toBe(4000); // authoritative price unchanged
+    expect(result.conflict).toBe(true);
+  });
+
+  it("matching a pre-existing price is not a conflict", async () => {
+    const existing: PriceRow = {
+      id: "existing-1",
+      product_key: "แตงโม",
+      unit_key: "โล",
+      business_date: "2026-07-24",
+      price_satang: 4000,
+      set_by: SYSTEM_WITHDRAWAL_SEED_ACTOR,
+      set_reason: null,
+      created_at: "2026-07-24T00:00:00Z",
+      updated_at: "2026-07-24T00:00:00Z",
+    };
+    const database = makeSeedFakeSupabase(existing);
+
+    const result = await seedCentralPriceFromWithdrawal(database, {
+      identity: { productName: "แตงโม", unit: "โล", businessDate: "2026-07-24" },
+      priceSatang: 4000,
+    });
+
+    expect(result.conflict).toBe(false);
+  });
+
+  it("rejects a non-integer priceSatang", async () => {
+    const database = makeSeedFakeSupabase();
+    await expect(
+      seedCentralPriceFromWithdrawal(database, {
+        identity: { productName: "แตงโม", unit: "โล", businessDate: "2026-07-24" },
+        priceSatang: 40.5,
+      }),
+    ).rejects.toBeInstanceOf(CentralPriceError);
+  });
+
+  it("rejects a negative priceSatang", async () => {
+    const database = makeSeedFakeSupabase();
+    await expect(
+      seedCentralPriceFromWithdrawal(database, {
+        identity: { productName: "แตงโม", unit: "โล", businessDate: "2026-07-24" },
+        priceSatang: -100,
+      }),
+    ).rejects.toBeInstanceOf(CentralPriceError);
   });
 });

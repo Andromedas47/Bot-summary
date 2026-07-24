@@ -593,6 +593,55 @@ export interface Database {
         Relationships: [];
       };
 
+      digital_white_sheet_cash_entries: {
+        Row: {
+          id:                      string;
+          source_id:               string;
+          market_label_normalized: string;
+          business_date:           string;
+          labor:                   number;
+          location_fee:            number;
+          bag:                     number;
+          snack:                   number;
+          other:                   number;
+          other_note:              string | null;
+          actual_cash_submitted:   number;
+          created_at:              string;
+          updated_at:              string;
+        };
+        Insert: {
+          id?:                      string;
+          source_id:                string;
+          market_label_normalized:  string;
+          business_date:            string;
+          labor?:                   number;
+          location_fee?:            number;
+          bag?:                     number;
+          snack?:                   number;
+          other?:                   number;
+          other_note?:              string | null;
+          actual_cash_submitted?:   number;
+          created_at?:              string;
+          updated_at?:              string;
+        };
+        Update: {
+          id?:                      string;
+          source_id?:               string;
+          market_label_normalized?: string;
+          business_date?:           string;
+          labor?:                   number;
+          location_fee?:            number;
+          bag?:                     number;
+          snack?:                   number;
+          other?:                   number;
+          other_note?:              string | null;
+          actual_cash_submitted?:   number;
+          created_at?:              string;
+          updated_at?:              string;
+        };
+        Relationships: [];
+      };
+
       slip_batches: {
         Row: {
           id:              string;
@@ -915,3 +964,4 @@ export type ManualSlipSessionRow         = Database["public"]["Tables"]["manual_
 export type ManualSlipEntryRow           = Database["public"]["Tables"]["manual_slip_entries"]["Row"];
 export type TransferReconciliationRow      = Database["public"]["Tables"]["transfer_reconciliations"]["Row"];
 export type SettlementFinalizationRow      = Database["public"]["Tables"]["settlement_finalizations"]["Row"];
+export type DigitalWhiteSheetCashEntryRow  = Database["public"]["Tables"]["digital_white_sheet_cash_entries"]["Row"];

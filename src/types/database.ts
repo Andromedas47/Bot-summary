@@ -731,6 +731,8 @@ export interface Database {
           updated_at:      string;
           batch_id:        string | null;
           batch_index:     number | null;
+          market_label:            string | null;
+          market_label_normalized: string | null;
         };
         Insert: {
           id?:              string;
@@ -750,6 +752,8 @@ export interface Database {
           updated_at?:      string;
           batch_id?:        string | null;
           batch_index?:     number | null;
+          market_label?:            string | null;
+          market_label_normalized?: string | null;
         };
         Update: {
           id?:              string;
@@ -769,6 +773,8 @@ export interface Database {
           updated_at?:      string;
           batch_id?:        string | null;
           batch_index?:     number | null;
+          market_label?:            string | null;
+          market_label_normalized?: string | null;
         };
         Relationships: [];
       };

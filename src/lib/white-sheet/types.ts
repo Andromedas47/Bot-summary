@@ -79,6 +79,13 @@ export interface DigitalWhiteSheetInput {
   marketLabel: string;
   businessDate: string;
   transactions: readonly WhiteSheetTransactionRow[];
+  /**
+   * Central selling price in satang, keyed by centralPriceMapKey(productKey,
+   * unitKey) — see src/lib/white-sheet/pricing.ts. BR-01: the sole trusted
+   * price source; a missing key fails closed with a warning rather than
+   * falling back to any withdrawal-lot price.
+   */
+  centralPrices?: ReadonlyMap<string, number>;
   verifiedTransfers: number;
   expenses: Readonly<WhiteSheetExpenses>;
   actualCashSubmitted: number;

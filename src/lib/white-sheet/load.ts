@@ -3,13 +3,14 @@ import { normalizedMarketLabel } from "@/lib/market";
 import { loadMarketScopedAiVerifiedTransfers } from "@/lib/reconciliation";
 import type { Database } from "@/types/database";
 import { calculateDigitalWhiteSheet } from "./calculate";
+import { loadCentralPricesForDate } from "./pricing";
 import type {
   DigitalWhiteSheetCalculation,
   DigitalWhiteSheetSummary,
   WhiteSheetExpenses,
   WhiteSheetTransactionRow,
 } from "./types";
-import { unattributedVerifiedTransferWarning } from "./warnings";
+import { pendingReferenceVerifiedTransferWarning, unattributedVerifiedTransferWarning } from "./warnings";
 
 export { normalizedMarketLabel } from "@/lib/market";
 
@@ -284,6 +285,7 @@ export async function loadDigitalWhiteSheetCalculation(
     (row) => normalizedMarketLabel(row.market_name) === targetMarket,
   );
   const transactions = rows.map((row) => adaptTransactionRow(row, scope));
+  const centralPrices = await loadCentralPricesForDate(supabase, scope.businessDate);
   const verifiedTransferResult = await loadMarketScopedAiVerifiedTransfers(
     supabase,
     scope.sourceId,
@@ -291,20 +293,30 @@ export async function loadDigitalWhiteSheetCalculation(
     targetMarket,
     knownMarkets,
   );
-  const verifiedTransferWarnings =
-    verifiedTransferResult.unresolvedAcceptedCount > 0
+  const verifiedTransferWarnings = [
+    ...(verifiedTransferResult.unresolvedAcceptedCount > 0
       ? [
           unattributedVerifiedTransferWarning(
             verifiedTransferResult.unresolvedAcceptedCount,
             verifiedTransferResult.unresolvedAcceptedAmount,
           ),
         ]
-      : [];
+      : []),
+    ...(verifiedTransferResult.pendingReferenceCount > 0
+      ? [
+          pendingReferenceVerifiedTransferWarning(
+            verifiedTransferResult.pendingReferenceCount,
+            verifiedTransferResult.pendingReferenceAmount,
+          ),
+        ]
+      : []),
+  ];
   const calculation = calculateDigitalWhiteSheet({
     marketKey: scope.marketKey,
     marketLabel: targetMarket,
     businessDate: scope.businessDate,
     transactions,
+    centralPrices,
     verifiedTransfers: verifiedTransferResult.attributedTotal,
     expenses: cashInput.expenses,
     actualCashSubmitted: cashInput.actualCashSubmitted,

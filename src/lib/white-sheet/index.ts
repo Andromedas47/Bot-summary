@@ -12,7 +12,9 @@ export {
   WhiteSheetDataError,
 } from "./load";
 export {
+  finalizeWhiteSheetCashEntry,
   loadWhiteSheetCashEntry,
+  reopenWhiteSheetCashEntry,
   saveWhiteSheetCashEntry,
   WhiteSheetPersistenceError,
 } from "./persist";
@@ -21,6 +23,21 @@ export type {
   WhiteSheetCashEntryInput,
   WhiteSheetCashEntryState,
 } from "./persist";
+export {
+  centralPriceKey,
+  centralPriceMapKey,
+  CentralPriceError,
+  getCentralPrice,
+  getCentralPriceHistory,
+  loadCentralPricesForDate,
+  setCentralPrice,
+} from "./pricing";
+export type {
+  CentralPriceCorrection,
+  CentralPriceIdentity,
+  CentralPriceKey,
+  CentralPriceRecord,
+} from "./pricing";
 export {
   loadDigitalWhiteSheetPageModel,
   requireSubmittedWhiteSheetSummary,
@@ -32,7 +49,13 @@ export type { DigitalWhiteSheetPageModel } from "./compose";
 export {
   hasHardStopWarning,
   isHardStopWarning,
+  missingCentralPriceWarning,
+  MISSING_CENTRAL_PRICE_WARNING_PREFIX,
+  pendingReferenceVerifiedTransferWarning,
+  PENDING_REFERENCE_VERIFIED_TRANSFER_WARNING,
   splitWhiteSheetWarnings,
+  UNATTRIBUTED_VERIFIED_TRANSFER_WARNING,
+  unattributedVerifiedTransferWarning,
 } from "./warnings";
 export type {
   DigitalWhiteSheetCalculation,

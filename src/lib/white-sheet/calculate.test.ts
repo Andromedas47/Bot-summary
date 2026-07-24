@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { normalizeProductName } from "@/lib/summary/remaining-fruit";
+import { resolveUnitQuantity } from "@/lib/parsers/weigh-session/units";
 import {
   calculateDigitalWhiteSheet,
   calculateWhiteSheetItems,
   WhiteSheetValidationError,
 } from "./calculate";
+import { centralPriceMapKey } from "./pricing";
 import type {
   DigitalWhiteSheetInput,
   WhiteSheetExpenses,
@@ -39,6 +42,23 @@ function expenses(overrides: Partial<WhiteSheetExpenses> = {}): WhiteSheetExpens
   };
 }
 
+/**
+ * BR-01: central daily selling price, keyed the same way calculate.ts groups
+ * items (normalizeProductName + resolveUnitQuantity(...).unit) — never a
+ * second, independent normalization.
+ */
+function priceMap(
+  entries: Array<{ product: string; unit: string; priceBaht: number }>,
+): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const entry of entries) {
+    const productKey = normalizeProductName(entry.product);
+    const unitKey = resolveUnitQuantity(1, entry.unit).unit;
+    map.set(centralPriceMapKey(productKey, unitKey), Math.round(entry.priceBaht * 100));
+  }
+  return map;
+}
+
 function input(
   overrides: Partial<DigitalWhiteSheetInput> = {},
 ): DigitalWhiteSheetInput {
@@ -47,6 +67,7 @@ function input(
     marketLabel: "ตลาด 72",
     businessDate: BUSINESS_DATE,
     transactions: [transaction()],
+    centralPrices: priceMap([{ product: "ผักกาดขาว", unit: "โล", priceBaht: 25 }]),
     verifiedTransfers: 0,
     expenses: expenses(),
     actualCashSubmitted: 0,
@@ -55,12 +76,15 @@ function input(
 }
 
 describe("calculateWhiteSheetItems", () => {
-  test("subtracts good and damaged returns from withdrawals", () => {
-    const items = calculateWhiteSheetItems([
-      transaction({ quantity: 10, unitPrice: 25 }),
-      transaction({ quantity: 2, transactionType: "คืน", unitPrice: 999 }),
-      transaction({ quantity: 1, transactionType: "คืนเสีย", unitPrice: null }),
-    ]);
+  test("subtracts good and damaged returns from withdrawals, priced at the central daily price (not the withdrawal price)", () => {
+    const items = calculateWhiteSheetItems(
+      [
+        transaction({ quantity: 10, unitPrice: 999 }),
+        transaction({ quantity: 2, transactionType: "คืน", unitPrice: null }),
+        transaction({ quantity: 1, transactionType: "คืนเสีย", unitPrice: null }),
+      ],
+      priceMap([{ product: "ผักกาดขาว", unit: "โล", priceBaht: 25 }]),
+    );
 
     expect(items).toEqual([
       expect.objectContaining({
@@ -74,12 +98,16 @@ describe("calculateWhiteSheetItems", () => {
   });
 
   test("treats missing and explicit zero returns as zero", () => {
-    const missing = calculateWhiteSheetItems([transaction({ quantity: 4, unitPrice: 12.5 })]);
-    const explicitZero = calculateWhiteSheetItems([
-      transaction({ quantity: 4, unitPrice: 12.5 }),
-      transaction({ quantity: 0, transactionType: "คืน", unitPrice: null }),
-      transaction({ quantity: 0, transactionType: "คืนเสีย", unitPrice: null }),
-    ]);
+    const prices = priceMap([{ product: "ผักกาดขาว", unit: "โล", priceBaht: 12.5 }]);
+    const missing = calculateWhiteSheetItems([transaction({ quantity: 4 })], prices);
+    const explicitZero = calculateWhiteSheetItems(
+      [
+        transaction({ quantity: 4 }),
+        transaction({ quantity: 0, transactionType: "คืน", unitPrice: null }),
+        transaction({ quantity: 0, transactionType: "คืนเสีย", unitPrice: null }),
+      ],
+      prices,
+    );
 
     expect(missing[0]).toMatchObject({
       goodReturnQuantity: 0,
@@ -91,11 +119,14 @@ describe("calculateWhiteSheetItems", () => {
   });
 
   test("sums duplicate product rows", () => {
-    const [item] = calculateWhiteSheetItems([
-      transaction({ quantity: 2, unitPrice: 10 }),
-      transaction({ quantity: 3, unitPrice: 10 }),
-      transaction({ quantity: 1, transactionType: "คืน", unitPrice: null }),
-    ]);
+    const [item] = calculateWhiteSheetItems(
+      [
+        transaction({ quantity: 2, unitPrice: 10 }),
+        transaction({ quantity: 3, unitPrice: 10 }),
+        transaction({ quantity: 1, transactionType: "คืน", unitPrice: null }),
+      ],
+      priceMap([{ product: "ผักกาดขาว", unit: "โล", priceBaht: 10 }]),
+    );
 
     expect(item).toMatchObject({
       withdrawnQuantity: 5,
@@ -106,11 +137,14 @@ describe("calculateWhiteSheetItems", () => {
   });
 
   test("preserves decimal kilogram precision", () => {
-    const [item] = calculateWhiteSheetItems([
-      transaction({ quantity: 1.25, unitPrice: 100 }),
-      transaction({ quantity: 0.15, transactionType: "คืน", unitPrice: null }),
-      transaction({ quantity: 0.1, transactionType: "คืนเสีย", unitPrice: null }),
-    ]);
+    const [item] = calculateWhiteSheetItems(
+      [
+        transaction({ quantity: 1.25, unitPrice: 100 }),
+        transaction({ quantity: 0.15, transactionType: "คืน", unitPrice: null }),
+        transaction({ quantity: 0.1, transactionType: "คืนเสีย", unitPrice: null }),
+      ],
+      priceMap([{ product: "ผักกาดขาว", unit: "โล", priceBaht: 100 }]),
+    );
 
     expect(item).toMatchObject({
       withdrawnQuantity: 1.25,
@@ -121,28 +155,32 @@ describe("calculateWhiteSheetItems", () => {
     });
   });
 
-  test("uses the exact persisted basis price instead of rounded price_per_unit", () => {
-    const items = calculateWhiteSheetItems([
-      transaction({
-        productName: "ข้าวโพด",
-        unit: "หัว",
-        quantity: 7,
-        unitPrice: 33.33,
-        basisQuantity: 3,
-        basisPrice: 100,
-      }),
-      transaction({
-        productName: "ข้าวโพด",
-        unit: "หัว",
-        quantity: 1,
-        transactionType: "คืน",
-        unitPrice: null,
-      }),
-    ]);
+  test("central price is used even when a persisted basis price exists on the row (BR-01)", () => {
+    const items = calculateWhiteSheetItems(
+      [
+        transaction({
+          productName: "ข้าวโพด",
+          unit: "หัว",
+          quantity: 7,
+          unitPrice: 33.33,
+          basisQuantity: 3,
+          basisPrice: 100,
+        }),
+        transaction({
+          productName: "ข้าวโพด",
+          unit: "หัว",
+          quantity: 1,
+          transactionType: "คืน",
+          unitPrice: null,
+        }),
+      ],
+      priceMap([{ product: "ข้าวโพด", unit: "หัว", priceBaht: 40 }]),
+    );
 
+    // Basis price implies ~33.33/หัว; central price (40) wins instead.
     expect(items[0]).toMatchObject({
       soldQuantity: 6,
-      expectedSales: 200,
+      expectedSales: 240,
     });
   });
 
@@ -155,10 +193,16 @@ describe("calculateWhiteSheetItems", () => {
   });
 
   test("keeps incompatible units on separate rows", () => {
-    const items = calculateWhiteSheetItems([
-      transaction({ quantity: 2, unit: "โล", unitPrice: 100 }),
-      transaction({ quantity: 3, unit: "ลูก", unitPrice: 10 }),
-    ]);
+    const items = calculateWhiteSheetItems(
+      [
+        transaction({ quantity: 2, unit: "โล", unitPrice: 100 }),
+        transaction({ quantity: 3, unit: "ลูก", unitPrice: 10 }),
+      ],
+      priceMap([
+        { product: "ผักกาดขาว", unit: "โล", priceBaht: 100 },
+        { product: "ผักกาดขาว", unit: "ลูก", priceBaht: 10 },
+      ]),
+    );
 
     expect(items).toHaveLength(2);
     expect(items.find((item) => item.normalizedUnit === "โล")).toMatchObject({
@@ -172,10 +216,13 @@ describe("calculateWhiteSheetItems", () => {
   });
 
   test("converts compatible weight units to a common canonical basis (withdrawal in โล, return in ขีด)", () => {
-    const items = calculateWhiteSheetItems([
-      transaction({ quantity: 1, unit: "โล", unitPrice: 100 }),
-      transaction({ quantity: 2, unit: "ขีด", transactionType: "คืน", unitPrice: null }),
-    ]);
+    const items = calculateWhiteSheetItems(
+      [
+        transaction({ quantity: 1, unit: "โล", unitPrice: 100 }),
+        transaction({ quantity: 2, unit: "ขีด", transactionType: "คืน", unitPrice: null }),
+      ],
+      priceMap([{ product: "ผักกาดขาว", unit: "โล", priceBaht: 100 }]),
+    );
 
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
@@ -188,10 +235,13 @@ describe("calculateWhiteSheetItems", () => {
   });
 
   test("supports decimal kilogram withdrawal reconciled against a gram return", () => {
-    const items = calculateWhiteSheetItems([
-      transaction({ quantity: 1.5, unit: "โล", unitPrice: 40 }),
-      transaction({ quantity: 250, unit: "กรัม", transactionType: "คืน", unitPrice: null }),
-    ]);
+    const items = calculateWhiteSheetItems(
+      [
+        transaction({ quantity: 1.5, unit: "โล", unitPrice: 40 }),
+        transaction({ quantity: 250, unit: "กรัม", transactionType: "คืน", unitPrice: null }),
+      ],
+      priceMap([{ product: "ผักกาดขาว", unit: "โล", priceBaht: 40 }]),
+    );
 
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
@@ -203,36 +253,40 @@ describe("calculateWhiteSheetItems", () => {
     });
   });
 
-  test("rescales legacy unitPrice by the same factor as the converted quantity", () => {
-    // 2 ขีด withdrawn at 10 baht/ขีด converts to 0.2 โล at 100 baht/โล
-    // (10 / 0.1); total value must stay 2 × 10 = 20 baht either way.
-    const items = calculateWhiteSheetItems([
-      transaction({ quantity: 2, unit: "ขีด", unitPrice: 10 }),
-    ]);
+  test("rescales the informational legacy unitPrice by the same factor as the converted quantity (display only — central price still prices the sale)", () => {
+    // 2 ขีด withdrawn at 10 baht/ขีด converts to 0.2 โล; the display price
+    // rescales to 100 baht/โล (10 / 0.1) so unitPrice × quantity stays
+    // unchanged after conversion — but the central price (50/โล) is what
+    // actually prices expectedSales.
+    const items = calculateWhiteSheetItems(
+      [transaction({ quantity: 2, unit: "ขีด", unitPrice: 10 })],
+      priceMap([{ product: "ผักกาดขาว", unit: "โล", priceBaht: 50 }]),
+    );
 
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
       normalizedUnit: "โล",
       withdrawnQuantity: 0.2,
       soldQuantity: 0.2,
-      expectedSales: 20,
+      withdrawalUnitPrices: [100],
+      expectedSales: 10,
     });
   });
 
-  test("rescales a persisted basis price under a converted unit", () => {
-    // 6 ขีด withdrawn at 90 baht per 3 ขีด converts to 0.6 โล at 90 baht per
-    // 0.3 โล; a 2 ขีด (0.2 โล) good return leaves 0.4 โล sold at the same
-    // effective rate: (0.4 / 0.3) × 90 = 120.
-    const items = calculateWhiteSheetItems([
-      transaction({
-        unit: "ขีด",
-        quantity: 6,
-        unitPrice: 30,
-        basisQuantity: 3,
-        basisPrice: 90,
-      }),
-      transaction({ unit: "ขีด", quantity: 2, transactionType: "คืน", unitPrice: null }),
-    ]);
+  test("rescales a persisted basis price under a converted unit for display only — central price still prices the sale", () => {
+    const items = calculateWhiteSheetItems(
+      [
+        transaction({
+          unit: "ขีด",
+          quantity: 6,
+          unitPrice: 30,
+          basisQuantity: 3,
+          basisPrice: 90,
+        }),
+        transaction({ unit: "ขีด", quantity: 2, transactionType: "คืน", unitPrice: null }),
+      ],
+      priceMap([{ product: "ผักกาดขาว", unit: "โล", priceBaht: 50 }]),
+    );
 
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
@@ -240,7 +294,7 @@ describe("calculateWhiteSheetItems", () => {
       withdrawnQuantity: 0.6,
       goodReturnQuantity: 0.2,
       soldQuantity: 0.4,
-      expectedSales: 120,
+      expectedSales: 20,
     });
   });
 
@@ -280,32 +334,47 @@ describe("calculateWhiteSheetItems", () => {
     }
   });
 
-  test("uses FIFO withdrawal price lots without averaging conflicting prices", () => {
+  test("BR-01: conflicting withdrawal-lot prices no longer affect expected sales — the central price is the sole deterministic source", () => {
     const result = calculateDigitalWhiteSheet(input({
       transactions: [
         transaction({ quantity: 2, unitPrice: 10 }),
         transaction({ quantity: 3, unitPrice: 20 }),
         transaction({ quantity: 1, transactionType: "คืน", unitPrice: null }),
       ],
-      actualCashSubmitted: 70,
+      centralPrices: priceMap([{ product: "ผักกาดขาว", unit: "โล", priceBaht: 15 }]),
+      actualCashSubmitted: 60,
     }));
 
     expect(result.items[0]).toMatchObject({
       soldQuantity: 4,
       withdrawalUnitPrices: [10, 20],
-      expectedSales: 70,
+      expectedSales: 60,
     });
-    expect(result.expectedSales).toBe(70);
+    expect(result.expectedSales).toBe(60);
     expect(result.warnings).toContain(
-      "Conflicting withdrawal prices for ผักกาดขาว (โล); FIFO source-order lots applied: 10.00, 20.00",
+      "Withdrawal lot prices varied for ผักกาดขาว (โล): 10.00, 20.00 — central price used for expected sales instead.",
     );
+  });
+
+  test("BR-01: missing central price fails closed with a precise product/unit/date warning, never a guessed price", () => {
+    const items = calculateWhiteSheetItems([transaction({ quantity: 10 })], new Map());
+
+    expect(items[0]?.expectedSales).toBe(0);
   });
 });
 
 describe("calculateDigitalWhiteSheet", () => {
+  test("missing central price produces a precise HARD-STOP-classified warning at the summary level", () => {
+    const result = calculateDigitalWhiteSheet(input({ centralPrices: new Map() }));
+
+    expect(result.expectedSales).toBe(0);
+    expect(result.warnings).toContain("ไม่พบราคากลางสำหรับ ผักกาดขาว (โล) วันที่ 2026-07-23");
+  });
+
   test("warns about uncategorized products without excluding them", () => {
     const result = calculateDigitalWhiteSheet(input({
       transactions: [transaction({ productName: "ปลาทูเค็ม", quantity: 2, unitPrice: 30 })],
+      centralPrices: priceMap([{ product: "ปลาทูเค็ม", unit: "โล", priceBaht: 30 }]),
       actualCashSubmitted: 60,
     }));
 
@@ -317,6 +386,7 @@ describe("calculateDigitalWhiteSheet", () => {
   test("calculates expense total and expected cash", () => {
     const result = calculateDigitalWhiteSheet(input({
       transactions: [transaction({ quantity: 10, unitPrice: 10 })],
+      centralPrices: priceMap([{ product: "ผักกาดขาว", unit: "โล", priceBaht: 10 }]),
       verifiedTransfers: 20,
       expenses: expenses({ labor: 2, locationFee: 3, bag: 1, snack: 1, other: 3 }),
       actualCashSubmitted: 70,
@@ -334,6 +404,7 @@ describe("calculateDigitalWhiteSheet", () => {
     test(`reports ${scenario.name}`, () => {
       const result = calculateDigitalWhiteSheet(input({
         transactions: [transaction({ quantity: 10, unitPrice: 10 })],
+        centralPrices: priceMap([{ product: "ผักกาดขาว", unit: "โล", priceBaht: 10 }]),
         verifiedTransfers: 20,
         expenses: expenses({ labor: 10 }),
         actualCashSubmitted: scenario.actualCashSubmitted,
@@ -351,6 +422,7 @@ describe("calculateDigitalWhiteSheet", () => {
         transaction({ quantity: 0.1, unitPrice: 0.1 }),
         transaction({ quantity: 0.2, unitPrice: 0.1 }),
       ],
+      centralPrices: priceMap([{ product: "ผักกาดขาว", unit: "โล", priceBaht: 0.1 }]),
       verifiedTransfers: 0,
       expenses: expenses({ other: 0.1 + 0.2 }),
       actualCashSubmitted: 0,
@@ -375,10 +447,10 @@ describe("calculateDigitalWhiteSheet", () => {
       expenses: expenseInput,
       actualCashSubmitted: 15,
     }));
-    const before = JSON.parse(JSON.stringify(source));
+    const before = JSON.parse(JSON.stringify({ ...source, centralPrices: undefined }));
 
     calculateDigitalWhiteSheet(source);
 
-    expect(source).toEqual(before);
+    expect({ ...source, centralPrices: undefined }).toEqual(before);
   });
 });

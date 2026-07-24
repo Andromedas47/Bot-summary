@@ -2,6 +2,8 @@ import { conversionFactor, resolveUnitQuantity } from "@/lib/parsers/weigh-sessi
 import { normalizeProductName } from "@/lib/summary/remaining-fruit";
 import { baseTransactionType } from "@/lib/summary/transactions";
 import { classifyProduct } from "./category";
+import { centralPriceMapKey } from "./pricing";
+import { missingCentralPriceWarning } from "./warnings";
 import type {
   DigitalWhiteSheetCalculation,
   DigitalWhiteSheetInput,
@@ -16,13 +18,6 @@ const QUANTITY_SCALE = 3;
 const MONEY_SCALE = 2;
 const MILLIQUANTITY_PER_UNIT = BigInt(1_000);
 
-interface PriceLot {
-  quantity: bigint;
-  unitPrice: bigint;
-  basisQuantity: bigint | null;
-  basisPrice: bigint | null;
-}
-
 interface ItemAggregate {
   marketKey: string;
   businessDate: string;
@@ -31,7 +26,9 @@ interface ItemAggregate {
   withdrawn: bigint;
   goodReturn: bigint;
   damagedReturn: bigint;
-  priceLots: PriceLot[];
+  /** Historical withdrawal unit prices seen on rows — informational only
+   * (BR-01: central daily price, not withdrawal-lot price, prices expected sales). */
+  withdrawalUnitPrices: bigint[];
 }
 
 interface ItemCalculationParts {
@@ -125,47 +122,23 @@ function moneyLabel(value: bigint): string {
   return fromScaledInteger(value, MONEY_SCALE).toFixed(MONEY_SCALE);
 }
 
-function distinctPrices(lots: readonly PriceLot[]): bigint[] {
+function distinctPrices(prices: readonly bigint[]): bigint[] {
   const seen = new Set<string>();
-  const prices: bigint[] = [];
+  const distinct: bigint[] = [];
 
-  for (const lot of lots) {
-    const key = lot.unitPrice.toString();
+  for (const price of prices) {
+    const key = price.toString();
     if (seen.has(key)) continue;
     seen.add(key);
-    prices.push(lot.unitPrice);
+    distinct.push(price);
   }
 
-  return prices;
-}
-
-function allocateReturnsFifo(group: ItemAggregate): {
-  expectedMilliSatang: bigint;
-  distinctUnitPrices: bigint[];
-} {
-  let returnsRemaining = group.goodReturn + group.damagedReturn;
-  let expectedMilliSatang = BigInt(0);
-
-  for (const lot of group.priceLots) {
-    const consumed = returnsRemaining < lot.quantity ? returnsRemaining : lot.quantity;
-    const soldFromLot = lot.quantity - consumed;
-    returnsRemaining -= consumed;
-    expectedMilliSatang += lot.basisQuantity !== null && lot.basisPrice !== null
-      ? roundDivide(
-          soldFromLot * lot.basisPrice * MILLIQUANTITY_PER_UNIT,
-          lot.basisQuantity,
-        )
-      : soldFromLot * lot.unitPrice;
-  }
-
-  return {
-    expectedMilliSatang,
-    distinctUnitPrices: distinctPrices(group.priceLots),
-  };
+  return distinct;
 }
 
 function buildItemCalculationParts(
   rows: readonly WhiteSheetTransactionRow[],
+  centralPrices: ReadonlyMap<string, number>,
 ): ItemCalculationParts {
   const groups = new Map<string, ItemAggregate>();
 
@@ -212,7 +185,7 @@ function buildItemCalculationParts(
       withdrawn: BigInt(0),
       goodReturn: BigInt(0),
       damagedReturn: BigInt(0),
-      priceLots: [],
+      withdrawalUnitPrices: [],
     };
 
     if (transactionType === "เบิก") {
@@ -235,8 +208,9 @@ function buildItemCalculationParts(
       // Legacy (non-basis) unitPrice is quoted per the raw unit — rescale it
       // by the same factor as the quantity so unitPrice × quantity stays
       // unchanged after conversion (mirrors applyQuantity in the ingestion
-      // parser). Basis rows never use unitPrice for totals, so it is left
-      // unconverted there.
+      // parser). Kept for the informational withdrawalUnitPrices display only
+      // — BR-01: central daily price, never withdrawal-lot price, prices
+      // expected sales.
       const adjustedUnitPrice =
         !hasBasisQuantity && rowConversionFactor !== 1
           ? row.unitPrice / rowConversionFactor
@@ -248,6 +222,9 @@ function buildItemCalculationParts(
         "invalid_money",
         rowIndex,
       );
+      // basisQuantity/basisPrice are still structurally validated (a
+      // persisted basis row must be internally consistent) even though
+      // central pricing no longer reads them for expected sales.
       const basisQuantity = hasBasisQuantity
         ? toScaledInteger(
             // basisQuantity is denominated in the same raw unit as the row
@@ -267,17 +244,17 @@ function buildItemCalculationParts(
           { rowIndex, groupKey: key },
         );
       }
-      const basisPrice = hasBasisPrice
-        ? toScaledInteger(
-            row.basisPrice as number,
-            MONEY_SCALE,
-            `basisPrice at row ${rowIndex}`,
-            "invalid_money",
-            rowIndex,
-          )
-        : null;
+      if (hasBasisPrice) {
+        toScaledInteger(
+          row.basisPrice as number,
+          MONEY_SCALE,
+          `basisPrice at row ${rowIndex}`,
+          "invalid_money",
+          rowIndex,
+        );
+      }
       group.withdrawn += quantity;
-      group.priceLots.push({ quantity, unitPrice, basisQuantity, basisPrice });
+      group.withdrawalUnitPrices.push(unitPrice);
     } else if (transactionType === "คืน") {
       group.goodReturn += quantity;
     } else {
@@ -301,20 +278,33 @@ function buildItemCalculationParts(
       );
     }
 
-    const allocation = allocateReturnsFifo(group);
     const category = classifyProduct(group.normalizedProduct);
-    const expectedSales = roundDivide(allocation.expectedMilliSatang, MILLIQUANTITY_PER_UNIT);
-    expectedMilliSatang += allocation.expectedMilliSatang;
+    const distinctUnitPrices = distinctPrices(group.withdrawalUnitPrices);
+
+    // BR-01: central daily price is the sole trusted source for expected
+    // sales — never withdrawal-lot/FIFO price. Missing price fails closed:
+    // the group contributes 0 (never guessed) and a HARD-STOP warning names
+    // exactly which product/unit/date needs a central price.
+    const priceKey = centralPriceMapKey(group.normalizedProduct, group.normalizedUnit);
+    const priceSatang = centralPrices.get(priceKey);
+    let expectedSales = BigInt(0);
+    if (priceSatang === undefined) {
+      warnings.push(missingCentralPriceWarning(group.normalizedProduct, group.normalizedUnit, group.businessDate));
+    } else {
+      const groupMilliSatang = sold * BigInt(priceSatang);
+      expectedMilliSatang += groupMilliSatang;
+      expectedSales = roundDivide(groupMilliSatang, MILLIQUANTITY_PER_UNIT);
+    }
 
     if (category === "uncategorized") {
       warnings.push(
         `Uncategorized product: ${group.normalizedProduct} (${group.normalizedUnit})`,
       );
     }
-    if (allocation.distinctUnitPrices.length > 1) {
+    if (distinctUnitPrices.length > 1) {
       warnings.push(
-        `Conflicting withdrawal prices for ${group.normalizedProduct} (${group.normalizedUnit}); `
-          + `FIFO source-order lots applied: ${allocation.distinctUnitPrices.map(moneyLabel).join(", ")}`,
+        `Withdrawal lot prices varied for ${group.normalizedProduct} (${group.normalizedUnit}): `
+          + `${distinctUnitPrices.map(moneyLabel).join(", ")} — central price used for expected sales instead.`,
       );
     }
 
@@ -328,7 +318,7 @@ function buildItemCalculationParts(
       goodReturnQuantity: fromScaledInteger(group.goodReturn, QUANTITY_SCALE),
       damagedReturnQuantity: fromScaledInteger(group.damagedReturn, QUANTITY_SCALE),
       soldQuantity: fromScaledInteger(sold, QUANTITY_SCALE),
-      withdrawalUnitPrices: allocation.distinctUnitPrices.map((price) =>
+      withdrawalUnitPrices: distinctUnitPrices.map((price) =>
         fromScaledInteger(price, MONEY_SCALE),
       ),
       expectedSales: fromScaledInteger(expectedSales, MONEY_SCALE),
@@ -344,8 +334,9 @@ function buildItemCalculationParts(
 
 export function calculateWhiteSheetItems(
   rows: readonly WhiteSheetTransactionRow[],
+  centralPrices: ReadonlyMap<string, number> = new Map(),
 ): WhiteSheetItemCalculation[] {
-  return buildItemCalculationParts(rows).items;
+  return buildItemCalculationParts(rows, centralPrices).items;
 }
 
 function moneyInput(value: number, field: string): bigint {
@@ -392,7 +383,7 @@ export function calculateDigitalWhiteSheet(
     }
   });
 
-  const itemParts = buildItemCalculationParts(input.transactions);
+  const itemParts = buildItemCalculationParts(input.transactions, input.centralPrices ?? new Map());
   const verifiedTransfers = moneyInput(input.verifiedTransfers, "verifiedTransfers");
   const actualCashSubmitted = moneyInput(input.actualCashSubmitted, "actualCashSubmitted");
   const expenseParts = normalizedExpenses(input.expenses);

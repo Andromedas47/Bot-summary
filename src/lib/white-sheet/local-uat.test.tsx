@@ -159,6 +159,19 @@ function makeLocalUatDatabase() {
           }),
         };
       }
+      if (table === "central_selling_prices") {
+        return {
+          select: () => ({
+            eq: async () => ({
+              data: [
+                { product_key: "แตงโม", unit_key: "โล", price_satang: 2000 },
+                { product_key: "มะม่วง", unit_key: "ลูก", price_satang: 500 },
+              ],
+              error: null,
+            }),
+          }),
+        };
+      }
       if (table === "slip_checks") {
         return {
           select: (columns: string) => {
@@ -184,47 +197,77 @@ function makeLocalUatDatabase() {
         };
       }
       if (table === "digital_white_sheet_cash_entries") {
+        type Filter = { op: "eq" | "is"; column: string; value: unknown };
+        const matches = (row: CashEntryRow, filters: Filter[]) =>
+          filters.every(({ column, value }) => (row as Record<string, unknown>)[column] === value);
+
         return {
           select: () => {
-            const filters: Record<string, string> = {};
+            const filters: Filter[] = [];
             const builder = {
-              eq: (column: string, value: string) => {
-                filters[column] = value;
+              eq: (column: string, value: unknown) => {
+                filters.push({ op: "eq", column, value });
+                return builder;
+              },
+              is: (column: string, value: unknown) => {
+                filters.push({ op: "is", column, value });
                 return builder;
               },
               maybeSingle: async () => ({
-                data:
-                  cashEntries.get(
-                    cashEntryKey(
-                      filters.source_id,
-                      filters.market_label_normalized,
-                      filters.business_date,
-                    ),
-                  ) ?? null,
+                data: [...cashEntries.values()].find((row) => matches(row, filters)) ?? null,
                 error: null,
               }),
             };
             return builder;
           },
-          upsert: (values: Partial<CashEntryRow>) => ({
+          insert: (values: Partial<CashEntryRow>) => ({
             select: () => ({
               single: async () => {
-                const key = cashEntryKey(
-                  values.source_id!,
-                  values.market_label_normalized!,
-                  values.business_date!,
-                );
-                const existing = cashEntries.get(key);
                 const merged: CashEntryRow = {
-                  id: existing?.id ?? `entry-${cashEntries.size + 1}`,
-                  created_at: existing?.created_at ?? "2026-07-24T00:00:00Z",
+                  id: `entry-${cashEntries.size + 1}`,
+                  created_at: "2026-07-24T00:00:00Z",
+                  updated_at: "2026-07-24T00:00:00Z",
+                  other_note: null,
+                  finalized_at: null,
+                  finalized_by: null,
                   ...values,
                 } as CashEntryRow;
-                cashEntries.set(key, merged);
+                cashEntries.set(
+                  cashEntryKey(merged.source_id, merged.market_label_normalized, merged.business_date),
+                  merged,
+                );
                 return { data: merged, error: null };
               },
             }),
           }),
+          update: (values: Partial<CashEntryRow>) => {
+            const filters: Filter[] = [];
+            const builder = {
+              eq: (column: string, value: unknown) => {
+                filters.push({ op: "eq", column, value });
+                return builder;
+              },
+              is: (column: string, value: unknown) => {
+                filters.push({ op: "is", column, value });
+                return builder;
+              },
+              select: () => ({
+                maybeSingle: async () => {
+                  const found = [...cashEntries.entries()].find(([, row]) => matches(row, filters));
+                  if (!found) return { data: null, error: null };
+                  const [key, existing] = found;
+                  const merged: CashEntryRow = {
+                    ...existing,
+                    ...values,
+                    updated_at: "2026-07-24T01:00:00Z",
+                  } as CashEntryRow;
+                  cashEntries.set(key, merged);
+                  return { data: merged, error: null };
+                },
+              }),
+            };
+            return builder;
+          },
         };
       }
       throw new Error(`unexpected table: ${table}`);

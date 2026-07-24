@@ -190,6 +190,19 @@ function makeIntegrationDatabase(options?: {
           }),
         };
       }
+      if (table === "central_selling_prices") {
+        return {
+          select: () => ({
+            eq: async () => ({
+              data: [
+                { product_key: "ทุเรียนหมอนทอง", unit_key: "โล", price_satang: 10000 },
+                { product_key: "มะพร้าวพิเศษ", unit_key: "ลูก", price_satang: 2500 },
+              ],
+              error: null,
+            }),
+          }),
+        };
+      }
       if (table === "slip_checks") {
         return {
           select: (columns: string) => {
@@ -288,6 +301,16 @@ function makeProduceLoaderDatabase(
           }),
         };
       }
+      if (table === "central_selling_prices") {
+        return {
+          select: () => ({
+            eq: async () => ({
+              data: [{ product_key: "ทุเรียนหมอนทอง", unit_key: "โล", price_satang: 10000 }],
+              error: null,
+            }),
+          }),
+        };
+      }
       throw new Error(`unexpected table: ${table}`);
     },
   } as unknown as SupabaseClient<Database>;
@@ -374,17 +397,20 @@ describe("digital white-sheet real-data integration", () => {
     ]);
     expect(calculation).toMatchObject({
       expectedSales: 975,
-      verifiedTransfers: 500,
+      // BR-02: the no-reference check (100) is pending manual resolution and
+      // no longer auto-counted — only the deduped DUP-REF-001 winner (400).
+      verifiedTransfers: 400,
       expenseTotal: 90,
-      expectedCash: 385,
+      expectedCash: 485,
       actualCashSubmitted: 375,
-      difference: -10,
+      difference: -110,
       status: "shortage",
     });
     expect(calculation.warnings).toEqual(
       expect.arrayContaining([
         expect.stringContaining("Uncategorized product: มะพร้าวพิเศษ (ลูก)"),
         expect.stringContaining("Multiple completed main produce sessions (2)"),
+        expect.stringContaining("ยังไม่มีเลขอ้างอิง"),
       ]),
     );
 
@@ -394,10 +420,14 @@ describe("digital white-sheet real-data integration", () => {
     );
     const lineMessage = buildWhiteSheetSummaryMessage(summary);
 
-    for (const expectedValue of ["975.00", "500.00", "90.00", "385.00", "375.00", "10.00"]) {
+    for (const expectedValue of ["975.00", "400.00", "90.00", "485.00", "375.00"]) {
       expect(dashboardHtml).toContain(expectedValue);
       expect(lineMessage).toContain(expectedValue);
     }
+    // The Dashboard hides the financial-status section entirely under a HARD
+    // STOP (see white-sheet-status-blocked below); the difference figure is
+    // therefore not expected in dashboardHtml, only in the LINE formatter.
+    expect(lineMessage).toContain("110.00");
     expect(dashboardHtml).toContain("white-sheet-status-blocked");
     expect(lineMessage).toContain("เงินขาด");
     expect({ produceRows, rawMessages, checks }).toEqual(sourceSnapshot);
@@ -530,10 +560,10 @@ describe("digital white-sheet real-data integration", () => {
           created_at: "2026-07-23T00:01:00Z",
         },
         {
-          id: "check-without-reference",
+          id: "check-local-unique",
           evidence_id: "evidence-2",
           transfer_amount: 100,
-          reference_id: null,
+          reference_id: "LOCAL-REF",
           created_at: "2026-07-23T00:02:00Z",
         },
       ],
@@ -542,6 +572,11 @@ describe("digital white-sheet real-data integration", () => {
           id: "check-other-source-winner",
           reference_id: "CROSS-SOURCE-REF",
           created_at: "2026-07-22T00:00:00Z",
+        },
+        {
+          id: "check-local-unique",
+          reference_id: "LOCAL-REF",
+          created_at: "2026-07-23T00:02:00Z",
         },
       ],
     });

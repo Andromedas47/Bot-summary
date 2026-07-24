@@ -650,3 +650,67 @@ describe("remaining fruit command routing", () => {
     expect(db.appendCalls).toBe(1);
   });
 });
+
+describe("white sheet close command routing", () => {
+  const CLOSE_TEXT = [
+    "ตลาดกี้ ปิดยอด 24/07/2569",
+    "ค่าแรง 30",
+    "เงินสด 16",
+    "จบปิดยอด",
+  ].join("\n");
+
+  it("does not append a closing message into an active pending produce session", async () => {
+    const original = "โอม-พาซิโอ้ผลไม้ เบิก 30/06/2569\n1.ทุเรียน100บาท\n2โล";
+    const db = new BoundaryDatabase(pendingSession(original));
+    const replies: string[] = [];
+    const webhook = service(db, replies);
+
+    await webhook.processEvents(
+      [textEvent(CLOSE_TEXT, 2_000, "close-ws-reply")],
+      "destination",
+    );
+
+    expect(db.appendCalls).toBe(0);
+    expect(db.rows("pending_sessions")[0].accumulated_text).toBe(original);
+    expect(replies.length).toBeGreaterThan(0);
+    const reply = replies.join("\n");
+    expect(reply).not.toContain("รับจบรายการ");
+    expect(reply).not.toMatch(/รับ\s+\d+\s+รายการ/);
+  });
+
+  it("does not treat LINE-export-prefixed closing text as produce/manual-slip input", async () => {
+    const original = "โอม-พาซิโอ้ผลไม้ เบิก 30/06/2569";
+    const db = new BoundaryDatabase(pendingSession(original));
+    const replies: string[] = [];
+    const webhook = service(db, replies);
+    const exported = [
+      "10:15 ผู้ขาย ตลาดกี้ ปิดยอด 24/07/2569",
+      "10:15 ผู้ขาย เงินสด 16",
+      "10:15 ผู้ขาย จบปิดยอด",
+    ].join("\n");
+
+    await webhook.processEvents(
+      [textEvent(exported, 2_000, "export-close-reply")],
+      "destination",
+    );
+
+    expect(db.appendCalls).toBe(0);
+    expect(db.rows("pending_sessions")[0].accumulated_text).toBe(original);
+    expect(replies.length).toBeGreaterThan(0);
+  });
+
+  it("validation errors stay on the close path (no pending append)", async () => {
+    const original = "โอม-พาซิโอ้ผลไม้ เบิก 30/06/2569";
+    const db = new BoundaryDatabase(pendingSession(original));
+    const replies: string[] = [];
+    const webhook = service(db, replies);
+
+    await webhook.processEvents(
+      [textEvent("ตลาดกี้ ปิดยอด 24/07/2569\nเงินสด abc\nจบปิดยอด", 2_000, "bad-close")],
+      "destination",
+    );
+
+    expect(db.appendCalls).toBe(0);
+    expect(replies[0]).toContain("จำนวนเงินไม่ถูกต้อง");
+  });
+});

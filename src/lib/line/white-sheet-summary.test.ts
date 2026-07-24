@@ -3,6 +3,7 @@ import {
   buildWhiteSheetSummaryMessage,
   buildWhiteSheetSummaryMessages,
   buildWhiteSheetSummaryMessagesFromPageModel,
+  buildWhiteSheetHardStopReplyMessages,
   countCodePoints,
   LINE_MESSAGE_MAX_CODE_POINTS,
   LINE_REPLY_MAX_MESSAGES,
@@ -15,6 +16,7 @@ import {
 } from "@/components/white-sheet/white-sheet-fixtures";
 import { formatThaiDate } from "@/lib/date";
 import { WhiteSheetHardStopError, WhiteSheetNotSubmittedError } from "@/lib/white-sheet/compose";
+import { PENDING_REFERENCE_VERIFIED_TRANSFER_WARNING } from "@/lib/white-sheet/warnings";
 
 function assertWithinLineLimits(messages: string[]) {
   expect(messages.length).toBeGreaterThanOrEqual(1);
@@ -28,20 +30,19 @@ describe("buildWhiteSheetSummaryMessage", () => {
   it("formats shortage closing summary", () => {
     const result = buildWhiteSheetSummaryMessage(shortageWhiteSheetFixture);
 
-    expect(result).toContain("สรุปปิดยอด ตลาดกี้");
-    expect(result).toContain(`วันที่ ${formatThaiDate("2026-06-15")}`);
-    expect(result).toContain("ยอดขายที่ควรได้: 9,800.00 บาท");
-    expect(result).toContain("เงินโอนที่ตรวจแล้ว: 6,100.00 บาท");
-    expect(result).toContain("- ค่าแรง: 900.00 บาท");
-    expect(result).toContain("- ค่าที่: 400.00 บาท");
-    expect(result).toContain("- ค่าถุง: 60.00 บาท");
-    expect(result).toContain("- ค่าขนม: 30.00 บาท");
-    expect(result).toContain("- ค่าใช้จ่ายอื่น: 150.00 บาท");
-    expect(result).toContain("(ค่าน้ำแข็ง)");
-    expect(result).toContain("รวมค่าใช้จ่าย: 1,540.00 บาท");
-    expect(result).toContain("เงินสดที่ควรส่ง: 2,160.00 บาท");
-    expect(result).toContain("เงินสดส่งจริง: 1,850.00 บาท");
-    expect(result).toContain("ผลต่าง: เงินขาด 310.00 บาท");
+    expect(result).toContain("สรุปปิดยอด — ตลาดกี้");
+    expect(result).toContain(formatThaiDate("2026-06-15"));
+    expect(result).toContain("ยอดขายที่ควรได้ 9,800.00 บาท");
+    expect(result).toContain("ยอดโอนที่ตรวจแล้ว 6,100.00 บาท");
+    expect(result).toContain("ค่าแรง 900.00 บาท");
+    expect(result).toContain("ค่าที่ 400.00 บาท");
+    expect(result).toContain("ค่าถุง 60.00 บาท");
+    expect(result).toContain("ค่าขนม 30.00 บาท");
+    expect(result).toContain("ค่าอื่น 150.00 บาท — ค่าน้ำแข็ง");
+    expect(result).toContain("รวมค่าใช้จ่าย 1,540.00 บาท");
+    expect(result).toContain("เงินสดที่ควรส่ง 2,160.00 บาท");
+    expect(result).toContain("เงินสดที่ส่งจริง 1,850.00 บาท");
+    expect(result).toContain("เงินขาด 310.00 บาท");
     expect(result).toContain("— คำเตือน —");
     expect(result).toContain("พบสลิปโอนซ้ำในช่วงเวลาเดียวกัน");
   });
@@ -49,14 +50,14 @@ describe("buildWhiteSheetSummaryMessage", () => {
   it("formats matched closing summary without warnings section", () => {
     const result = buildWhiteSheetSummaryMessage(matchedWhiteSheetFixture);
 
-    expect(result).toContain("ผลต่าง: ยอดตรง 0.00 บาท");
+    expect(result).toContain("✅ ยอดตรง");
     expect(result).not.toContain("— คำเตือน —");
   });
 
   it("formats overage closing summary", () => {
     const result = buildWhiteSheetSummaryMessage(overageWhiteSheetFixture);
 
-    expect(result).toContain("ผลต่าง: เงินเกิน 150.00 บาท");
+    expect(result).toContain("เงินเกิน 150.00 บาท");
   });
 
   it("includes uncategorized warning in separated section", () => {
@@ -95,6 +96,22 @@ describe("buildWhiteSheetSummaryMessage", () => {
   });
 });
 
+describe("buildWhiteSheetHardStopReplyMessages", () => {
+  it("confirms save and refuses matched/shortage/overage claims", () => {
+    const messages = buildWhiteSheetHardStopReplyMessages([
+      PENDING_REFERENCE_VERIFIED_TRANSFER_WARNING,
+    ]);
+    const text = messages.join("\n");
+    expect(text).toContain("บันทึกข้อมูลปิดยอดแล้ว ✅");
+    expect(text).toContain("ยังไม่สามารถสรุปยอดตรง/ขาด/เกินได้");
+    expect(text).toContain(PENDING_REFERENCE_VERIFIED_TRANSFER_WARNING);
+    expect(text).not.toContain("✅ ยอดตรง");
+    expect(text).not.toContain("เงินขาด");
+    expect(text).not.toContain("เงินเกิน");
+    assertWithinLineLimits(messages);
+  });
+});
+
 describe("buildWhiteSheetSummaryMessagesFromPageModel", () => {
   it("builds messages for a submitted, trustworthy page model", () => {
     const messages = buildWhiteSheetSummaryMessagesFromPageModel({
@@ -102,7 +119,7 @@ describe("buildWhiteSheetSummaryMessagesFromPageModel", () => {
       summary: matchedWhiteSheetFixture,
     });
     assertWithinLineLimits(messages);
-    expect(messages[0]).toContain("สรุปปิดยอด วัดทุ่งลานนา");
+    expect(messages[0]).toContain("สรุปปิดยอด — วัดทุ่งลานนา");
   });
 
   it("refuses to build messages for a not-submitted entry", () => {

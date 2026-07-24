@@ -189,4 +189,24 @@ describe("resolveGloballyAcceptedCheckIds", () => {
     const winners = await resolveGloballyAcceptedCheckIds(supabase as never, ["REF-001", "REF-002"]);
     expect(winners).toEqual(new Set(["check-early", "check-other"]));
   });
+
+  it("fails closed when a requested reference has no resolved accepted row", async () => {
+    const supabase = makeSupabase({
+      checks: [
+        {
+          id: "check-found",
+          evidence_id: "ev-1",
+          created_at: "2026-06-06T01:00:00Z",
+          reference_id: "REF-FOUND",
+        },
+      ],
+    });
+
+    await expect(
+      resolveGloballyAcceptedCheckIds(
+        supabase as never,
+        ["REF-FOUND", "REF-MISSING"],
+      ),
+    ).rejects.toThrow("incomplete for 1 reference id");
+  });
 });

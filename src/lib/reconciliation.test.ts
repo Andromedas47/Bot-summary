@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { reconcile } from "./reconciliation";
+import { loadAiVerifiedTransferTotal, reconcile } from "./reconciliation";
 
 // ── Stub builder ──────────────────────────────────────────────────────────────
 function makeFullSupabase(cfg: {
@@ -12,6 +12,8 @@ function makeFullSupabase(cfg: {
   // dedupe lookup. Defaults to each in-scope check winning its own reference
   // (i.e. no cross-source exclusion), preserving prior same-scope-only behavior.
   globalWinners?:  Array<{ id: string; reference_id: string; created_at: string }>;
+  scopedOrder?:    number[];
+  globalError?:    { message: string } | null;
 }) {
   let manualSessionCallCount = 0;
 
@@ -58,29 +60,34 @@ function makeFullSupabase(cfg: {
       }
 
       if (table === "slip_checks") {
-        const scopedChecks = cfg.transferAmounts.map((a, i) => ({
+        const allScopedChecks = cfg.transferAmounts.map((a, i) => ({
           id: `check-${i}`,
           transfer_amount: a,
           reference_id: cfg.transferRefs?.[i] ?? null,
+          created_at: `2026-01-01T00:00:${String(i).padStart(2, "0")}Z`,
         }));
-        const defaultGlobalWinners = scopedChecks
+        const scopedChecks = (cfg.scopedOrder ?? allScopedChecks.map((_, index) => index))
+          .map((index) => allScopedChecks[index]);
+        const defaultGlobalWinners = allScopedChecks
           .filter((c) => c.reference_id !== null)
           .map((c, i) => ({ id: c.id, reference_id: c.reference_id as string, created_at: `2026-01-01T00:00:0${i}Z` }));
 
         return {
-          select: () => ({
-            in: () => ({
-              // Per-scope fetch (existing behavior): ends in `.not(...)`.
-              in: () => ({
-                not: async () => ({ data: scopedChecks, error: null }),
-                // Global cross-source resolution: ends in `.order(...)`, no `.not()`.
-                order: async () => ({
-                  data: cfg.globalWinners ?? defaultGlobalWinners,
-                  error: null,
-                }),
+          select: (columns: string) => {
+            const isScopedQuery = columns.includes("transfer_amount");
+            const builder = {
+              in: () => builder,
+              not: () => builder,
+              order: () => builder,
+              then: (resolve: (value: unknown) => void) => resolve({
+                data: isScopedQuery
+                  ? scopedChecks
+                  : (cfg.globalWinners ?? defaultGlobalWinners),
+                error: isScopedQuery ? null : (cfg.globalError ?? null),
               }),
-            }),
-          }),
+            };
+            return builder;
+          },
         };
       }
 
@@ -111,6 +118,79 @@ function makeFullSupabase(cfg: {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+describe("loadAiVerifiedTransferTotal", () => {
+  for (const [label, scopedOrder] of [
+    ["winner row first", [0, 1]],
+    ["duplicate row first", [1, 0]],
+  ] as const) {
+    it(`counts the global winner exactly once with ${label}`, async () => {
+      const db = makeFullSupabase({
+        openSession: false,
+        transferAmounts: [400, 400],
+        transferRefs: ["REF-ORDER", "REF-ORDER"],
+        scopedOrder: [...scopedOrder],
+        closedSessions: [],
+        entryAmounts: [],
+        globalWinners: [
+          {
+            id: "check-0",
+            reference_id: "REF-ORDER",
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+      });
+
+      await expect(
+        loadAiVerifiedTransferTotal(db as never, "grp1", "2026-06-17"),
+      ).resolves.toBe(400);
+    });
+  }
+
+  it("keeps checks without reference ids independently countable", async () => {
+    const db = makeFullSupabase({
+      openSession: false,
+      transferAmounts: [125, 275],
+      transferRefs: [null, null],
+      closedSessions: [],
+      entryAmounts: [],
+    });
+
+    await expect(
+      loadAiVerifiedTransferTotal(db as never, "grp1", "2026-06-17"),
+    ).resolves.toBe(400);
+  });
+
+  it("fails closed when global reference resolution fails", async () => {
+    const db = makeFullSupabase({
+      openSession: false,
+      transferAmounts: [400],
+      transferRefs: ["REF-FAIL"],
+      closedSessions: [],
+      entryAmounts: [],
+      globalError: { message: "resolver unavailable" },
+    });
+
+    await expect(
+      loadAiVerifiedTransferTotal(db as never, "grp1", "2026-06-17"),
+    ).rejects.toThrow("resolver unavailable");
+  });
+
+  it("fails closed when global resolution returns no winner for a scoped reference", async () => {
+    const db = makeFullSupabase({
+      openSession: false,
+      transferAmounts: [400],
+      transferRefs: ["REF-MISSING"],
+      closedSessions: [],
+      entryAmounts: [],
+      globalWinners: [],
+    });
+
+    await expect(
+      loadAiVerifiedTransferTotal(db as never, "grp1", "2026-06-17"),
+    ).rejects.toThrow("global reference resolution incomplete");
+  });
+});
 
 describe("reconcile", () => {
   it("blocks when there is an open manual session", async () => {

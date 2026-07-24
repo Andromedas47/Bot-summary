@@ -52,10 +52,12 @@ export async function loadAiVerifiedTransferTotal(
 
   const { data: checks, error: checkError } = await supabase
     .from("slip_checks")
-    .select("id, transfer_amount, reference_id")
+    .select("id, transfer_amount, reference_id, created_at")
     .in("evidence_id", evidenceIds)
     .in("status", ["EXTRACTED", "PARTIAL_EXTRACTED"])
-    .not("transfer_amount", "is", null);
+    .not("transfer_amount", "is", null)
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true });
   if (checkError) {
     throw new Error(`slip check query failed: ${checkError.message}`);
   }
@@ -71,19 +73,23 @@ export async function loadAiVerifiedTransferTotal(
       .filter((ref): ref is string => ref !== null),
   )];
   const globalWinners = await resolveGloballyAcceptedCheckIds(supabase, distinctRefs);
+  if (distinctRefs.length > 0 && globalWinners.size === 0) {
+    throw new Error(
+      "global reference resolution returned no winners for scoped financial totals",
+    );
+  }
 
   // Duplicate slip guard: the same slip submitted twice (even across batches
   // in the same business day) extracts the same bank reference_id — count each
   // distinct reference once. Checks without a visible reference cannot be
   // distinguished from one another and are summed individually.
-  const seenReferences = new Set<string>();
+  const countedWinnerReferences = new Set<string>();
   let total = 0;
   for (const c of checks ?? []) {
     const ref = normalizeTransactionId(c.reference_id);
     if (ref) {
-      if (seenReferences.has(ref)) continue;
-      seenReferences.add(ref);
-      if (globalWinners.size > 0 && !globalWinners.has(c.id)) continue;
+      if (!globalWinners.has(c.id) || countedWinnerReferences.has(ref)) continue;
+      countedWinnerReferences.add(ref);
     }
     total += Number(c.transfer_amount);
   }

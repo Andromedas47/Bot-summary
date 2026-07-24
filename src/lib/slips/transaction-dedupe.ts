@@ -70,7 +70,8 @@ export async function findSlipTransactionDuplicate(
     .select("id, evidence_id, created_at")
     .eq("reference_id", transactionId)
     .in("status", TERMINAL_STATUSES)
-    .order("created_at", { ascending: true });
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true });
 
   if (error) throw new Error(`slip transaction duplicate lookup failed: ${error.message}`);
 
@@ -128,7 +129,8 @@ export async function resolveGloballyAcceptedCheckIds(
     .select("id, reference_id, created_at")
     .in("reference_id", referenceIds)
     .in("status", TERMINAL_STATUSES)
-    .order("created_at", { ascending: true });
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true });
 
   if (error) throw new Error(`global reference resolution failed: ${error.message}`);
 
@@ -137,5 +139,13 @@ export async function resolveGloballyAcceptedCheckIds(
     if (!row.reference_id) continue;
     if (!winners.has(row.reference_id)) winners.set(row.reference_id, row.id);
   }
+
+  const unresolvedCount = referenceIds.filter((referenceId) => !winners.has(referenceId)).length;
+  if (unresolvedCount > 0) {
+    throw new Error(
+      `global reference resolution incomplete for ${unresolvedCount} reference id(s)`,
+    );
+  }
+
   return new Set(winners.values());
 }

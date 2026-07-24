@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { displayMarketName } from "@/lib/market";
-import { loadAiVerifiedTransferTotal } from "@/lib/reconciliation";
+import { loadMarketScopedAiVerifiedTransfers } from "@/lib/reconciliation";
+import { unattributedVerifiedTransferWarning } from "./warnings";
 import type { Database } from "@/types/database";
 import { calculateDigitalWhiteSheet } from "./calculate";
 import type {
@@ -287,17 +288,27 @@ export async function loadDigitalWhiteSheetCalculation(
     (row) => normalizedMarketLabel(row.market_name) === targetMarket,
   );
   const transactions = rows.map((row) => adaptTransactionRow(row, scope));
-  const verifiedTransfers = await loadAiVerifiedTransferTotal(
+  const verifiedTransferResult = await loadMarketScopedAiVerifiedTransfers(
     supabase,
     scope.sourceId,
     scope.businessDate,
+    targetMarket,
   );
+  const verifiedTransferWarnings =
+    verifiedTransferResult.unresolvedAcceptedCount > 0
+      ? [
+          unattributedVerifiedTransferWarning(
+            verifiedTransferResult.unresolvedAcceptedCount,
+            verifiedTransferResult.unresolvedAcceptedAmount,
+          ),
+        ]
+      : [];
   const calculation = calculateDigitalWhiteSheet({
     marketKey: scope.marketKey,
     marketLabel: targetMarket,
     businessDate: scope.businessDate,
     transactions,
-    verifiedTransfers,
+    verifiedTransfers: verifiedTransferResult.attributedTotal,
     expenses: cashInput.expenses,
     actualCashSubmitted: cashInput.actualCashSubmitted,
   });
@@ -306,6 +317,7 @@ export async function loadDigitalWhiteSheetCalculation(
     ...calculation,
     warnings: [
       ...calculation.warnings,
+      ...verifiedTransferWarnings,
       ...unresolvedMarketWarnings(sourceRows),
       ...multipleSessionWarnings(rows),
     ],

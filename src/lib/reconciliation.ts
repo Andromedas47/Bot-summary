@@ -13,6 +13,20 @@ export interface ReconciliationResult {
   matched:                  boolean;
 }
 
+export interface VerifiedTransferCheckRow {
+  id:               string;
+  evidence_id:      string;
+  transfer_amount:  number;
+  reference_id:     string | null;
+  created_at:       string;
+}
+
+export interface MarketScopedVerifiedTransferResult {
+  attributedTotal:           number;
+  unresolvedAcceptedCount:   number;
+  unresolvedAcceptedAmount:  number;
+}
+
 // business_date (ISO) 04:00 Bangkok = prev day 21:00 UTC.
 export function businessDateToUtcRange(businessDate: string): { startUtc: string; endUtc: string } {
   const [y, m, d] = businessDate.split("-").map(Number);
@@ -21,6 +35,121 @@ export function businessDateToUtcRange(businessDate: string): { startUtc: string
     startUtc: `${prevDay}T21:00:00Z`,
     endUtc:   `${businessDate}T21:00:00Z`,
   };
+}
+
+/**
+ * Applies global reference dedupe first, then optionally scopes accepted winners
+ * to one normalized market label. Global dedupe always runs before market filter.
+ */
+export function aggregateGloballyAcceptedVerifiedTransfers(
+  checks: readonly VerifiedTransferCheckRow[],
+  evidenceMarketById: ReadonlyMap<string, string | null>,
+  globalWinners: ReadonlySet<string>,
+  options?: { marketLabelNormalized?: string },
+): MarketScopedVerifiedTransferResult {
+  const targetMarket = options?.marketLabelNormalized;
+  const countedWinnerReferences = new Set<string>();
+  let attributedTotal = 0;
+  let unresolvedAcceptedCount = 0;
+  let unresolvedAcceptedAmount = 0;
+
+  for (const check of checks) {
+    const ref = normalizeTransactionId(check.reference_id);
+    if (ref) {
+      if (!globalWinners.has(check.id) || countedWinnerReferences.has(ref)) continue;
+      countedWinnerReferences.add(ref);
+    }
+
+    if (targetMarket === undefined) {
+      attributedTotal += Number(check.transfer_amount);
+      continue;
+    }
+
+    const evidenceMarket = evidenceMarketById.get(check.evidence_id) ?? null;
+    if (!evidenceMarket) {
+      unresolvedAcceptedCount += 1;
+      unresolvedAcceptedAmount += Number(check.transfer_amount);
+      continue;
+    }
+    if (evidenceMarket === targetMarket) {
+      attributedTotal += Number(check.transfer_amount);
+    }
+  }
+
+  return {
+    attributedTotal,
+    unresolvedAcceptedCount,
+    unresolvedAcceptedAmount,
+  };
+}
+
+async function loadVerifiedTransferChecksForSourceDate(
+  supabase:     Supabase,
+  sourceId:     string,
+  businessDate: string,
+): Promise<{
+  checks: VerifiedTransferCheckRow[];
+  evidenceMarketById: Map<string, string | null>;
+}> {
+  const { startUtc, endUtc } = businessDateToUtcRange(businessDate);
+
+  const { data: evidences, error: evidenceError } = await supabase
+    .from("slip_evidences")
+    .select("id, market_label_normalized")
+    .eq("source_id", sourceId)
+    .gte("received_at", startUtc)
+    .lt("received_at", endUtc);
+  if (evidenceError) {
+    throw new Error(`slip evidence query failed: ${evidenceError.message}`);
+  }
+
+  const evidenceMarketById = new Map<string, string | null>();
+  for (const evidence of evidences ?? []) {
+    evidenceMarketById.set(
+      evidence.id,
+      evidence.market_label_normalized?.normalize("NFC").trim() || null,
+    );
+  }
+
+  const evidenceIds = [...evidenceMarketById.keys()];
+  if (evidenceIds.length === 0) {
+    return { checks: [], evidenceMarketById };
+  }
+
+  const { data: checks, error: checkError } = await supabase
+    .from("slip_checks")
+    .select("id, evidence_id, transfer_amount, reference_id, created_at")
+    .in("evidence_id", evidenceIds)
+    .in("status", ["EXTRACTED", "PARTIAL_EXTRACTED"])
+    .not("transfer_amount", "is", null)
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true });
+  if (checkError) {
+    throw new Error(`slip check query failed: ${checkError.message}`);
+  }
+
+  return {
+    checks: (checks ?? []) as VerifiedTransferCheckRow[],
+    evidenceMarketById,
+  };
+}
+
+async function resolveGlobalWinnersForChecks(
+  supabase: Supabase,
+  checks: readonly VerifiedTransferCheckRow[],
+): Promise<Set<string>> {
+  const distinctRefs = [...new Set(
+    checks
+      .map((c) => normalizeTransactionId(c.reference_id))
+      .filter((ref): ref is string => ref !== null),
+  )];
+  const globalWinners = await resolveGloballyAcceptedCheckIds(supabase, distinctRefs);
+  if (distinctRefs.length > 0 && globalWinners.size === 0) {
+    throw new Error(
+      "global reference resolution returned no winners for scoped financial totals",
+    );
+  }
+  return globalWinners;
 }
 
 /**
@@ -33,67 +162,57 @@ export async function loadAiVerifiedTransferTotal(
   sourceId:     string,
   businessDate: string,
 ): Promise<number> {
-  const { startUtc, endUtc } = businessDateToUtcRange(businessDate);
+  const { checks, evidenceMarketById } = await loadVerifiedTransferChecksForSourceDate(
+    supabase,
+    sourceId,
+    businessDate,
+  );
+  if (checks.length === 0) return 0;
 
-  // ponytail: validation flags (outlier, date-mismatch) are not persisted — can't filter here.
-  // Tighten this query if/when validation flags are stored on slip_checks.
-  const { data: evidences, error: evidenceError } = await supabase
-    .from("slip_evidences")
-    .select("id")
-    .eq("source_id", sourceId)
-    .gte("received_at", startUtc)
-    .lt("received_at", endUtc);
-  if (evidenceError) {
-    throw new Error(`slip evidence query failed: ${evidenceError.message}`);
+  const globalWinners = await resolveGlobalWinnersForChecks(supabase, checks);
+  return aggregateGloballyAcceptedVerifiedTransfers(
+    checks,
+    evidenceMarketById,
+    globalWinners,
+  ).attributedTotal;
+}
+
+/**
+ * Market-scoped verified-transfer loader for Digital White Sheet. Global dedupe
+ * runs before market attribution; unattributed accepted winners are reported
+ * separately and must trigger fail-closed handling upstream.
+ */
+export async function loadMarketScopedAiVerifiedTransfers(
+  supabase:                Supabase,
+  sourceId:                string,
+  businessDate:            string,
+  marketLabelNormalized:   string,
+): Promise<MarketScopedVerifiedTransferResult> {
+  const targetMarket = marketLabelNormalized.normalize("NFC").trim();
+  if (!targetMarket) {
+    throw new Error("marketLabelNormalized must not be empty");
   }
 
-  const evidenceIds = (evidences ?? []).map(e => e.id);
-  if (evidenceIds.length === 0) return 0;
-
-  const { data: checks, error: checkError } = await supabase
-    .from("slip_checks")
-    .select("id, transfer_amount, reference_id, created_at")
-    .in("evidence_id", evidenceIds)
-    .in("status", ["EXTRACTED", "PARTIAL_EXTRACTED"])
-    .not("transfer_amount", "is", null)
-    .order("created_at", { ascending: true })
-    .order("id", { ascending: true });
-  if (checkError) {
-    throw new Error(`slip check query failed: ${checkError.message}`);
+  const { checks, evidenceMarketById } = await loadVerifiedTransferChecksForSourceDate(
+    supabase,
+    sourceId,
+    businessDate,
+  );
+  if (checks.length === 0) {
+    return {
+      attributedTotal: 0,
+      unresolvedAcceptedCount: 0,
+      unresolvedAcceptedAmount: 0,
+    };
   }
 
-  // Cross-group/cross-market guard: the same bank transaction id may have
-  // already been accepted under a different source_id or business_date.
-  // ponytail: best-effort (no unique constraint on reference_id backs this
-  // yet — see schema gap report), but a single batched query resolves the
-  // globally-earliest accepted check per distinct reference id in this scope.
-  const distinctRefs = [...new Set(
-    (checks ?? [])
-      .map((c) => normalizeTransactionId(c.reference_id))
-      .filter((ref): ref is string => ref !== null),
-  )];
-  const globalWinners = await resolveGloballyAcceptedCheckIds(supabase, distinctRefs);
-  if (distinctRefs.length > 0 && globalWinners.size === 0) {
-    throw new Error(
-      "global reference resolution returned no winners for scoped financial totals",
-    );
-  }
-
-  // Duplicate slip guard: the same slip submitted twice (even across batches
-  // in the same business day) extracts the same bank reference_id — count each
-  // distinct reference once. Checks without a visible reference cannot be
-  // distinguished from one another and are summed individually.
-  const countedWinnerReferences = new Set<string>();
-  let total = 0;
-  for (const c of checks ?? []) {
-    const ref = normalizeTransactionId(c.reference_id);
-    if (ref) {
-      if (!globalWinners.has(c.id) || countedWinnerReferences.has(ref)) continue;
-      countedWinnerReferences.add(ref);
-    }
-    total += Number(c.transfer_amount);
-  }
-  return total;
+  const globalWinners = await resolveGlobalWinnersForChecks(supabase, checks);
+  return aggregateGloballyAcceptedVerifiedTransfers(
+    checks,
+    evidenceMarketById,
+    globalWinners,
+    { marketLabelNormalized: targetMarket },
+  );
 }
 
 async function computeManualSlipTotal(

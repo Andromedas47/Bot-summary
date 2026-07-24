@@ -104,10 +104,21 @@ export function DigitalWhiteSheetSummary({
               <MoneyRow label="เงินสดส่งจริง" value={viewModel.actualCashSubmitted} emphasis />
             </section>
 
-            <DigitalWhiteSheetStatus
-              status={viewModel.status}
-              difference={viewModel.difference}
-            />
+            {hardStopWarnings.length === 0 ? (
+              <DigitalWhiteSheetStatus
+                status={viewModel.status}
+                difference={viewModel.difference}
+              />
+            ) : (
+              <section
+                className="rounded-xl border border-slate-200 bg-slate-50 p-4"
+                data-testid="white-sheet-status-blocked"
+              >
+                <p className="text-sm text-slate-700">
+                  ไม่สามารถแสดงสถานะเงินสดที่เชื่อถือได้จนกว่าจะแก้ไขคำเตือนด้านบน
+                </p>
+              </section>
+            )}
           </>
         ) : (
           <section

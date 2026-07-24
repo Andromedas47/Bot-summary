@@ -13,8 +13,12 @@
  */
 const HARD_STOP_WARNING_PREFIX = "Multiple completed main produce sessions";
 
+export const UNATTRIBUTED_VERIFIED_TRANSFER_WARNING =
+  "พบสลิปที่ยืนยันแล้วแต่ยังระบุตลาดไม่ได้ กรุณาตรวจสอบก่อนใช้ยอดสรุป";
+
 export function isHardStopWarning(warning: string): boolean {
-  return warning.startsWith(HARD_STOP_WARNING_PREFIX);
+  return warning.startsWith(HARD_STOP_WARNING_PREFIX)
+    || warning.startsWith(UNATTRIBUTED_VERIFIED_TRANSFER_WARNING);
 }
 
 export function hasHardStopWarning(warnings: readonly string[]): boolean {
@@ -31,4 +35,15 @@ export function splitWhiteSheetWarnings(warnings: readonly string[]): {
     (isHardStopWarning(warning) ? hardStopWarnings : otherWarnings).push(warning);
   }
   return { hardStopWarnings, otherWarnings };
+}
+
+export function unattributedVerifiedTransferWarning(
+  count: number,
+  amount: number,
+): string {
+  const formattedAmount = amount.toLocaleString("th-TH", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  return `${UNATTRIBUTED_VERIFIED_TRANSFER_WARNING} (${count} รายการ, ${formattedAmount} บาท)`;
 }

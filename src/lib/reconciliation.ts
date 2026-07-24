@@ -26,6 +26,9 @@ export interface MarketScopedVerifiedTransferResult {
   attributedTotal:           number;
   unresolvedAcceptedCount:   number;
   unresolvedAcceptedAmount:  number;
+  /** BR-02: accepted checks with no reference id yet — pending manual resolution, never auto-counted. */
+  pendingReferenceCount:     number;
+  pendingReferenceAmount:    number;
 }
 
 export interface MarketScopedAggregationOptions {
@@ -48,14 +51,18 @@ export function businessDateToUtcRange(businessDate: string): { startUtc: string
  * Applies global reference dedupe first, then optionally scopes accepted winners
  * to one canonical market label against known produce markets for the source/date.
  *
- * Classification (market-scoped only, after global dedupe):
+ * BR-02: an accepted check with no reference id is never auto-counted — it is
+ * reported separately as pending manual reference resolution (see
+ * src/lib/slips/reference-resolution.ts) and must not contribute to
+ * attributedTotal until an authorized reviewer supplies a reference id, at
+ * which point it flows through this SAME global-winner/market classification
+ * on the next load — no separate duplicate check is invented for it.
+ *
+ * Classification (after the no-reference / global-dedupe gate):
  * A. empty/null market → unresolved
  * B. known + equals requested → attributed
  * C. known + other market → skip (not unresolved)
  * D. non-empty but not in knownMarkets → unresolved (HARD STOP upstream)
- *
- * Global dedupe always runs before market filter. Missing reference IDs have no
- * duplicate claim (pre-existing limitation — not redesigned here).
  */
 export function aggregateGloballyAcceptedVerifiedTransfers(
   checks: readonly VerifiedTransferCheckRow[],
@@ -73,13 +80,19 @@ export function aggregateGloballyAcceptedVerifiedTransfers(
   let attributedTotal = 0;
   let unresolvedAcceptedCount = 0;
   let unresolvedAcceptedAmount = 0;
+  let pendingReferenceCount = 0;
+  let pendingReferenceAmount = 0;
 
   for (const check of checks) {
     const ref = normalizeTransactionId(check.reference_id);
-    if (ref) {
-      if (!globalWinners.has(check.id) || countedWinnerReferences.has(ref)) continue;
-      countedWinnerReferences.add(ref);
+    if (!ref) {
+      // BR-02: no reference id yet — pending manual resolution, never counted.
+      pendingReferenceCount += 1;
+      pendingReferenceAmount += Number(check.transfer_amount);
+      continue;
     }
+    if (!globalWinners.has(check.id) || countedWinnerReferences.has(ref)) continue;
+    countedWinnerReferences.add(ref);
 
     if (targetMarket === undefined || !knownMarkets) {
       attributedTotal += Number(check.transfer_amount);
@@ -107,6 +120,8 @@ export function aggregateGloballyAcceptedVerifiedTransfers(
     attributedTotal,
     unresolvedAcceptedCount,
     unresolvedAcceptedAmount,
+    pendingReferenceCount,
+    pendingReferenceAmount,
   };
 }
 
@@ -231,6 +246,8 @@ export async function loadMarketScopedAiVerifiedTransfers(
       attributedTotal: 0,
       unresolvedAcceptedCount: 0,
       unresolvedAcceptedAmount: 0,
+      pendingReferenceCount: 0,
+      pendingReferenceAmount: 0,
     };
   }
 

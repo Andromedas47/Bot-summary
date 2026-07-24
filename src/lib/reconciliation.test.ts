@@ -148,7 +148,7 @@ describe("loadAiVerifiedTransferTotal", () => {
     });
   }
 
-  it("keeps checks without reference ids independently countable", async () => {
+  it("BR-02: checks without reference ids are pending manual resolution and never auto-counted", async () => {
     const db = makeFullSupabase({
       openSession: false,
       transferAmounts: [125, 275],
@@ -159,7 +159,7 @@ describe("loadAiVerifiedTransferTotal", () => {
 
     await expect(
       loadAiVerifiedTransferTotal(db as never, "grp1", "2026-06-17"),
-    ).resolves.toBe(400);
+    ).resolves.toBe(0);
   });
 
   it("fails closed when global reference resolution fails", async () => {
@@ -206,6 +206,7 @@ describe("reconcile", () => {
     const db = makeFullSupabase({
       openSession:     false,
       transferAmounts: [500, 300],   // ai verified = 800
+      transferRefs:    ["REF-A", "REF-B"],
       closedSessions:  ["sess1"],
       entryAmounts:    [200],        // manual = 200
     });
@@ -224,6 +225,7 @@ describe("reconcile", () => {
     const db = makeFullSupabase({
       openSession:     false,
       transferAmounts: [500],   // ai = 500
+      transferRefs:    ["REF-A"],
       closedSessions:  [],
       entryAmounts:    [],      // manual = 0
     });
@@ -239,7 +241,7 @@ describe("reconcile", () => {
     const db = makeFullSupabase({
       openSession:     false,
       transferAmounts: [500, 500, 300],           // same slip sent twice + one distinct
-      transferRefs:    ["REF-001", "REF-001", null],
+      transferRefs:    ["REF-001", "REF-001", "REF-002"],
       closedSessions:  [],
       entryAmounts:    [],
     });
@@ -255,12 +257,16 @@ describe("reconcile", () => {
     const db = makeFullSupabase({
       openSession:     false,
       transferAmounts: [500, 300],           // REF-001 belongs to another source, 300 is untouched
-      transferRefs:    ["REF-001", null],
+      transferRefs:    ["REF-001", "REF-002"],
       closedSessions:  [],
       entryAmounts:    [],
       // The globally-earliest accepted check for REF-001 is a different
       // record (from another source/business date), not this scope's check-0.
-      globalWinners:   [{ id: "check-from-other-market", reference_id: "REF-001", created_at: "2020-01-01T00:00:00Z" }],
+      // check-1 (REF-002) wins its own reference normally.
+      globalWinners:   [
+        { id: "check-from-other-market", reference_id: "REF-001", created_at: "2020-01-01T00:00:00Z" },
+        { id: "check-1", reference_id: "REF-002", created_at: "2026-01-01T00:00:01Z" },
+      ],
     });
     const result = await reconcile(db as never, "grp1", "2026-06-17", 300);
     expect(result.blocked).toBe(false);
@@ -274,6 +280,7 @@ describe("reconcile", () => {
     const db = makeFullSupabase({
       openSession:     false,
       transferAmounts: [100.1, 200.2],
+      transferRefs:    ["REF-A", "REF-B"],
       closedSessions:  [],
       entryAmounts:    [],
     });

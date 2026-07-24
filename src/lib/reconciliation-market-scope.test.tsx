@@ -311,14 +311,27 @@ describe("legacy backfill attribution semantics", () => {
 
   it("C: batch_id NULL → remains unresolved", () => {
     const result = aggregateGloballyAcceptedVerifiedTransfers(
-      [{ id: "c-u", evidence_id: "ev-null", transfer_amount: 75, reference_id: null, created_at: "2026-07-23T01:00:00Z" }],
+      [{ id: "c-u", evidence_id: "ev-null", transfer_amount: 75, reference_id: "REF-C", created_at: "2026-07-23T01:00:00Z" }],
       new Map([["ev-null", null]]),
-      new Set<string>(),
+      new Set(["c-u"]),
       { marketLabelNormalized: MARKET_A_NORM, knownMarkets: KNOWN_AB },
     );
     expect(result.attributedTotal).toBe(0);
     expect(result.unresolvedAcceptedCount).toBe(1);
     expect(result.unresolvedAcceptedAmount).toBe(75);
+  });
+
+  it("D (BR-02): reference_id NULL → pending manual resolution, not counted as market-unresolved", () => {
+    const result = aggregateGloballyAcceptedVerifiedTransfers(
+      [{ id: "c-pending", evidence_id: "ev-a", transfer_amount: 60, reference_id: null, created_at: "2026-07-23T01:00:00Z" }],
+      new Map([["ev-a", MARKET_A_NORM]]),
+      new Set<string>(),
+      { marketLabelNormalized: MARKET_A_NORM, knownMarkets: KNOWN_AB },
+    );
+    expect(result.attributedTotal).toBe(0);
+    expect(result.unresolvedAcceptedCount).toBe(0);
+    expect(result.pendingReferenceCount).toBe(1);
+    expect(result.pendingReferenceAmount).toBe(60);
   });
 });
 
@@ -401,6 +414,19 @@ describe("White Sheet fail-closed for unattributed verified transfers", () => {
           return {
             select: () => ({
               in: async () => ({ data: rawMessages, error: null }),
+            }),
+          };
+        }
+        if (table === "central_selling_prices") {
+          return {
+            select: () => ({
+              eq: async () => ({
+                data: [
+                  { product_key: "ทุเรียน", unit_key: "โล", price_satang: 10000 },
+                  { product_key: "มะม่วง", unit_key: "โล", price_satang: 1000 },
+                ],
+                error: null,
+              }),
             }),
           };
         }

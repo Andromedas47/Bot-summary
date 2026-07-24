@@ -73,9 +73,25 @@ Before any persistence migration, the business must approve either a persisted
 market registry/mapping or one canonical derivation and backfill rule. Until
 then, no white-sheet persistence key is approved.
 
-## Settlement persistence gap
+## Settlement persistence gap (Local MVP status: implemented)
 
-Current schema:
+The proposal below was implemented as a LOCAL-ONLY additive migration:
+`supabase/migrations/0037_digital_white_sheet_cash_entries.sql`, persisted
+through `src/lib/white-sheet/persist.ts`, composed with the operational
+loader in `src/lib/white-sheet/compose.ts`, exposed at
+`GET/POST /api/white-sheet`, and wired to `DigitalWhiteSheetExpensesForm` at
+the `/white-sheet` Dashboard route. It deliberately diverges from the
+original sketch below in one respect: the unique key uses
+`market_label_normalized` (the same normalization the calculation loader
+already applies), not the unresolved `market_key` — per the "Market identity
+before persistence" section above, a caller-supplied `marketKey` was never
+approved as a persistence identity. `settlement_entries` and
+`settlement_finalizations` are untouched; nothing here dual-writes to them.
+This migration has NOT been applied to Production — see the Local UAT
+verification report for the exact blocker that prevents a genuinely fresh
+database from reaching it today.
+
+Current schema (pre-existing, still unmodified by this work):
 
 - `settlement_entries` is unique by
   `(settlement_date, settlement_time, staff_name, market_name)`.
@@ -154,8 +170,6 @@ Rollback:
 - A destructive table drop, if ever required, must be a separate approved
   migration after exporting submitted data.
 
-No migration or generated database type change is included in this integration.
-
 ## Slip duplicate enforcement
 
 Reconciliation and batch finalization share the read-time global winner
@@ -168,3 +182,28 @@ This is best-effort, not concurrency-safe fraud prevention. The required base
 has no unique constraint on `slip_checks.reference_id`, so simultaneous checks
 can both pass a read-before-write lookup. A separately approved partial unique
 index/claim flow remains required for atomic enforcement.
+
+`resolveGloballyAcceptedCheckIds` (src/lib/slips/transaction-dedupe.ts) now
+chunks its `.in("reference_id", …)` lookup (500 ids/chunk) instead of sending
+one unbounded query. The reference id list — not the result rows — is
+partitioned, so every check row for a given reference id is always resolved
+from exactly one chunk; the existing earliest-wins ordering and fail-closed
+"incomplete resolution" check are unchanged, just applied across the merged
+chunk results. See the regression test in transaction-dedupe.test.ts that
+forces 3 chunks (1,137 distinct reference ids).
+
+## Weight unit compatibility (Local MVP status: implemented)
+
+`calculateWhiteSheetItems`/`calculateDigitalWhiteSheet`
+(src/lib/white-sheet/calculate.ts) now apply the same trusted
+`resolveUnitQuantity`/`conversionFactor` table the ingestion parser uses
+(src/lib/parsers/weigh-session/units.ts) when grouping transaction rows,
+instead of only alias-normalizing the unit string. A withdrawal in `โล` and a
+return in `ขีด` for the same product now land in one canonical `โล` group
+(quantity and any legacy `unitPrice`/`basisQuantity` rescaled consistently)
+rather than being silently split into two groups — which could otherwise
+manufacture a phantom negative-sold-quantity row and fail the entire sheet.
+No new conversion rule was invented: units with no entry in the existing
+`UNIT_CONVERSIONS` table (kg vs. pieces, pack vs. pieces, etc.) still stay in
+separate groups, and returns exceeding a converted withdrawal quantity still
+fail closed. See the new tests in calculate.test.ts.

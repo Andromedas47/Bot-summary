@@ -28,28 +28,28 @@ describe("batch finalizer global slip dedupe", () => {
     const db = {
       from(table: string) {
         if (table !== "slip_checks") throw new Error(`unexpected table: ${table}`);
-        return {
-          select: () => ({
-            in: () => ({
-              in: () => ({
-                order: async () => ({
-                  data: [
-                    {
-                      id: "check-original",
-                      reference_id: "REF-001",
-                      created_at: "2026-07-23T00:00:00Z",
-                    },
-                    {
-                      id: "check-current",
-                      reference_id: "REF-001",
-                      created_at: "2026-07-23T00:01:00Z",
-                    },
-                  ],
-                  error: null,
-                }),
-              }),
-            }),
+        const builder = {
+          select: () => builder,
+          in: () => builder,
+          order: () => builder,
+          then: (resolve: (value: unknown) => void) => resolve({
+            data: [
+              {
+                id: "check-original",
+                reference_id: "REF-001",
+                created_at: "2026-07-23T00:00:00Z",
+              },
+              {
+                id: "check-current",
+                reference_id: "REF-001",
+                created_at: "2026-07-23T00:01:00Z",
+              },
+            ],
+            error: null,
           }),
+        };
+        return {
+          select: builder.select,
         };
       },
     };

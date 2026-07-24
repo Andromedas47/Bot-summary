@@ -171,6 +171,99 @@ describe("calculateWhiteSheetItems", () => {
     });
   });
 
+  test("converts compatible weight units to a common canonical basis (withdrawal in โล, return in ขีด)", () => {
+    const items = calculateWhiteSheetItems([
+      transaction({ quantity: 1, unit: "โล", unitPrice: 100 }),
+      transaction({ quantity: 2, unit: "ขีด", transactionType: "คืน", unitPrice: null }),
+    ]);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      normalizedUnit: "โล",
+      withdrawnQuantity: 1,
+      goodReturnQuantity: 0.2,
+      soldQuantity: 0.8,
+      expectedSales: 80,
+    });
+  });
+
+  test("supports decimal kilogram withdrawal reconciled against a gram return", () => {
+    const items = calculateWhiteSheetItems([
+      transaction({ quantity: 1.5, unit: "โล", unitPrice: 40 }),
+      transaction({ quantity: 250, unit: "กรัม", transactionType: "คืน", unitPrice: null }),
+    ]);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      normalizedUnit: "โล",
+      withdrawnQuantity: 1.5,
+      goodReturnQuantity: 0.25,
+      soldQuantity: 1.25,
+      expectedSales: 50,
+    });
+  });
+
+  test("rescales legacy unitPrice by the same factor as the converted quantity", () => {
+    // 2 ขีด withdrawn at 10 baht/ขีด converts to 0.2 โล at 100 baht/โล
+    // (10 / 0.1); total value must stay 2 × 10 = 20 baht either way.
+    const items = calculateWhiteSheetItems([
+      transaction({ quantity: 2, unit: "ขีด", unitPrice: 10 }),
+    ]);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      normalizedUnit: "โล",
+      withdrawnQuantity: 0.2,
+      soldQuantity: 0.2,
+      expectedSales: 20,
+    });
+  });
+
+  test("rescales a persisted basis price under a converted unit", () => {
+    // 6 ขีด withdrawn at 90 baht per 3 ขีด converts to 0.6 โล at 90 baht per
+    // 0.3 โล; a 2 ขีด (0.2 โล) good return leaves 0.4 โล sold at the same
+    // effective rate: (0.4 / 0.3) × 90 = 120.
+    const items = calculateWhiteSheetItems([
+      transaction({
+        unit: "ขีด",
+        quantity: 6,
+        unitPrice: 30,
+        basisQuantity: 3,
+        basisPrice: 90,
+      }),
+      transaction({ unit: "ขีด", quantity: 2, transactionType: "คืน", unitPrice: null }),
+    ]);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      normalizedUnit: "โล",
+      withdrawnQuantity: 0.6,
+      goodReturnQuantity: 0.2,
+      soldQuantity: 0.4,
+      expectedSales: 120,
+    });
+  });
+
+  test("kg and pieces remain incompatible even though both are recognized units", () => {
+    const items = calculateWhiteSheetItems([
+      transaction({ quantity: 1, unit: "โล", unitPrice: 100 }),
+      transaction({ quantity: 1, unit: "ชิ้น", unitPrice: 50 }),
+    ]);
+
+    expect(items).toHaveLength(2);
+  });
+
+  test("does not weaken negative sold-quantity validation across compatible units", () => {
+    const source = [
+      transaction({ quantity: 1, unit: "โล", unitPrice: 100 }),
+      // 20 ขีด = 2 โล — more than the 1 โล withdrawn, so this must still
+      // fail closed instead of being silently absorbed by conversion.
+      transaction({ quantity: 20, unit: "ขีด", transactionType: "คืน", unitPrice: null }),
+    ];
+
+    expect(() => calculateWhiteSheetItems(source)).toThrow(WhiteSheetValidationError);
+  });
+
   test("fails closed when returns make sold quantity negative", () => {
     const source = [
       transaction({ quantity: 1, unitPrice: 10 }),

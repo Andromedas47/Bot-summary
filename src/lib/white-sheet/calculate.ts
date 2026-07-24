@@ -1,4 +1,4 @@
-import { normalizeUnitAlias } from "@/lib/parsers/weigh-session/units";
+import { conversionFactor, resolveUnitQuantity } from "@/lib/parsers/weigh-session/units";
 import { normalizeProductName } from "@/lib/summary/remaining-fruit";
 import { baseTransactionType } from "@/lib/summary/transactions";
 import { classifyProduct } from "./category";
@@ -175,7 +175,17 @@ function buildItemCalculationParts(
     const normalizedProduct = normalizeProductName(
       requireIdentity(row.productName, "productName", rowIndex),
     );
-    const normalizedUnit = normalizeUnitAlias(requireIdentity(row.unit, "unit", rowIndex));
+    const rawUnit = requireIdentity(row.unit, "unit", rowIndex);
+    // Reuse the same trusted conversion table the ingestion parser uses
+    // (src/lib/parsers/weigh-session/units.ts) so compatible weight units
+    // (e.g. withdrawal in โล, return in ขีด) land in one canonical group
+    // instead of being silently split into two — which could otherwise
+    // manufacture a phantom negative-sold-quantity group and fail the whole
+    // sheet. Units with no known conversion (kg vs pieces, pack vs pieces,
+    // etc.) pass through unchanged — no conversion is ever guessed here.
+    const unitConversion = resolveUnitQuantity(row.quantity, rawUnit);
+    const rowConversionFactor = conversionFactor(rawUnit);
+    const normalizedUnit = unitConversion.unit;
     const transactionType = baseTransactionType(row.transactionType);
 
     if (!transactionType) {
@@ -187,7 +197,7 @@ function buildItemCalculationParts(
     }
 
     const quantity = toScaledInteger(
-      row.quantity,
+      unitConversion.quantity,
       QUANTITY_SCALE,
       `quantity at row ${rowIndex}`,
       "invalid_quantity",
@@ -213,13 +223,6 @@ function buildItemCalculationParts(
           { rowIndex, groupKey: key },
         );
       }
-      const unitPrice = toScaledInteger(
-        row.unitPrice,
-        MONEY_SCALE,
-        `unitPrice at row ${rowIndex}`,
-        "invalid_money",
-        rowIndex,
-      );
       const hasBasisQuantity = row.basisQuantity !== null && row.basisQuantity !== undefined;
       const hasBasisPrice = row.basisPrice !== null && row.basisPrice !== undefined;
       if (hasBasisQuantity !== hasBasisPrice) {
@@ -229,9 +232,28 @@ function buildItemCalculationParts(
           { rowIndex, groupKey: key },
         );
       }
+      // Legacy (non-basis) unitPrice is quoted per the raw unit — rescale it
+      // by the same factor as the quantity so unitPrice × quantity stays
+      // unchanged after conversion (mirrors applyQuantity in the ingestion
+      // parser). Basis rows never use unitPrice for totals, so it is left
+      // unconverted there.
+      const adjustedUnitPrice =
+        !hasBasisQuantity && rowConversionFactor !== 1
+          ? row.unitPrice / rowConversionFactor
+          : row.unitPrice;
+      const unitPrice = toScaledInteger(
+        adjustedUnitPrice,
+        MONEY_SCALE,
+        `unitPrice at row ${rowIndex}`,
+        "invalid_money",
+        rowIndex,
+      );
       const basisQuantity = hasBasisQuantity
         ? toScaledInteger(
-            row.basisQuantity as number,
+            // basisQuantity is denominated in the same raw unit as the row
+            // (see the parser's basis-unit-mismatch check), so it converts
+            // with the identical resolveUnitQuantity call as the quantity.
+            resolveUnitQuantity(row.basisQuantity as number, rawUnit).quantity,
             QUANTITY_SCALE,
             `basisQuantity at row ${rowIndex}`,
             "invalid_quantity",

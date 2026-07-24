@@ -6,6 +6,7 @@ export {
   WhiteSheetValidationError,
 } from "./calculate";
 export {
+  listKnownProduceMarketLabels,
   loadDigitalWhiteSheetCalculation,
   loadDigitalWhiteSheetSummary,
   normalizedMarketLabel,

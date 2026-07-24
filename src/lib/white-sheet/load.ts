@@ -131,6 +131,26 @@ export async function fetchProduceRows(
   return rows;
 }
 
+/**
+ * Canonical produce market labels present for one source + business date.
+ * Used by LINE closing to fail closed on unknown/mismatched market text —
+ * never fuzzy-map "กี้" onto "ตลาดกี้".
+ */
+export async function listKnownProduceMarketLabels(
+  supabase: Supabase,
+  sourceId: string,
+  businessDate: string,
+): Promise<string[]> {
+  const dateRows = await fetchProduceRows(supabase, businessDate);
+  const sourceRows = await filterRowsBySource(supabase, dateRows, sourceId);
+  const labels = new Set<string>();
+  for (const row of sourceRows) {
+    const label = normalizedMarketLabel(row.market_name);
+    if (label) labels.add(label);
+  }
+  return [...labels].sort((a, b) => a.localeCompare(b, "th"));
+}
+
 async function filterRowsBySource(
   supabase: Supabase,
   rows: readonly ProduceTransactionRow[],

@@ -48,6 +48,8 @@ import {
   type SlipSessionIngestor,
   type SlipSessionHeader,
 } from "@/lib/slips/slip-session-service";
+import { parseWhiteSheetCloseCommandFromMessage } from "@/lib/line/white-sheet-close-command";
+import { processWhiteSheetCloseCommand } from "@/lib/line/white-sheet-close-service";
 
 type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
@@ -318,6 +320,20 @@ export class WebhookService {
     if (text.trim().toLowerCase() === "test") {
       if (replyToken) await replyLineMessage(replyToken, "Bot รับข้อความได้แล้ว ✅");
       return { eventId, eventType: event.type, status: "saved", parsed: false };
+    }
+
+    // ── 3.2. White Sheet close command (high-level control; before session appenders)
+    // Must take priority over pending produce append, manual-slip amounts, and
+    // weigh/return item text so a full closing message is never misrouted.
+    const closeParse = parseWhiteSheetCloseCommandFromMessage(text);
+    if (closeParse.kind !== "not_command") {
+      return this.processWhiteSheetClose(
+        msgEvent,
+        closeParse,
+        eventId,
+        event.type,
+        log,
+      );
     }
 
     // ── 3.3. Manual slip session commands ────────────────────────────────────
@@ -896,6 +912,54 @@ export class WebhookService {
           `${prefix}รับ ${amounts.length} รายการ รวม ${runTotal.toLocaleString("th-TH")} บาท\nพิมพ์ จบสลิปมือ เมื่อส่งครบ`,
         );
       }
+    }
+  }
+
+  // ── White Sheet closing command ───────────────────────────────────────────
+  private async processWhiteSheetClose(
+    event: LineMessageEvent,
+    parseResult: Exclude<
+      ReturnType<typeof parseWhiteSheetCloseCommandFromMessage>,
+      { kind: "not_command" }
+    >,
+    eventId: string,
+    eventType: string,
+    log: ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const replyToken = event.replyToken;
+    const sourceId = getSourceId(event.source);
+
+    if (parseResult.kind === "invalid") {
+      log.info("white sheet close command invalid", { sourceId });
+      if (replyToken) await this.replyMessage(replyToken, parseResult.message);
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+
+    log.info("white sheet close command", {
+      sourceId,
+      market: parseResult.command.marketLabelNormalized,
+      businessDate: parseResult.command.businessDate,
+    });
+
+    try {
+      const outcome = await processWhiteSheetCloseCommand(this.supabase, {
+        sourceId,
+        command: parseResult.command,
+      });
+      if (replyToken) await this.replyMessages(replyToken, outcome.replyMessages);
+      return { eventId, eventType, status: "saved", parsed: true };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("white sheet close command failed", { error: errorMessage });
+      if (replyToken) {
+        try {
+          await this.replyMessage(
+            replyToken,
+            "บันทึกปิดยอดไม่สำเร็จ กรุณาลองใหม่อีกครั้ง หรือติดต่อผู้ดูแลระบบ",
+          );
+        } catch { /* ignore reply error */ }
+      }
+      return { eventId, eventType, status: "error", parsed: false, error: errorMessage };
     }
   }
 

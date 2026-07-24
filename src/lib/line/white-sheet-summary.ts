@@ -18,33 +18,29 @@ function fmt(amount: number): string {
   });
 }
 
-const STATUS_DIFFERENCE_LABELS: Record<WhiteSheetStatus, string> = {
-  shortage: "เงินขาด",
-  matched: "ยอดตรง",
-  overage: "เงินเกิน",
-};
-
-function formatDifferenceLine(status: WhiteSheetStatus, difference: number): string {
-  const label = STATUS_DIFFERENCE_LABELS[status];
-  return `ผลต่าง: ${label} ${fmt(Math.abs(difference))} บาท`;
+function formatStatusLine(status: WhiteSheetStatus, difference: number): string {
+  if (status === "matched") return "✅ ยอดตรง";
+  if (status === "shortage") return `เงินขาด ${fmt(Math.abs(difference))} บาท`;
+  return `เงินเกิน ${fmt(Math.abs(difference))} บาท`;
 }
 
 function buildExpenseSection(summary: DigitalWhiteSheetSummary): string[] {
   const { expenses } = summary;
   const lines = [
     "ค่าใช้จ่าย",
-    `- ค่าแรง: ${fmt(expenses.labor)} บาท`,
-    `- ค่าที่: ${fmt(expenses.locationFee)} บาท`,
-    `- ค่าถุง: ${fmt(expenses.bag)} บาท`,
-    `- ค่าขนม: ${fmt(expenses.snack)} บาท`,
-    `- ค่าใช้จ่ายอื่น: ${fmt(expenses.other)} บาท`,
+    `ค่าแรง ${fmt(expenses.labor)} บาท`,
+    `ค่าที่ ${fmt(expenses.locationFee)} บาท`,
+    `ค่าถุง ${fmt(expenses.bag)} บาท`,
+    `ค่าขนม ${fmt(expenses.snack)} บาท`,
   ];
 
   if (expenses.otherNote?.trim()) {
-    lines.push(`  (${expenses.otherNote.trim()})`);
+    lines.push(`ค่าอื่น ${fmt(expenses.other)} บาท — ${expenses.otherNote.trim()}`);
+  } else {
+    lines.push(`ค่าอื่น ${fmt(expenses.other)} บาท`);
   }
 
-  lines.push(`รวมค่าใช้จ่าย: ${fmt(summary.expenseTotal)} บาท`);
+  lines.push(`รวมค่าใช้จ่าย ${fmt(summary.expenseTotal)} บาท`);
   return lines;
 }
 
@@ -52,18 +48,18 @@ export function buildWhiteSheetSummaryMessage(summary: DigitalWhiteSheetSummary)
   const market = displayMarketName(summary.marketLabel, summary.marketLabel);
 
   const lines = [
-    `สรุปปิดยอด ${market}`,
-    `วันที่ ${formatThaiDate(summary.businessDate)}`,
+    `สรุปปิดยอด — ${market}`,
+    formatThaiDate(summary.businessDate),
     "",
-    `ยอดขายที่ควรได้: ${fmt(summary.expectedSales)} บาท`,
-    `เงินโอนที่ตรวจแล้ว: ${fmt(summary.verifiedTransfers)} บาท`,
+    `ยอดขายที่ควรได้ ${fmt(summary.expectedSales)} บาท`,
+    `ยอดโอนที่ตรวจแล้ว ${fmt(summary.verifiedTransfers)} บาท`,
     "",
     ...buildExpenseSection(summary),
     "",
-    `เงินสดที่ควรส่ง: ${fmt(summary.expectedCash)} บาท`,
-    `เงินสดส่งจริง: ${fmt(summary.actualCashSubmitted)} บาท`,
+    `เงินสดที่ควรส่ง ${fmt(summary.expectedCash)} บาท`,
+    `เงินสดที่ส่งจริง ${fmt(summary.actualCashSubmitted)} บาท`,
     "",
-    formatDifferenceLine(summary.status, summary.difference),
+    formatStatusLine(summary.status, summary.difference),
   ];
 
   if (summary.warnings.length > 0) {
@@ -129,15 +125,54 @@ export function buildWhiteSheetSummaryMessages(
 }
 
 /**
+ * HARD STOP reply after a successful closing persistence: inputs were saved,
+ * but matched/shortage/overage must not be claimed.
+ */
+export function buildWhiteSheetHardStopReplyMessages(
+  hardStopWarnings: readonly string[],
+): string[] {
+  const warningLines =
+    hardStopWarnings.length > 0
+      ? hardStopWarnings.map((w) => (w.startsWith("⚠️") ? w : `⚠️ ${w}`))
+      : ["⚠️ สรุปยอดยังไม่น่าเชื่อถือ กรุณาให้ผู้ดูแลตรวจสอบ"];
+
+  const full = [
+    "บันทึกข้อมูลปิดยอดแล้ว ✅",
+    "",
+    "แต่ยังไม่สามารถสรุปยอดตรง/ขาด/เกินได้",
+    "เนื่องจาก:",
+    ...warningLines,
+    "",
+    "กรุณาให้ผู้ดูแลตรวจสอบก่อน",
+  ].join("\n");
+
+  if (countCodePoints(full) <= LINE_MESSAGE_MAX_CODE_POINTS) {
+    return [full];
+  }
+
+  const messages: string[] = [];
+  let remaining = full;
+  while (remaining && messages.length < LINE_REPLY_MAX_MESSAGES) {
+    if (countCodePoints(remaining) <= LINE_MESSAGE_MAX_CODE_POINTS) {
+      messages.push(remaining);
+      break;
+    }
+    const split = splitMessageAtNewline(remaining, LINE_MESSAGE_MAX_CODE_POINTS);
+    if (!split) {
+      messages.push(remaining.slice(0, LINE_MESSAGE_MAX_CODE_POINTS));
+      remaining = remaining.slice(LINE_MESSAGE_MAX_CODE_POINTS);
+      continue;
+    }
+    messages.push(split[0]);
+    remaining = split[1];
+  }
+  return messages.length > 0 ? messages : [full.slice(0, LINE_MESSAGE_MAX_CODE_POINTS)];
+}
+
+/**
  * Builds the White Sheet LINE messages directly from the composed page
  * model, guarded so it can never run against a not-yet-submitted entry or a
- * HARD STOP (multiple completed main sessions) result — see
- * requireTrustedWhiteSheetSummary. This is the ready building block for
- * STEP 12; no automatic trigger calls it yet. Wiring it to an actual
- * "send now" action (button, close/finalization event) is the remaining
- * step — there is no existing close/finalization boundary specific to the
- * White Sheet cash entry (settlement_finalizations is a different,
- * unrelated persisted entity), so this integration does not invent one.
+ * HARD STOP result — see requireTrustedWhiteSheetSummary.
  */
 export function buildWhiteSheetSummaryMessagesFromPageModel(
   pageModel: DigitalWhiteSheetPageModel,

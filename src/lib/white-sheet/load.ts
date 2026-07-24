@@ -215,15 +215,20 @@ function multipleSessionWarnings(rows: readonly ProduceTransactionRow[]): string
     : [];
 }
 
-function marketExclusionWarnings(
-  dateRows: readonly ProduceTransactionRow[],
-  marketRows: readonly ProduceTransactionRow[],
+function normalizedMarketLabel(marketName: string | null): string {
+  return displayMarketName(marketName, "").normalize("NFC").trim();
+}
+
+function unresolvedMarketWarnings(
+  sourceRows: readonly ProduceTransactionRow[],
 ): string[] {
-  const excludedCount = dateRows.length - marketRows.length;
-  return excludedCount > 0
+  const unresolvedCount = sourceRows.filter(
+    (row) => !normalizedMarketLabel(row.market_name),
+  ).length;
+  return unresolvedCount > 0
     ? [
-        `Excluded ${excludedCount} produce row(s) because their market label did not `
-          + "match or could not be normalized to the requested market.",
+        `Excluded ${unresolvedCount} produce row(s) because their market label could not `
+          + "be normalized.",
       ]
     : [];
 }
@@ -264,17 +269,16 @@ export async function loadDigitalWhiteSheetCalculation(
     businessDate: requireScopeValue(rawScope.businessDate, "businessDate"),
   };
 
-  const targetMarket = displayMarketName(scope.marketLabel, "").normalize("NFC").trim();
+  const targetMarket = normalizedMarketLabel(scope.marketLabel);
   if (!targetMarket) {
     throw new WhiteSheetDataError("marketLabel does not identify a market");
   }
 
   const dateRows = await fetchProduceRows(supabase, scope.businessDate);
-  const marketRows = dateRows.filter(
-    (row) =>
-      displayMarketName(row.market_name, "").normalize("NFC").trim() === targetMarket,
+  const sourceRows = await filterRowsBySource(supabase, dateRows, scope.sourceId);
+  const rows = sourceRows.filter(
+    (row) => normalizedMarketLabel(row.market_name) === targetMarket,
   );
-  const rows = await filterRowsBySource(supabase, marketRows, scope.sourceId);
   const transactions = rows.map((row) => adaptTransactionRow(row, scope));
   const verifiedTransfers = await loadAiVerifiedTransferTotal(
     supabase,
@@ -295,7 +299,7 @@ export async function loadDigitalWhiteSheetCalculation(
     ...calculation,
     warnings: [
       ...calculation.warnings,
-      ...marketExclusionWarnings(dateRows, marketRows),
+      ...unresolvedMarketWarnings(sourceRows),
       ...multipleSessionWarnings(rows),
     ],
   };

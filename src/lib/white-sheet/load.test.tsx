@@ -387,7 +387,7 @@ describe("digital white-sheet real-data integration", () => {
     expect({ produceRows, rawMessages, checks }).toEqual(sourceSnapshot);
   });
 
-  test("filters mixed dates and sources while warning on mixed or unresolved markets", async () => {
+  test("warns only for unresolved market labels within the requested source and date", async () => {
     const { produceRows } = makeIntegrationDatabase();
     const baseRow = produceRows[0] as ProduceRow;
     const scopedRows: ProduceRow[] = [
@@ -452,10 +452,55 @@ describe("digital white-sheet real-data integration", () => {
     expect(calculation.expectedSales).toBe(1050);
     expect(calculation.items).toHaveLength(1);
     const exclusionWarning = calculation.warnings.find((warning) =>
-      warning.startsWith("Excluded 2 produce row(s)"));
+      warning.startsWith("Excluded 1 produce row(s)"));
     expect(exclusionWarning).toBeDefined();
     expect(exclusionWarning).not.toContain("Other Market");
     expect(exclusionWarning).not.toContain("raw-");
+  });
+
+  test("does not warn when another scoped row has a valid different market", async () => {
+    const { produceRows } = makeIntegrationDatabase();
+    const baseRow = produceRows[0] as ProduceRow;
+    const { database } = makeProduceLoaderDatabase(
+      [
+        { ...baseRow, id: "target-row", raw_message_id: "raw-target" },
+        {
+          ...baseRow,
+          id: "other-market-row",
+          market_name: "Other Market",
+          raw_message_id: "raw-other-market",
+        },
+      ],
+      [
+        { id: "raw-target", source_id: SOURCE_ID },
+        { id: "raw-other-market", source_id: SOURCE_ID },
+      ],
+    );
+
+    const calculation = await loadDigitalWhiteSheetCalculation(
+      database,
+      {
+        sourceId: SOURCE_ID,
+        marketKey: "talad-kee",
+        marketLabel: MARKET_LABEL,
+        businessDate: BUSINESS_DATE,
+      },
+      {
+        expenses: {
+          labor: 0,
+          locationFee: 0,
+          bag: 0,
+          snack: 0,
+          other: 0,
+          otherNote: "",
+        },
+        actualCashSubmitted: 1050,
+      },
+    );
+
+    expect(calculation.expectedSales).toBe(1050);
+    expect(calculation.items).toHaveLength(1);
+    expect(calculation.warnings.some((warning) => warning.startsWith("Excluded "))).toBe(false);
   });
 
   test("excludes a scoped slip when its global winner belongs to another source", async () => {

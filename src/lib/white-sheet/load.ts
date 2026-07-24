@@ -1,7 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { displayMarketName } from "@/lib/market";
+import { normalizedMarketLabel } from "@/lib/market";
 import { loadMarketScopedAiVerifiedTransfers } from "@/lib/reconciliation";
-import { unattributedVerifiedTransferWarning } from "./warnings";
 import type { Database } from "@/types/database";
 import { calculateDigitalWhiteSheet } from "./calculate";
 import type {
@@ -10,6 +9,9 @@ import type {
   WhiteSheetExpenses,
   WhiteSheetTransactionRow,
 } from "./types";
+import { unattributedVerifiedTransferWarning } from "./warnings";
+
+export { normalizedMarketLabel } from "@/lib/market";
 
 type Supabase = SupabaseClient<Database>;
 type ProduceTransactionRow =
@@ -216,17 +218,6 @@ function multipleSessionWarnings(rows: readonly ProduceTransactionRow[]): string
     : [];
 }
 
-/**
- * Canonical normalization for the market label identity component shared by
- * the calculation loader and the White Sheet cash/expense persistence layer
- * (src/lib/white-sheet/persist.ts). Both must derive the same normalized
- * label from the same raw market name, or a persisted entry could silently
- * stop matching the row it was saved against.
- */
-export function normalizedMarketLabel(marketName: string | null): string {
-  return displayMarketName(marketName, "").normalize("NFC").trim();
-}
-
 function unresolvedMarketWarnings(
   sourceRows: readonly ProduceTransactionRow[],
 ): string[] {
@@ -284,6 +275,11 @@ export async function loadDigitalWhiteSheetCalculation(
 
   const dateRows = await fetchProduceRows(supabase, scope.businessDate);
   const sourceRows = await filterRowsBySource(supabase, dateRows, scope.sourceId);
+  const knownMarkets = new Set(
+    sourceRows
+      .map((row) => normalizedMarketLabel(row.market_name))
+      .filter((label) => label.length > 0),
+  );
   const rows = sourceRows.filter(
     (row) => normalizedMarketLabel(row.market_name) === targetMarket,
   );
@@ -293,6 +289,7 @@ export async function loadDigitalWhiteSheetCalculation(
     scope.sourceId,
     scope.businessDate,
     targetMarket,
+    knownMarkets,
   );
   const verifiedTransferWarnings =
     verifiedTransferResult.unresolvedAcceptedCount > 0

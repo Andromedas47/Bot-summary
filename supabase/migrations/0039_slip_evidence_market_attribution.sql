@@ -2,9 +2,13 @@
 -- verified-transfer totals (Digital White Sheet).
 --
 -- market_label comes from slip_batches.market_name at attach time (operator slip-
--- session header). market_label_normalized uses trim + Unicode NFC — equivalent
--- to the application path displayMarketName(...).normalize("NFC").trim() for
--- slip-session header market names, which are already isolated market tokens.
+-- session header). market_label_normalized stores trim + Unicode NFC for indexing
+-- and backfill only — it is NOT the trusted financial identity.
+--
+-- Trusted White Sheet attribution canonicalizes raw market_label in TypeScript
+-- via normalizedMarketLabel / displayMarketName / cleanMarketName, then validates
+-- against known produce markets for the source+date. Do not treat SQL NFC alone
+-- as equivalent to that application path.
 --
 -- Rows with no batch, a batch with NULL market_name, or otherwise unrecoverable
 -- market remain NULL (intentionally unresolved — never guessed).
@@ -14,9 +18,9 @@ ALTER TABLE public.slip_evidences
   ADD COLUMN market_label_normalized text;
 
 COMMENT ON COLUMN public.slip_evidences.market_label IS
-  'Raw market name copied from slip_batches.market_name when evidence is attached.';
+  'Raw market name copied from slip_batches.market_name when evidence is attached. Authoritative input for application canonicalization.';
 COMMENT ON COLUMN public.slip_evidences.market_label_normalized IS
-  'Normalized market identity for White Sheet financial scoping. NULL means unresolved.';
+  'Storage/index helper (trim + Unicode NFC). Trusted financial comparison uses TypeScript normalizedMarketLabel on market_label instead. NULL means unresolved at attach time.';
 
 CREATE INDEX slip_evidences_market_lookup_idx
   ON public.slip_evidences (source_id, market_label_normalized)

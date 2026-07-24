@@ -179,9 +179,9 @@ function makeIntegrationDatabase(options?: {
               gte: () => ({
                 lt: async () => ({
                   data: [
-                    { id: "evidence-1", market_label_normalized: MARKET_LABEL },
-                    { id: "evidence-2", market_label_normalized: MARKET_LABEL },
-                    { id: "evidence-3", market_label_normalized: MARKET_LABEL },
+                    { id: "evidence-1", market_label: MARKET_LABEL },
+                    { id: "evidence-2", market_label: MARKET_LABEL },
+                    { id: "evidence-3", market_label: MARKET_LABEL },
                   ],
                   error: null,
                 }),

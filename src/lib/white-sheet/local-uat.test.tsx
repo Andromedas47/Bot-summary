@@ -107,8 +107,8 @@ function makeLocalUatDatabase() {
   ];
   const rawMessages = [{ id: "raw-uat-1", source_id: SOURCE_ID }];
   const slipEvidences = [
-    { id: "ev-uat-1", received_at: "2026-07-24T02:00:00Z", market_label_normalized: MARKET_LABEL },
-    { id: "ev-uat-2", received_at: "2026-07-24T03:00:00Z", market_label_normalized: MARKET_LABEL },
+    { id: "ev-uat-1", received_at: "2026-07-24T02:00:00Z", market_label: MARKET_LABEL },
+    { id: "ev-uat-2", received_at: "2026-07-24T03:00:00Z", market_label: MARKET_LABEL },
   ];
   // Two checks share reference REF-100 (a duplicate transfer submission);
   // only the earlier one (chk-a) must count. REF-200 is unique and counted.

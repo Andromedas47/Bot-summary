@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { normalizedMarketLabel } from "@/lib/market";
 import { normalizeTransactionId, resolveGloballyAcceptedCheckIds } from "@/lib/slips/transaction-dedupe";
 import type { Database, TransferReconciliationRow } from "@/types/database";
 
@@ -27,6 +28,12 @@ export interface MarketScopedVerifiedTransferResult {
   unresolvedAcceptedAmount:  number;
 }
 
+export interface MarketScopedAggregationOptions {
+  marketLabelNormalized: string;
+  /** Canonical produce markets for source+date. Required for market scoping. */
+  knownMarkets: ReadonlySet<string>;
+}
+
 // business_date (ISO) 04:00 Bangkok = prev day 21:00 UTC.
 export function businessDateToUtcRange(businessDate: string): { startUtc: string; endUtc: string } {
   const [y, m, d] = businessDate.split("-").map(Number);
@@ -39,15 +46,29 @@ export function businessDateToUtcRange(businessDate: string): { startUtc: string
 
 /**
  * Applies global reference dedupe first, then optionally scopes accepted winners
- * to one normalized market label. Global dedupe always runs before market filter.
+ * to one canonical market label against known produce markets for the source/date.
+ *
+ * Classification (market-scoped only, after global dedupe):
+ * A. empty/null market → unresolved
+ * B. known + equals requested → attributed
+ * C. known + other market → skip (not unresolved)
+ * D. non-empty but not in knownMarkets → unresolved (HARD STOP upstream)
+ *
+ * Global dedupe always runs before market filter. Missing reference IDs have no
+ * duplicate claim (pre-existing limitation — not redesigned here).
  */
 export function aggregateGloballyAcceptedVerifiedTransfers(
   checks: readonly VerifiedTransferCheckRow[],
   evidenceMarketById: ReadonlyMap<string, string | null>,
   globalWinners: ReadonlySet<string>,
-  options?: { marketLabelNormalized?: string },
+  options?: MarketScopedAggregationOptions,
 ): MarketScopedVerifiedTransferResult {
   const targetMarket = options?.marketLabelNormalized;
+  const knownMarkets = options?.knownMarkets;
+  if (targetMarket !== undefined && !knownMarkets) {
+    throw new Error("knownMarkets is required when marketLabelNormalized is set");
+  }
+
   const countedWinnerReferences = new Set<string>();
   let attributedTotal = 0;
   let unresolvedAcceptedCount = 0;
@@ -60,13 +81,19 @@ export function aggregateGloballyAcceptedVerifiedTransfers(
       countedWinnerReferences.add(ref);
     }
 
-    if (targetMarket === undefined) {
+    if (targetMarket === undefined || !knownMarkets) {
       attributedTotal += Number(check.transfer_amount);
       continue;
     }
 
     const evidenceMarket = evidenceMarketById.get(check.evidence_id) ?? null;
     if (!evidenceMarket) {
+      unresolvedAcceptedCount += 1;
+      unresolvedAcceptedAmount += Number(check.transfer_amount);
+      continue;
+    }
+    if (!knownMarkets.has(evidenceMarket)) {
+      // Unknown / non-matching market — fail closed (not "another market").
       unresolvedAcceptedCount += 1;
       unresolvedAcceptedAmount += Number(check.transfer_amount);
       continue;
@@ -93,9 +120,11 @@ async function loadVerifiedTransferChecksForSourceDate(
 }> {
   const { startUtc, endUtc } = businessDateToUtcRange(businessDate);
 
+  // Trusted financial identity uses raw market_label + canonical TS helper.
+  // market_label_normalized (SQL trim/NFC) is storage/index only — not trusted alone.
   const { data: evidences, error: evidenceError } = await supabase
     .from("slip_evidences")
-    .select("id, market_label_normalized")
+    .select("id, market_label")
     .eq("source_id", sourceId)
     .gte("received_at", startUtc)
     .lt("received_at", endUtc);
@@ -105,10 +134,8 @@ async function loadVerifiedTransferChecksForSourceDate(
 
   const evidenceMarketById = new Map<string, string | null>();
   for (const evidence of evidences ?? []) {
-    evidenceMarketById.set(
-      evidence.id,
-      evidence.market_label_normalized?.normalize("NFC").trim() || null,
-    );
+    const canonical = normalizedMarketLabel(evidence.market_label);
+    evidenceMarketById.set(evidence.id, canonical || null);
   }
 
   const evidenceIds = [...evidenceMarketById.keys()];
@@ -179,14 +206,15 @@ export async function loadAiVerifiedTransferTotal(
 
 /**
  * Market-scoped verified-transfer loader for Digital White Sheet. Global dedupe
- * runs before market attribution; unattributed accepted winners are reported
- * separately and must trigger fail-closed handling upstream.
+ * runs before market attribution; unattributed / unknown-market accepted winners
+ * are reported separately and must trigger fail-closed handling upstream.
  */
 export async function loadMarketScopedAiVerifiedTransfers(
   supabase:                Supabase,
   sourceId:                string,
   businessDate:            string,
   marketLabelNormalized:   string,
+  knownMarkets:            ReadonlySet<string>,
 ): Promise<MarketScopedVerifiedTransferResult> {
   const targetMarket = marketLabelNormalized.normalize("NFC").trim();
   if (!targetMarket) {
@@ -211,7 +239,7 @@ export async function loadMarketScopedAiVerifiedTransfers(
     checks,
     evidenceMarketById,
     globalWinners,
-    { marketLabelNormalized: targetMarket },
+    { marketLabelNormalized: targetMarket, knownMarkets },
   );
 }
 

@@ -50,7 +50,7 @@ function makeFullSupabase(cfg: {
             eq: () => ({
               gte: () => ({
                 lt: async () => ({
-                  data: [{ id: "ev1", market_label_normalized: null }],
+                  data: [{ id: "ev1", market_label: null }],
                   error: null,
                 }),
               }),

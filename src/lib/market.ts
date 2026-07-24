@@ -104,3 +104,12 @@ export function isIdentifiedMarket(value: string | null | undefined): boolean {
 export function displayMarketName(value: string | null | undefined, fallback = "—"): string {
   return cleanMarketName(value) ?? fallback;
 }
+
+/**
+ * Canonical market identity for White Sheet financial comparison.
+ * Same boundary for produce rows and slip evidence market_label — never use
+ * SQL trim/NFC alone as the trusted identity.
+ */
+export function normalizedMarketLabel(marketName: string | null | undefined): string {
+  return displayMarketName(marketName, "").normalize("NFC").trim();
+}

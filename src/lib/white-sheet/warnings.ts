@@ -14,7 +14,7 @@
 const HARD_STOP_WARNING_PREFIX = "Multiple completed main produce sessions";
 
 export const UNATTRIBUTED_VERIFIED_TRANSFER_WARNING =
-  "พบสลิปที่ยืนยันแล้วแต่ยังระบุตลาดไม่ได้ กรุณาตรวจสอบก่อนใช้ยอดสรุป";
+  "พบสลิปที่ยืนยันแล้วแต่ไม่สามารถระบุตลาดให้ตรงกับรายการของวันนี้ได้ กรุณาตรวจสอบก่อนใช้ยอดสรุป";
 
 export function isHardStopWarning(warning: string): boolean {
   return warning.startsWith(HARD_STOP_WARNING_PREFIX)

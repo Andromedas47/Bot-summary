@@ -141,6 +141,10 @@ export interface Database {
           declared_transaction_type: string | null;
           ingest_idempotency_key:  string | null;
           ingest_source:           string | null;
+          voided_at:               string | null;
+          voided_by:               string | null;
+          void_reason:             string | null;
+          replacement_session_id:  string | null;
         };
         Insert: {
           id?:                      string;
@@ -160,6 +164,10 @@ export interface Database {
           declared_transaction_type?: string | null;
           ingest_idempotency_key?:  string | null;
           ingest_source?:           string | null;
+          voided_at?:               string | null;
+          voided_by?:               string | null;
+          void_reason?:             string | null;
+          replacement_session_id?:  string | null;
         };
         Update: {
           id?:                      string;
@@ -179,6 +187,10 @@ export interface Database {
           declared_transaction_type?: string | null;
           ingest_idempotency_key?:  string | null;
           ingest_source?:           string | null;
+          voided_at?:               string | null;
+          voided_by?:               string | null;
+          void_reason?:             string | null;
+          replacement_session_id?:  string | null;
         };
         Relationships: [];
       };
@@ -608,6 +620,8 @@ export interface Database {
           actual_cash_submitted:   number;
           created_at:              string;
           updated_at:              string;
+          finalized_at:            string | null;
+          finalized_by:            string | null;
         };
         Insert: {
           id?:                      string;
@@ -623,6 +637,8 @@ export interface Database {
           actual_cash_submitted?:   number;
           created_at?:              string;
           updated_at?:              string;
+          finalized_at?:            string | null;
+          finalized_by?:            string | null;
         };
         Update: {
           id?:                      string;
@@ -638,6 +654,119 @@ export interface Database {
           actual_cash_submitted?:   number;
           created_at?:              string;
           updated_at?:              string;
+          finalized_at?:            string | null;
+          finalized_by?:            string | null;
+        };
+        Relationships: [];
+      };
+
+      white_sheet_lifecycle_events: {
+        Row: {
+          id:                      string;
+          source_id:               string;
+          market_label_normalized: string;
+          business_date:           string;
+          event:                   "finalized" | "reopened";
+          actor:                   string;
+          reason:                  string | null;
+          created_at:              string;
+        };
+        Insert: {
+          id?:                      string;
+          source_id:                string;
+          market_label_normalized:  string;
+          business_date:            string;
+          event:                    "finalized" | "reopened";
+          actor:                    string;
+          reason?:                  string | null;
+          created_at?:              string;
+        };
+        Update: {
+          id?:                      string;
+          source_id?:               string;
+          market_label_normalized?: string;
+          business_date?:           string;
+          event?:                   "finalized" | "reopened";
+          actor?:                   string;
+          reason?:                  string | null;
+          created_at?:              string;
+        };
+        Relationships: [];
+      };
+
+      central_selling_prices: {
+        Row: {
+          id:            string;
+          product_key:   string;
+          unit_key:      string;
+          business_date: string;
+          price_satang:  number;
+          set_by:        string;
+          set_reason:    string | null;
+          created_at:    string;
+          updated_at:    string;
+        };
+        Insert: {
+          id?:            string;
+          product_key:    string;
+          unit_key:       string;
+          business_date:  string;
+          price_satang:   number;
+          set_by:         string;
+          set_reason?:    string | null;
+          created_at?:    string;
+          updated_at?:    string;
+        };
+        Update: {
+          id?:            string;
+          product_key?:   string;
+          unit_key?:      string;
+          business_date?: string;
+          price_satang?:  number;
+          set_by?:        string;
+          set_reason?:    string | null;
+          created_at?:    string;
+          updated_at?:    string;
+        };
+        Relationships: [];
+      };
+
+      central_selling_price_corrections: {
+        Row: {
+          id:                    string;
+          price_id:              string;
+          product_key:           string;
+          unit_key:              string;
+          business_date:         string;
+          previous_price_satang: number | null;
+          new_price_satang:      number;
+          actor:                 string;
+          reason:                string | null;
+          created_at:            string;
+        };
+        Insert: {
+          id?:                    string;
+          price_id:               string;
+          product_key:            string;
+          unit_key:               string;
+          business_date:          string;
+          previous_price_satang?: number | null;
+          new_price_satang:       number;
+          actor:                  string;
+          reason?:                string | null;
+          created_at?:            string;
+        };
+        Update: {
+          id?:                    string;
+          price_id?:              string;
+          product_key?:           string;
+          unit_key?:              string;
+          business_date?:         string;
+          previous_price_satang?: number | null;
+          new_price_satang?:      number;
+          actor?:                 string;
+          reason?:                string | null;
+          created_at?:            string;
         };
         Relationships: [];
       };
@@ -882,6 +1011,31 @@ export interface Database {
         };
         Relationships: [];
       };
+
+      slip_check_reference_resolutions: {
+        Row: {
+          id:           string;
+          check_id:     string;
+          reference_id: string;
+          actor:        string;
+          created_at:   string;
+        };
+        Insert: {
+          id?:           string;
+          check_id:      string;
+          reference_id:  string;
+          actor:         string;
+          created_at?:   string;
+        };
+        Update: {
+          id?:           string;
+          check_id?:     string;
+          reference_id?: string;
+          actor?:        string;
+          created_at?:   string;
+        };
+        Relationships: [];
+      };
     };
     Views: {
       produce_transactions: {
@@ -913,6 +1067,48 @@ export interface Database {
           base_transaction_type: string;
           session_kind:       string;
           declared_transaction_type: string | null;
+          voided_at:          string | null;
+          voided_by:          string | null;
+          void_reason:        string | null;
+          replacement_session_id: string | null;
+        };
+        Insert: never;
+        Update: never;
+        Relationships: [];
+      };
+      produce_transactions_all: {
+        Row: {
+          id:                 string;
+          item_number:        number | null;
+          product_name:       string;
+          price_per_unit:     number | null;
+          quantity:           number | null;
+          total_amount:       number | null;
+          unit:               string | null;
+          section:            string;
+          transaction_type:   string;
+          item_hash:          string | null;
+          item_created_at:    string;
+          session_id:         string;
+          transaction_date:   string | null;
+          transaction_time:   string | null;
+          market_name:        string | null;
+          staff_name:         string;
+          sender_name:        string | null;
+          session_created_at: string;
+          raw_message_id:     string;
+          source_message:     string | null;
+          basis_quantity:     number | null;
+          basis_unit:         string | null;
+          basis_price:        number | null;
+          pricing_mode:       string;
+          base_transaction_type: string;
+          session_kind:       string;
+          declared_transaction_type: string | null;
+          voided_at:          string | null;
+          voided_by:          string | null;
+          void_reason:        string | null;
+          replacement_session_id: string | null;
         };
         Insert: never;
         Update: never;
@@ -944,6 +1140,27 @@ export interface Database {
           p_quiet_seconds?: number;
         };
         Returns: Array<{ batch_id: string; is_new_batch: boolean }>;
+      };
+      set_central_selling_price: {
+        Args: {
+          p_product_key:    string;
+          p_unit_key:       string;
+          p_business_date:  string;
+          p_price_satang:   number;
+          p_actor:          string;
+          p_reason:         string | null;
+        };
+        Returns: {
+          id:            string;
+          product_key:   string;
+          unit_key:      string;
+          business_date: string;
+          price_satang:  number;
+          set_by:        string;
+          set_reason:    string | null;
+          created_at:    string;
+          updated_at:    string;
+        };
       };
     };
     CompositeTypes: { [_ in never]: never };

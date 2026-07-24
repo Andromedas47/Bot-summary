@@ -12,7 +12,7 @@ Database-to-calculation mappings:
 
 | Current source | Canonical field | Rule |
 | --- | --- | --- |
-| loader argument `marketKey` | `marketKey` | Stable application key supplied with the market/source mapping. No database column currently stores it on produce rows. |
+| loader argument `marketKey` | `marketKey` | Caller-supplied calculation grouping key. No authoritative database column currently stores it on produce rows; it is not approved as a persistence identity. |
 | normalized `produce_transactions.market_name` | `marketLabel` | Exact comparison after the existing `displayMarketName` normalization. |
 | loader argument `businessDate` / `produce_transactions.transaction_date` | `businessDate` | Rows are queried by exact ISO business date. |
 | `produce_transactions.product_name` | `transactions[].productName` | Persisted text; calculation applies its existing product normalization. |
@@ -32,6 +32,46 @@ required base has no void or supersede marker, so the loader does not invent
 one. More than one non-additional session for the same scoped market/date
 produces a warning because those completed rows can still represent duplicate
 business data. Raw rows are never mutated or deleted.
+
+## Pricing business decision (unresolved)
+
+Current technical behavior prices each withdrawal from its persisted withdrawal
+lot. When one product/day has withdrawals at multiple prices, the calculation
+allocates good and damaged returns against those lots in FIFO order before
+calculating sold quantity and expected sales.
+
+The business target under discussion is one central selling price per product
+per business day. No authoritative source, approval flow, or conflict rule for
+that central price has been agreed. FIFO is therefore the current deterministic
+technical behavior, not the final business rule. This integration does not
+change the pricing algorithm; persistence and UAT must remain blocked on an
+explicit business decision if central-price behavior is required.
+
+## Market identity before persistence
+
+The produce path has no persisted `market_key` source of truth. Its stable
+persisted inputs are the LINE `source_id` reached through
+`produce_transactions.raw_message_id`, the persisted `transaction_date`, and
+the stored `market_name`. The loader deterministically derives a normalized
+display label from `market_name`, but that label is not an immutable market ID.
+
+`manual_slip_sessions.market_key` is persisted for manual-slip session
+uniqueness, but it is derived from command text (including the `"default"`
+fallback) and is not attached to produce rows. The white-sheet loader's
+`marketKey` is caller-supplied and currently serves only calculation grouping;
+it cannot be treated as an authoritative persisted identity.
+
+Consequently, `source_id + normalized market label + business_date` is the only
+currently reproducible white-sheet identity across the produce data path. It
+still depends on label normalization and is not a substitute for an approved
+market registry. Using caller-supplied `marketKey` in a future uniqueness
+constraint could create duplicate white sheets when callers use different keys
+for the same source/label/date, or merge distinct markets when a reused default
+key collides.
+
+Before any persistence migration, the business must approve either a persisted
+market registry/mapping or one canonical derivation and backfill rule. Until
+then, no white-sheet persistence key is approved.
 
 ## Settlement persistence gap
 
@@ -73,13 +113,16 @@ Add a dedicated `digital_white_sheet_cash_entries` table:
 - `actual_cash_submitted numeric(12,2) not null default 0`
 - `created_at timestamptz not null default now()`
 - `updated_at timestamptz not null default now()`
-- unique constraint on `(source_id, market_key, business_date)`
+- proposed unique constraint on `(source_id, market_key, business_date)`,
+  contingent on resolving the market identity decision above
 - check constraints requiring every numeric money field to be non-negative
 - optional length constraint `char_length(other_note) <= 1000`
 
-The unique key gives one itemized cash submission per source/market/business
-date while allowing one LINE source to serve multiple markets. It does not
-change or reinterpret historical `settlement_entries`.
+Once an authoritative `market_key` exists, the proposed unique key would give
+one itemized cash submission per source/market/business date while allowing one
+LINE source to serve multiple markets. A caller-supplied key is not safe for
+that purpose. The proposal does not change or reinterpret historical
+`settlement_entries`.
 
 API proposal:
 

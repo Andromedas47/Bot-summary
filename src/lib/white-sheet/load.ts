@@ -57,30 +57,66 @@ function chunks<T>(values: readonly T[], size: number): T[][] {
   return result;
 }
 
-async function fetchProduceRows(
+export async function fetchProduceRows(
   supabase: Supabase,
   businessDate: string,
 ): Promise<ProduceTransactionRow[]> {
   const rows: ProduceTransactionRow[] = [];
+  const seenRowIds = new Set<string>();
   let offset = 0;
+  let expectedCount: number | null = null;
 
   while (true) {
-    const { data, error } = await supabase
+    const { data, error, count } = await supabase
       .from("produce_transactions")
-      .select(PRODUCE_TRANSACTION_SELECT)
+      .select(PRODUCE_TRANSACTION_SELECT, { count: "exact" })
       .eq("transaction_date", businessDate)
       .in("base_transaction_type", [...EFFECTIVE_TRANSACTION_TYPES])
       .order("item_created_at", { ascending: true })
+      .order("id", { ascending: true })
       .range(offset, offset + PAGE_SIZE - 1);
 
     if (error) {
       throw new WhiteSheetDataError(`produce transaction query failed: ${error.message}`);
     }
+    if (count === null) {
+      throw new WhiteSheetDataError(
+        "produce transaction pagination requires an exact row count",
+      );
+    }
+    if (expectedCount === null) {
+      expectedCount = count;
+    } else if (count !== expectedCount) {
+      throw new WhiteSheetDataError(
+        "produce transaction set changed during pagination",
+      );
+    }
 
     const page = (data ?? []) as ProduceTransactionRow[];
-    rows.push(...page);
-    if (page.length < PAGE_SIZE) break;
-    offset += PAGE_SIZE;
+    if (page.length === 0) {
+      if (offset === expectedCount) break;
+      throw new WhiteSheetDataError(
+        "produce transaction pagination stopped before all rows were loaded",
+      );
+    }
+
+    for (const row of page) {
+      if (seenRowIds.has(row.id)) {
+        throw new WhiteSheetDataError(
+          "produce transaction pagination returned a duplicate persisted row",
+        );
+      }
+      seenRowIds.add(row.id);
+      rows.push(row);
+    }
+
+    offset += page.length;
+    if (offset === expectedCount) break;
+    if (offset > expectedCount) {
+      throw new WhiteSheetDataError(
+        "produce transaction pagination exceeded the exact row count",
+      );
+    }
   }
 
   return rows;
@@ -179,6 +215,19 @@ function multipleSessionWarnings(rows: readonly ProduceTransactionRow[]): string
     : [];
 }
 
+function marketExclusionWarnings(
+  dateRows: readonly ProduceTransactionRow[],
+  marketRows: readonly ProduceTransactionRow[],
+): string[] {
+  const excludedCount = dateRows.length - marketRows.length;
+  return excludedCount > 0
+    ? [
+        `Excluded ${excludedCount} produce row(s) because their market label did not `
+          + "match or could not be normalized to the requested market.",
+      ]
+    : [];
+}
+
 export function toDigitalWhiteSheetSummary(
   calculation: DigitalWhiteSheetCalculation,
 ): DigitalWhiteSheetSummary {
@@ -244,7 +293,11 @@ export async function loadDigitalWhiteSheetCalculation(
 
   return {
     ...calculation,
-    warnings: [...calculation.warnings, ...multipleSessionWarnings(rows)],
+    warnings: [
+      ...calculation.warnings,
+      ...marketExclusionWarnings(dateRows, marketRows),
+      ...multipleSessionWarnings(rows),
+    ],
   };
 }
 

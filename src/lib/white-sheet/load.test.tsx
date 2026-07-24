@@ -5,6 +5,7 @@ import { DigitalWhiteSheetSummary as DashboardSummary } from "@/components/white
 import { buildWhiteSheetSummaryMessage } from "@/lib/line/white-sheet-summary";
 import type { Database } from "@/types/database";
 import {
+  fetchProduceRows,
   loadDigitalWhiteSheetCalculation,
   toDigitalWhiteSheetSummary,
 } from "./load";
@@ -12,8 +13,20 @@ import {
 const BUSINESS_DATE = "2026-07-23";
 const MARKET_LABEL = "ตลาดกี้";
 const SOURCE_ID = "C-market-1";
+type ProduceRow = Database["public"]["Views"]["produce_transactions"]["Row"];
 
-function makeIntegrationDatabase() {
+function makeIntegrationDatabase(options?: {
+  checks?: Array<{
+    id: string;
+    transfer_amount: number;
+    reference_id: string | null;
+  }>;
+  globalWinners?: Array<{
+    id: string;
+    reference_id: string;
+    created_at: string;
+  }>;
+}) {
   const produceRows = [
     {
       id: "item-1",
@@ -106,14 +119,14 @@ function makeIntegrationDatabase() {
     { id: "raw-2", source_id: SOURCE_ID },
     { id: "raw-3", source_id: SOURCE_ID },
   ];
-  const checks = [
+  const checks = options?.checks ?? [
     {
-      id: "check-original",
+      id: "check-duplicate",
       transfer_amount: 400,
       reference_id: "DUP-REF-001",
     },
     {
-      id: "check-duplicate",
+      id: "check-original",
       transfer_amount: 400,
       reference_id: "DUP-REF-001",
     },
@@ -127,17 +140,18 @@ function makeIntegrationDatabase() {
   const database = {
     from(table: string) {
       if (table === "produce_transactions") {
-        return {
-          select: () => ({
-            eq: () => ({
-              in: () => ({
-                order: () => ({
-                  range: async () => ({ data: produceRows, error: null }),
-                }),
-              }),
-            }),
+        const builder = {
+          select: () => builder,
+          eq: () => builder,
+          in: () => builder,
+          order: () => builder,
+          range: async () => ({
+            data: produceRows,
+            error: null,
+            count: produceRows.length,
           }),
         };
+        return builder;
       }
       if (table === "raw_messages") {
         return {
@@ -162,32 +176,32 @@ function makeIntegrationDatabase() {
       }
       if (table === "slip_checks") {
         return {
-          select: (columns: string) => ({
-            in: () => ({
-              in: () =>
-                columns.includes("transfer_amount")
-                  ? {
-                      not: async () => ({ data: checks, error: null }),
-                    }
-                  : {
-                      order: async () => ({
-                        data: [
-                          {
-                            id: "check-original",
-                            reference_id: "DUP-REF-001",
-                            created_at: "2026-07-23T00:00:00Z",
-                          },
-                          {
-                            id: "check-duplicate",
-                            reference_id: "DUP-REF-001",
-                            created_at: "2026-07-23T00:01:00Z",
-                          },
-                        ],
-                        error: null,
-                      }),
-                    },
-            }),
-          }),
+          select: (columns: string) => {
+            const scoped = columns.includes("transfer_amount");
+            const builder = {
+              in: () => builder,
+              not: () => builder,
+              order: () => builder,
+              then: (resolve: (value: unknown) => void) => resolve({
+                data: scoped
+                  ? checks
+                  : (options?.globalWinners ?? [
+                      {
+                        id: "check-original",
+                        reference_id: "DUP-REF-001",
+                        created_at: "2026-07-23T00:00:00Z",
+                      },
+                      {
+                        id: "check-duplicate",
+                        reference_id: "DUP-REF-001",
+                        created_at: "2026-07-23T00:01:00Z",
+                      },
+                    ]),
+                error: null,
+              }),
+            };
+            return builder;
+          },
         };
       }
       throw new Error(`unexpected table: ${table}`);
@@ -196,6 +210,104 @@ function makeIntegrationDatabase() {
 
   return { database, produceRows, rawMessages, checks };
 }
+
+function makeProduceLoaderDatabase(
+  produceRows: readonly ProduceRow[],
+  rawMessages: ReadonlyArray<{ id: string; source_id: string }>,
+  serverMaxRows = Number.POSITIVE_INFINITY,
+) {
+  const orderColumns: string[] = [];
+  const requestedRanges: Array<[number, number]> = [];
+
+  const database = {
+    from(table: string) {
+      if (table === "produce_transactions") {
+        let selectedBusinessDate = "";
+        const builder = {
+          select: () => builder,
+          eq: (column: string, value: unknown) => {
+            if (column === "transaction_date") selectedBusinessDate = String(value);
+            return builder;
+          },
+          in: () => builder,
+          order: (column: string) => {
+            orderColumns.push(column);
+            return builder;
+          },
+          range: async (start: number, end: number) => {
+            requestedRanges.push([start, end]);
+            const matchingRows = produceRows
+              .filter((row) => row.transaction_date === selectedBusinessDate)
+              .sort((left, right) =>
+                left.item_created_at.localeCompare(right.item_created_at)
+                  || left.id.localeCompare(right.id));
+            const returnedLength = Math.min(end - start + 1, serverMaxRows);
+            return {
+              data: matchingRows.slice(start, start + returnedLength),
+              error: null,
+              count: matchingRows.length,
+            };
+          },
+        };
+        return builder;
+      }
+      if (table === "raw_messages") {
+        return {
+          select: () => ({
+            in: async (_column: string, ids: string[]) => ({
+              data: rawMessages.filter((row) => ids.includes(row.id)),
+              error: null,
+            }),
+          }),
+        };
+      }
+      if (table === "slip_evidences") {
+        return {
+          select: () => ({
+            eq: () => ({
+              gte: () => ({
+                lt: async () => ({ data: [], error: null }),
+              }),
+            }),
+          }),
+        };
+      }
+      throw new Error(`unexpected table: ${table}`);
+    },
+  } as unknown as SupabaseClient<Database>;
+
+  return { database, orderColumns, requestedRanges };
+}
+
+describe("produce transaction pagination", () => {
+  test("loads tied timestamps exactly once across a truncated page boundary", async () => {
+    const { produceRows } = makeIntegrationDatabase();
+    const baseRow = produceRows[0] as ProduceRow;
+    const persistedRows = Array.from({ length: 1005 }, (_, index) => ({
+      ...baseRow,
+      id: `item-${String(index).padStart(4, "0")}`,
+      item_created_at: "2026-07-23T01:00:00Z",
+      raw_message_id: `raw-${String(index).padStart(4, "0")}`,
+    })).reverse();
+    const { database, orderColumns, requestedRanges } = makeProduceLoaderDatabase(
+      persistedRows,
+      [],
+      600,
+    );
+
+    const loadedRows = await fetchProduceRows(database, BUSINESS_DATE);
+    const loadedIds = loadedRows.map((row) => row.id);
+    const expectedIds = persistedRows.map((row) => row.id).sort();
+
+    expect(loadedIds).toEqual(expectedIds);
+    expect(new Set(loadedIds).size).toBe(persistedRows.length);
+    expect(orderColumns.slice(0, 2)).toEqual(["item_created_at", "id"]);
+    expect(requestedRanges).toEqual([
+      [0, 999],
+      [600, 1599],
+    ]);
+  });
+});
 
 describe("digital white-sheet real-data integration", () => {
   test("loads one market/date and feeds the same canonical summary to Dashboard and LINE", async () => {
@@ -273,5 +385,123 @@ describe("digital white-sheet real-data integration", () => {
     expect(dashboardHtml).toContain("เงินขาด");
     expect(lineMessage).toContain("เงินขาด");
     expect({ produceRows, rawMessages, checks }).toEqual(sourceSnapshot);
+  });
+
+  test("filters mixed dates and sources while warning on mixed or unresolved markets", async () => {
+    const { produceRows } = makeIntegrationDatabase();
+    const baseRow = produceRows[0] as ProduceRow;
+    const scopedRows: ProduceRow[] = [
+      {
+        ...baseRow,
+        id: "target-row",
+        raw_message_id: "raw-target",
+      },
+      {
+        ...baseRow,
+        id: "other-date-row",
+        transaction_date: "2026-07-22",
+        raw_message_id: "raw-other-date",
+      },
+      {
+        ...baseRow,
+        id: "other-market-row",
+        market_name: "Other Market",
+        raw_message_id: "raw-other-market",
+      },
+      {
+        ...baseRow,
+        id: "unresolved-market-row",
+        market_name: null,
+        raw_message_id: "raw-unresolved-market",
+      },
+      {
+        ...baseRow,
+        id: "other-source-row",
+        raw_message_id: "raw-other-source",
+      },
+    ];
+    const { database } = makeProduceLoaderDatabase(scopedRows, [
+      { id: "raw-target", source_id: SOURCE_ID },
+      { id: "raw-other-date", source_id: SOURCE_ID },
+      { id: "raw-other-market", source_id: SOURCE_ID },
+      { id: "raw-unresolved-market", source_id: SOURCE_ID },
+      { id: "raw-other-source", source_id: "C-market-other" },
+    ]);
+
+    const calculation = await loadDigitalWhiteSheetCalculation(
+      database,
+      {
+        sourceId: SOURCE_ID,
+        marketKey: "talad-kee",
+        marketLabel: MARKET_LABEL,
+        businessDate: BUSINESS_DATE,
+      },
+      {
+        expenses: {
+          labor: 0,
+          locationFee: 0,
+          bag: 0,
+          snack: 0,
+          other: 0,
+          otherNote: "",
+        },
+        actualCashSubmitted: 1050,
+      },
+    );
+
+    expect(calculation.expectedSales).toBe(1050);
+    expect(calculation.items).toHaveLength(1);
+    const exclusionWarning = calculation.warnings.find((warning) =>
+      warning.startsWith("Excluded 2 produce row(s)"));
+    expect(exclusionWarning).toBeDefined();
+    expect(exclusionWarning).not.toContain("Other Market");
+    expect(exclusionWarning).not.toContain("raw-");
+  });
+
+  test("excludes a scoped slip when its global winner belongs to another source", async () => {
+    const { database } = makeIntegrationDatabase({
+      checks: [
+        {
+          id: "check-local-duplicate",
+          transfer_amount: 400,
+          reference_id: "CROSS-SOURCE-REF",
+        },
+        {
+          id: "check-without-reference",
+          transfer_amount: 100,
+          reference_id: null,
+        },
+      ],
+      globalWinners: [
+        {
+          id: "check-other-source-winner",
+          reference_id: "CROSS-SOURCE-REF",
+          created_at: "2026-07-22T00:00:00Z",
+        },
+      ],
+    });
+
+    const calculation = await loadDigitalWhiteSheetCalculation(
+      database,
+      {
+        sourceId: SOURCE_ID,
+        marketKey: "talad-kee",
+        marketLabel: MARKET_LABEL,
+        businessDate: BUSINESS_DATE,
+      },
+      {
+        expenses: {
+          labor: 0,
+          locationFee: 0,
+          bag: 0,
+          snack: 0,
+          other: 0,
+          otherNote: "",
+        },
+        actualCashSubmitted: 875,
+      },
+    );
+
+    expect(calculation.verifiedTransfers).toBe(100);
   });
 });

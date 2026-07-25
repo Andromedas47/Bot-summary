@@ -23,16 +23,21 @@ function rowKey(sourceId: string, marketLabelNormalized: string, businessDate: s
 
 let nextId = 1;
 
+type LifecycleEvent = { event: string; actor: string; reason?: string | null };
+
 /**
- * In-memory fake mirroring the real table. Supports every chain shape
- * persist.ts calls: select().eq().eq().eq().maybeSingle() for reads,
- * insert().select().single() for first-time saves,
- * update().eq().is().select().maybeSingle() for corrections/finalize/reopen.
- * Filters are matched generically (eq/is) against the full row, not just the
- * composite key, so the id-based update path used by finalize/reopen works
- * the same way the real table would.
+ * In-memory fake mirroring the real table + atomic lifecycle RPCs.
+ * Supports: select/insert/update for normal save paths, and
+ * rpc(finalize_white_sheet_cash_entry|reopen_white_sheet_cash_entry) which
+ * apply state mutation + audit insert together (same as the Postgres RPCs).
  */
-function makeFakeSupabase(seed: Array<Partial<Row> & Pick<Row, "source_id" | "market_label_normalized" | "business_date">> = []) {
+function makeFakeSupabase(
+  seed: Array<Partial<Row> & Pick<Row, "source_id" | "market_label_normalized" | "business_date">> = [],
+  options: {
+    failFinalizeAudit?: boolean;
+    failReopenAudit?: boolean;
+  } = {},
+) {
   const rows = new Map<string, Row>(
     seed.map((row) => {
       const full: Row = {
@@ -63,17 +68,25 @@ function makeFakeSupabase(seed: Array<Partial<Row> & Pick<Row, "source_id" | "ma
     });
   }
 
-  const lifecycleEvents: Array<{ event: string; actor: string; reason?: string | null }> = [];
+  const lifecycleEvents: LifecycleEvent[] = [];
+  const rpcCalls: Array<{ fn: string; args: Record<string, unknown> }> = [];
+
+  function findByIdentity(sourceId: string, market: string, businessDate: string): [string, Row] | null {
+    const found = [...rows.entries()].find(
+      ([, row]) =>
+        row.source_id === sourceId &&
+        row.market_label_normalized === market &&
+        row.business_date === businessDate,
+    );
+    return found ?? null;
+  }
 
   const database = {
     from(table: string) {
       if (table === "white_sheet_lifecycle_events") {
-        return {
-          insert: (values: { event: string; actor: string; reason?: string | null }) => {
-            lifecycleEvents.push(values);
-            return Promise.resolve({ error: null });
-          },
-        };
+        throw new Error(
+          "lifecycle audit must go through finalize/reopen RPCs — direct insert is forbidden",
+        );
       }
       if (table !== "digital_white_sheet_cash_entries") {
         throw new Error(`unexpected table: ${table}`);
@@ -146,9 +159,95 @@ function makeFakeSupabase(seed: Array<Partial<Row> & Pick<Row, "source_id" | "ma
         },
       };
     },
+    rpc(fn: string, args: Record<string, unknown>) {
+      rpcCalls.push({ fn, args });
+
+      if (fn === "finalize_white_sheet_cash_entry") {
+        const found = findByIdentity(
+          String(args.p_source_id),
+          String(args.p_market_label_normalized),
+          String(args.p_business_date),
+        );
+        if (!found || found[1].finalized_at !== null) {
+          return Promise.resolve({
+            data: null,
+            error: {
+              message:
+                "no SUBMITTED White Sheet entry found for this identity, or it is already finalized",
+            },
+          });
+        }
+        if (options.failFinalizeAudit) {
+          // Simulate audit INSERT failure inside the RPC transaction: no state change.
+          return Promise.resolve({
+            data: null,
+            error: { message: "forced finalize audit failure" },
+          });
+        }
+        const [id, existing] = found;
+        const merged: Row = {
+          ...existing,
+          finalized_at: "2026-07-24T02:00:00Z",
+          finalized_by: String(args.p_actor),
+          updated_at: "2026-07-24T02:00:00Z",
+        };
+        rows.set(id, merged);
+        lifecycleEvents.push({ event: "finalized", actor: String(args.p_actor) });
+        return Promise.resolve({ data: merged, error: null });
+      }
+
+      if (fn === "reopen_white_sheet_cash_entry") {
+        const reason = String(args.p_reason ?? "").trim();
+        if (!reason) {
+          return Promise.resolve({
+            data: null,
+            error: { message: "reason is required to reopen a finalized entry" },
+          });
+        }
+        const found = findByIdentity(
+          String(args.p_source_id),
+          String(args.p_market_label_normalized),
+          String(args.p_business_date),
+        );
+        if (!found || found[1].finalized_at === null) {
+          return Promise.resolve({
+            data: null,
+            error: { message: "no FINALIZED White Sheet entry found for this identity" },
+          });
+        }
+        if (options.failReopenAudit) {
+          // Simulate audit INSERT failure inside the RPC transaction: stay FINALIZED.
+          return Promise.resolve({
+            data: null,
+            error: { message: "forced reopen audit failure" },
+          });
+        }
+        const [id, existing] = found;
+        const merged: Row = {
+          ...existing,
+          finalized_at: null,
+          finalized_by: null,
+          updated_at: "2026-07-24T03:00:00Z",
+        };
+        rows.set(id, merged);
+        lifecycleEvents.push({
+          event: "reopened",
+          actor: String(args.p_actor),
+          reason,
+        });
+        return Promise.resolve({ data: merged, error: null });
+      }
+
+      return Promise.resolve({ data: null, error: { message: `unexpected rpc: ${fn}` } });
+    },
   };
 
-  return { database: database as unknown as SupabaseClient<Database>, rows, lifecycleEvents };
+  return {
+    database: database as unknown as SupabaseClient<Database>,
+    rows,
+    lifecycleEvents,
+    rpcCalls,
+  };
 }
 
 // ── loadWhiteSheetCashEntry ─────────────────────────────────────────────────
@@ -516,5 +615,87 @@ describe("White Sheet lifecycle (finalize/reopen)", () => {
     await expect(
       reopenWhiteSheetCashEntry(database, IDENTITY, "admin-2", "no reason needed"),
     ).rejects.toThrow(WhiteSheetPersistenceError);
+  });
+
+  it("A. finalize calls one atomic RPC (no separate lifecycle insert)", async () => {
+    const { database, rpcCalls } = makeFakeSupabase();
+    await saveWhiteSheetCashEntry(database, VALID_SAVE_INPUT);
+
+    await finalizeWhiteSheetCashEntry(database, IDENTITY, "admin-1");
+
+    expect(rpcCalls.map((c) => c.fn)).toEqual(["finalize_white_sheet_cash_entry"]);
+    expect(rpcCalls[0].args).toEqual({
+      p_source_id: IDENTITY.sourceId,
+      p_market_label_normalized: IDENTITY.marketLabelNormalized,
+      p_business_date: IDENTITY.businessDate,
+      p_actor: "admin-1",
+    });
+  });
+
+  it("B. reopen calls one atomic RPC", async () => {
+    const { database, rpcCalls } = makeFakeSupabase();
+    await saveWhiteSheetCashEntry(database, VALID_SAVE_INPUT);
+    await finalizeWhiteSheetCashEntry(database, IDENTITY, "admin-1");
+    rpcCalls.length = 0;
+
+    await reopenWhiteSheetCashEntry(database, IDENTITY, "admin-2", "operator reported a typo");
+
+    expect(rpcCalls.map((c) => c.fn)).toEqual(["reopen_white_sheet_cash_entry"]);
+    expect(rpcCalls[0].args).toEqual({
+      p_source_id: IDENTITY.sourceId,
+      p_market_label_normalized: IDENTITY.marketLabelNormalized,
+      p_business_date: IDENTITY.businessDate,
+      p_actor: "admin-2",
+      p_reason: "operator reported a typo",
+    });
+  });
+
+  it("C. failed audit inside finalize RPC rolls back finalize", async () => {
+    const { database, rows, lifecycleEvents } = makeFakeSupabase([], {
+      failFinalizeAudit: true,
+    });
+    await saveWhiteSheetCashEntry(database, VALID_SAVE_INPUT);
+
+    await expect(finalizeWhiteSheetCashEntry(database, IDENTITY, "admin-1")).rejects.toThrow(
+      /forced finalize audit failure/,
+    );
+
+    const row = [...rows.values()][0];
+    expect(row.finalized_at).toBeNull();
+    expect(row.finalized_by).toBeNull();
+    expect(lifecycleEvents).toEqual([]);
+  });
+
+  it("D. failed audit inside reopen RPC rolls back reopen", async () => {
+    const failing = makeFakeSupabase(
+      [
+        {
+          id: "row-finalized",
+          source_id: IDENTITY.sourceId,
+          market_label_normalized: IDENTITY.marketLabelNormalized,
+          business_date: IDENTITY.businessDate,
+          labor: 100,
+          location_fee: 50,
+          bag: 10,
+          snack: 5,
+          other: 0,
+          other_note: null,
+          actual_cash_submitted: 1000,
+          finalized_at: "2026-07-24T02:00:00Z",
+          finalized_by: "admin-1",
+        },
+      ],
+      { failReopenAudit: true },
+    );
+    failing.lifecycleEvents.push({ event: "finalized", actor: "admin-1" });
+
+    await expect(
+      reopenWhiteSheetCashEntry(failing.database, IDENTITY, "admin-2", "typo"),
+    ).rejects.toThrow(/forced reopen audit failure/);
+
+    const still = [...failing.rows.values()][0];
+    expect(still.finalized_at).toBe("2026-07-24T02:00:00Z");
+    expect(still.finalized_by).toBe("admin-1");
+    expect(failing.lifecycleEvents).toEqual([{ event: "finalized", actor: "admin-1" }]);
   });
 });

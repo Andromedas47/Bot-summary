@@ -327,11 +327,61 @@ function makeCloseDatabase(options?: {
         };
       }
       if (table === "white_sheet_lifecycle_events") {
-        return {
-          insert: async () => ({ error: null }),
-        };
+        throw new Error(
+          "lifecycle audit must go through finalize/reopen RPCs — direct insert is forbidden",
+        );
       }
       throw new Error(`unexpected table: ${table}`);
+    },
+    rpc(fn: string, args: Record<string, unknown>) {
+      if (fn === "finalize_white_sheet_cash_entry") {
+        const key = cashKey(
+          String(args.p_source_id),
+          String(args.p_market_label_normalized),
+          String(args.p_business_date),
+        );
+        const existing = cashEntries.get(key);
+        if (!existing || existing.finalized_at !== null) {
+          return Promise.resolve({
+            data: null,
+            error: {
+              message:
+                "no SUBMITTED White Sheet entry found for this identity, or it is already finalized",
+            },
+          });
+        }
+        const merged: CashEntryRow = {
+          ...existing,
+          finalized_at: "2026-07-24T02:00:00Z",
+          finalized_by: String(args.p_actor),
+          updated_at: "2026-07-24T02:00:00Z",
+        };
+        cashEntries.set(key, merged);
+        return Promise.resolve({ data: merged, error: null });
+      }
+      if (fn === "reopen_white_sheet_cash_entry") {
+        const key = cashKey(
+          String(args.p_source_id),
+          String(args.p_market_label_normalized),
+          String(args.p_business_date),
+        );
+        const existing = cashEntries.get(key);
+        if (!existing || existing.finalized_at === null) {
+          return Promise.resolve({
+            data: null,
+            error: { message: "no FINALIZED White Sheet entry found for this identity" },
+          });
+        }
+        const merged: CashEntryRow = {
+          ...existing,
+          finalized_at: null,
+          finalized_by: null,
+          updated_at: "2026-07-24T03:00:00Z",
+        };
+        cashEntries.set(key, merged);
+        return Promise.resolve({ data: merged, error: null });
+      }
+      return Promise.resolve({ data: null, error: { message: `unexpected rpc: ${fn}` } });
     },
   };
 

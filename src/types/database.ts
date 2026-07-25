@@ -1183,6 +1183,57 @@ export interface Database {
           updated_at:    string;
         };
       };
+      finalize_white_sheet_cash_entry: {
+        Args: {
+          p_source_id:               string;
+          p_market_label_normalized: string;
+          p_business_date:           string;
+          p_actor:                   string;
+        };
+        Returns: {
+          id:                      string;
+          source_id:               string;
+          market_label_normalized: string;
+          business_date:           string;
+          labor:                   number;
+          location_fee:            number;
+          bag:                     number;
+          snack:                   number;
+          other:                   number;
+          other_note:              string | null;
+          actual_cash_submitted:   number;
+          created_at:              string;
+          updated_at:              string;
+          finalized_at:            string | null;
+          finalized_by:            string | null;
+        };
+      };
+      reopen_white_sheet_cash_entry: {
+        Args: {
+          p_source_id:               string;
+          p_market_label_normalized: string;
+          p_business_date:           string;
+          p_actor:                   string;
+          p_reason:                  string;
+        };
+        Returns: {
+          id:                      string;
+          source_id:               string;
+          market_label_normalized: string;
+          business_date:           string;
+          labor:                   number;
+          location_fee:            number;
+          bag:                     number;
+          snack:                   number;
+          other:                   number;
+          other_note:              string | null;
+          actual_cash_submitted:   number;
+          created_at:              string;
+          updated_at:              string;
+          finalized_at:            string | null;
+          finalized_by:            string | null;
+        };
+      };
     };
     CompositeTypes: { [_ in never]: never };
     Enums: {

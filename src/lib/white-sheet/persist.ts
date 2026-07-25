@@ -275,16 +275,12 @@ export async function saveWhiteSheetCashEntry(
   return toEntryState(data as CashEntryRow);
 }
 
-const SELECT_WITH_LIFECYCLE =
-  "labor, location_fee, bag, snack, other, other_note, actual_cash_submitted, updated_at, finalized_at, finalized_by";
-
 /**
  * BR-06: admin-only transition SUBMITTED -> FINALIZED. Callers must call
  * requireAdminActor() first (see src/lib/auth/admin.ts) and pass its actor
  * id. Requires a SUBMITTED entry to already exist — there is nothing to
- * finalize for NOT_SUBMITTED. Atomic: the UPDATE only matches while
- * finalized_at is still NULL, so it cannot finalize twice or race another
- * finalize.
+ * finalize for NOT_SUBMITTED. Atomic via finalize_white_sheet_cash_entry(...):
+ * guarded UPDATE + lifecycle audit INSERT in one database transaction.
  */
 export async function finalizeWhiteSheetCashEntry(
   supabase: Supabase,
@@ -299,42 +295,32 @@ export async function finalizeWhiteSheetCashEntry(
   const businessDate = requireBusinessDate(rawIdentity.businessDate);
   const actorId = requireIdentityField(actor, "actor");
 
-  const finalizedAt = new Date().toISOString();
-  const { data, error } = await supabase
-    .from(TABLE)
-    .update({ finalized_at: finalizedAt, finalized_by: actorId })
-    .eq("source_id", sourceId)
-    .eq("market_label_normalized", marketLabelNormalized)
-    .eq("business_date", businessDate)
-    .is("finalized_at", null)
-    .select(SELECT_WITH_LIFECYCLE)
-    .maybeSingle();
+  const { data, error } = await supabase.rpc("finalize_white_sheet_cash_entry", {
+    p_source_id: sourceId,
+    p_market_label_normalized: marketLabelNormalized,
+    p_business_date: businessDate,
+    p_actor: actorId,
+  });
 
   if (error) {
     throw new WhiteSheetPersistenceError(`finalize failed: ${error.message}`);
   }
-  if (!data) {
+  const row = (Array.isArray(data) ? data[0] : data) as CashEntryRow | null;
+  if (!row) {
     throw new WhiteSheetPersistenceError(
       "no SUBMITTED White Sheet entry found for this identity, or it is already finalized",
     );
   }
 
-  await supabase.from("white_sheet_lifecycle_events").insert({
-    source_id: sourceId,
-    market_label_normalized: marketLabelNormalized,
-    business_date: businessDate,
-    event: "finalized",
-    actor: actorId,
-  });
-
-  return toEntryState(data as CashEntryRow);
+  return toEntryState(row);
 }
 
 /**
  * BR-06/BR-05: explicit privileged reopen — the only way a FINALIZED entry
  * ever becomes editable again. Never a silent overwrite: requires a
  * non-empty reason and records an audit event. Callers must call
- * requireAdminActor() first.
+ * requireAdminActor() first. Atomic via reopen_white_sheet_cash_entry(...):
+ * guarded UPDATE + lifecycle audit INSERT in one database transaction.
  */
 export async function reopenWhiteSheetCashEntry(
   supabase: Supabase,
@@ -354,31 +340,21 @@ export async function reopenWhiteSheetCashEntry(
     throw new WhiteSheetPersistenceError("reason is required to reopen a finalized entry");
   }
 
-  const { data, error } = await supabase
-    .from(TABLE)
-    .update({ finalized_at: null, finalized_by: null })
-    .eq("source_id", sourceId)
-    .eq("market_label_normalized", marketLabelNormalized)
-    .eq("business_date", businessDate)
-    .not("finalized_at", "is", null)
-    .select(SELECT_WITH_LIFECYCLE)
-    .maybeSingle();
+  const { data, error } = await supabase.rpc("reopen_white_sheet_cash_entry", {
+    p_source_id: sourceId,
+    p_market_label_normalized: marketLabelNormalized,
+    p_business_date: businessDate,
+    p_actor: actorId,
+    p_reason: trimmedReason,
+  });
 
   if (error) {
     throw new WhiteSheetPersistenceError(`reopen failed: ${error.message}`);
   }
-  if (!data) {
+  const row = (Array.isArray(data) ? data[0] : data) as CashEntryRow | null;
+  if (!row) {
     throw new WhiteSheetPersistenceError("no FINALIZED White Sheet entry found for this identity");
   }
 
-  await supabase.from("white_sheet_lifecycle_events").insert({
-    source_id: sourceId,
-    market_label_normalized: marketLabelNormalized,
-    business_date: businessDate,
-    event: "reopened",
-    actor: actorId,
-    reason: trimmedReason,
-  });
-
-  return toEntryState(data as CashEntryRow);
+  return toEntryState(row);
 }

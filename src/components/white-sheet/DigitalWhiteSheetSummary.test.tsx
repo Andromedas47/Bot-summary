@@ -90,9 +90,9 @@ describe("DigitalWhiteSheetSummary", () => {
     const hardStopFixture = {
       ...shortageWhiteSheetFixture,
       warnings: [
-        "Multiple completed main produce sessions (2) exist for this market and business " +
-          "date; current schema has no void/supersede marker, so duplicate business data " +
-          "may still be included.",
+        "Multiple completed main produce sessions (2) exist for this market and business "
+          + "date with the same transaction type (เบิก); multiple ACTIVE main sessions of "
+          + "the same type must be reviewed or voided before trusting the summary.",
         "พบสลิปโอนซ้ำในช่วงเวลาเดียวกัน",
       ],
     };

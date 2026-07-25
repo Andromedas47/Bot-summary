@@ -6,10 +6,11 @@
  * finalization) — see requireTrustedWhiteSheetSummary in ./compose.
  *
  * The multiple-completed-main-session warning (see load.ts
- * multipleSessionWarnings) is a HARD STOP: the required base has no
- * void/supersede marker, so duplicate business data may already be
- * double-counted. Duplicate sessions are never auto-resolved; this only
- * classifies the warning so every consumer treats it the same way.
+ * multipleSessionWarnings) is a HARD STOP when multiple ACTIVE main sessions
+ * of the same base_transaction_type remain for a market/date. Voided sessions
+ * are already excluded by produce_transactions (0037). Duplicate sessions are
+ * never auto-resolved; this only classifies the warning so every consumer
+ * treats it the same way.
  */
 const HARD_STOP_WARNING_PREFIX = "Multiple completed main produce sessions";
 

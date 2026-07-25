@@ -5,10 +5,16 @@ import { DigitalWhiteSheetSummary as DashboardSummary } from "@/components/white
 import { buildWhiteSheetSummaryMessage } from "@/lib/line/white-sheet-summary";
 import type { Database } from "@/types/database";
 import {
+  loadDigitalWhiteSheetPageModel,
+  requireTrustedWhiteSheetSummary,
+  WhiteSheetHardStopError,
+} from "./compose";
+import {
   fetchProduceRows,
   loadDigitalWhiteSheetCalculation,
   toDigitalWhiteSheetSummary,
 } from "./load";
+import { hasHardStopWarning } from "./warnings";
 
 const BUSINESS_DATE = "2026-07-23";
 const MARKET_LABEL = "ตลาดกี้";
@@ -409,10 +415,15 @@ describe("digital white-sheet real-data integration", () => {
     expect(calculation.warnings).toEqual(
       expect.arrayContaining([
         expect.stringContaining("Uncategorized product: มะพร้าวพิเศษ (ลูก)"),
-        expect.stringContaining("Multiple completed main produce sessions (2)"),
         expect.stringContaining("ยังไม่มีเลขอ้างอิง"),
       ]),
     );
+    // One main เบิก + one main คืน/คืนเสีย session is a normal mixed-type day,
+    // not a duplicate hard stop.
+    expect(
+      calculation.warnings.some((warning) =>
+        warning.startsWith("Multiple completed main produce sessions")),
+    ).toBe(false);
 
     const summary = toDigitalWhiteSheetSummary(calculation);
     const dashboardHtml = renderToStaticMarkup(
@@ -603,5 +614,382 @@ describe("digital white-sheet real-data integration", () => {
     );
 
     expect(calculation.verifiedTransfers).toBe(100);
+  });
+});
+
+const ZERO_CASH = {
+  expenses: {
+    labor: 0,
+    locationFee: 0,
+    bag: 0,
+    snack: 0,
+    other: 0,
+    otherNote: "",
+  },
+  actualCashSubmitted: 0,
+} as const;
+
+function makeDuplicateDetectionRow(
+  overrides: Partial<ProduceRow> & Pick<
+    ProduceRow,
+    "id" | "session_id" | "base_transaction_type" | "transaction_type"
+  >,
+): ProduceRow {
+  return {
+    product_name: "ทุเรียนหมอนทอง",
+    quantity: 1,
+    unit: "ลูก",
+    price_per_unit: overrides.base_transaction_type === "เบิก" ? 40 : null,
+    item_created_at: "2026-07-25T01:00:00Z",
+    transaction_date: "2026-07-25",
+    market_name: "ทดสอบไวท์ชีท",
+    raw_message_id: "raw-dup-1",
+    basis_quantity: null,
+    basis_price: null,
+    session_kind: "main",
+    ...overrides,
+  } as ProduceRow;
+}
+
+function makeDuplicateDetectionDatabase(produceRows: readonly ProduceRow[]) {
+  const rawMessages = [...new Set(produceRows.map((row) => row.raw_message_id))]
+    .map((id) => ({ id, source_id: SOURCE_ID }));
+  const productKeysByIdentity = new Map<string, {
+    product_key: string;
+    unit_key: string;
+    price_satang: number;
+  }>();
+  for (const row of produceRows) {
+    if (row.base_transaction_type !== "เบิก" || !row.unit || row.price_per_unit === null) {
+      continue;
+    }
+    const identity = `${row.product_name}::${row.unit}`;
+    if (productKeysByIdentity.has(identity)) continue;
+    productKeysByIdentity.set(identity, {
+      product_key: row.product_name,
+      unit_key: row.unit,
+      price_satang: Math.round(Number(row.price_per_unit) * 100),
+    });
+  }
+  const productKeys = [...productKeysByIdentity.values()];
+
+  const database = {
+    from(table: string) {
+      if (table === "produce_transactions") {
+        const builder = {
+          select: () => builder,
+          eq: () => builder,
+          in: () => builder,
+          order: () => builder,
+          range: async () => ({
+            data: produceRows,
+            error: null,
+            count: produceRows.length,
+          }),
+        };
+        return builder;
+      }
+      if (table === "raw_messages") {
+        return {
+          select: () => ({
+            in: async () => ({ data: rawMessages, error: null }),
+          }),
+        };
+      }
+      if (table === "slip_evidences") {
+        return {
+          select: () => ({
+            eq: () => ({
+              gte: () => ({
+                lt: async () => ({ data: [], error: null }),
+              }),
+            }),
+          }),
+        };
+      }
+      if (table === "central_selling_prices") {
+        return {
+          select: () => ({
+            eq: async () => ({ data: productKeys, error: null }),
+          }),
+        };
+      }
+      if (table === "digital_white_sheet_cash_entries") {
+        return {
+          select: () => {
+            const builder = {
+              eq: () => builder,
+              maybeSingle: async () => ({
+                data: {
+                  id: "entry-smoke",
+                  source_id: SOURCE_ID,
+                  market_label_normalized: "ทดสอบไวท์ชีท",
+                  business_date: "2026-07-25",
+                  labor: 0,
+                  location_fee: 0,
+                  bag: 0,
+                  snack: 0,
+                  other: 0,
+                  other_note: null,
+                  actual_cash_submitted: 320,
+                  finalized_at: null,
+                  finalized_by: null,
+                  created_at: "2026-07-25T00:00:00Z",
+                  updated_at: "2026-07-25T00:00:00Z",
+                },
+                error: null,
+              }),
+            };
+            return builder;
+          },
+        };
+      }
+      throw new Error(`unexpected table: ${table}`);
+    },
+  } as unknown as SupabaseClient<Database>;
+
+  return database;
+}
+
+describe("multiple main-session duplicate detection by transaction type", () => {
+  const SCOPE = {
+    sourceId: SOURCE_ID,
+    marketKey: "test-white-sheet",
+    marketLabel: "ทดสอบไวท์ชีท",
+    businessDate: "2026-07-25",
+  };
+
+  test("one main เบิก + one main คืน does not warn", async () => {
+    const database = makeDuplicateDetectionDatabase([
+      makeDuplicateDetectionRow({
+        id: "w1",
+        session_id: "main-withdrawal",
+        base_transaction_type: "เบิก",
+        transaction_type: "เบิก",
+        quantity: 10,
+        price_per_unit: 40,
+      }),
+      makeDuplicateDetectionRow({
+        id: "r1",
+        session_id: "main-return",
+        base_transaction_type: "คืน",
+        transaction_type: "คืน",
+        quantity: 2,
+        item_created_at: "2026-07-25T02:00:00Z",
+        raw_message_id: "raw-dup-2",
+      }),
+    ]);
+
+    const calculation = await loadDigitalWhiteSheetCalculation(database, SCOPE, ZERO_CASH);
+    expect(
+      calculation.warnings.some((warning) =>
+        warning.startsWith("Multiple completed main produce sessions")),
+    ).toBe(false);
+  });
+
+  test("smoke-test case: 10 withdrawal / 2 return @ 40 allows a trusted summary", async () => {
+    const database = makeDuplicateDetectionDatabase([
+      makeDuplicateDetectionRow({
+        id: "w1",
+        session_id: "main-withdrawal",
+        base_transaction_type: "เบิก",
+        transaction_type: "เบิก",
+        quantity: 10,
+        price_per_unit: 40,
+      }),
+      makeDuplicateDetectionRow({
+        id: "r1",
+        session_id: "main-return",
+        base_transaction_type: "คืน",
+        transaction_type: "คืน",
+        quantity: 2,
+        item_created_at: "2026-07-25T02:00:00Z",
+        raw_message_id: "raw-dup-2",
+      }),
+    ]);
+
+    const calculation = await loadDigitalWhiteSheetCalculation(
+      database,
+      SCOPE,
+      { ...ZERO_CASH, actualCashSubmitted: 320 },
+    );
+    expect(calculation.items).toEqual([
+      expect.objectContaining({
+        soldQuantity: 8,
+        expectedSales: 320,
+      }),
+    ]);
+    expect(calculation.expectedSales).toBe(320);
+    expect(calculation.status).toBe("matched");
+    expect(hasHardStopWarning(calculation.warnings)).toBe(false);
+
+    const pageModel = await loadDigitalWhiteSheetPageModel(database, SCOPE);
+    expect(requireTrustedWhiteSheetSummary(pageModel)).toMatchObject({
+      expectedSales: 320,
+      actualCashSubmitted: 320,
+      status: "matched",
+    });
+  });
+
+  test("two active main เบิก sessions warn and block trusted summary", async () => {
+    const database = makeDuplicateDetectionDatabase([
+      makeDuplicateDetectionRow({
+        id: "w1",
+        session_id: "main-withdrawal-a",
+        base_transaction_type: "เบิก",
+        transaction_type: "เบิก",
+        quantity: 10,
+        price_per_unit: 40,
+      }),
+      makeDuplicateDetectionRow({
+        id: "w2",
+        session_id: "main-withdrawal-b",
+        base_transaction_type: "เบิก",
+        transaction_type: "เบิก",
+        quantity: 5,
+        price_per_unit: 40,
+        item_created_at: "2026-07-25T02:00:00Z",
+        raw_message_id: "raw-dup-2",
+      }),
+    ]);
+
+    const calculation = await loadDigitalWhiteSheetCalculation(database, SCOPE, ZERO_CASH);
+    expect(calculation.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Multiple completed main produce sessions (2)"),
+        expect.stringContaining("same transaction type (เบิก)"),
+        expect.stringContaining("reviewed or voided"),
+      ]),
+    );
+
+    const pageModel = await loadDigitalWhiteSheetPageModel(database, SCOPE);
+    expect(() => requireTrustedWhiteSheetSummary(pageModel)).toThrow(WhiteSheetHardStopError);
+  });
+
+  test("two active main คืน sessions warn", async () => {
+    const database = makeDuplicateDetectionDatabase([
+      makeDuplicateDetectionRow({
+        id: "w1",
+        session_id: "main-withdrawal",
+        base_transaction_type: "เบิก",
+        transaction_type: "เบิก",
+        quantity: 10,
+        price_per_unit: 40,
+      }),
+      makeDuplicateDetectionRow({
+        id: "r1",
+        session_id: "main-return-a",
+        base_transaction_type: "คืน",
+        transaction_type: "คืน",
+        quantity: 1,
+        item_created_at: "2026-07-25T02:00:00Z",
+        raw_message_id: "raw-dup-2",
+      }),
+      makeDuplicateDetectionRow({
+        id: "r2",
+        session_id: "main-return-b",
+        base_transaction_type: "คืน",
+        transaction_type: "คืน",
+        quantity: 1,
+        item_created_at: "2026-07-25T03:00:00Z",
+        raw_message_id: "raw-dup-3",
+      }),
+    ]);
+
+    const calculation = await loadDigitalWhiteSheetCalculation(database, SCOPE, ZERO_CASH);
+    expect(calculation.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("same transaction type (คืน)"),
+      ]),
+    );
+  });
+
+  test("two active main คืนเสีย sessions warn", async () => {
+    const database = makeDuplicateDetectionDatabase([
+      makeDuplicateDetectionRow({
+        id: "w1",
+        session_id: "main-withdrawal",
+        base_transaction_type: "เบิก",
+        transaction_type: "เบิก",
+        quantity: 10,
+        price_per_unit: 40,
+      }),
+      makeDuplicateDetectionRow({
+        id: "d1",
+        session_id: "main-damaged-a",
+        base_transaction_type: "คืนเสีย",
+        transaction_type: "คืนเสีย",
+        quantity: 1,
+        item_created_at: "2026-07-25T02:00:00Z",
+        raw_message_id: "raw-dup-2",
+      }),
+      makeDuplicateDetectionRow({
+        id: "d2",
+        session_id: "main-damaged-b",
+        base_transaction_type: "คืนเสีย",
+        transaction_type: "คืนเสีย",
+        quantity: 1,
+        item_created_at: "2026-07-25T03:00:00Z",
+        raw_message_id: "raw-dup-3",
+      }),
+    ]);
+
+    const calculation = await loadDigitalWhiteSheetCalculation(database, SCOPE, ZERO_CASH);
+    expect(calculation.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("same transaction type (คืนเสีย)"),
+      ]),
+    );
+  });
+
+  test("main เบิก + additional เบิก does not warn", async () => {
+    const database = makeDuplicateDetectionDatabase([
+      makeDuplicateDetectionRow({
+        id: "w1",
+        session_id: "main-withdrawal",
+        base_transaction_type: "เบิก",
+        transaction_type: "เบิก",
+        quantity: 10,
+        price_per_unit: 40,
+      }),
+      makeDuplicateDetectionRow({
+        id: "w2",
+        session_id: "additional-withdrawal",
+        base_transaction_type: "เบิก",
+        transaction_type: "เบิก",
+        quantity: 3,
+        price_per_unit: 40,
+        session_kind: "additional",
+        item_created_at: "2026-07-25T02:00:00Z",
+        raw_message_id: "raw-dup-2",
+      }),
+    ]);
+
+    const calculation = await loadDigitalWhiteSheetCalculation(database, SCOPE, ZERO_CASH);
+    expect(
+      calculation.warnings.some((warning) =>
+        warning.startsWith("Multiple completed main produce sessions")),
+    ).toBe(false);
+  });
+
+  test("voided duplicate main session does not warn (produce_transactions already void-filtered)", async () => {
+    // Migration 0037 filters voided sessions out of produce_transactions.
+    // The loader only sees the remaining ACTIVE main เบิก session.
+    const database = makeDuplicateDetectionDatabase([
+      makeDuplicateDetectionRow({
+        id: "w-active",
+        session_id: "main-withdrawal-active",
+        base_transaction_type: "เบิก",
+        transaction_type: "เบิก",
+        quantity: 10,
+        price_per_unit: 40,
+      }),
+    ]);
+
+    const calculation = await loadDigitalWhiteSheetCalculation(database, SCOPE, ZERO_CASH);
+    expect(
+      calculation.warnings.some((warning) =>
+        warning.startsWith("Multiple completed main produce sessions")),
+    ).toBe(false);
   });
 });

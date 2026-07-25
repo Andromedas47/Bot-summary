@@ -229,19 +229,37 @@ function adaptTransactionRow(
 }
 
 function multipleSessionWarnings(rows: readonly ProduceTransactionRow[]): string[] {
-  const mainSessionIds = new Set(
-    rows
-      .filter((row) => row.session_kind !== "additional")
-      .map((row) => row.session_id),
-  );
+  // Duplicate detection is scoped by effective base_transaction_type: a normal
+  // day has one main เบิก and one main คืน (and optionally คืนเสีย). Only
+  // multiple ACTIVE main sessions of the SAME type are a hard stop.
+  // Voided sessions are already excluded by produce_transactions (0037).
+  const mainSessionIdsByType = new Map<string, Set<string>>();
 
-  return mainSessionIds.size > 1
-    ? [
-        `Multiple completed main produce sessions (${mainSessionIds.size}) exist for this `
-          + "market and business date; current schema has no void/supersede marker, so "
-          + "duplicate business data may still be included.",
-      ]
-    : [];
+  for (const row of rows) {
+    if (row.session_kind === "additional") continue;
+    const transactionType = row.base_transaction_type?.trim();
+    if (!transactionType) continue;
+
+    let sessionIds = mainSessionIdsByType.get(transactionType);
+    if (!sessionIds) {
+      sessionIds = new Set();
+      mainSessionIdsByType.set(transactionType, sessionIds);
+    }
+    sessionIds.add(row.session_id);
+  }
+
+  const warnings: string[] = [];
+  for (const transactionType of EFFECTIVE_TRANSACTION_TYPES) {
+    const sessionIds = mainSessionIdsByType.get(transactionType);
+    if (!sessionIds || sessionIds.size <= 1) continue;
+    warnings.push(
+      `Multiple completed main produce sessions (${sessionIds.size}) exist for this `
+        + `market and business date with the same transaction type (${transactionType}); `
+        + "multiple ACTIVE main sessions of the same type must be reviewed or voided "
+        + "before trusting the summary.",
+    );
+  }
+  return warnings;
 }
 
 function unresolvedMarketWarnings(
@@ -330,9 +348,10 @@ export function toDigitalWhiteSheetSummary(
 }
 
 /**
- * Read-only calculation boundary. produce_transactions contains only persisted
- * produce_items joined to produce_sessions. The required base has no
- * void/supersede status on those rows, so this loader does not invent one.
+ * Read-only calculation boundary. produce_transactions contains only active
+ * persisted produce_items joined to produce_sessions (voided sessions are
+ * filtered out by migration 0037). Duplicate main-session detection therefore
+ * only sees ACTIVE rows and scopes by base_transaction_type.
  */
 export async function loadDigitalWhiteSheetCalculation(
   supabase: Supabase,

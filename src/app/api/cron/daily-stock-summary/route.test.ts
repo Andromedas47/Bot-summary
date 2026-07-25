@@ -55,40 +55,6 @@ mock.module("@/lib/line/reply", () => ({
   },
 }));
 
-// Approved thresholds are intentionally empty in the real configuration, so the
-// table is stubbed here to exercise both states: configured and not configured.
-interface ThresholdEntry {
-  productName: string;
-  unit: string;
-  threshold: number;
-}
-
-const thresholdKey = (productName: string, unit: string) =>
-  `${productName.normalize("NFC").trim()}||${unit.normalize("NFC").trim()}`;
-
-let thresholds = new Map<string, ThresholdEntry>();
-
-const thresholdTableStub = {
-  get size() {
-    return thresholds.size;
-  },
-  get: (productName: string, unit: string) =>
-    thresholds.get(thresholdKey(productName, unit))?.threshold,
-  entries: () => [...thresholds.values()],
-};
-
-function setThresholds(entries: ThresholdEntry[]) {
-  thresholds = new Map(entries.map((entry) => [thresholdKey(entry.productName, entry.unit), entry]));
-}
-
-mock.module("@/lib/summary/stock-thresholds", () => ({
-  LOW_STOCK_COMPARISON: "remaining <= threshold",
-  STOCK_THRESHOLDS: [],
-  stockThresholdKey: thresholdKey,
-  createStockThresholdTable: () => thresholdTableStub,
-  stockThresholdTable: thresholdTableStub,
-}));
-
 const { GET } = await import("./route");
 
 const TX_RETURN = "คืน";
@@ -110,8 +76,6 @@ beforeEach(() => {
   messageResult = { data: [], error: null };
   process.env.CRON_SECRET = "stock-secret";
   delete process.env.STOCK_SUMMARY_LINE_TARGETS;
-  // Default to the real shipped state: no approved thresholds.
-  setThresholds([]);
 });
 
 afterEach(() => {
@@ -166,37 +130,9 @@ describe("daily stock summary cron — authentication", () => {
   });
 });
 
-describe("daily stock summary cron — activation safety", () => {
-  test("sends nothing while no low-stock thresholds are approved", async () => {
-    produceResult = { data: produceRows(), error: null };
-    process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
-
-    const res = await GET(request("?date=2026-07-25"));
-    const body = await res.json();
-
-    expect(res.status).toBe(200);
-    expect(body.ok).toBe(true);
-    expect(body.sent).toBe(false);
-    expect(body.reason).toBe("no_low_stock_thresholds_configured");
-    expect(body.thresholdCount).toBe(0);
-    expect(pushCalls).toHaveLength(0);
-  });
-
-  test("does NOT fall back to sending the whole stock report", async () => {
-    produceResult = { data: produceRows(), error: null };
-    process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
-
-    await GET(request("?date=2026-07-25"));
-
-    // Silence is the required behavior — not "send everything instead".
-    expect(pushCalls).toHaveLength(0);
-  });
-});
-
 describe("daily stock summary cron — delivery", () => {
   test("does nothing when no LINE targets are configured", async () => {
     produceResult = { data: produceRows(), error: null };
-    setThresholds([{ productName: "หมอนทอง", unit: "โล", threshold: 300 }]);
 
     const res = await GET(request());
     const body = await res.json();
@@ -208,9 +144,8 @@ describe("daily stock summary cron — delivery", () => {
     expect(pushCalls).toHaveLength(0);
   });
 
-  test("pushes the low-stock attention report to each configured target", async () => {
+  test("pushes the shared StockSummary content to each configured target", async () => {
     produceResult = { data: produceRows(), error: null };
-    setThresholds([{ productName: "หมอนทอง", unit: "โล", threshold: 300 }]);
     process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1,Cgroup2";
 
     const res = await GET(request("?date=2026-07-25"));
@@ -220,21 +155,19 @@ describe("daily stock summary cron — delivery", () => {
     expect(body.sent).toBe(true);
     expect(body.sentCount).toBe(2);
     expect(body.businessDate).toBe("2026-07-25");
-    expect(body.lowStockCount).toBe(1);
-    expect(body.thresholdCount).toBe(1);
     expect(body.isComplete).toBe(false);
     expect(body.incompleteCount).toBe(1);
 
     expect(pushCalls.map((c) => c.to)).toEqual(["Cgroup1", "Cgroup2"]);
-    expect(pushCalls[0].text).toContain("🚨 รายการคงเหลือน้อย — ตรวจสอบก่อนซื้อ");
-    expect(pushCalls[0].text).toContain("หมอนทอง — 281.1 กก. (เกณฑ์ 300 กก.)");
-    expect(pushCalls[0].text).toContain("⚠️ ข้อมูลยังไม่ครบ\n1 ตลาด / 1 รายการยังไม่มีข้อมูลชั่งคืน");
+    expect(pushCalls[0].text).toContain("📦 สรุปคงเหลือทุกตลาด");
+    expect(pushCalls[0].text).toContain("หมอนทอง — 281.1 กก.");
+    // Scheduled delivery collapses the missing-return section to counts.
+    expect(pushCalls[0].text).toContain("⚠️ ข้อมูลชั่งคืนยังไม่ครบ\n1 ตลาด / 1 รายการ");
     expect(pushCalls[0].text).not.toContain("เฉลิม72 ผลไม้: แก้วมังกร");
   });
 
   test("repeat scheduler calls reuse the same retry keys — no duplicate LINE spam", async () => {
     produceResult = { data: produceRows(), error: null };
-    setThresholds([{ productName: "หมอนทอง", unit: "โล", threshold: 300 }]);
     process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
 
     await GET(request("?date=2026-07-25"));
@@ -253,7 +186,6 @@ describe("daily stock summary cron — delivery", () => {
 
   test("a different business date produces different retry keys", async () => {
     produceResult = { data: produceRows(), error: null };
-    setThresholds([{ productName: "หมอนทอง", unit: "โล", threshold: 300 }]);
     process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
 
     await GET(request("?date=2026-07-25"));
@@ -270,7 +202,6 @@ describe("daily stock summary cron — delivery", () => {
 describe("daily stock summary cron — scheduled report date", () => {
   test("a scheduled run with no date param reports the previous business date", async () => {
     produceResult = { data: produceRows(), error: null };
-    setThresholds([{ productName: "หมอนทอง", unit: "โล", threshold: 300 }]);
     process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
 
     const res = await GET(request());
@@ -281,44 +212,26 @@ describe("daily stock summary cron — scheduled report date", () => {
     expect(body.businessDate).toBe(previousBangkokBusinessDate());
   });
 
-  test("scheduled delivery sends the attention list only", async () => {
+  test("scheduled delivery sends the concise executive summary only", async () => {
     produceResult = { data: produceRows(), error: null };
-    setThresholds([{ productName: "หมอนทอง", unit: "โล", threshold: 300 }]);
     process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
 
     await GET(request("?date=2026-07-25"));
     const text = pushCalls.map((c) => c.text).join("\n\n");
 
-    expect(text).toContain("🚨 รายการคงเหลือน้อย — ตรวจสอบก่อนซื้อ");
+    expect(text).toContain("📦 สรุปคงเหลือทุกตลาด");
     expect(text).toContain("🥭 ทุเรียน");
-    expect(text).toContain("หมอนทอง — 281.1 กก. (เกณฑ์ 300 กก.)");
-    expect(text).toContain("⚠️ ข้อมูลยังไม่ครบ\n1 ตลาด / 1 รายการยังไม่มีข้อมูลชั่งคืน");
-    expect(text).toContain("ไม่ใช่คำสั่งซื้ออัตโนมัติ");
-    // No full inventory and no per-market detail.
-    expect(text).not.toContain("📦 สรุปคงเหลือทุกตลาด");
+    expect(text).toContain("หมอนทอง — 281.1 กก.");
+    // Missing returns collapse to counts …
+    expect(text).toContain("⚠️ ข้อมูลชั่งคืนยังไม่ครบ\n1 ตลาด / 1 รายการ");
+    // … and no per-market detail block is appended.
     expect(text).not.toContain("เฉลิม72 ผลไม้: แก้วมังกร");
     expect(text).not.toContain("เหลือขายต่อ:");
     expect(text).not.toContain("เบิกทั้งหมด:");
   });
 
-  test("a product above its threshold is not pushed at all", async () => {
-    produceResult = { data: produceRows(), error: null };
-    setThresholds([{ productName: "หมอนทอง", unit: "โล", threshold: 30 }]);
-    process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
-
-    const res = await GET(request("?date=2026-07-25"));
-    const text = pushCalls.map((c) => c.text).join("\n\n");
-
-    expect((await res.json()).lowStockCount).toBe(0);
-    expect(text).not.toContain("หมอนทอง");
-    expect(text).toContain("✅ ไม่มีรายการคงเหลือน้อยตามเกณฑ์ที่ตั้งไว้");
-    // The missing-ชั่งคืน warning still has to reach them.
-    expect(text).toContain("⚠️ ข้อมูลยังไม่ครบ");
-  });
-
   test("idempotency keys follow the resolved scheduled date, not wall-clock time", async () => {
     produceResult = { data: produceRows(), error: null };
-    setThresholds([{ productName: "หมอนทอง", unit: "โล", threshold: 300 }]);
     process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
 
     // Two scheduled runs on the same morning resolve the same date …
@@ -339,7 +252,6 @@ describe("daily stock summary cron — scheduled report date", () => {
 describe("daily stock summary cron — failure behavior", () => {
   test("returns 500 when the summary cannot be built", async () => {
     produceResult = { data: null, error: { message: "boom" } };
-    setThresholds([{ productName: "หมอนทอง", unit: "โล", threshold: 300 }]);
     process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
 
     const res = await GET(request("?date=2026-07-25"));
@@ -351,7 +263,6 @@ describe("daily stock summary cron — failure behavior", () => {
 
   test("isolates a failing target and reports 500 so the scheduler retries", async () => {
     produceResult = { data: produceRows(), error: null };
-    setThresholds([{ productName: "หมอนทอง", unit: "โล", threshold: 300 }]);
     process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgood,Cbad";
     pushBehavior = (call) => {
       if (call.to === "Cbad") throw new Error("LINE push HTTP 429");
@@ -372,7 +283,6 @@ describe("daily stock summary cron — failure behavior", () => {
 describe("daily stock summary cron — debug mode", () => {
   test("previews without pushing", async () => {
     produceResult = { data: produceRows(), error: null };
-    setThresholds([{ productName: "หมอนทอง", unit: "โล", threshold: 300 }]);
     process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
 
     const res = await GET(request("?date=2026-07-25&debug=1"));
@@ -382,22 +292,7 @@ describe("daily stock summary cron — debug mode", () => {
     expect(body.debug).toBe(true);
     expect(body.wouldSendLine).toBe(true);
     expect(body.productCount).toBe(1);
-    expect(body.lowStockCount).toBe(1);
-    expect(body.messages[0]).toContain("🚨 รายการคงเหลือน้อย — ตรวจสอบก่อนซื้อ");
-    expect(pushCalls).toHaveLength(0);
-  });
-
-  test("debug reports the unconfigured state instead of hiding it", async () => {
-    produceResult = { data: produceRows(), error: null };
-    process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
-
-    const body = await (await GET(request("?date=2026-07-25&debug=1"))).json();
-
-    expect(body.thresholdCount).toBe(0);
-    expect(body.wouldSendLine).toBe(false);
-    // The administration stat lives here, not in the LINE message.
-    expect(body.withoutThresholdCount).toBe(1);
-    expect(body.suppressedIncompleteCount).toBe(0);
+    expect(body.messages[0]).toContain("📦 สรุปคงเหลือทุกตลาด");
     expect(pushCalls).toHaveLength(0);
   });
 });

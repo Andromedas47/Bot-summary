@@ -67,6 +67,59 @@ describe("stockCategoryFor", () => {
     }
   });
 
+  test("maps vegetable forms observed in production", () => {
+    for (const name of [
+      "กวางตุ้งจิ้ว", "กวางตุ้งยี่ปุ่น", "กวางตุ้งดอกเหลือง", "กวางตุ้งไทย",
+      "บอคโครี่", "ดอกกะหล่ำ", "กะกล่ำปี",
+      "ผักบุ้งจีน", "ผักบุ้งไทย", "ผักชีไทย", "ผักชีใบเลื่อย",
+      "ผักกาดลุ้ย", "ผักกาดลู้ย", "ผักกาดดอง", "สลัดคอตนิ่ม",
+      "คน้าเลก", "คน้าเล็ก", "คน้าไหย่", "คน้าฮ้องกง",
+      "กระเพา", "กระเพาแดง", "ใบโหระพา", "ใบตั้งโอ้", "สาระแหน",
+      "ใบกระเจียบ", "ฝักกระเจียบ",
+      "กระเทียมหัว", "กระเทียมกลีบใหย่",
+      "หอมแขกเลก", "หอมแขกเล็ก", "หอมแขกใหย่", "หอมหัวใหย่",
+      "ขิงแก่", "ขิงออ่น", "พริกสด", "พริกแห้ง", "พริกป่น",
+      "มะเขือเทสเลก", "มะเขือเทสเล็ก", "มะเขือเทสใหย่", "มะเขือเปาะ", "มะเขือเหลือง",
+      "มะระขี้นก", "มะระลูก", "แตงกวาเล็ก", "ฟักออ่น", "บวบเหลี่ยม",
+      "นำเต้า", "ถั่วแขก", "ข้าวโพดออ่น", "ไชยท้าว",
+      "หน่อไม้ดอง", "หน่อไม้ต้ม",
+      "เหดแพค", "เห็ดแพครวม", "เหดออริจิ",
+    ]) {
+      expect(stockCategoryFor(name)).toBe("ผัก");
+    }
+  });
+
+  test("vegetable size and spelling variants stay separate canonical products", () => {
+    // All four are ผัก, but คะน้า grades are distinct products and must not merge.
+    const variants = ["คน้าเลก", "คน้าเล็ก", "คน้าไหย่", "คน้าฮ้องกง"];
+    for (const name of variants) expect(stockCategoryFor(name)).toBe("ผัก");
+    expect(new Set(variants.map((n) => normalizeProductName(n))).size).toBe(variants.length);
+
+    for (const [a, b] of [
+      ["มะเขือเทสเลก", "มะเขือเทสเล็ก"],
+      ["หอมแขกเลก", "หอมแขกเล็ก"],
+      ["ผักกาดลุ้ย", "ผักกาดลู้ย"],
+      ["กระเพา", "กระเพาแดง"],
+    ] as Array<[string, string]>) {
+      expect(stockCategoryFor(a)).toBe(stockCategoryFor(b));
+      expect(normalizeProductName(a)).not.toBe(normalizeProductName(b));
+    }
+  });
+
+  test("non-produce items are left uncategorized rather than forced into ผัก", () => {
+    for (const name of [
+      "ปลาทูนึ่ง", "ขนมจีน", "ข้าวคั่ว", "เครื่องต้มยำ", "เครื่องผัดฉ่า", "มะขามเปียก",
+    ]) {
+      expect(stockCategoryFor(name)).toBe("ไม่จัดหมวด");
+    }
+  });
+
+  test("fruit shorthand is untouched by the vegetable pass", () => {
+    for (const name of ["ไข่ปลา", "แม่มด", "ไซมัส"]) {
+      expect(stockCategoryFor(name)).toBe("ไม่จัดหมวด");
+    }
+  });
+
   test("unknown products stay visible as ไม่จัดหมวด", () => {
     expect(stockCategoryFor("ของแปลกใหม่ไม่เคยเจอ")).toBe("ไม่จัดหมวด");
     expect(stockCategoryFor("")).toBe("ไม่จัดหมวด");

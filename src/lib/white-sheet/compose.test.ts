@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/database";
+import { stubManualSlipTables } from "@/lib/white-sheet/test-manual-slip-db";
 import {
   loadDigitalWhiteSheetPageModel,
   requireSubmittedWhiteSheetSummary,
@@ -132,7 +133,9 @@ function makeComposedDatabase(cashEntry?: CashEntryRow, options?: { duplicateMai
           }),
         };
       }
-      throw new Error(`unexpected table: ${table}`);
+      const manualSlip = stubManualSlipTables()(table);
+        if (manualSlip) return manualSlip;
+        throw new Error(`unexpected table: ${table}`);
     },
   };
 

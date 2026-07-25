@@ -4,6 +4,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/database";
 import { DigitalWhiteSheetPanel } from "@/components/white-sheet/DigitalWhiteSheetPanel";
 import { buildWhiteSheetSummaryMessagesFromPageModel } from "@/lib/line/white-sheet-summary";
+import { stubManualSlipTables } from "@/lib/white-sheet/test-manual-slip-db";
 import {
   loadDigitalWhiteSheetPageModel,
   requireTrustedWhiteSheetSummary,
@@ -270,7 +271,9 @@ function makeLocalUatDatabase() {
           },
         };
       }
-      throw new Error(`unexpected table: ${table}`);
+      const manualSlip = stubManualSlipTables()(table);
+        if (manualSlip) return manualSlip;
+        throw new Error(`unexpected table: ${table}`);
     },
   };
 

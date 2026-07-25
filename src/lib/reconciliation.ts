@@ -283,6 +283,58 @@ async function computeManualSlipTotal(
   return (entries ?? []).reduce((sum, e) => sum + Number(e.amount), 0);
 }
 
+/**
+ * Market-scoped closed manual-slip total for Digital White Sheet.
+ *
+ * Business rule (same as settlement reconciliation):
+ *   checked_slip_total = ai_verified_total + manual_slip_total
+ *
+ * White Sheet verifiedTransfers must include both halves. Only CLOSED sessions
+ * whose normalized market_label equals the requested market are counted —
+ * another market's manual slips must never leak in. Sessions with a missing
+ * or unidentifiable market_label are skipped (fail closed), not attributed.
+ *
+ * Closing a manual slip does NOT write transfer_reconciliations; White Sheet
+ * loads closed sessions directly (mirrors AI slip loading).
+ */
+export async function loadMarketScopedManualSlipTotal(
+  supabase:              Supabase,
+  sourceId:              string,
+  businessDate:          string,
+  marketLabelNormalized: string,
+): Promise<number> {
+  const targetMarket = marketLabelNormalized.normalize("NFC").trim();
+  if (!targetMarket) {
+    throw new Error("marketLabelNormalized must not be empty");
+  }
+
+  const { data: sessions, error: sessionError } = await supabase
+    .from("manual_slip_sessions")
+    .select("id, market_label")
+    .eq("source_id", sourceId)
+    .eq("business_date", businessDate)
+    .eq("status", "closed");
+  if (sessionError) {
+    throw new Error(`manual_slip_sessions query failed: ${sessionError.message}`);
+  }
+
+  const sessionIds = (sessions ?? [])
+    .filter((session) => normalizedMarketLabel(session.market_label) === targetMarket)
+    .map((session) => session.id);
+  if (sessionIds.length === 0) return 0;
+
+  const { data: entries, error: entryError } = await supabase
+    .from("manual_slip_entries")
+    .select("amount")
+    .in("session_id", sessionIds);
+  if (entryError) {
+    throw new Error(`manual_slip_entries query failed: ${entryError.message}`);
+  }
+
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  return round2((entries ?? []).reduce((sum, e) => sum + Number(e.amount), 0));
+}
+
 export async function reconcile(
   supabase:             Supabase,
   sourceId:             string,

@@ -11,12 +11,18 @@ import {
   aggregateGloballyAcceptedVerifiedTransfers,
   loadAiVerifiedTransferTotal,
   loadMarketScopedAiVerifiedTransfers,
+  loadMarketScopedManualSlipTotal,
 } from "@/lib/reconciliation";
 import { loadDigitalWhiteSheetCalculation } from "@/lib/white-sheet/load";
 import {
   requireTrustedWhiteSheetSummary,
   WhiteSheetHardStopError,
 } from "@/lib/white-sheet/compose";
+import {
+  stubManualSlipTables,
+  type ManualSlipEntryStub,
+  type ManualSlipSessionStub,
+} from "@/lib/white-sheet/test-manual-slip-db";
 import {
   hasHardStopWarning,
   UNATTRIBUTED_VERIFIED_TRANSFER_WARNING,
@@ -86,7 +92,9 @@ function makeTransferDatabase(options: {
           },
         };
       }
-      throw new Error(`unexpected table: ${table}`);
+      const manualSlip = stubManualSlipTables()(table);
+        if (manualSlip) return manualSlip;
+        throw new Error(`unexpected table: ${table}`);
     },
   } as unknown as SupabaseClient<Database>;
 }
@@ -341,6 +349,8 @@ describe("White Sheet fail-closed for unattributed verified transfers", () => {
     evidences?: SlipEvidenceRow[];
     checks?: SlipCheckRow[];
     extraProduceMarkets?: string[];
+    manualSessions?: ManualSlipSessionStub[];
+    manualEntries?: ManualSlipEntryStub[];
   }) {
     const produceMarket = options?.produceMarket ?? MARKET_A;
     const produceRows = [
@@ -433,6 +443,11 @@ describe("White Sheet fail-closed for unattributed verified transfers", () => {
         if (table === "slip_evidences" || table === "slip_checks") {
           return db.from(table);
         }
+        const manualSlip = stubManualSlipTables({
+          sessions: options?.manualSessions,
+          entries: options?.manualEntries,
+        })(table);
+        if (manualSlip) return manualSlip;
         throw new Error(`unexpected table: ${table}`);
       },
     };
@@ -589,6 +604,256 @@ describe("White Sheet fail-closed for unattributed verified transfers", () => {
     expect(calculation.verifiedTransfers).toBe(0);
     expect(hasHardStopWarning(calculation.warnings)).toBe(false);
     expect(calculation.warnings.some((w) => w.startsWith(UNATTRIBUTED_VERIFIED_TRANSFER_WARNING))).toBe(false);
+  });
+
+  it("never attributes another market's closed manual slip", async () => {
+    const calculation = await loadDigitalWhiteSheetCalculation(
+      makeWhiteSheetDatabase({
+        produceMarket: MARKET_A,
+        evidences: [],
+        checks: [],
+        extraProduceMarkets: [MARKET_B],
+        manualSessions: [{ id: "ms-b", market_label: MARKET_B }],
+        manualEntries: [{ session_id: "ms-b", amount: 999 }],
+      }),
+      {
+        sourceId: SOURCE_ID,
+        marketKey: "market-a",
+        marketLabel: MARKET_A,
+        businessDate: BUSINESS_DATE,
+      },
+      {
+        expenses: { labor: 0, locationFee: 0, bag: 0, snack: 0, other: 0, otherNote: "" },
+        actualCashSubmitted: 1000,
+      },
+    );
+
+    expect(calculation.verifiedTransfers).toBe(0);
+  });
+
+  it("adds AI attributed total + market-scoped manual total", async () => {
+    const calculation = await loadDigitalWhiteSheetCalculation(
+      makeWhiteSheetDatabase({
+        produceMarket: MARKET_A,
+        evidences: [{ id: "ev-a", market_label: MARKET_A }],
+        checks: [
+          {
+            id: "c-a",
+            evidence_id: "ev-a",
+            transfer_amount: 50,
+            reference_id: "REF-A50",
+            created_at: "2026-07-23T01:00:00Z",
+          },
+        ],
+        manualSessions: [{ id: "ms-a", market_label: MARKET_A }],
+        manualEntries: [{ session_id: "ms-a", amount: 75 }],
+      }),
+      {
+        sourceId: SOURCE_ID,
+        marketKey: "market-a",
+        marketLabel: MARKET_A,
+        businessDate: BUSINESS_DATE,
+      },
+      {
+        expenses: { labor: 0, locationFee: 0, bag: 0, snack: 0, other: 0, otherNote: "" },
+        actualCashSubmitted: 875,
+      },
+    );
+
+    expect(calculation.verifiedTransfers).toBe(125);
+  });
+});
+
+describe("White Sheet manual slip bridge (checked_slip = AI + manual)", () => {
+  const PROD_MARKET = "ทดสอบเงินโอน";
+  const PROD_MARKET_NORM = normalizedMarketLabel(PROD_MARKET);
+  const OTHER_MARKET = "ตลาดอื่น";
+
+  function makeManualSlipDatabase(options: {
+    sessions: ManualSlipSessionStub[];
+    entries: ManualSlipEntryStub[];
+  }) {
+    return {
+      from(table: string) {
+        const manualSlip = stubManualSlipTables(options)(table);
+        if (manualSlip) return manualSlip;
+        throw new Error(`unexpected table: ${table}`);
+      },
+    } as unknown as SupabaseClient<Database>;
+  }
+
+  it("loadMarketScopedManualSlipTotal counts only closed sessions for the target market", async () => {
+    const db = makeManualSlipDatabase({
+      sessions: [
+        { id: "ms-target", market_label: PROD_MARKET },
+        { id: "ms-other", market_label: OTHER_MARKET },
+        { id: "ms-null", market_label: null },
+      ],
+      entries: [
+        { session_id: "ms-target", amount: 100 },
+        { session_id: "ms-other", amount: 500 },
+        { session_id: "ms-null", amount: 80 },
+      ],
+    });
+
+    await expect(
+      loadMarketScopedManualSlipTotal(db, SOURCE_ID, BUSINESS_DATE, PROD_MARKET_NORM),
+    ).resolves.toBe(100);
+
+    await expect(
+      loadMarketScopedManualSlipTotal(db, SOURCE_ID, BUSINESS_DATE, normalizedMarketLabel(OTHER_MARKET)),
+    ).resolves.toBe(500);
+  });
+
+  it("does not count an OPEN manual slip session", async () => {
+    const db = makeManualSlipDatabase({
+      sessions: [
+        { id: "ms-open", market_label: PROD_MARKET, status: "open" },
+        { id: "ms-closed", market_label: PROD_MARKET, status: "closed" },
+      ],
+      entries: [
+        { session_id: "ms-open", amount: 999 },
+        { session_id: "ms-closed", amount: 100 },
+      ],
+    });
+
+    await expect(
+      loadMarketScopedManualSlipTotal(db, SOURCE_ID, BUSINESS_DATE, PROD_MARKET_NORM),
+    ).resolves.toBe(100);
+  });
+
+  it("does not count a closed manual slip from another source_id", async () => {
+    const db = makeManualSlipDatabase({
+      sessions: [
+        { id: "ms-other-source", market_label: PROD_MARKET, source_id: "group-somewhere-else" },
+      ],
+      entries: [{ session_id: "ms-other-source", amount: 750 }],
+    });
+
+    await expect(
+      loadMarketScopedManualSlipTotal(db, SOURCE_ID, BUSINESS_DATE, PROD_MARKET_NORM),
+    ).resolves.toBe(0);
+  });
+
+  it("does not count a closed manual slip from another business_date", async () => {
+    const db = makeManualSlipDatabase({
+      sessions: [
+        { id: "ms-other-date", market_label: PROD_MARKET, business_date: "2026-07-24" },
+      ],
+      entries: [{ session_id: "ms-other-date", amount: 640 }],
+    });
+
+    await expect(
+      loadMarketScopedManualSlipTotal(db, SOURCE_ID, BUSINESS_DATE, PROD_MARKET_NORM),
+    ).resolves.toBe(0);
+  });
+
+  it("Production gap: manual-only transfers enter verifiedTransfers and MATCH cash", async () => {
+    // Live evidence: closed manual_slip 100, no AI slips, expected sales 320,
+    // actual cash 220 → must be MATCHED (was SHORT 100 when manual slips ignored).
+    const produceRows = [
+      {
+        id: "item-prod",
+        product_name: "ทุเรียน",
+        quantity: 3.2,
+        unit: "โล",
+        price_per_unit: 100,
+        transaction_type: "เบิก",
+        base_transaction_type: "เบิก",
+        item_created_at: "2026-07-25T01:00:00Z",
+        session_id: "main-session-prod",
+        transaction_date: "2026-07-25",
+        market_name: PROD_MARKET,
+        raw_message_id: "raw-prod",
+        basis_quantity: null,
+        basis_price: null,
+        session_kind: "main",
+      },
+    ];
+
+    const prodDb = {
+      from(table: string) {
+        if (table === "produce_transactions") {
+          const builder = {
+            select: () => builder,
+            eq: () => builder,
+            in: () => builder,
+            order: () => builder,
+            range: async () => ({ data: produceRows, error: null, count: produceRows.length }),
+          };
+          return builder;
+        }
+        if (table === "raw_messages") {
+          return {
+            select: () => ({
+              in: async () => ({ data: [{ id: "raw-prod", source_id: SOURCE_ID }], error: null }),
+            }),
+          };
+        }
+        if (table === "central_selling_prices") {
+          return {
+            select: () => ({
+              eq: async () => ({
+                data: [{ product_key: "ทุเรียน", unit_key: "โล", price_satang: 10000 }],
+                error: null,
+              }),
+            }),
+          };
+        }
+        if (table === "slip_evidences") {
+          return {
+            select: () => ({
+              eq: () => ({
+                gte: () => ({
+                  lt: async () => ({ data: [], error: null }),
+                }),
+              }),
+            }),
+          };
+        }
+        if (table === "slip_checks") {
+          return {
+            select: () => {
+              const builder = {
+                in: () => builder,
+                not: () => builder,
+                order: () => builder,
+                then: (resolve: (value: unknown) => void) =>
+                  resolve({ data: [], error: null }),
+              };
+              return builder;
+            },
+          };
+        }
+        const manualSlip = stubManualSlipTables({
+          sessions: [{ id: "ms-prod", market_label: PROD_MARKET }],
+          entries: [{ session_id: "ms-prod", amount: 100 }],
+        })(table);
+        if (manualSlip) return manualSlip;
+        throw new Error(`unexpected table: ${table}`);
+      },
+    } as unknown as SupabaseClient<Database>;
+
+    const calculation = await loadDigitalWhiteSheetCalculation(
+      prodDb,
+      {
+        sourceId: SOURCE_ID,
+        marketKey: PROD_MARKET.toLowerCase(),
+        marketLabel: PROD_MARKET,
+        businessDate: "2026-07-25",
+      },
+      {
+        expenses: { labor: 0, locationFee: 0, bag: 0, snack: 0, other: 0, otherNote: "" },
+        actualCashSubmitted: 220,
+      },
+    );
+
+    expect(calculation.expectedSales).toBe(320);
+    expect(calculation.verifiedTransfers).toBe(100);
+    expect(calculation.expectedCash).toBe(220);
+    expect(calculation.actualCashSubmitted).toBe(220);
+    expect(calculation.difference).toBe(0);
+    expect(calculation.status).toBe("matched");
   });
 });
 

@@ -15,6 +15,7 @@ import {
   CENTRAL_PRICE_CONFLICT_WARNING_PREFIX,
   PENDING_REFERENCE_VERIFIED_TRANSFER_WARNING,
 } from "@/lib/white-sheet/warnings";
+import { stubManualSlipTables } from "@/lib/white-sheet/test-manual-slip-db";
 
 type CashEntryRow = Database["public"]["Tables"]["digital_white_sheet_cash_entries"]["Row"];
 
@@ -331,6 +332,8 @@ function makeCloseDatabase(options?: {
           "lifecycle audit must go through finalize/reopen RPCs — direct insert is forbidden",
         );
       }
+      const manualSlip = stubManualSlipTables()(table);
+      if (manualSlip) return manualSlip;
       throw new Error(`unexpected table: ${table}`);
     },
     rpc(fn: string, args: Record<string, unknown>) {

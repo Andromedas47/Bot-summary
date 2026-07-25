@@ -1,6 +1,9 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { normalizedMarketLabel } from "@/lib/market";
-import { loadMarketScopedAiVerifiedTransfers } from "@/lib/reconciliation";
+import {
+  loadMarketScopedAiVerifiedTransfers,
+  loadMarketScopedManualSlipTotal,
+} from "@/lib/reconciliation";
 import type { Database } from "@/types/database";
 import { calculateDigitalWhiteSheet, resolveWithdrawalUnitPriceBaht } from "./calculate";
 import {
@@ -393,6 +396,16 @@ export async function loadDigitalWhiteSheetCalculation(
     targetMarket,
     knownMarkets,
   );
+  // checked_slip_total = ai_verified_total + manual_slip_total
+  // White Sheet verifiedTransfers must include closed market-scoped manual slips.
+  const manualSlipTotal = await loadMarketScopedManualSlipTotal(
+    supabase,
+    scope.sourceId,
+    scope.businessDate,
+    targetMarket,
+  );
+  const verifiedTransfers =
+    Math.round((verifiedTransferResult.attributedTotal + manualSlipTotal) * 100) / 100;
   const verifiedTransferWarnings = [
     ...(verifiedTransferResult.unresolvedAcceptedCount > 0
       ? [
@@ -418,7 +431,7 @@ export async function loadDigitalWhiteSheetCalculation(
     transactions,
     centralPrices,
     priceConflicts,
-    verifiedTransfers: verifiedTransferResult.attributedTotal,
+    verifiedTransfers,
     expenses: cashInput.expenses,
     actualCashSubmitted: cashInput.actualCashSubmitted,
   });

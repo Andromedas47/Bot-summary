@@ -8,6 +8,7 @@ import { requireTrustedWhiteSheetSummary, WhiteSheetHardStopError } from "./comp
 import { loadDigitalWhiteSheetCalculation } from "./load";
 import { SYSTEM_WITHDRAWAL_SEED_ACTOR } from "./pricing";
 import { seedCentralPricesFromPersistedWithdrawals } from "./seed-from-withdrawal";
+import { stubManualSlipTables } from "@/lib/white-sheet/test-manual-slip-db";
 
 const SOURCE_ID = "group-central-pricing";
 const BUSINESS_DATE = "2026-07-24";
@@ -156,7 +157,9 @@ function makeDatabase(options: {
       if (table === "central_selling_prices") {
         return { select: options.centralPriceTable.select };
       }
-      throw new Error(`unexpected table: ${table}`);
+      const manualSlip = stubManualSlipTables()(table);
+        if (manualSlip) return manualSlip;
+        throw new Error(`unexpected table: ${table}`);
     },
     rpc: options.centralPriceTable.rpc,
   };

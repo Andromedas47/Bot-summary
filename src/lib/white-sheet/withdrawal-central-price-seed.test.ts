@@ -6,6 +6,7 @@ import type { Database } from "@/types/database";
 import { loadDigitalWhiteSheetCalculation } from "./load";
 import { loadDigitalWhiteSheetPageModel } from "./compose";
 import { SYSTEM_WITHDRAWAL_SEED_ACTOR } from "./pricing";
+import { stubManualSlipTables } from "@/lib/white-sheet/test-manual-slip-db";
 import {
   seedCentralPricesFromPersistedWithdrawals,
   type PersistedWithdrawalSeedItem,
@@ -131,7 +132,9 @@ function makeSheetDatabase(options: {
       if (table === "central_selling_prices") {
         return { select: options.priceTable.select };
       }
-      throw new Error(`unexpected table: ${table}`);
+      const manualSlip = stubManualSlipTables()(table);
+        if (manualSlip) return manualSlip;
+        throw new Error(`unexpected table: ${table}`);
     },
     rpc: options.priceTable.rpc,
   } as unknown as SupabaseClient<Database>;
@@ -761,6 +764,8 @@ describe("central price seeds on withdrawal write, not White Sheet read", () => 
             },
           };
         }
+        const manualSlip = stubManualSlipTables()(table);
+        if (manualSlip) return manualSlip;
         throw new Error(`unexpected table: ${table}`);
       },
       rpc: priceTable.rpc,

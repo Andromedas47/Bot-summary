@@ -4,6 +4,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { DigitalWhiteSheetSummary as DashboardSummary } from "@/components/white-sheet/DigitalWhiteSheetSummary";
 import { buildWhiteSheetSummaryMessage } from "@/lib/line/white-sheet-summary";
 import type { Database } from "@/types/database";
+import { stubManualSlipTables } from "@/lib/white-sheet/test-manual-slip-db";
 import {
   loadDigitalWhiteSheetPageModel,
   requireTrustedWhiteSheetSummary,
@@ -239,7 +240,9 @@ function makeIntegrationDatabase(options?: {
           },
         };
       }
-      throw new Error(`unexpected table: ${table}`);
+      const manualSlip = stubManualSlipTables()(table);
+        if (manualSlip) return manualSlip;
+        throw new Error(`unexpected table: ${table}`);
     },
   } as unknown as SupabaseClient<Database>;
 
@@ -317,7 +320,9 @@ function makeProduceLoaderDatabase(
           }),
         };
       }
-      throw new Error(`unexpected table: ${table}`);
+      const manualSlip = stubManualSlipTables()(table);
+        if (manualSlip) return manualSlip;
+        throw new Error(`unexpected table: ${table}`);
     },
   } as unknown as SupabaseClient<Database>;
 
@@ -744,7 +749,9 @@ function makeDuplicateDetectionDatabase(produceRows: readonly ProduceRow[]) {
           },
         };
       }
-      throw new Error(`unexpected table: ${table}`);
+      const manualSlip = stubManualSlipTables()(table);
+        if (manualSlip) return manualSlip;
+        throw new Error(`unexpected table: ${table}`);
     },
   } as unknown as SupabaseClient<Database>;
 

@@ -59,18 +59,38 @@ function baseNormalize(name: string): string {
   return name.normalize("NFC").replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Reporting-only canonicalization: raw name → additional-entry prefix form →
+ * alias mapping → aggregation key.
+ *
+ * The prefix ("เพิ่ม") and the alias map have to compose, not compete. An alias
+ * declared directly on the prefixed form still wins (เพิ่มถั่วพู → ถั่วพู is an
+ * explicit entry). Otherwise the prefix is stripped first and the remainder is
+ * then put through the alias map, so an alias on the bare product also covers
+ * its เพิ่ม form — เพิ่มหมอน → หมอน → หมอนทอง.
+ *
+ * Without that second alias lookup, adding an alias for a bare name silently
+ * orphaned its เพิ่ม form: knownNames is built from already-aliased names, so
+ * the bare name was no longer in it and the strip failed.
+ */
 export function normalizeProductName(
   name: string,
   aliases: Record<string, string> = PRODUCT_ALIASES,
   knownNames?: ReadonlySet<string>,
 ): string {
   const n = baseNormalize(name);
-  const aliased = aliases[n] ?? n;
-  if (aliased !== n) return aliased;
+  const direct = aliases[n];
+  if (direct && direct !== n) return direct;
 
-  if (knownNames && n.startsWith(KNOWN_PREFIX)) {
+  if (n.startsWith(KNOWN_PREFIX)) {
     const rest = n.slice(KNOWN_PREFIX.length).trim();
-    if (rest && knownNames.has(rest)) return rest;
+    if (rest) {
+      // An explicit alias on the bare name is stronger evidence than dataset
+      // presence, so it does not need the knownNames gate.
+      const restAliased = aliases[rest];
+      if (restAliased) return restAliased;
+      if (knownNames?.has(rest)) return rest;
+    }
   }
   return n;
 }

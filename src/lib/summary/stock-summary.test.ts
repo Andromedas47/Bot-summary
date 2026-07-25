@@ -207,6 +207,43 @@ describe("product identity", () => {
     expect(productIn(summary, "ผัก", "ใบมังลัก")?.quantity).toBe(13);
   });
 
+  test("เพิ่ม-prefixed names compose with the alias map", () => {
+    const summary = buildStockSummaryFromRows(DATE, [
+      row({ product_name: "หมอนทอง", quantity: 100, unit: "โล" }),
+      // Regression: an alias on the bare name (หมอน → หมอนทอง) used to orphan
+      // its เพิ่ม form, because knownNames is built from already-aliased names.
+      row({ product_name: "เพิ่มหมอน", quantity: 13.4, unit: "โล" }),
+    ]);
+
+    expect(productIn(summary, "ทุเรียน", "หมอนทอง")?.quantity).toBeCloseTo(113.4, 5);
+    expect(allProducts(summary).map((p) => p.productName)).not.toContain("เพิ่มหมอน");
+  });
+
+  test("existing เพิ่ม-prefix behavior is preserved", () => {
+    const summary = buildStockSummaryFromRows(DATE, [
+      // via knownNames (bare name present in the same dataset, no alias)
+      row({ product_name: "แตงโม", quantity: 10, unit: "ลูก" }),
+      row({ product_name: "เพิ่มแตงโม", quantity: 5, unit: "ลูก" }),
+      // via an explicit alias declared on the prefixed form itself
+      row({ product_name: "เพิ่มถั่วพู", quantity: 3, unit: "กำ" }),
+      // via an alias on the bare name reached after stripping
+      row({ product_name: "เพิ่มกะหล่ำปี", quantity: 4, unit: "โล" }),
+    ]);
+
+    expect(productIn(summary, "ผลไม้", "แตงโม")?.quantity).toBe(15);
+    expect(productIn(summary, "ผัก", "ถั่วพู")?.quantity).toBe(3);
+    expect(productIn(summary, "ผัก", "กะหล่ำปี")?.quantity).toBe(4);
+  });
+
+  test("an unknown เพิ่ม-prefixed product is left untouched", () => {
+    const summary = buildStockSummaryFromRows(DATE, [
+      // Neither aliased nor present as a bare name — must not be guessed apart.
+      row({ product_name: "เพิ่มของไม่รู้จัก", quantity: 2, unit: "ถุง" }),
+    ]);
+
+    expect(productIn(summary, "ไม่จัดหมวด", "เพิ่มของไม่รู้จัก")?.quantity).toBe(2);
+  });
+
   test("similar but unlisted names stay separate — no fuzzy merging", () => {
     const summary = buildStockSummaryFromRows(DATE, [
       // Neither is an alias of the other; only a human may declare them equal.

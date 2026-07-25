@@ -54,6 +54,9 @@ const DURIAN_MARKER_EXCLUSIONS: ReadonlySet<string> = new Set([
 const DURIAN: readonly string[] = [
   "ทุเรียน",
   "หมอนทอง",
+  // A cracked หมอนทอง — unambiguously a durian, and sold as its own grade.
+  // Classified here only; it stays a SEPARATE canonical product from หมอนทอง.
+  "หมอนแตก",
   "ก้านยาว",
   "ชะนี",
   "พวงมณี",
@@ -101,7 +104,20 @@ const FRUIT: readonly string[] = [
   "มังคุด",
   "ลองกอง",
   "ลางสาด",
+  // องุ่น varietals seen in real production output. Classification only —
+  // these deliberately remain SEPARATE canonical products (องุ่นไชมัส and
+  // องุ่นไซมัส are two spellings of Shine Muscat but are NOT aliased here).
   "องุ่น",
+  "องุ่นเขียว",
+  "องุ่นแดง",
+  "องุ่นดำ",
+  "องุ่นไข่ปลา",
+  "องุ่นไซมัส",
+  "องุ่นไชมัส",
+  "องุ่นรวม",
+  "องุ่นรวมแดงดำ",
+  "องุ่นแม่มด",
+  "เขียวมรกต",
   "ชมพู่",
   "ฝรั่ง",
   "มะพร้าว",
@@ -117,7 +133,15 @@ const FRUIT: readonly string[] = [
   "แคนตาลูป",
   "ทับทิม",
   "แอปเปิ้ล",
+  // สาลี่หอม / สาลีหอม differ only by ่ and are the same pear, but they are
+  // classified here, NOT merged — canonical identity is unchanged.
   "สาลี่",
+  "สาลี่หอม",
+  "สาลีหอม",
+  "ส้มไต้หวัน",
+  // Shortened avocado form seen in production. Classified as fruit; explicitly
+  // NOT aliased to อะโวคาโด.
+  "อะโว",
   "มะละกอ",
   "เสาวรส",
   "มะเฟือง",

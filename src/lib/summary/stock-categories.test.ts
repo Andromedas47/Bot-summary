@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { stockCategoryFor, stockCategoryEntries } from "./stock-categories";
+import { normalizeProductName } from "./remaining-fruit";
 
 describe("stockCategoryFor", () => {
   test("maps durian varieties", () => {
@@ -27,6 +28,42 @@ describe("stockCategoryFor", () => {
   test("maps vegetables", () => {
     for (const name of ["กระชาย", "กะเพรา", "ผักชี", "ต้นหอม", "ถั่วพู", "กะหล่ำปี", "ใบมังลัก"]) {
       expect(stockCategoryFor(name)).toBe("ผัก");
+    }
+  });
+
+  test("maps องุ่น varietals seen in production", () => {
+    for (const name of [
+      "องุ่นเขียว", "องุ่นแดง", "องุ่นดำ", "องุ่นไข่ปลา",
+      "องุ่นไซมัส", "องุ่นไชมัส", "องุ่นรวม", "องุ่นรวมแดงดำ",
+      "องุ่นแม่มด", "เขียวมรกต",
+    ]) {
+      expect(stockCategoryFor(name)).toBe("ผลไม้");
+    }
+  });
+
+  test("maps pear, orange and avocado forms seen in production", () => {
+    for (const name of ["สาลี่", "สาลี่หอม", "สาลีหอม", "ส้มไต้หวัน", "อะโว"]) {
+      expect(stockCategoryFor(name)).toBe("ผลไม้");
+    }
+  });
+
+  test("หมอนแตก is a durian grade", () => {
+    expect(stockCategoryFor("หมอนแตก")).toBe("ทุเรียน");
+  });
+
+  test("classification never implies canonical merging", () => {
+    // Both spellings are fruit, but they must remain DISTINCT products until a
+    // human approves an alias. Categorizing must not be mistaken for merging.
+    const pairs: Array<[string, string]> = [
+      ["องุ่นไชมัส", "องุ่นไซมัส"],
+      ["สาลีหอม", "สาลี่หอม"],
+      ["อะโว", "อะโวคาโด"],
+      ["องุ่นรวม", "องุ่นรวมแดงดำ"],
+      ["หมอนแตก", "หมอนทอง"],
+    ];
+    for (const [a, b] of pairs) {
+      expect(stockCategoryFor(a)).toBe(stockCategoryFor(b));
+      expect(normalizeProductName(a)).not.toBe(normalizeProductName(b));
     }
   });
 

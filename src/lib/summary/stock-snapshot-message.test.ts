@@ -88,7 +88,7 @@ describe("stock snapshot header", () => {
     // never rendered as a market holding 0.
     expect(stockSnapshotMarketCoverage(summary)).toEqual({ total: 1, withStock: 0 });
     expect(text).toContain("ข้อมูลจาก 1 ตลาด • พบคงเหลือ 0 ตลาด");
-    expect(text).toContain("⚠️ ข้อมูลชั่งคืนยังไม่ครบ\n1 ตลาด / 1 รายการ");
+    expect(text).toContain("⚠️ พบรายการเบิกที่ไม่มีข้อมูลชั่งคืน\n1 รายการ จาก 1 ตลาด");
     expect(text).not.toContain("แก้วมังกร — 0");
   });
 
@@ -242,7 +242,7 @@ describe("stock snapshot missing-ชั่งคืน handling", () => {
       }),
     ]);
 
-    expect(text).toContain("⚠️ ข้อมูลชั่งคืนยังไม่ครบ\n2 ตลาด / 2 รายการ");
+    expect(text).toContain("⚠️ พบรายการเบิกที่ไม่มีข้อมูลชั่งคืน\n2 รายการ จาก 2 ตลาด");
     expect(text).not.toContain("- เฉลิม72 ผลไม้:");
     expect(text).not.toContain("แก้วมังกร");
   });
@@ -254,7 +254,7 @@ describe("stock snapshot missing-ชั่งคืน handling", () => {
 
     expect(text).not.toContain("มะละกอ — 0 ลูก");
     expect(text).not.toContain("มะละกอ");
-    expect(text).toContain("⚠️ ข้อมูลชั่งคืนยังไม่ครบ\n1 ตลาด / 1 รายการ");
+    expect(text).toContain("⚠️ พบรายการเบิกที่ไม่มีข้อมูลชั่งคืน\n1 รายการ จาก 1 ตลาด");
   });
 
   test("คืนเสีย alone does not close the loop or create sellable stock", () => {
@@ -264,7 +264,7 @@ describe("stock snapshot missing-ชั่งคืน handling", () => {
     ]);
 
     expect(text).not.toContain("แตงโม — ");
-    expect(text).toContain("⚠️ ข้อมูลชั่งคืนยังไม่ครบ\n1 ตลาด / 1 รายการ");
+    expect(text).toContain("⚠️ พบรายการเบิกที่ไม่มีข้อมูลชั่งคืน\n1 รายการ จาก 1 ตลาด");
   });
 
   test("states completeness when every ชั่งคืน is in", () => {
@@ -274,7 +274,7 @@ describe("stock snapshot missing-ชั่งคืน handling", () => {
     ]);
 
     expect(text).toContain("✅ ชั่งคืนครบทุกตลาด");
-    expect(text).not.toContain("⚠️ ข้อมูลชั่งคืนยังไม่ครบ");
+    expect(text).not.toContain("⚠️ พบรายการเบิกที่ไม่มีข้อมูลชั่งคืน");
   });
 });
 

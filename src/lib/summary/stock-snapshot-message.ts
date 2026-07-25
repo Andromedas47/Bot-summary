@@ -5,7 +5,6 @@ import type { StockCategoryGroup, StockProductTotal, StockSummary } from "@/lib/
 import {
   STOCK_COMPLETE_NOTICE,
   STOCK_EMPTY_NOTICE,
-  STOCK_INCOMPLETE_HEADING,
   STOCK_UNIDENTIFIED_HEADING,
   stockDisplayUnit,
 } from "@/lib/summary/stock-summary-message";
@@ -30,6 +29,13 @@ import { chunkBlocks, countCodePoints } from "@/lib/summary/line-chunking";
  */
 
 export const STOCK_SNAPSHOT_TITLE = "📦 สต๊อกคงเหลือรวมทุกตลาด";
+
+/**
+ * Auto-snapshot incomplete heading. Wording differs from the manual
+ * `สรุปคงเหลือ` heading (`STOCK_INCOMPLETE_HEADING`) — same incomplete list,
+ * presentation only.
+ */
+export const STOCK_SNAPSHOT_INCOMPLETE_HEADING = "⚠️ พบรายการเบิกที่ไม่มีข้อมูลชั่งคืน";
 
 /**
  * Readability caps, both far below the 4000 code-point LINE hard limit.
@@ -178,8 +184,12 @@ export function stockSnapshotMarketCoverage(summary: StockSummary): StockSnapsho
 function incompleteBlocks(summary: StockSummary): string[] {
   if (summary.incomplete.length === 0) return [STOCK_COMPLETE_NOTICE];
 
+  // Same meaning as before: รายการ = incomplete market+product+unit rows;
+  // ตลาด = distinct markets among those rows. Counts unchanged; wording only.
   const markets = new Set(summary.incomplete.map((entry) => entry.marketName));
-  return [`${STOCK_INCOMPLETE_HEADING}\n${markets.size} ตลาด / ${summary.incomplete.length} รายการ`];
+  return [
+    `${STOCK_SNAPSHOT_INCOMPLETE_HEADING}\n${summary.incomplete.length} รายการ จาก ${markets.size} ตลาด`,
+  ];
 }
 
 export function buildStockSnapshotBlocks(summary: StockSummary): string[] {

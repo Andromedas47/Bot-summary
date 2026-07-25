@@ -165,7 +165,7 @@ describe("daily stock summary cron — delivery", () => {
     expect(pushCalls[0].text).toContain("ข้อมูลจาก 2 ตลาด • พบคงเหลือ 1 ตลาด");
     expect(pushCalls[0].text).toContain("🥭 ทุเรียน\n\nกก.\nหมอนทอง — 281.1 กก.");
     // Scheduled delivery collapses the missing-return section to counts.
-    expect(pushCalls[0].text).toContain("⚠️ ข้อมูลชั่งคืนยังไม่ครบ\n1 ตลาด / 1 รายการ");
+    expect(pushCalls[0].text).toContain("⚠️ พบรายการเบิกที่ไม่มีข้อมูลชั่งคืน\n1 รายการ จาก 1 ตลาด");
     expect(pushCalls[0].text).not.toContain("เฉลิม72 ผลไม้: แก้วมังกร");
   });
 
@@ -226,7 +226,7 @@ describe("daily stock summary cron — scheduled report date", () => {
     expect(text).toContain("🥭 ทุเรียน");
     expect(text).toContain("หมอนทอง — 281.1 กก.");
     // Missing returns collapse to counts …
-    expect(text).toContain("⚠️ ข้อมูลชั่งคืนยังไม่ครบ\n1 ตลาด / 1 รายการ");
+    expect(text).toContain("⚠️ พบรายการเบิกที่ไม่มีข้อมูลชั่งคืน\n1 รายการ จาก 1 ตลาด");
     // … and no per-market detail block is appended.
     expect(text).not.toContain("เฉลิม72 ผลไม้: แก้วมังกร");
     expect(text).not.toContain("เหลือขายต่อ:");

@@ -3,7 +3,8 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { logger } from "@/lib/logger";
 import { pushLineMessage } from "@/lib/line/reply";
 import { loadStockSummary } from "@/lib/summary/stock-summary-service";
-import { buildStockSummaryMessages } from "@/lib/summary/stock-summary-message";
+import { buildLowStockReport } from "@/lib/summary/low-stock";
+import { buildLowStockMessages } from "@/lib/summary/low-stock-message";
 import {
   parseStockSummaryTargets,
   resolveStockSummaryDate,
@@ -15,15 +16,22 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * Scheduled daily Stock ("สรุปคงเหลือ") delivery.
+ * Scheduled daily LOW-STOCK ATTENTION delivery.
  *
  * Scheduled by .github/workflows/daily-stock-summary.yml at 08:00 Asia/Bangkok
  * (01:00 UTC) — GitHub Actions, matching how finalize-slip-batches is driven,
  * because vercel.json crons are UTC-only and this project is on a Hobby plan
  * where cron firing time is approximate.
  *
- * Delivery is still INERT until STOCK_SUMMARY_LINE_TARGETS is configured: with
- * no targets the route logs and returns without sending anything.
+ * What goes out is the attention list for the previous business date — which
+ * products are running low and deserve a look before buying. The FULL
+ * inventory stays on the manual `สรุปคงเหลือ` command, which is unchanged.
+ *
+ * Delivery is INERT until BOTH are true, and fails closed on either:
+ *   - at least one threshold is configured in stock-thresholds.ts, otherwise
+ *     the alert list would be empty and misleading rather than informative;
+ *   - STOCK_SUMMARY_LINE_TARGETS names at least one LINE target.
+ * It never falls back to sending the whole stock report.
  *
  * Contract:
  *   - Auth: Bearer CRON_SECRET, the same convention as the other cron routes.
@@ -75,20 +83,23 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: message }, { status: 500 });
   }
 
-  // Executive summary only, with the missing-ชั่งคืน section collapsed to counts.
-  // The morning report has to be short enough to act on before the markets run.
-  const messages = buildStockSummaryMessages(summary, { incomplete: "count" });
+  // Attention list only — no full inventory, no per-market detail.
+  const lowStock = buildLowStockReport(summary);
+  const messages = buildLowStockMessages(lowStock);
   const productCount = summary.categories.reduce((n, group) => n + group.products.length, 0);
+  const wouldSendLine = lowStock.hasThresholds && targets.length > 0;
 
   if (debugMode) {
     logger.info("daily stock summary cron debug completed", {
       businessDate,
       productCount,
+      lowStockCount: lowStock.itemCount,
+      thresholdCount: lowStock.thresholdCount,
       incompleteCount: summary.incomplete.length,
       isComplete: summary.isComplete,
       messageCount: messages.length,
       targetCount: targets.length,
-      wouldSendLine: targets.length > 0,
+      wouldSendLine,
     });
 
     return NextResponse.json({
@@ -96,12 +107,40 @@ export async function GET(req: NextRequest) {
       debug: true,
       businessDate,
       productCount,
+      lowStockCount: lowStock.itemCount,
+      thresholdCount: lowStock.thresholdCount,
+      withoutThresholdCount: lowStock.withoutThresholdCount,
+      suppressedIncompleteCount: lowStock.suppressedIncompleteCount,
       incompleteCount: summary.incomplete.length,
       isComplete: summary.isComplete,
       messageCount: messages.length,
       targetCount: targets.length,
-      wouldSendLine: targets.length > 0,
+      wouldSendLine,
       messages,
+    });
+  }
+
+  if (!lowStock.hasThresholds) {
+    // Activation safety: with no approved thresholds every product is "not low"
+    // by rule, so a delivered report would claim everything is fine. Sending
+    // nothing is the honest answer, and sending the whole inventory instead is
+    // explicitly not the fallback.
+    logger.warn("daily stock summary cron skipped - no low-stock thresholds configured", {
+      businessDate,
+      productCount,
+      withoutThresholdCount: lowStock.withoutThresholdCount,
+    });
+    return NextResponse.json({
+      ok: true,
+      businessDate,
+      sent: false,
+      reason: "no_low_stock_thresholds_configured",
+      productCount,
+      lowStockCount: 0,
+      thresholdCount: 0,
+      withoutThresholdCount: lowStock.withoutThresholdCount,
+      incompleteCount: summary.incomplete.length,
+      targetCount: targets.length,
     });
   }
 
@@ -118,6 +157,8 @@ export async function GET(req: NextRequest) {
       sent: false,
       reason: "no_targets_configured",
       productCount,
+      lowStockCount: lowStock.itemCount,
+      thresholdCount: lowStock.thresholdCount,
       incompleteCount: summary.incomplete.length,
       targetCount: 0,
     });
@@ -156,6 +197,7 @@ export async function GET(req: NextRequest) {
         sentCount,
         failedCount: failedTargets.length,
         productCount,
+        lowStockCount: lowStock.itemCount,
         incompleteCount: summary.incomplete.length,
         targetCount: targets.length,
       },
@@ -167,6 +209,7 @@ export async function GET(req: NextRequest) {
     businessDate,
     sentCount,
     productCount,
+    lowStockCount: lowStock.itemCount,
     incompleteCount: summary.incomplete.length,
     isComplete: summary.isComplete,
   });
@@ -177,6 +220,10 @@ export async function GET(req: NextRequest) {
     sent: true,
     sentCount,
     productCount,
+    lowStockCount: lowStock.itemCount,
+    thresholdCount: lowStock.thresholdCount,
+    withoutThresholdCount: lowStock.withoutThresholdCount,
+    suppressedIncompleteCount: lowStock.suppressedIncompleteCount,
     incompleteCount: summary.incomplete.length,
     isComplete: summary.isComplete,
     targetCount: targets.length,

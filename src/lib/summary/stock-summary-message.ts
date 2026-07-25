@@ -38,8 +38,11 @@ function productLine(productName: string, quantity: number, unit: string): strin
 /**
  * Pack a heading plus its lines into one or more blocks. The heading repeats on
  * every continuation block so a split section is still readable on its own.
+ *
+ * Exported so the low-stock report renders its sections identically instead of
+ * growing a second, slightly different packer.
  */
-function packSection(heading: string, lines: string[]): string[] {
+export function packSection(heading: string, lines: string[]): string[] {
   if (lines.length === 0) return [];
 
   const blocks: string[] = [];

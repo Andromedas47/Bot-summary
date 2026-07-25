@@ -17,13 +17,19 @@ export const dynamic = "force-dynamic";
 /**
  * Scheduled daily Stock ("สรุปคงเหลือ") delivery.
  *
- * NOT ACTIVATED. vercel.json declares no schedule for this route, and
- * STOCK_SUMMARY_LINE_TARGETS is unset in every environment, so the endpoint is
- * inert until the business supplies target IDs and an approved clock time.
+ * Scheduled by .github/workflows/daily-stock-summary.yml at 08:00 Asia/Bangkok
+ * (01:00 UTC) — GitHub Actions, matching how finalize-slip-batches is driven,
+ * because vercel.json crons are UTC-only and this project is on a Hobby plan
+ * where cron firing time is approximate.
+ *
+ * Delivery is still INERT until STOCK_SUMMARY_LINE_TARGETS is configured: with
+ * no targets the route logs and returns without sending anything.
  *
  * Contract:
  *   - Auth: Bearer CRON_SECRET, the same convention as the other cron routes.
- *   - Business date: Bangkok 04:00 cutoff, overridable with ?date=YYYY-MM-DD.
+ *   - Report date: with no ?date=, the PREVIOUS Bangkok business date (the day
+ *     that just closed) — see previousBangkokBusinessDate. An explicit
+ *     ?date=YYYY-MM-DD is used verbatim and never shifted.
  *   - Idempotent: a deterministic X-Line-Retry-Key per (date, target, part)
  *     means a repeated scheduler call cannot produce duplicate LINE messages.
  *   - Per-target isolation: one failing target never blocks the others.
@@ -69,7 +75,9 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: message }, { status: 500 });
   }
 
-  const messages = buildStockSummaryMessages(summary);
+  // Executive summary only, with the missing-ชั่งคืน section collapsed to counts.
+  // The morning report has to be short enough to act on before the markets run.
+  const messages = buildStockSummaryMessages(summary, { incomplete: "count" });
   const productCount = summary.categories.reduce((n, group) => n + group.products.length, 0);
 
   if (debugMode) {

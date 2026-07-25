@@ -1,0 +1,43 @@
+name: daily-stock-summary
+
+# Daily Stock Core summary for P'Krai / Je — the morning purchasing report.
+#
+# Business requirement: 08:00 Asia/Bangkok every day, reporting the PREVIOUS
+# business date (the day that just closed). The route resolves that date itself
+# via previousBangkokBusinessDate, so this workflow passes no ?date=.
+#
+# Timezone: GitHub Actions cron is UTC, exactly like Vercel cron. Bangkok is
+# UTC+7 year-round with no DST, so 08:00 Bangkok == 01:00 UTC.
+#
+# Why GitHub Actions rather than a vercel.json cron entry: this project is on a
+# Vercel Hobby plan, where cron firing time is only approximate (a previous
+# commit already removed a Vercel cron for Hobby restrictions). The existing
+# finalize-slip-batches workflow established this pattern.
+#
+# NOTE: GitHub only runs scheduled workflows from the repository's DEFAULT
+# branch. This file does not fire until it is merged to main.
+
+on:
+  schedule:
+    - cron: "0 1 * * *" # 01:00 UTC = 08:00 Asia/Bangkok
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Optional business date override (YYYY-MM-DD). Leave blank for the previous business date."
+        required: false
+        type: string
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call daily-stock-summary cron
+        run: |
+          URL="https://bot-summary.vercel.app/api/cron/daily-stock-summary"
+          if [ -n "${{ inputs.date }}" ]; then
+            URL="$URL?date=${{ inputs.date }}"
+          fi
+          curl -sf --max-time 60 \
+            -X GET \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "$URL"

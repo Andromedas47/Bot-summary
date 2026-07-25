@@ -33,8 +33,14 @@ function row(overrides: Partial<RemainingFruitSourceRow> = {}): RemainingFruitSo
   };
 }
 
+/** Scheduled/automatic rendering (executive only, counts for missing returns). */
 function messagesFor(rows: RemainingFruitSourceRow[]): string[] {
   return buildStockSummaryMessages(buildStockSummaryFromRows(DATE, rows));
+}
+
+/** Manual/default rendering (full missing-return listing). */
+function blocksFor(rows: RemainingFruitSourceRow[]): string[] {
+  return buildStockSummaryBlocks(buildStockSummaryFromRows(DATE, rows));
 }
 
 describe("stock summary message", () => {
@@ -61,8 +67,8 @@ describe("stock summary message", () => {
     expect(text).not.toContain("กิโล");
   });
 
-  test("lists missing returns per market", () => {
-    const text = messagesFor([
+  test("manual rendering lists missing returns per market", () => {
+    const text = blocksFor([
       row({ market_name: "เฉลิม72 ผลไม้", product_name: "แก้วมังกร", quantity: 8, unit: "โล", transaction_type: TX_WITHDRAW }),
       row({ market_name: "เฉลิม72 ผลไม้", product_name: "แตงโม", quantity: 5, unit: "ลูก", transaction_type: TX_WITHDRAW }),
       row({ market_name: "พาซิโอ้ผลไม้", product_name: "แตงโม", quantity: 4, unit: "ลูก", transaction_type: TX_WITHDRAW }),
@@ -72,6 +78,47 @@ describe("stock summary message", () => {
     expect(text).toContain("- เฉลิม72 ผลไม้: แก้วมังกร (กก.), แตงโม (ลูก)");
     expect(text).toContain("- พาซิโอ้ผลไม้: แตงโม (ลูก)");
     expect(text).not.toContain(STOCK_COMPLETE_NOTICE);
+  });
+
+  test("scheduled delivery collapses missing returns to counts", () => {
+    const summary = buildStockSummaryFromRows(DATE, [
+      row({ market_name: "เฉลิม72 ผลไม้", product_name: "แก้วมังกร", quantity: 8, unit: "โล", transaction_type: TX_WITHDRAW }),
+      row({ market_name: "เฉลิม72 ผลไม้", product_name: "แตงโม", quantity: 5, unit: "ลูก", transaction_type: TX_WITHDRAW }),
+      row({ market_name: "พาซิโอ้ผลไม้", product_name: "แตงโม", quantity: 4, unit: "ลูก", transaction_type: TX_WITHDRAW }),
+      row({ market_name: "ตลาดกี้", quantity: 20 }),
+    ]);
+
+    const auto = buildStockSummaryMessages(summary).join("\n\n");
+    expect(auto).toContain(`${STOCK_INCOMPLETE_HEADING}\n2 ตลาด / 3 รายการ`);
+    // The per-market product names belong to the manual reply, not the morning push.
+    expect(auto).not.toContain("แก้วมังกร");
+    expect(auto).not.toContain("- เฉลิม72 ผลไม้:");
+
+    // The manual/default rendering is unchanged.
+    const full = buildStockSummaryBlocks(summary).join("\n\n");
+    expect(full).toContain("- เฉลิม72 ผลไม้: แก้วมังกร (กก.), แตงโม (ลูก)");
+    expect(full).toContain("- พาซิโอ้ผลไม้: แตงโม (ลูก)");
+    expect(full).not.toContain("2 ตลาด / 3 รายการ");
+  });
+
+  test("scheduled delivery still carries the categorized stock itself", () => {
+    const auto = messagesFor([
+      row({ product_name: "หมอนทอง", quantity: 108.2, unit: "โล" }),
+      row({ product_name: "มหาชนก", quantity: 64.7, unit: "โล" }),
+      row({ product_name: "กระชาย", quantity: 4, unit: "แพค" }),
+    ]).join("\n\n");
+
+    expect(auto).toContain("🥭 ทุเรียน\nหมอนทอง — 108.2 กก.");
+    expect(auto).toContain("🍉 ผลไม้\nมหาชนก — 64.7 กก.");
+    expect(auto).toContain("🥬 ผัก\nกระชาย — 4 แพค");
+  });
+
+  test("empty categories are omitted from the scheduled message", () => {
+    const auto = messagesFor([row({ product_name: "หมอนทอง", quantity: 10, unit: "โล" })]).join("\n\n");
+    expect(auto).toContain("🥭 ทุเรียน");
+    expect(auto).not.toContain("🍉 ผลไม้");
+    expect(auto).not.toContain("🥬 ผัก");
+    expect(auto).not.toContain("❓ ไม่จัดหมวด");
   });
 
   test("states completeness when every return is in", () => {

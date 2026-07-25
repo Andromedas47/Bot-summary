@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   isIsoDate,
   parseStockSummaryTargets,
+  previousBangkokBusinessDate,
   resolveStockSummaryDate,
   stockSummaryRetryKey,
 } from "./daily-stock-cron";
@@ -11,30 +12,56 @@ function bangkok(iso: string): number {
   return new Date(`${iso}+07:00`).getTime();
 }
 
+describe("previousBangkokBusinessDate", () => {
+  test("08:00 Bangkok reports the day that just closed", () => {
+    expect(previousBangkokBusinessDate(bangkok("2026-07-26T08:00:00"))).toBe("2026-07-25");
+    expect(previousBangkokBusinessDate(bangkok("2026-07-27T08:00:00"))).toBe("2026-07-26");
+  });
+
+  test("is derived from the 04:00 business cutoff, not the calendar date", () => {
+    // 03:59 still belongs to the previous business day, so the report shifts too.
+    expect(previousBangkokBusinessDate(bangkok("2026-07-26T03:59:00"))).toBe("2026-07-24");
+    // 04:00 rolls the business day over.
+    expect(previousBangkokBusinessDate(bangkok("2026-07-26T04:00:00"))).toBe("2026-07-25");
+    expect(previousBangkokBusinessDate(bangkok("2026-07-26T23:59:00"))).toBe("2026-07-25");
+  });
+
+  test("crosses month and year boundaries", () => {
+    expect(previousBangkokBusinessDate(bangkok("2026-08-01T08:00:00"))).toBe("2026-07-31");
+    expect(previousBangkokBusinessDate(bangkok("2026-03-01T08:00:00"))).toBe("2026-02-28");
+    expect(previousBangkokBusinessDate(bangkok("2027-01-01T08:00:00"))).toBe("2026-12-31");
+  });
+
+  test("handles a leap day", () => {
+    expect(previousBangkokBusinessDate(bangkok("2028-03-01T08:00:00"))).toBe("2028-02-29");
+  });
+
+  test("the whole 08:00 hour resolves to one date, so the scheduler is retry-safe", () => {
+    const dates = new Set(
+      ["08:00:00", "08:00:30", "08:05:00", "08:30:00", "08:59:59"].map((t) =>
+        previousBangkokBusinessDate(bangkok(`2026-07-26T${t}`)),
+      ),
+    );
+    expect([...dates]).toEqual(["2026-07-25"]);
+  });
+});
+
 describe("resolveStockSummaryDate", () => {
-  test("uses an explicit ISO date when supplied", () => {
-    expect(resolveStockSummaryDate("2026-07-25", bangkok("2026-01-01T12:00:00"))).toBe("2026-07-25");
+  test("a scheduled run (no date param) reports the previous business date", () => {
+    expect(resolveStockSummaryDate(null, bangkok("2026-07-26T08:00:00"))).toBe("2026-07-25");
+    expect(resolveStockSummaryDate(null, bangkok("2026-07-27T08:00:00"))).toBe("2026-07-26");
   });
 
-  test("ignores a malformed date param and falls back to the business date", () => {
-    expect(resolveStockSummaryDate("25/07/2569", bangkok("2026-07-25T20:00:00"))).toBe("2026-07-25");
-    expect(resolveStockSummaryDate("", bangkok("2026-07-25T20:00:00"))).toBe("2026-07-25");
+  test("an explicit ISO date is used verbatim and never shifted backwards", () => {
+    expect(resolveStockSummaryDate("2026-07-25", bangkok("2026-07-26T08:00:00"))).toBe("2026-07-25");
+    expect(resolveStockSummaryDate("2026-07-26", bangkok("2026-07-26T08:00:00"))).toBe("2026-07-26");
+    // Even a far-off backfill date stays exactly as requested.
+    expect(resolveStockSummaryDate("2026-01-01", bangkok("2026-07-26T08:00:00"))).toBe("2026-01-01");
   });
 
-  test("respects the Bangkok 04:00 business-day boundary", () => {
-    // 23:59 on the 25th is still the 25th
-    expect(resolveStockSummaryDate(null, bangkok("2026-07-25T23:59:00"))).toBe("2026-07-25");
-    // 00:30 on the 26th still belongs to the 25th's business day
-    expect(resolveStockSummaryDate(null, bangkok("2026-07-26T00:30:00"))).toBe("2026-07-25");
-    // 03:59 is the last minute of the 25th
-    expect(resolveStockSummaryDate(null, bangkok("2026-07-26T03:59:00"))).toBe("2026-07-25");
-    // 04:00 rolls over to the 26th
-    expect(resolveStockSummaryDate(null, bangkok("2026-07-26T04:00:00"))).toBe("2026-07-26");
-  });
-
-  test("handles month and year boundaries", () => {
-    expect(resolveStockSummaryDate(null, bangkok("2026-08-01T02:00:00"))).toBe("2026-07-31");
-    expect(resolveStockSummaryDate(null, bangkok("2027-01-01T01:00:00"))).toBe("2026-12-31");
+  test("a malformed date param falls back to the scheduled semantics", () => {
+    expect(resolveStockSummaryDate("25/07/2569", bangkok("2026-07-26T08:00:00"))).toBe("2026-07-25");
+    expect(resolveStockSummaryDate("", bangkok("2026-07-26T08:00:00"))).toBe("2026-07-25");
   });
 
   test("isIsoDate accepts only YYYY-MM-DD", () => {
@@ -84,5 +111,27 @@ describe("parseStockSummaryTargets", () => {
     expect(parseStockSummaryTargets("Cabc, Cxyz")).toEqual(["Cabc", "Cxyz"]);
     expect(parseStockSummaryTargets("Cabc\nCxyz")).toEqual(["Cabc", "Cxyz"]);
     expect(parseStockSummaryTargets("Cabc,Cabc,Cxyz")).toEqual(["Cabc", "Cxyz"]);
+  });
+});
+
+describe("scheduler configuration", () => {
+  test("the daily-stock-summary GitHub Actions workflow runs at 08:00 Asia/Bangkok", async () => {
+    const yaml = await Bun.file(
+      `${import.meta.dir}/../../../.github/workflows/daily-stock-summary.yml`,
+    ).text();
+
+    // GitHub Actions cron is UTC, same as Vercel cron. Bangkok is UTC+7 with no
+    // DST, so 08:00 Bangkok is 01:00 UTC year-round.
+    expect(yaml).toContain('- cron: "0 1 * * *"');
+    expect(yaml).toContain("/api/cron/daily-stock-summary");
+    expect(yaml).toContain("Authorization: Bearer ${{ secrets.CRON_SECRET }}");
+    // The report date must come from the route's own resolution, not the caller.
+    expect(yaml).not.toContain("date=2026");
+  });
+
+  test("daily-stock-summary is NOT a vercel.json cron (Hobby plan firing is approximate)", async () => {
+    const file = await import("../../../vercel.json", { with: { type: "json" } });
+    const config = file.default as { crons?: Array<{ path: string; schedule: string }> };
+    expect(config.crons?.find((c) => c.path === "/api/cron/daily-stock-summary")).toBeUndefined();
   });
 });

@@ -69,16 +69,33 @@ function categoryBlocks(group: StockCategoryGroup): string[] {
   return packSection(heading, lines);
 }
 
-/** One line per market, products comma-joined, so a busy day stays readable. */
-function incompleteBlocks(summary: StockSummary): string[] {
-  if (summary.incomplete.length === 0) return [];
+/**
+ * How the missing-ชั่งคืน section is rendered.
+ *   "full"  — one line per market with the product names (manual reply)
+ *   "count" — just the totals (scheduled morning delivery, kept concise)
+ * Both read the same summary.incomplete list; this is presentation only.
+ */
+export type IncompleteDetail = "full" | "count";
 
+function incompleteByMarket(summary: StockSummary): Map<string, string[]> {
   const byMarket = new Map<string, string[]>();
   for (const entry of summary.incomplete) {
     const products = byMarket.get(entry.marketName) ?? [];
     const label = `${entry.productName} (${stockDisplayUnit(entry.unit)})`;
     if (!products.includes(label)) products.push(label);
     byMarket.set(entry.marketName, products);
+  }
+  return byMarket;
+}
+
+function incompleteBlocks(summary: StockSummary, detail: IncompleteDetail): string[] {
+  if (summary.incomplete.length === 0) return [];
+
+  const byMarket = incompleteByMarket(summary);
+
+  if (detail === "count") {
+    const itemCount = [...byMarket.values()].reduce((n, products) => n + products.length, 0);
+    return [`${STOCK_INCOMPLETE_HEADING}\n${byMarket.size} ตลาด / ${itemCount} รายการ`];
   }
 
   const lines = [...byMarket.entries()].map(
@@ -107,7 +124,12 @@ function unidentifiedBlocks(summary: StockSummary): string[] {
  * preserved by the existing detail blocks that follow in the manual reply and
  * by the dashboard.
  */
-export function buildStockSummaryBlocks(summary: StockSummary): string[] {
+export function buildStockSummaryBlocks(
+  summary: StockSummary,
+  options: { incomplete?: IncompleteDetail } = {},
+): string[] {
+  // "full" keeps the manual reply exactly as it was.
+  const detail = options.incomplete ?? "full";
   const header = `${STOCK_REPORT_TITLE}\nวันที่ ${formatThaiDate(summary.businessDate)}`;
 
   const body = [
@@ -122,15 +144,24 @@ export function buildStockSummaryBlocks(summary: StockSummary): string[] {
   return [
     header,
     ...body,
-    ...(summary.isComplete ? [STOCK_COMPLETE_NOTICE] : incompleteBlocks(summary)),
+    ...(summary.isComplete ? [STOCK_COMPLETE_NOTICE] : incompleteBlocks(summary, detail)),
   ];
 }
 
-/** LINE-ready executive messages — used by the scheduled daily delivery. */
+/**
+ * LINE-ready executive messages for the scheduled daily delivery.
+ *
+ * Executive summary ONLY — the per-market detail blocks are deliberately not
+ * appended here, so the 08:00 morning report stays short enough to act on.
+ * The manual command still returns the detail.
+ */
 export function buildStockSummaryMessages(
   summary: StockSummary,
-  options: { maxMessages?: number } = {},
+  options: { maxMessages?: number; incomplete?: IncompleteDetail } = {},
 ): string[] {
-  const messages = chunkBlocks(buildStockSummaryBlocks(summary), LINE_MESSAGE_MAX_CODE_POINTS);
+  const blocks = buildStockSummaryBlocks(summary, {
+    incomplete: options.incomplete ?? "count",
+  });
+  const messages = chunkBlocks(blocks, LINE_MESSAGE_MAX_CODE_POINTS);
   return capAtMaxMessages(messages, options.maxMessages);
 }

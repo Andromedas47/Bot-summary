@@ -8,18 +8,45 @@ export function isIsoDate(value: string): boolean {
   return /^\d{4}-\d{2}-\d{2}$/.test(value);
 }
 
+function shiftIsoDate(isoDate: string, days: number): string {
+  const [y, m, d] = isoDate.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
+
 /**
- * Business date for a scheduled run.
+ * The business date a SCHEDULED run must report: the previous Bangkok business
+ * date, never the one currently in progress.
  *
- * Uses the Bangkok 04:00 business-day cutoff, so a run at 01:30 Bangkok still
- * reports the day that is closing rather than the calendar day that just
- * started. An explicit ISO ?date= always wins (used for backfill and UAT).
+ * The morning delivery runs at 08:00 Bangkok so P'Krai and Je can decide what
+ * to buy that morning, and what they need is the day that just closed. The
+ * existing 04:00 business-day cutoff still defines "today", so this is
+ * literally (business date now) − 1 day:
+ *
+ *   26/07 08:00 Bangkok → business date 26/07 → reports 25/07
+ *   27/07 08:00 Bangkok → business date 27/07 → reports 26/07
+ *
+ * Around the cutoff the rule stays consistent because it is derived from the
+ * business date rather than the calendar date:
+ *
+ *   26/07 03:59 Bangkok → business date 25/07 → reports 24/07
+ *   26/07 04:00 Bangkok → business date 26/07 → reports 25/07
+ */
+export function previousBangkokBusinessDate(timestamp = Date.now()): string {
+  const businessDate =
+    bangkokBusinessDateFromTimestamp(timestamp) ?? new Date(timestamp).toISOString().slice(0, 10);
+  return shiftIsoDate(businessDate, -1);
+}
+
+/**
+ * Report date for a cron invocation.
+ *
+ * An explicit ISO ?date= always wins and is used verbatim — backfill and UAT
+ * must never be shifted backwards. With no parameter the scheduled semantics
+ * apply: the previous Bangkok business date.
  */
 export function resolveStockSummaryDate(dateParam: string | null, timestamp = Date.now()): string {
   if (dateParam && isIsoDate(dateParam)) return dateParam;
-  return (
-    bangkokBusinessDateFromTimestamp(timestamp) ?? new Date(timestamp).toISOString().slice(0, 10)
-  );
+  return previousBangkokBusinessDate(timestamp);
 }
 
 /**

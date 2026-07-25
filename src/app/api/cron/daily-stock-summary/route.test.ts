@@ -161,8 +161,9 @@ describe("daily stock summary cron — delivery", () => {
     expect(pushCalls.map((c) => c.to)).toEqual(["Cgroup1", "Cgroup2"]);
     expect(pushCalls[0].text).toContain("📦 สรุปคงเหลือทุกตลาด");
     expect(pushCalls[0].text).toContain("หมอนทอง — 281.1 กก.");
-    expect(pushCalls[0].text).toContain("⚠️ ข้อมูลชั่งคืนยังไม่ครบ");
-    expect(pushCalls[0].text).toContain("เฉลิม72 ผลไม้: แก้วมังกร");
+    // Scheduled delivery collapses the missing-return section to counts.
+    expect(pushCalls[0].text).toContain("⚠️ ข้อมูลชั่งคืนยังไม่ครบ\n1 ตลาด / 1 รายการ");
+    expect(pushCalls[0].text).not.toContain("เฉลิม72 ผลไม้: แก้วมังกร");
   });
 
   test("repeat scheduler calls reuse the same retry keys — no duplicate LINE spam", async () => {
@@ -195,6 +196,56 @@ describe("daily stock summary cron — delivery", () => {
     const day2 = pushCalls.map((c) => c.retryKey);
 
     expect(day2).not.toEqual(day1);
+  });
+});
+
+describe("daily stock summary cron — scheduled report date", () => {
+  test("a scheduled run with no date param reports the previous business date", async () => {
+    produceResult = { data: produceRows(), error: null };
+    process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
+
+    const res = await GET(request());
+    const body = await res.json();
+
+    // The route must not report the day currently in progress.
+    const { previousBangkokBusinessDate } = await import("@/lib/summary/daily-stock-cron");
+    expect(body.businessDate).toBe(previousBangkokBusinessDate());
+  });
+
+  test("scheduled delivery sends the concise executive summary only", async () => {
+    produceResult = { data: produceRows(), error: null };
+    process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
+
+    await GET(request("?date=2026-07-25"));
+    const text = pushCalls.map((c) => c.text).join("\n\n");
+
+    expect(text).toContain("📦 สรุปคงเหลือทุกตลาด");
+    expect(text).toContain("🥭 ทุเรียน");
+    expect(text).toContain("หมอนทอง — 281.1 กก.");
+    // Missing returns collapse to counts …
+    expect(text).toContain("⚠️ ข้อมูลชั่งคืนยังไม่ครบ\n1 ตลาด / 1 รายการ");
+    // … and no per-market detail block is appended.
+    expect(text).not.toContain("เฉลิม72 ผลไม้: แก้วมังกร");
+    expect(text).not.toContain("เหลือขายต่อ:");
+    expect(text).not.toContain("เบิกทั้งหมด:");
+  });
+
+  test("idempotency keys follow the resolved scheduled date, not wall-clock time", async () => {
+    produceResult = { data: produceRows(), error: null };
+    process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
+
+    // Two scheduled runs on the same morning resolve the same date …
+    await GET(request());
+    const first = pushCalls.map((c) => c.retryKey);
+    pushCalls = [];
+    await GET(request());
+    expect(pushCalls.map((c) => c.retryKey)).toEqual(first);
+
+    // … and equal the keys for that date requested explicitly.
+    const { previousBangkokBusinessDate, stockSummaryRetryKey } = await import(
+      "@/lib/summary/daily-stock-cron"
+    );
+    expect(first[0]).toBe(stockSummaryRetryKey(previousBangkokBusinessDate(), "Cgroup1", 0));
   });
 });
 

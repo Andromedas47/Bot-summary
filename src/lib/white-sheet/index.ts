@@ -13,6 +13,14 @@ export {
   toDigitalWhiteSheetSummary,
   WhiteSheetDataError,
 } from "./load";
+export { formatBusinessDateThai } from "./business-date-display";
+export {
+  buildWhiteSheetMarketScopeOptions,
+  listWhiteSheetMarketScopesForDate,
+  resolveWhiteSheetMarketScopeSelection,
+  whiteSheetMarketScopeKey,
+} from "./market-scopes";
+export type { WhiteSheetMarketScopeOption } from "./market-scopes";
 export {
   finalizeWhiteSheetCashEntry,
   loadWhiteSheetCashEntry,

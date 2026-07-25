@@ -56,7 +56,10 @@ async function getSessions(
 
   let query = supabase
     .from("produce_sessions")
-    .select("id,session_date,staff_name,session_title,total_items,parser_errors,created_at", { count: "exact" })
+    .select(
+      "id,session_date,staff_name,session_title,total_items,parser_errors,created_at,declared_transaction_type,voided_at,voided_by,void_reason",
+      { count: "exact" },
+    )
     .order("created_at", { ascending: false })
     .range(from, to);
 

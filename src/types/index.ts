@@ -57,6 +57,10 @@ export interface ProduceSession {
   total_items:      number;
   parser_errors:    string[] | null;
   created_at:       string;
+  declared_transaction_type?: string | null;
+  voided_at?:       string | null;
+  voided_by?:       string | null;
+  void_reason?:     string | null;
 }
 
 export interface ProduceItem {

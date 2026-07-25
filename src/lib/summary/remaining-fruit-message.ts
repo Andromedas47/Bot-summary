@@ -4,20 +4,32 @@ import {
   displayRemainingUnit,
   formatQuantity,
   REMAINING_STOCK_REPORT_TITLE,
-  UNIDENTIFIED_MARKET_SECTION,
   type RemainingFruitItem,
   type RemainingFruitReport,
   type RemainingFruitSourceRow,
 } from "@/lib/summary/remaining-fruit";
+import { buildStockSummary } from "@/lib/summary/stock-summary";
+import { buildStockSummaryBlocks } from "@/lib/summary/stock-summary-message";
+import {
+  capAtMaxMessages,
+  chunkBlocks,
+  countCodePoints,
+  joinBlocks,
+  LINE_MESSAGE_MAX_CODE_POINTS,
+  LINE_REPLY_MAX_MESSAGES,
+  OVERFLOW_NOTICE,
+} from "@/lib/summary/line-chunking";
 
-export const LINE_MESSAGE_MAX_CODE_POINTS = 4000;
-export const LINE_REPLY_MAX_MESSAGES = 5;
-export const OVERFLOW_NOTICE = "\n\nรายการยังไม่ครบ — ดูรายละเอียดทั้งหมดในหน้าเว็บ";
-
-/** Count Unicode code points (not UTF-16 code units). */
-export function countCodePoints(text: string): number {
-  return [...text].length;
-}
+// Re-exported so existing importers (and their tests) keep working after the
+// chunking primitives moved into their own module.
+export {
+  capAtMaxMessages,
+  chunkBlocks,
+  countCodePoints,
+  LINE_MESSAGE_MAX_CODE_POINTS,
+  LINE_REPLY_MAX_MESSAGES,
+  OVERFLOW_NOTICE,
+};
 
 function formatQtyLine(quantity: number, unit: string): string {
   return `${formatQuantity(quantity)} ${displayRemainingUnit(unit)}`.trim();
@@ -43,34 +55,6 @@ function formatItemBlock(item: RemainingFruitItem, index: number): string {
   return lines.join("\n");
 }
 
-function overallFruitBlock(row: RemainingFruitReport["overall"][number]): string {
-  const lines = [
-    row.fruitName,
-    `เหลือขายต่อทั้งหมด: ${formatQtyLine(row.totalRemainingForResale, row.unit)}`,
-  ];
-  for (const entry of row.marketBreakdown) {
-    lines.push(`- ${entry.marketName}: ${formatQtyLine(entry.quantity, row.unit)}`);
-  }
-  return lines.join("\n");
-}
-
-function buildConfirmedOverallBlocks(header: string, report: RemainingFruitReport): string[] {
-  const blocks = [header, "\u0E2A\u0E23\u0E38\u0E1B\u0E04\u0E07\u0E40\u0E2B\u0E25\u0E37\u0E2D\u0E23\u0E27\u0E21\u0E17\u0E38\u0E01\u0E15\u0E25\u0E32\u0E14"];
-  for (const row of report.overall) {
-    blocks.push(overallFruitBlock(row));
-  }
-  return blocks;
-}
-
-function buildUnidentifiedOverallBlocks(report: RemainingFruitReport): string[] {
-  if (!report.unidentified || report.unidentified.overall.length === 0) return [];
-  const blocks = [UNIDENTIFIED_MARKET_SECTION];
-  for (const row of report.unidentified.overall) {
-    blocks.push(overallFruitBlock(row));
-  }
-  return blocks;
-}
-
 function buildMarketBlocks(sections: RemainingFruitReport["markets"]): string[] {
   const blocks: string[] = [];
   for (const section of sections) {
@@ -89,84 +73,6 @@ function buildAllDetailBlocks(report: RemainingFruitReport): string[] {
   ];
 }
 
-function joinBlocks(blocks: string[]): string {
-  return blocks.join("\n\n");
-}
-
-/** Split only at blank-line boundaries within a single oversized block. */
-function splitOversizedBlock(block: string, maxCodePoints: number): string[] {
-  const parts = block.split("\n\n");
-  return chunkBlocks(parts, maxCodePoints);
-}
-
-/**
- * Pack blocks into messages without splitting a block unless it alone exceeds the limit.
- */
-export function chunkBlocks(blocks: string[], maxCodePoints: number): string[] {
-  const messages: string[] = [];
-  let current: string[] = [];
-
-  const flush = () => {
-    if (current.length > 0) {
-      messages.push(joinBlocks(current));
-      current = [];
-    }
-  };
-
-  for (const block of blocks) {
-    const candidate = current.length === 0 ? block : joinBlocks([...current, block]);
-
-    if (countCodePoints(candidate) <= maxCodePoints) {
-      current.push(block);
-      continue;
-    }
-
-    flush();
-
-    if (countCodePoints(block) <= maxCodePoints) {
-      current = [block];
-    } else {
-      messages.push(...splitOversizedBlock(block, maxCodePoints));
-    }
-  }
-
-  flush();
-  return messages;
-}
-
-function capAtMaxMessages(messages: string[]): string[] {
-  if (messages.length <= LINE_REPLY_MAX_MESSAGES) return messages;
-
-  const kept = messages.slice(0, LINE_REPLY_MAX_MESSAGES - 1);
-  const overflow = messages.slice(LINE_REPLY_MAX_MESSAGES - 1).join("\n\n");
-  const maxBody = LINE_MESSAGE_MAX_CODE_POINTS - countCodePoints(OVERFLOW_NOTICE);
-  const truncated = truncateAtSectionBoundary(overflow, maxBody);
-  kept.push(`${truncated}${OVERFLOW_NOTICE}`);
-  return kept;
-}
-
-function truncateAtSectionBoundary(text: string, maxCodePoints: number): string {
-  if (countCodePoints(text) <= maxCodePoints) return text;
-
-  let low = 0;
-  let high = text.length;
-  while (low < high) {
-    const mid = Math.ceil((low + high) / 2);
-    const slice = text.slice(0, mid);
-    const boundary = slice.lastIndexOf("\n\n");
-    const cut = boundary > 0 ? slice.slice(0, boundary) : slice;
-    if (countCodePoints(cut) <= maxCodePoints) low = mid;
-    else high = mid - 1;
-  }
-
-  const slice = text.slice(0, low);
-  const boundary = slice.lastIndexOf("\n\n");
-  if (boundary > 0) return slice.slice(0, boundary).trimEnd();
-  const lineBoundary = slice.lastIndexOf("\n");
-  if (lineBoundary > 0) return slice.slice(0, lineBoundary).trimEnd();
-  return slice.trimEnd();
-}
-
 export function buildRemainingFruitMessages(
   date: string,
   report: RemainingFruitReport,
@@ -182,13 +88,17 @@ export function buildRemainingFruitMessages(
   }
 
   const messages: string[] = [];
-  const showOverall = includeOverall && (report.overall.length > 0 || !!report.unidentified?.overall.length);
+  const showOverall =
+    includeOverall &&
+    (report.overall.length > 0 ||
+      !!report.unidentified?.overall.length ||
+      report.markets.length > 0);
 
   if (showOverall) {
-    const summaryBlocks = [
-      ...buildConfirmedOverallBlocks(header, report),
-      ...buildUnidentifiedOverallBlocks(report),
-    ];
+    // The all-market view leads with the shared StockSummary executive block
+    // (categories + missing-return warnings) — the same model the scheduled
+    // delivery uses — and keeps the per-market detail blocks below it.
+    const summaryBlocks = buildStockSummaryBlocks(buildStockSummary(date, report));
     const summaryMessage = joinBlocks(summaryBlocks);
     if (countCodePoints(summaryMessage) <= LINE_MESSAGE_MAX_CODE_POINTS) {
       messages.push(summaryMessage);

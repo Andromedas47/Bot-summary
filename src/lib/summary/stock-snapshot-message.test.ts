@@ -4,7 +4,7 @@ import { buildStockSummaryBlocks } from "./stock-summary-message";
 import {
   buildStockSnapshotBlocks,
   buildStockSnapshotMessages,
-  stockSnapshotMarketCount,
+  stockSnapshotMarketCoverage,
   STOCK_SNAPSHOT_TITLE,
 } from "./stock-snapshot-message";
 import { countCodePoints, LINE_MESSAGE_MAX_CODE_POINTS, OVERFLOW_NOTICE } from "./line-chunking";
@@ -31,27 +31,88 @@ function textFor(rows: RemainingFruitSourceRow[]): string {
 }
 
 describe("stock snapshot header", () => {
-  test("states that it is the all-market total, with the date and market count", () => {
+  test("states that it is the all-market total, with the date and both market counts", () => {
     const text = textFor([
       row({ market_name: "ตลาดกี้", product_name: "แตงโม", quantity: 10, unit: "ลูก" }),
       row({ market_name: "เฉลิม72 ผลไม้", product_name: "มะละกอ", quantity: 4, unit: "ลูก" }),
     ]);
 
     expect(text).toContain(
-      `${STOCK_SNAPSHOT_TITLE}\nข้อมูลวันที่ 25 กรกฎาคม 2569\nรวม 2 ตลาด`,
+      `${STOCK_SNAPSHOT_TITLE}\nข้อมูลวันที่ 25 กรกฎาคม 2569\nข้อมูลจาก 2 ตลาด • พบคงเหลือ 2 ตลาด`,
     );
     // The purpose has to be legible from the first line.
     expect(STOCK_SNAPSHOT_TITLE).toContain("รวมทุกตลาด");
   });
 
-  test("counts each contributing market once, however many products it sent", () => {
+  test("both counts match when every market contributed sellable stock", () => {
     const summary = buildStockSummaryFromRows(DATE, [
       row({ market_name: "ตลาดกี้", product_name: "แตงโม", quantity: 10, unit: "ลูก" }),
       row({ market_name: "ตลาดกี้", product_name: "มะละกอ", quantity: 3, unit: "ลูก" }),
       row({ market_name: "เฉลิม72 ผลไม้", product_name: "ฝรั่ง", quantity: 5, unit: "โล" }),
     ]);
 
-    expect(stockSnapshotMarketCount(summary)).toBe(2);
+    // Each market counts once however many products it sent.
+    expect(stockSnapshotMarketCoverage(summary)).toEqual({ total: 2, withStock: 2 });
+  });
+
+  test("a market with data but no sellable stock still counts toward the total", () => {
+    const summary = buildStockSummaryFromRows(DATE, [
+      row({ market_name: "ตลาดกี้", product_name: "แตงโม", quantity: 10, unit: "ลูก" }),
+      // Withdrew, no ชั่งคืน recorded yet — present in the data, no stock figure.
+      row({
+        market_name: "เฉลิม72 ผลไม้",
+        product_name: "แก้วมังกร",
+        quantity: 9,
+        unit: "โล",
+        transaction_type: TX_WITHDRAW,
+      }),
+    ]);
+
+    expect(stockSnapshotMarketCoverage(summary)).toEqual({ total: 2, withStock: 1 });
+    expect(buildStockSnapshotBlocks(summary)[0]).toContain("ข้อมูลจาก 2 ตลาด • พบคงเหลือ 1 ตลาด");
+  });
+
+  test("an incomplete market is never counted as a zero-stock market", () => {
+    const summary = buildStockSummaryFromRows(DATE, [
+      row({
+        market_name: "เฉลิม72 ผลไม้",
+        product_name: "แก้วมังกร",
+        quantity: 9,
+        unit: "โล",
+        transaction_type: TX_WITHDRAW,
+      }),
+    ]);
+    const text = buildStockSnapshotMessages(summary).join("\n\n");
+
+    // It is in the total, absent from พบคงเหลือ, and named in the warning —
+    // never rendered as a market holding 0.
+    expect(stockSnapshotMarketCoverage(summary)).toEqual({ total: 1, withStock: 0 });
+    expect(text).toContain("ข้อมูลจาก 1 ตลาด • พบคงเหลือ 0 ตลาด");
+    expect(text).toContain("⚠️ ข้อมูลชั่งคืนยังไม่ครบ\n1 ตลาด / 1 รายการ");
+    expect(text).not.toContain("แก้วมังกร — 0");
+  });
+
+  test("คืนเสีย-only stock leaves the market outside พบคงเหลือ", () => {
+    const summary = buildStockSummaryFromRows(DATE, [
+      row({ market_name: "ตลาดกี้", product_name: "แตงโม", quantity: 6, unit: "ลูก" }),
+      row({
+        market_name: "เฉลิม72 ผลไม้",
+        product_name: "ลูกพลับ",
+        quantity: 12,
+        unit: "ลูก",
+        transaction_type: TX_WITHDRAW,
+      }),
+      row({
+        market_name: "เฉลิม72 ผลไม้",
+        product_name: "ลูกพลับ",
+        quantity: 12,
+        unit: "ลูก",
+        transaction_type: TX_DAMAGED,
+      }),
+    ]);
+
+    // Damage is not a good return, so the loop is still open for that market.
+    expect(stockSnapshotMarketCoverage(summary)).toEqual({ total: 2, withStock: 1 });
   });
 });
 
@@ -149,8 +210,9 @@ describe("stock snapshot completeness", () => {
 
     expect(text).toContain("❔ ยังระบุตลาดไม่ได้");
     expect(text).toContain("ลูกพลับ — 363 ลูก");
-    // Unresolved markets are not counted as confirmed contributing markets.
-    expect(text).toContain("รวม 1 ตลาด");
+    // An unresolved row has no market identity, so it counts toward neither
+    // number — its stock is still shown in its own section above.
+    expect(text).toContain("ข้อมูลจาก 1 ตลาด • พบคงเหลือ 1 ตลาด");
   });
 
   test("reports an empty day explicitly", () => {

@@ -160,7 +160,9 @@ describe("daily stock summary cron — delivery", () => {
 
     expect(pushCalls.map((c) => c.to)).toEqual(["Cgroup1", "Cgroup2"]);
     expect(pushCalls[0].text).toContain("📦 สต๊อกคงเหลือรวมทุกตลาด");
-    expect(pushCalls[0].text).toContain("รวม 1 ตลาด");
+    // เฉลิม72 ผลไม้ is in the day's data but owes its ชั่งคืน, so it counts
+    // toward the total and not toward พบคงเหลือ.
+    expect(pushCalls[0].text).toContain("ข้อมูลจาก 2 ตลาด • พบคงเหลือ 1 ตลาด");
     expect(pushCalls[0].text).toContain("🥭 ทุเรียน\n\nกก.\nหมอนทอง — 281.1 กก.");
     // Scheduled delivery collapses the missing-return section to counts.
     expect(pushCalls[0].text).toContain("⚠️ ข้อมูลชั่งคืนยังไม่ครบ\n1 ตลาด / 1 รายการ");

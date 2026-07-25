@@ -141,15 +141,34 @@ function unidentifiedBlocks(summary: StockSummary): string[] {
   return sectionBlocks(STOCK_UNIDENTIFIED_HEADING, unitGroups(products));
 }
 
-/** Markets contributing at least one sellable product to this snapshot. */
-export function stockSnapshotMarketCount(summary: StockSummary): number {
-  const markets = new Set<string>();
+export interface StockSnapshotMarketCoverage {
+  /** Distinct markets represented in this business day's data. */
+  total: number;
+  /** Of those, the markets that contributed sellable remaining stock. */
+  withStock: number;
+}
+
+/**
+ * Both market numbers behind the header.
+ *
+ * They are reported separately because "10 ตลาด" alone is ambiguous: a market
+ * can appear in the day's data and still contribute no sellable stock — most
+ * often because its ชั่งคืน has not been recorded yet. Such a market is NOT a
+ * zero-stock market, and collapsing the two numbers into one would quietly
+ * claim it was. The ⚠️ warning stays separate and says how many are pending.
+ *
+ * Unresolved-market rows are excluded from both counts: they have no market
+ * identity to count. Their stock is still shown in its own section.
+ */
+export function stockSnapshotMarketCoverage(summary: StockSummary): StockSnapshotMarketCoverage {
+  const withStock = new Set<string>();
   for (const group of summary.categories) {
     for (const product of group.products) {
-      for (const market of product.markets) markets.add(market.marketName);
+      for (const market of product.markets) withStock.add(market.marketName);
     }
   }
-  return markets.size;
+
+  return { total: summary.detail.markets.length, withStock: withStock.size };
 }
 
 /**
@@ -164,10 +183,11 @@ function incompleteBlocks(summary: StockSummary): string[] {
 }
 
 export function buildStockSnapshotBlocks(summary: StockSummary): string[] {
+  const coverage = stockSnapshotMarketCoverage(summary);
   const header = [
     STOCK_SNAPSHOT_TITLE,
     `ข้อมูลวันที่ ${formatThaiDate(summary.businessDate)}`,
-    `รวม ${stockSnapshotMarketCount(summary)} ตลาด`,
+    `ข้อมูลจาก ${coverage.total} ตลาด • พบคงเหลือ ${coverage.withStock} ตลาด`,
   ].join("\n");
 
   const body = [...summary.categories.flatMap(categoryBlocks), ...unidentifiedBlocks(summary)];

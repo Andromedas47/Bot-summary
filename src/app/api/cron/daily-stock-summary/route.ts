@@ -3,7 +3,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { logger } from "@/lib/logger";
 import { pushLineMessage } from "@/lib/line/reply";
 import { loadStockSummary } from "@/lib/summary/stock-summary-service";
-import { buildStockSummaryMessages } from "@/lib/summary/stock-summary-message";
+import { buildStockSnapshotMessages } from "@/lib/summary/stock-snapshot-message";
 import {
   parseStockSummaryTargets,
   resolveStockSummaryDate,
@@ -15,7 +15,13 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * Scheduled daily Stock ("สรุปคงเหลือ") delivery.
+ * Scheduled daily Stock snapshot delivery.
+ *
+ * What goes out is the sellable remaining stock of the previous business date
+ * across all markets, grouped by category then by unit — a factual snapshot the
+ * humans use to decide what to buy. It contains no recommendation, no reorder
+ * rule and no purchase wording. The FULL per-market inventory stays on the
+ * manual `สรุปคงเหลือ` command.
  *
  * Scheduled by .github/workflows/daily-stock-summary.yml at 08:00 Asia/Bangkok
  * (01:00 UTC) — GitHub Actions, matching how finalize-slip-batches is driven,
@@ -75,9 +81,10 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: message }, { status: 500 });
   }
 
-  // Executive summary only, with the missing-ชั่งคืน section collapsed to counts.
-  // The morning report has to be short enough to act on before the markets run.
-  const messages = buildStockSummaryMessages(summary, { incomplete: "count" });
+  // The all-market stock snapshot, grouped by category then unit, with the
+  // missing-ชั่งคืน section collapsed to counts. No per-market detail: the
+  // morning report has to be readable before the markets run.
+  const messages = buildStockSnapshotMessages(summary);
   const productCount = summary.categories.reduce((n, group) => n + group.products.length, 0);
 
   if (debugMode) {

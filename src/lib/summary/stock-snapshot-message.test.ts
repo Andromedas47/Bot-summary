@@ -1,0 +1,320 @@
+import { describe, expect, test } from "bun:test";
+import { buildStockSummaryFromRows } from "./stock-summary";
+import { buildStockSummaryBlocks } from "./stock-summary-message";
+import {
+  buildStockSnapshotBlocks,
+  buildStockSnapshotMessages,
+  stockSnapshotMarketCount,
+  STOCK_SNAPSHOT_TITLE,
+} from "./stock-snapshot-message";
+import { countCodePoints, LINE_MESSAGE_MAX_CODE_POINTS, OVERFLOW_NOTICE } from "./line-chunking";
+import type { RemainingFruitSourceRow } from "./remaining-fruit";
+
+const DATE = "2026-07-25";
+const TX_RETURN = "คืน";
+const TX_WITHDRAW = "เบิก";
+const TX_DAMAGED = "คืนเสีย";
+
+function row(overrides: Partial<RemainingFruitSourceRow> = {}): RemainingFruitSourceRow {
+  return {
+    market_name: "ตลาดกี้",
+    product_name: "แตงโม",
+    quantity: 10,
+    unit: "ลูก",
+    transaction_type: TX_RETURN,
+    ...overrides,
+  };
+}
+
+function textFor(rows: RemainingFruitSourceRow[]): string {
+  return buildStockSnapshotMessages(buildStockSummaryFromRows(DATE, rows)).join("\n\n");
+}
+
+describe("stock snapshot header", () => {
+  test("states that it is the all-market total, with the date and market count", () => {
+    const text = textFor([
+      row({ market_name: "ตลาดกี้", product_name: "แตงโม", quantity: 10, unit: "ลูก" }),
+      row({ market_name: "เฉลิม72 ผลไม้", product_name: "มะละกอ", quantity: 4, unit: "ลูก" }),
+    ]);
+
+    expect(text).toContain(
+      `${STOCK_SNAPSHOT_TITLE}\nข้อมูลวันที่ 25 กรกฎาคม 2569\nรวม 2 ตลาด`,
+    );
+    // The purpose has to be legible from the first line.
+    expect(STOCK_SNAPSHOT_TITLE).toContain("รวมทุกตลาด");
+  });
+
+  test("counts each contributing market once, however many products it sent", () => {
+    const summary = buildStockSummaryFromRows(DATE, [
+      row({ market_name: "ตลาดกี้", product_name: "แตงโม", quantity: 10, unit: "ลูก" }),
+      row({ market_name: "ตลาดกี้", product_name: "มะละกอ", quantity: 3, unit: "ลูก" }),
+      row({ market_name: "เฉลิม72 ผลไม้", product_name: "ฝรั่ง", quantity: 5, unit: "โล" }),
+    ]);
+
+    expect(stockSnapshotMarketCount(summary)).toBe(2);
+  });
+});
+
+describe("stock snapshot unit grouping", () => {
+  test("products are grouped by unit, and quantities sort ascending inside a group", () => {
+    const text = textFor([
+      row({ product_name: "มหาชนก", quantity: 120.2, unit: "โล" }),
+      row({ product_name: "องุ่นแดง", quantity: 2.3, unit: "โล" }),
+      row({ product_name: "องุ่นรวม", quantity: 6.4, unit: "โล" }),
+      row({ product_name: "ลูกพลับ", quantity: 363, unit: "ลูก" }),
+      row({ product_name: "แอปเปิ้ล", quantity: 66, unit: "ลูก" }),
+      row({ product_name: "มะละกอ", quantity: 242, unit: "ลูก" }),
+    ]);
+
+    expect(text).toContain(
+      "กก.\nองุ่นแดง — 2.3 กก.\nองุ่นรวม — 6.4 กก.\nมหาชนก — 120.2 กก.",
+    );
+    expect(text).toContain("ลูก\nแอปเปิ้ล — 66 ลูก\nมะละกอ — 242 ลูก\nลูกพลับ — 363 ลูก");
+  });
+
+  test("incompatible units form separate groups and are never ranked against each other", () => {
+    const text = textFor([
+      row({ product_name: "กะเพรา", quantity: 3, unit: "กำ" }),
+      row({ product_name: "ผักชี", quantity: 9, unit: "กำ" }),
+      row({ product_name: "มะนาว", quantity: 3, unit: "แพค" }),
+      row({ product_name: "ถั่วงอก", quantity: 8, unit: "แพค" }),
+      row({ product_name: "กะหล่ำปี", quantity: 3, unit: "หัว" }),
+      row({ product_name: "ผักกาดขาว", quantity: 7, unit: "หัว" }),
+    ]);
+
+    // Each unit is its own list; 3 กำ, 3 แพค and 3 หัว never share an ordering.
+    expect(text).toContain("กำ\nกะเพรา — 3 กำ\nผักชี — 9 กำ");
+    expect(text).toContain("แพค\nมะนาว — 3 แพค\nถั่วงอก — 8 แพค");
+    expect(text).toContain("หัว\nกะหล่ำปี — 3 หัว\nผักกาดขาว — 7 หัว");
+  });
+
+  test("the same product in two units appears once per unit, never summed", () => {
+    const text = textFor([
+      row({ product_name: "ทุเรียนกวน", quantity: 4, unit: "กระปุก" }),
+      row({ product_name: "ทุเรียนกวน", quantity: 9, unit: "กล่อง" }),
+    ]);
+
+    expect(text).toContain("ทุเรียนกวน — 4 กระปุก");
+    expect(text).toContain("ทุเรียนกวน — 9 กล่อง");
+    expect(text).not.toContain("ทุเรียนกวน — 13");
+  });
+
+  test("categories appear in canonical order and only when they hold stock", () => {
+    const text = textFor([
+      row({ product_name: "กะเพรา", quantity: 2, unit: "กำ" }),
+      row({ product_name: "หมอนทอง", quantity: 5, unit: "โล" }),
+    ]);
+
+    expect(text.indexOf("🥭 ทุเรียน")).toBeLessThan(text.indexOf("🥬 ผัก"));
+    expect(text).not.toContain("🍉 ผลไม้");
+    expect(text).not.toContain("❓ ไม่จัดหมวด");
+  });
+});
+
+describe("stock snapshot completeness", () => {
+  test("every stocked product is present — nothing is filtered by quantity", () => {
+    const text = textFor([
+      row({ product_name: "แตงโม", quantity: 0.1, unit: "โล" }),
+      row({ product_name: "มะละกอ", quantity: 5000, unit: "ลูก" }),
+      row({ product_name: "ฝรั่ง", quantity: 42, unit: "โล" }),
+    ]);
+
+    // A snapshot reports what is there. There is no threshold, no "low stock"
+    // filter, and no notion of a product being uninteresting.
+    expect(text).toContain("แตงโม — 0.1 กก.");
+    expect(text).toContain("มะละกอ — 5000 ลูก");
+    expect(text).toContain("ฝรั่ง — 42 กก.");
+    expect(text).not.toContain("เกณฑ์");
+    expect(text).not.toContain("คงเหลือน้อย");
+  });
+
+  test("never recommends a purchase", () => {
+    const text = textFor([row({ product_name: "แตงโม", quantity: 1, unit: "ลูก" })]);
+    for (const forbidden of ["ควรซื้อ", "ต้องซื้อ", "แนะนำ", "สั่งซื้อ"]) {
+      expect(text).not.toContain(forbidden);
+    }
+  });
+
+  test("uncategorized products are still shown", () => {
+    const text = textFor([row({ product_name: "ของแปลกใหม่ไม่เคยเจอ", quantity: 3, unit: "ถุง" })]);
+    expect(text).toContain("❓ ไม่จัดหมวด");
+    expect(text).toContain("ของแปลกใหม่ไม่เคยเจอ — 3 ถุง");
+  });
+
+  test("unresolved-market stock keeps its own section", () => {
+    const text = textFor([
+      row({ market_name: "ตลาดกี้", product_name: "แตงโม", quantity: 20, unit: "ลูก" }),
+      row({ market_name: "รายการชั่งเบิก", product_name: "ลูกพลับ", quantity: 363, unit: "ลูก" }),
+    ]);
+
+    expect(text).toContain("❔ ยังระบุตลาดไม่ได้");
+    expect(text).toContain("ลูกพลับ — 363 ลูก");
+    // Unresolved markets are not counted as confirmed contributing markets.
+    expect(text).toContain("รวม 1 ตลาด");
+  });
+
+  test("reports an empty day explicitly", () => {
+    const text = textFor([]);
+    expect(text).toContain(STOCK_SNAPSHOT_TITLE);
+    expect(text).toContain("ไม่พบข้อมูลสำหรับวันที่เลือก");
+  });
+});
+
+describe("stock snapshot missing-ชั่งคืน handling", () => {
+  test("the warning is counts only — no market or product names", () => {
+    const text = textFor([
+      row({ market_name: "ตลาดกี้", product_name: "แตงโม", quantity: 20, unit: "ลูก" }),
+      row({
+        market_name: "เฉลิม72 ผลไม้",
+        product_name: "แก้วมังกร",
+        quantity: 9,
+        unit: "โล",
+        transaction_type: TX_WITHDRAW,
+      }),
+      row({
+        market_name: "พาซิโอ้ผลไม้",
+        product_name: "ลูกพลับ",
+        quantity: 5,
+        unit: "ลูก",
+        transaction_type: TX_WITHDRAW,
+      }),
+    ]);
+
+    expect(text).toContain("⚠️ ข้อมูลชั่งคืนยังไม่ครบ\n2 ตลาด / 2 รายการ");
+    expect(text).not.toContain("- เฉลิม72 ผลไม้:");
+    expect(text).not.toContain("แก้วมังกร");
+  });
+
+  test("a withdrawal with no good return never becomes 0 remaining", () => {
+    const text = textFor([
+      row({ product_name: "มะละกอ", quantity: 50, unit: "ลูก", transaction_type: TX_WITHDRAW }),
+    ]);
+
+    expect(text).not.toContain("มะละกอ — 0 ลูก");
+    expect(text).not.toContain("มะละกอ");
+    expect(text).toContain("⚠️ ข้อมูลชั่งคืนยังไม่ครบ\n1 ตลาด / 1 รายการ");
+  });
+
+  test("คืนเสีย alone does not close the loop or create sellable stock", () => {
+    const text = textFor([
+      row({ product_name: "แตงโม", quantity: 20, unit: "ลูก", transaction_type: TX_WITHDRAW }),
+      row({ product_name: "แตงโม", quantity: 20, unit: "ลูก", transaction_type: TX_DAMAGED }),
+    ]);
+
+    expect(text).not.toContain("แตงโม — ");
+    expect(text).toContain("⚠️ ข้อมูลชั่งคืนยังไม่ครบ\n1 ตลาด / 1 รายการ");
+  });
+
+  test("states completeness when every ชั่งคืน is in", () => {
+    const text = textFor([
+      row({ product_name: "แตงโม", quantity: 20, unit: "ลูก", transaction_type: TX_WITHDRAW }),
+      row({ product_name: "แตงโม", quantity: 8, unit: "ลูก" }),
+    ]);
+
+    expect(text).toContain("✅ ชั่งคืนครบทุกตลาด");
+    expect(text).not.toContain("⚠️ ข้อมูลชั่งคืนยังไม่ครบ");
+  });
+});
+
+describe("stock snapshot has no per-market detail", () => {
+  test("market names and per-market figures are absent from the snapshot", () => {
+    const text = textFor([
+      row({ market_name: "ตลาดกี้", product_name: "แตงโม", quantity: 12, unit: "ลูก" }),
+      row({ market_name: "เฉลิม72 ผลไม้", product_name: "แตงโม", quantity: 8, unit: "ลูก" }),
+    ]);
+
+    // One combined line for the product …
+    expect(text).toContain("แตงโม — 20 ลูก");
+    // … and none of the manual report's per-market machinery.
+    expect(text).not.toContain("ตลาดกี้");
+    expect(text).not.toContain("เฉลิม72 ผลไม้");
+    expect(text).not.toContain("เหลือขายต่อ:");
+    expect(text).not.toContain("เบิกทั้งหมด:");
+    expect(text).not.toContain("คืนเสีย:");
+  });
+});
+
+describe("stock snapshot message splitting", () => {
+  function bigDay(): RemainingFruitSourceRow[] {
+    return [
+      ...Array.from({ length: 5 }, (_, i) =>
+        row({ product_name: `ทุเรียนพันธุ์${i}`, quantity: i + 1, unit: "โล" }),
+      ),
+      ...Array.from({ length: 22 }, (_, i) =>
+        row({ product_name: `ผลไม้ชนิด${i}`, quantity: i + 1, unit: i % 2 ? "ลูก" : "โล" }),
+      ),
+      ...Array.from({ length: 56 }, (_, i) =>
+        row({ product_name: `ผักชนิด${i}`, quantity: i + 1, unit: ["กำ", "แพค", "หัว"][i % 3] }),
+      ),
+    ];
+  }
+
+  test("a large day splits into several readable parts instead of one wall of text", () => {
+    const messages = buildStockSnapshotMessages(buildStockSummaryFromRows(DATE, bigDay()));
+
+    expect(messages.length).toBeGreaterThan(1);
+    for (const message of messages) {
+      expect(countCodePoints(message)).toBeLessThanOrEqual(LINE_MESSAGE_MAX_CODE_POINTS);
+    }
+    // The header leads the first part.
+    expect(messages[0].startsWith(STOCK_SNAPSHOT_TITLE)).toBe(true);
+  });
+
+  test("splitting never drops a product", () => {
+    const rows = bigDay();
+    const text = buildStockSnapshotMessages(buildStockSummaryFromRows(DATE, rows)).join("\n");
+
+    for (const source of rows) expect(text).toContain(`${source.product_name} — `);
+    expect(text).not.toContain(OVERFLOW_NOTICE);
+  });
+
+  test("a category too large for one block keeps its heading on every part", () => {
+    const rows = Array.from({ length: 300 }, (_, i) =>
+      row({ product_name: `ทุเรียนพันธุ์${i}`, quantity: i + 1, unit: "โล" }),
+    );
+
+    const blocks = buildStockSnapshotBlocks(buildStockSummaryFromRows(DATE, rows));
+    const durianBlocks = blocks.filter((b) => b.startsWith("🥭 ทุเรียน"));
+
+    expect(durianBlocks.length).toBeGreaterThan(1);
+    // Every continuation still says which category and which unit it is.
+    for (const block of durianBlocks) expect(block).toContain("\n\nกก.\n");
+  });
+
+  test("an enormous day still emits every product rather than truncating", () => {
+    const rows = Array.from({ length: 1200 }, (_, i) =>
+      row({ product_name: `สินค้า${i}`, quantity: i + 1, unit: "โล" }),
+    );
+
+    const messages = buildStockSnapshotMessages(buildStockSummaryFromRows(DATE, rows));
+
+    expect(messages.length).toBeGreaterThan(5);
+    expect(messages.join("\n")).toContain("สินค้า1199 — ");
+    expect(messages.join("\n")).not.toContain(OVERFLOW_NOTICE);
+  });
+});
+
+describe("the manual report is a different, unchanged rendering", () => {
+  test("manual keeps its own title, quantity ordering and per-market warning detail", () => {
+    const rows = [
+      row({ market_name: "ตลาดกี้", product_name: "มหาชนก", quantity: 120.2, unit: "โล" }),
+      row({ market_name: "ตลาดกี้", product_name: "องุ่นแดง", quantity: 2.3, unit: "โล" }),
+      row({
+        market_name: "เฉลิม72 ผลไม้",
+        product_name: "แก้วมังกร",
+        quantity: 9,
+        unit: "โล",
+        transaction_type: TX_WITHDRAW,
+      }),
+    ];
+
+    const manual = buildStockSummaryBlocks(buildStockSummaryFromRows(DATE, rows)).join("\n\n");
+
+    expect(manual).toContain("📦 สรุปคงเหลือทุกตลาด");
+    // Manual is quantity DESCENDING and not grouped by unit.
+    expect(manual).toContain("🍉 ผลไม้\nมหาชนก — 120.2 กก.\nองุ่นแดง — 2.3 กก.");
+    // Manual keeps the full per-market missing-return listing.
+    expect(manual).toContain("- เฉลิม72 ผลไม้: แก้วมังกร (กก.)");
+    expect(manual).not.toContain(STOCK_SNAPSHOT_TITLE);
+  });
+});

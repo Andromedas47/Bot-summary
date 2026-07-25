@@ -144,7 +144,7 @@ describe("daily stock summary cron — delivery", () => {
     expect(pushCalls).toHaveLength(0);
   });
 
-  test("pushes the shared StockSummary content to each configured target", async () => {
+  test("pushes the shared StockSummary snapshot to each configured target", async () => {
     produceResult = { data: produceRows(), error: null };
     process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1,Cgroup2";
 
@@ -159,8 +159,9 @@ describe("daily stock summary cron — delivery", () => {
     expect(body.incompleteCount).toBe(1);
 
     expect(pushCalls.map((c) => c.to)).toEqual(["Cgroup1", "Cgroup2"]);
-    expect(pushCalls[0].text).toContain("📦 สรุปคงเหลือทุกตลาด");
-    expect(pushCalls[0].text).toContain("หมอนทอง — 281.1 กก.");
+    expect(pushCalls[0].text).toContain("📦 สต๊อกคงเหลือรวมทุกตลาด");
+    expect(pushCalls[0].text).toContain("รวม 1 ตลาด");
+    expect(pushCalls[0].text).toContain("🥭 ทุเรียน\n\nกก.\nหมอนทอง — 281.1 กก.");
     // Scheduled delivery collapses the missing-return section to counts.
     expect(pushCalls[0].text).toContain("⚠️ ข้อมูลชั่งคืนยังไม่ครบ\n1 ตลาด / 1 รายการ");
     expect(pushCalls[0].text).not.toContain("เฉลิม72 ผลไม้: แก้วมังกร");
@@ -212,14 +213,14 @@ describe("daily stock summary cron — scheduled report date", () => {
     expect(body.businessDate).toBe(previousBangkokBusinessDate());
   });
 
-  test("scheduled delivery sends the concise executive summary only", async () => {
+  test("scheduled delivery sends the all-market snapshot only", async () => {
     produceResult = { data: produceRows(), error: null };
     process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
 
     await GET(request("?date=2026-07-25"));
     const text = pushCalls.map((c) => c.text).join("\n\n");
 
-    expect(text).toContain("📦 สรุปคงเหลือทุกตลาด");
+    expect(text).toContain("📦 สต๊อกคงเหลือรวมทุกตลาด");
     expect(text).toContain("🥭 ทุเรียน");
     expect(text).toContain("หมอนทอง — 281.1 กก.");
     // Missing returns collapse to counts …
@@ -228,6 +229,9 @@ describe("daily stock summary cron — scheduled report date", () => {
     expect(text).not.toContain("เฉลิม72 ผลไม้: แก้วมังกร");
     expect(text).not.toContain("เหลือขายต่อ:");
     expect(text).not.toContain("เบิกทั้งหมด:");
+    // No purchasing judgement of any kind.
+    expect(text).not.toContain("เกณฑ์");
+    expect(text).not.toContain("ควรซื้อ");
   });
 
   test("idempotency keys follow the resolved scheduled date, not wall-clock time", async () => {
@@ -292,7 +296,7 @@ describe("daily stock summary cron — debug mode", () => {
     expect(body.debug).toBe(true);
     expect(body.wouldSendLine).toBe(true);
     expect(body.productCount).toBe(1);
-    expect(body.messages[0]).toContain("📦 สรุปคงเหลือทุกตลาด");
+    expect(body.messages[0]).toContain("📦 สต๊อกคงเหลือรวมทุกตลาด");
     expect(pushCalls).toHaveLength(0);
   });
 });

@@ -3,7 +3,7 @@ import { cleanMarketName } from "@/lib/market";
 import { transactionBucket, type TransactionBucket } from "@/lib/summary/transactions";
 import { logger } from "@/lib/logger";
 
-export const REMAINING_STOCK_REPORT_TITLE = "\u0E2A\u0E23\u0E38\u0E1B\u0E1C\u0E25\u0E44\u0E21\u0E49\u0E04\u0E07\u0E40\u0E2B\u0E25\u0E37\u0E2D";
+export const REMAINING_STOCK_REPORT_TITLE = "📦 สรุปคงเหลือรวมทุกตลาด";
 export const UNIDENTIFIED_MARKET_SECTION = "\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E17\u0E35\u0E48\u0E22\u0E31\u0E07\u0E23\u0E30\u0E1A\u0E38\u0E15\u0E25\u0E32\u0E14\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49";
 
 export const PRODUCT_ALIASES: Record<string, string> = {
@@ -12,9 +12,54 @@ export const PRODUCT_ALIASES: Record<string, string> = {
   "\u0E40\u0E1E\u0E34\u0E48\u0E21\u0E01\u0E30\u0E2B\u0E25\u0E48\u0E33\u0E1B\u0E35": "\u0E01\u0E30\u0E2B\u0E25\u0E48\u0E33\u0E1B\u0E35",
   "\u0E43\u0E1A\u0E21\u0E31\u0E07\u0E25\u0E35\u0E01": "\u0E43\u0E1A\u0E21\u0E31\u0E07\u0E25\u0E31\u0E01",
   "\u0E43\u0E1A\u0E15\u0E31\u0E48\u0E07\u0E42\u0E2D\u0E49": "\u0E43\u0E1A\u0E15\u0E31\u0E48\u0E07\u0E42\u0E2D\u0E49",
+  "หมอน": "หมอนทอง",
+  "โชคอนัน": "โชคอนันต์",
+  "โชคิอนันต์": "โชคอนันต์",
+  "สัปรด": "สับปะรด",
+  "สัปปรถ": "สับปะรด",
+  "สัปแรถ": "สับปะรด",
+  "สีปปะรด": "สับปะรด",
+  "อะโวอาโด้": "อโวคาโด้",
+  "อินทผารัม": "อินทผาลัม",
+  "ทุเนียนกล่อง": "ทุเรียนกล่อง",
 };
 
 const KNOWN_PREFIX = "\u0E40\u0E1E\u0E34\u0E48\u0E21";
+
+export type StockCategory = "fruit" | "vegetable" | "durian" | "unknown";
+
+export const STOCK_CATEGORY_META: Record<
+  StockCategory,
+  { label: string; icon: string }
+> = {
+  fruit: { label: "ผลไม้", icon: "🍉" },
+  vegetable: { label: "ผัก", icon: "🥬" },
+  durian: { label: "ทุเรียน", icon: "🥭" },
+  unknown: { label: "ไม่จัดหมวด", icon: "❓" },
+};
+
+export const STOCK_CATEGORY_ORDER: readonly StockCategory[] = [
+  "fruit",
+  "vegetable",
+  "durian",
+  "unknown",
+];
+
+// Explicit reporting registry. Unknown products remain visible instead of being
+// guessed from a market name or fuzzy spelling.
+const PRODUCT_CATEGORIES: Readonly<Record<Exclude<StockCategory, "unknown">, ReadonlySet<string>>> = {
+  fruit: new Set([
+    "กระท้อน", "แก้วมังกร", "เงาะ", "โชคอนันต์", "แตงโม", "น้อยหน่า",
+    "ฝรั่ง", "พุทรา", "มะม่วง", "มหาชนก", "มังคุด", "ลองกอง", "ลำไย",
+    "ลูกพลับ", "สับปะรด", "ส้ม", "องุ่น", "อโวคาโด้", "อินทผาลัม",
+  ]),
+  vegetable: new Set([
+    "กระชาย", "กะเพรา", "กะหล่ำปี", "กะหล่ำปลี", "ขิง", "ข่า", "คะน้า", "แครอท",
+    "แตงกวา", "ต้นหอม", "ถั่วฝักยาว", "ถั่วพู", "ผักชี", "ผักบุ้ง",
+    "พริก", "มะเขือ", "มะนาว", "ใบตั้งโอ๋", "ใบมะกรูด", "ใบมังลัก", "โหระพา",
+  ]),
+  durian: new Set(["หมอนทอง", "ก้านยาว", "ชะนี", "พวงมณี", "ทุเรียนกล่อง", "ทุเรียนกวน"]),
+};
 
 function baseNormalize(name: string): string {
   return name.normalize("NFC").replace(/\s+/g, " ").trim();
@@ -34,6 +79,18 @@ export function normalizeProductName(
     if (rest && knownNames.has(rest)) return rest;
   }
   return n;
+}
+
+export function classifyProductCategory(canonicalName: string): StockCategory {
+  if (
+    PRODUCT_CATEGORIES.durian.has(canonicalName) ||
+    canonicalName.startsWith("ทุเรียน")
+  ) {
+    return "durian";
+  }
+  if (PRODUCT_CATEGORIES.vegetable.has(canonicalName)) return "vegetable";
+  if (PRODUCT_CATEGORIES.fruit.has(canonicalName)) return "fruit";
+  return "unknown";
 }
 
 export function formatQuantity(n: number): string {
@@ -57,6 +114,8 @@ export interface RemainingFruitSourceRow {
 export interface RemainingFruitItem {
   fruitName: string;
   unit: string;
+  category: StockCategory;
+  rawProductNames: string[];
   withdrawnQuantity: number;
   returnGoodQuantity: number;
   damagedQuantity: number;
@@ -79,22 +138,45 @@ export interface RemainingFruitOverallBreakdown {
 export interface RemainingFruitOverallItem {
   fruitName: string;
   unit: string;
+  category: StockCategory;
+  rawProductNames: string[];
   totalRemainingForResale: number;
   marketBreakdown: RemainingFruitOverallBreakdown[];
+}
+
+export interface StockCategorySection {
+  category: StockCategory;
+  label: string;
+  icon: string;
+  items: RemainingFruitOverallItem[];
+}
+
+export interface IncompleteStockItem {
+  marketName: string;
+  fruitName: string;
+  unit: string;
+  category: StockCategory;
+  rawProductNames: string[];
 }
 
 export interface RemainingFruitReport {
   markets: RemainingFruitMarketSection[];
   overall: RemainingFruitOverallItem[];
+  categories: StockCategorySection[];
+  incomplete: IncompleteStockItem[];
   unidentified: {
     markets: RemainingFruitMarketSection[];
     overall: RemainingFruitOverallItem[];
   } | null;
 }
 
+export type StockSummary = RemainingFruitReport;
+
 interface AggregateCell {
   fruitName: string;
   unit: string;
+  category: StockCategory;
+  rawProductNames: Set<string>;
   withdrawnQuantity: number;
   returnGoodQuantity: number;
   damagedQuantity: number;
@@ -119,6 +201,8 @@ function toItem(cell: AggregateCell): RemainingFruitItem {
   return {
     fruitName: cell.fruitName,
     unit: cell.unit,
+    category: cell.category,
+    rawProductNames: [...cell.rawProductNames].sort((a, b) => a.localeCompare(b, "th")),
     withdrawnQuantity: cell.withdrawnQuantity,
     returnGoodQuantity: cell.returnGoodQuantity,
     damagedQuantity: cell.damagedQuantity,
@@ -152,6 +236,8 @@ function emptyCell(fruitName: string, unit: string): AggregateCell {
   return {
     fruitName,
     unit,
+    category: classifyProductCategory(fruitName),
+    rawProductNames: new Set(),
     withdrawnQuantity: 0,
     returnGoodQuantity: 0,
     damagedQuantity: 0,
@@ -189,6 +275,8 @@ function buildOverallFromSections(sections: RemainingFruitMarketSection[]): Rema
         overall = {
           fruitName: item.fruitName,
           unit: item.unit,
+          category: item.category,
+          rawProductNames: [],
           totalRemainingForResale: 0,
           marketBreakdown: [],
         };
@@ -196,6 +284,9 @@ function buildOverallFromSections(sections: RemainingFruitMarketSection[]): Rema
       }
 
       overall.totalRemainingForResale += item.remainingForResaleQuantity;
+      overall.rawProductNames = [
+        ...new Set([...overall.rawProductNames, ...item.rawProductNames]),
+      ].sort((a, b) => a.localeCompare(b, "th"));
       overall.marketBreakdown.push({
         marketName: section.marketName,
         quantity: item.remainingForResaleQuantity,
@@ -213,6 +304,32 @@ function buildOverallFromSections(sections: RemainingFruitMarketSection[]): Rema
     .sort((a, b) =>
       a.fruitName.localeCompare(b.fruitName, "th") || a.unit.localeCompare(b.unit, "th"),
     );
+}
+
+function buildCategorySections(overall: RemainingFruitOverallItem[]): StockCategorySection[] {
+  return STOCK_CATEGORY_ORDER.map((category) => ({
+    category,
+    ...STOCK_CATEGORY_META[category],
+    items: overall.filter((item) => item.category === category),
+  })).filter((section) => section.items.length > 0);
+}
+
+function buildIncompleteItems(sections: RemainingFruitMarketSection[]): IncompleteStockItem[] {
+  return sections.flatMap((section) =>
+    section.items
+      .filter((item) => item.hasWithdrawnData && !item.hasReturnGoodData)
+      .map((item) => ({
+        marketName: section.marketName,
+        fruitName: item.fruitName,
+        unit: item.unit,
+        category: item.category,
+        rawProductNames: item.rawProductNames,
+      })),
+  ).sort((a, b) =>
+    a.marketName.localeCompare(b.marketName, "th") ||
+    a.fruitName.localeCompare(b.fruitName, "th") ||
+    a.unit.localeCompare(b.unit, "th"),
+  );
 }
 
 function sortItems(a: RemainingFruitItem, b: RemainingFruitItem): number {
@@ -482,6 +599,7 @@ export function buildRemainingFruitReport(
       cell = emptyCell(fruitName, unit);
       marketMap.set(key, cell);
     }
+    cell.rawProductNames.add(baseNormalize(row.product_name));
 
     addQuantity(cell, bucket, qty);
   }
@@ -508,6 +626,8 @@ export function buildRemainingFruitReport(
   return {
     markets,
     overall,
+    categories: buildCategorySections(overall),
+    incomplete: buildIncompleteItems(allSections),
     unidentified:
       unidentifiedSections.length > 0
         ? { markets: unidentifiedSections, overall: unidentifiedOverall }

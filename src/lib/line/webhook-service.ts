@@ -39,8 +39,8 @@ import {
 import { SlipBatchService, type SlipBatchIngestor } from "@/lib/slips/batch-service";
 import { tryFinalizeSettlement } from "@/lib/settlement-finalizer";
 import { parseRemainingFruitCommandFromMessage } from "@/lib/summary/remaining-fruit-command";
-import { fetchRemainingFruitRows } from "@/lib/summary/remaining-fruit-data";
-import { buildRemainingFruitMessagesFromRows } from "@/lib/summary/remaining-fruit-message";
+import { getDailyStockSummary } from "@/lib/summary/daily-stock-service";
+import { buildRemainingFruitMessages } from "@/lib/summary/remaining-fruit-message";
 import {
   SlipSessionService,
   parseSlipSessionHeader,
@@ -916,13 +916,12 @@ export class WebhookService {
     });
 
     try {
-      const rows = await fetchRemainingFruitRows(
+      const summary = await getDailyStockSummary(
         this.supabase,
         businessDate,
-        command.marketFilter,
+        { marketFilter: command.marketFilter },
       );
-      const messages = buildRemainingFruitMessagesFromRows(businessDate, rows, {
-        marketFilter: command.marketFilter,
+      const messages = buildRemainingFruitMessages(businessDate, summary, {
         includeOverall: !command.marketFilter,
       });
       if (replyToken) await this.replyMessages(replyToken, messages);

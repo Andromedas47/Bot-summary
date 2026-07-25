@@ -12,13 +12,16 @@ function makeSupabase({
   transactionRows,
   sessionsError = null,
   messagesError = null,
+  tablesSeen,
 }: {
   transactionRows: Array<Record<string, unknown>>;
   sessionsError?: { message: string } | null;
   messagesError?: { message: string } | null;
+  tablesSeen?: string[];
 }): SupabaseClient<Database> {
   return {
     from(table: string) {
+      tablesSeen?.push(table);
       if (table === "produce_transactions") {
         return {
           select() {
@@ -83,6 +86,16 @@ function makeSupabase({
 }
 
 describe("fetchRemainingFruitRows enrichment", () => {
+  test("uses the active, void-filtered produce view and never the audit-only superset", async () => {
+    const tablesSeen: string[] = [];
+    const supabase = makeSupabase({ transactionRows: [], tablesSeen });
+
+    await fetchRemainingFruitRows(supabase, "2026-07-01");
+
+    expect(tablesSeen).toEqual(["produce_transactions"]);
+    expect(tablesSeen).not.toContain("produce_transactions_all");
+  });
+
   test("attaches source_id/session_time when enrichment succeeds", async () => {
     const supabase = makeSupabase({
       transactionRows: [

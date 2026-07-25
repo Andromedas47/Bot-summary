@@ -1,14 +1,15 @@
 import { formatThaiDate } from "@/lib/date";
 import {
-  buildRemainingFruitReport,
   displayRemainingUnit,
   formatQuantity,
   REMAINING_STOCK_REPORT_TITLE,
+  STOCK_CATEGORY_META,
   UNIDENTIFIED_MARKET_SECTION,
   type RemainingFruitItem,
   type RemainingFruitReport,
   type RemainingFruitSourceRow,
 } from "@/lib/summary/remaining-fruit";
+import { createDailyStockSummary } from "@/lib/summary/daily-stock-service";
 
 export const LINE_MESSAGE_MAX_CODE_POINTS = 4000;
 export const LINE_REPLY_MAX_MESSAGES = 5;
@@ -54,21 +55,42 @@ function overallFruitBlock(row: RemainingFruitReport["overall"][number]): string
   return lines.join("\n");
 }
 
-function buildConfirmedOverallBlocks(header: string, report: RemainingFruitReport): string[] {
-  const blocks = [header, "\u0E2A\u0E23\u0E38\u0E1B\u0E04\u0E07\u0E40\u0E2B\u0E25\u0E37\u0E2D\u0E23\u0E27\u0E21\u0E17\u0E38\u0E01\u0E15\u0E25\u0E32\u0E14"];
-  for (const row of report.overall) {
-    blocks.push(overallFruitBlock(row));
+function buildCompactCategoryBlocks(report: RemainingFruitReport): string[] {
+  const blocks: string[] = [];
+  for (const section of report.categories) {
+    const meta = STOCK_CATEGORY_META[section.category];
+    blocks.push([
+      `${meta.icon} ${meta.label}`,
+      ...section.items.map((item) =>
+        `${item.fruitName} — ${formatQtyLine(item.totalRemainingForResale, item.unit)}`),
+    ].join("\n"));
   }
   return blocks;
 }
 
+function buildIncompleteBlocks(report: RemainingFruitReport): string[] {
+  if (report.incomplete.length === 0) return [];
+
+  const byMarket = new Map<string, string[]>();
+  for (const item of report.incomplete) {
+    const products = byMarket.get(item.marketName) ?? [];
+    products.push(`${item.fruitName} (${displayRemainingUnit(item.unit)})`);
+    byMarket.set(item.marketName, products);
+  }
+
+  return [[
+    "⚠️ ข้อมูลชั่งคืนยังไม่ครบ",
+    ...[...byMarket.entries()].map(([market, products]) =>
+      `- ${market}: ${products.join(", ")}`),
+  ].join("\n")];
+}
+
 function buildUnidentifiedOverallBlocks(report: RemainingFruitReport): string[] {
   if (!report.unidentified || report.unidentified.overall.length === 0) return [];
-  const blocks = [UNIDENTIFIED_MARKET_SECTION];
-  for (const row of report.unidentified.overall) {
-    blocks.push(overallFruitBlock(row));
-  }
-  return blocks;
+  return [
+    UNIDENTIFIED_MARKET_SECTION,
+    ...report.unidentified.overall.map(overallFruitBlock),
+  ];
 }
 
 function buildMarketBlocks(sections: RemainingFruitReport["markets"]): string[] {
@@ -96,7 +118,39 @@ function joinBlocks(blocks: string[]): string {
 /** Split only at blank-line boundaries within a single oversized block. */
 function splitOversizedBlock(block: string, maxCodePoints: number): string[] {
   const parts = block.split("\n\n");
-  return chunkBlocks(parts, maxCodePoints);
+  if (parts.length > 1) return chunkBlocks(parts, maxCodePoints);
+
+  const lines = block.split("\n");
+  if (lines.length > 1) {
+    const messages: string[] = [];
+    let current = "";
+    for (const line of lines) {
+      const candidate = current ? `${current}\n${line}` : line;
+      if (countCodePoints(candidate) <= maxCodePoints) {
+        current = candidate;
+        continue;
+      }
+      if (current) messages.push(current);
+      if (countCodePoints(line) <= maxCodePoints) {
+        current = line;
+      } else {
+        const codePoints = [...line];
+        for (let index = 0; index < codePoints.length; index += maxCodePoints) {
+          messages.push(codePoints.slice(index, index + maxCodePoints).join(""));
+        }
+        current = "";
+      }
+    }
+    if (current) messages.push(current);
+    return messages;
+  }
+
+  const codePoints = [...block];
+  return Array.from(
+    { length: Math.ceil(codePoints.length / maxCodePoints) },
+    (_, index) =>
+      codePoints.slice(index * maxCodePoints, (index + 1) * maxCodePoints).join(""),
+  );
 }
 
 /**
@@ -170,10 +224,14 @@ function truncateAtSectionBoundary(text: string, maxCodePoints: number): string 
 export function buildRemainingFruitMessages(
   date: string,
   report: RemainingFruitReport,
-  options: { includeOverall?: boolean } = {},
+  options: { includeOverall?: boolean; includeDetails?: boolean } = {},
 ): string[] {
   const includeOverall = options.includeOverall ?? report.markets.length !== 1;
-  const header = `${REMAINING_STOCK_REPORT_TITLE} ${formatThaiDate(date)}`;
+  const includeDetails = options.includeDetails ?? true;
+  const reportTitle = includeOverall
+    ? REMAINING_STOCK_REPORT_TITLE
+    : `📦 สรุปคงเหลือ${report.markets[0] ? ` — ${report.markets[0].marketName}` : ""}`;
+  const header = `${reportTitle}\nวันที่ ${formatThaiDate(date)}`;
 
   const hasIdentified = report.markets.length > 0 || report.overall.length > 0;
   const hasUnidentified = !!report.unidentified?.markets.length;
@@ -182,12 +240,18 @@ export function buildRemainingFruitMessages(
   }
 
   const messages: string[] = [];
-  const showOverall = includeOverall && (report.overall.length > 0 || !!report.unidentified?.overall.length);
+  const showOverall = includeOverall && (
+    report.overall.length > 0 ||
+    report.incomplete.length > 0 ||
+    !!report.unidentified?.overall.length
+  );
 
   if (showOverall) {
     const summaryBlocks = [
-      ...buildConfirmedOverallBlocks(header, report),
+      header,
+      ...buildCompactCategoryBlocks(report),
       ...buildUnidentifiedOverallBlocks(report),
+      ...buildIncompleteBlocks(report),
     ];
     const summaryMessage = joinBlocks(summaryBlocks);
     if (countCodePoints(summaryMessage) <= LINE_MESSAGE_MAX_CODE_POINTS) {
@@ -195,7 +259,9 @@ export function buildRemainingFruitMessages(
     } else {
       messages.push(...chunkBlocks(summaryBlocks, LINE_MESSAGE_MAX_CODE_POINTS));
     }
-    messages.push(...chunkBlocks(buildAllDetailBlocks(report), LINE_MESSAGE_MAX_CODE_POINTS));
+    if (includeDetails) {
+      messages.push(...chunkBlocks(buildAllDetailBlocks(report), LINE_MESSAGE_MAX_CODE_POINTS));
+    }
     return capAtMaxMessages(messages);
   }
 
@@ -209,13 +275,15 @@ export function buildRemainingFruitMessagesFromRows(
   options: {
     marketFilter?: string | null;
     includeOverall?: boolean;
+    includeDetails?: boolean;
   } = {},
 ): string[] {
-  const report = buildRemainingFruitReport(rows, {
+  const report = createDailyStockSummary(rows, {
     marketFilter: options.marketFilter,
   });
   return buildRemainingFruitMessages(date, report, {
     includeOverall: options.includeOverall ?? !options.marketFilter,
+    includeDetails: options.includeDetails,
   });
 }
 
@@ -223,7 +291,7 @@ export function buildRemainingFruitMessagesFromRows(
 export function buildRemainingFruitMessage(
   date: string,
   report: RemainingFruitReport,
-  options: { includeOverall?: boolean } = {},
+  options: { includeOverall?: boolean; includeDetails?: boolean } = {},
 ): string {
   return buildRemainingFruitMessages(date, report, options).join("\n\n");
 }
@@ -235,6 +303,7 @@ export function buildRemainingFruitMessageFromRows(
   options: {
     marketFilter?: string | null;
     includeOverall?: boolean;
+    includeDetails?: boolean;
   } = {},
 ): string {
   return buildRemainingFruitMessagesFromRows(date, rows, options).join("\n\n");

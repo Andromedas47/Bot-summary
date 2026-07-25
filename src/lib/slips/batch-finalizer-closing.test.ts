@@ -262,4 +262,12 @@ describe("vercel.json cron schedule", () => {
     const entry = config.crons?.find((c) => c.path === "/api/cron/daily-summary");
     expect(entry).toBeUndefined();
   });
+
+  it("daily-stock-summary cron is disabled until the delivery time is approved", async () => {
+    const file = await import("../../../vercel.json");
+    const config = file.default as { crons?: Array<{ path: string; schedule: string }> };
+    const entry = config.crons?.find((c) => c.path === "/api/cron/daily-stock-summary");
+
+    expect(entry).toBeUndefined();
+  });
 });

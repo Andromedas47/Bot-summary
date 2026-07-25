@@ -286,7 +286,12 @@ describe("Phase 14: missing central price fails closed", () => {
     expect(calculation.expectedSales).toBe(0); // never a guessed price
     expect(calculation.warnings.some((w) => w.includes("ไม่พบราคากลางสำหรับ"))).toBe(true);
 
-    const pageModel = { entryStatus: "submitted" as const, summary: calculation };
+    const pageModel = {
+      entryStatus: "submitted" as const,
+      summary: calculation,
+      finalizedAt: null,
+      finalizedBy: null,
+    };
     expect(() => requireTrustedWhiteSheetSummary(pageModel)).toThrow(WhiteSheetHardStopError);
     expect(() => buildWhiteSheetSummaryMessagesFromPageModel(pageModel)).toThrow(WhiteSheetHardStopError);
 

@@ -22,6 +22,10 @@ const ZERO_EXPENSES: WhiteSheetExpenses = {
 export interface DigitalWhiteSheetPageModel {
   entryStatus: WhiteSheetCashEntryState["status"];
   summary: DigitalWhiteSheetSummary;
+  /** Present only when entryStatus is "finalized" (from cash-entry row). */
+  finalizedAt: string | null;
+  /** Present only when entryStatus is "finalized" (admin actor id). */
+  finalizedBy: string | null;
 }
 
 export class WhiteSheetNotSubmittedError extends Error {
@@ -75,7 +79,12 @@ export async function loadDigitalWhiteSheetPageModel(
 
   const summary = await loadDigitalWhiteSheetSummary(supabase, scope, cashInput);
 
-  return { entryStatus: entry.status, summary };
+  return {
+    entryStatus: entry.status,
+    summary,
+    finalizedAt: entry.status === "finalized" ? entry.finalizedAt : null,
+    finalizedBy: entry.status === "finalized" ? entry.finalizedBy : null,
+  };
 }
 
 /**

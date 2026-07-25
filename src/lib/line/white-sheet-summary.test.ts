@@ -117,6 +117,8 @@ describe("buildWhiteSheetSummaryMessagesFromPageModel", () => {
     const messages = buildWhiteSheetSummaryMessagesFromPageModel({
       entryStatus: "submitted",
       summary: matchedWhiteSheetFixture,
+      finalizedAt: null,
+      finalizedBy: null,
     });
     assertWithinLineLimits(messages);
     expect(messages[0]).toContain("สรุปปิดยอด — วัดทุ่งลานนา");
@@ -127,6 +129,8 @@ describe("buildWhiteSheetSummaryMessagesFromPageModel", () => {
       buildWhiteSheetSummaryMessagesFromPageModel({
         entryStatus: "not_submitted",
         summary: matchedWhiteSheetFixture,
+        finalizedAt: null,
+        finalizedBy: null,
       }),
     ).toThrow(WhiteSheetNotSubmittedError);
   });
@@ -144,6 +148,8 @@ describe("buildWhiteSheetSummaryMessagesFromPageModel", () => {
       buildWhiteSheetSummaryMessagesFromPageModel({
         entryStatus: "submitted",
         summary: hardStopSummary,
+        finalizedAt: null,
+        finalizedBy: null,
       }),
     ).toThrow(WhiteSheetHardStopError);
   });

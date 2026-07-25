@@ -1,14 +1,17 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useRef, useState, useTransition } from "react";
 import { Button } from "@/components/ui/Button";
 import type { DigitalWhiteSheetSummary } from "@/lib/white-sheet";
 import { DigitalWhiteSheetPanel } from "./DigitalWhiteSheetPanel";
 import type { WhiteSheetExpenseInput } from "./types";
+import { postWhiteSheetLifecycle } from "./white-sheet-lifecycle-client";
 
 interface DigitalWhiteSheetPageModelResponse {
   entryStatus: "submitted" | "finalized" | "not_submitted";
   summary: DigitalWhiteSheetSummary;
+  finalizedAt: string | null;
+  finalizedBy: string | null;
 }
 
 const INPUT_CLS =
@@ -32,6 +35,9 @@ export function WhiteSheetPageClient({
     initial?.pageModel ?? null,
   );
   const [loadError, setLoadError] = useState("");
+  const [lifecycleError, setLifecycleError] = useState("");
+  const [lifecyclePending, setLifecyclePending] = useState(false);
+  const lifecyclePendingRef = useRef(false);
   const [loading, startLoad] = useTransition();
 
   async function fetchPageModel(): Promise<void> {
@@ -44,7 +50,12 @@ export function WhiteSheetPageClient({
       setPageModel(null);
       return;
     }
-    setPageModel(json);
+    setPageModel({
+      entryStatus: json.entryStatus,
+      summary: json.summary,
+      finalizedAt: json.finalizedAt ?? null,
+      finalizedBy: json.finalizedBy ?? null,
+    });
   }
 
   function handleLoad() {
@@ -76,10 +87,36 @@ export function WhiteSheetPageClient({
     if (!res.ok) {
       throw new Error(json.error ?? "บันทึกไม่สำเร็จ");
     }
-    // STEP 6: a successful save reloads the canonical summary — the server
-    // already recomposed it (operational loader + the entry just saved +
-    // calculateDigitalWhiteSheet); this just re-renders with that result.
-    setPageModel(json);
+    setPageModel({
+      entryStatus: json.entryStatus,
+      summary: json.summary,
+      finalizedAt: json.finalizedAt ?? null,
+      finalizedBy: json.finalizedBy ?? null,
+    });
+  }
+
+  async function runLifecycle(action: "finalize" | "reopen", reason?: string): Promise<void> {
+    // Ref guard blocks duplicate in-flight clicks before React re-renders
+    // the disabled button state.
+    if (lifecyclePendingRef.current) return;
+    lifecyclePendingRef.current = true;
+    setLifecyclePending(true);
+    setLifecycleError("");
+    try {
+      const result = await postWhiteSheetLifecycle(
+        action,
+        { sourceId, market, date },
+        { reason },
+      );
+      if (!result.ok) {
+        setLifecycleError(result.error);
+        return;
+      }
+      await fetchPageModel();
+    } finally {
+      lifecyclePendingRef.current = false;
+      setLifecyclePending(false);
+    }
   }
 
   return (
@@ -135,7 +172,13 @@ export function WhiteSheetPageClient({
         <DigitalWhiteSheetPanel
           viewModel={pageModel.summary}
           entryStatus={pageModel.entryStatus}
+          finalizedAt={pageModel.finalizedAt}
+          finalizedBy={pageModel.finalizedBy}
           onSubmitExpenses={handleSubmitExpenses}
+          lifecyclePending={lifecyclePending}
+          lifecycleError={lifecycleError}
+          onFinalize={() => runLifecycle("finalize")}
+          onReopen={(reason) => runLifecycle("reopen", reason)}
         />
       ) : (
         !loadError && (

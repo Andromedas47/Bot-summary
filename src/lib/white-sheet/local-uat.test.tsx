@@ -411,7 +411,11 @@ describe("White Sheet Local UAT scenario", () => {
       <DigitalWhiteSheetPanel
         viewModel={pageModel.summary}
         entryStatus={pageModel.entryStatus}
+        finalizedAt={pageModel.finalizedAt}
+        finalizedBy={pageModel.finalizedBy}
         onSubmitExpenses={() => {}}
+        onFinalize={async () => {}}
+        onReopen={async () => {}}
       />,
     );
 

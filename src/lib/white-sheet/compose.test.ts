@@ -288,5 +288,21 @@ describe("requireTrustedWhiteSheetSummary", () => {
     const database = makeComposedDatabase(SUBMITTED_ENTRY);
     const pageModel = await loadDigitalWhiteSheetPageModel(database, SCOPE);
     expect(requireTrustedWhiteSheetSummary(pageModel)).toBe(pageModel.summary);
+    expect(pageModel.finalizedAt).toBeNull();
+    expect(pageModel.finalizedBy).toBeNull();
+  });
+});
+
+describe("page model lifecycle metadata", () => {
+  it("exposes finalizedAt/finalizedBy after a finalized cash entry is loaded", async () => {
+    const database = makeComposedDatabase({
+      ...SUBMITTED_ENTRY,
+      finalized_at: "2026-07-24T12:00:00Z",
+      finalized_by: "admin-actor-1",
+    });
+    const pageModel = await loadDigitalWhiteSheetPageModel(database, SCOPE);
+    expect(pageModel.entryStatus).toBe("finalized");
+    expect(pageModel.finalizedAt).toBe("2026-07-24T12:00:00Z");
+    expect(pageModel.finalizedBy).toBe("admin-actor-1");
   });
 });

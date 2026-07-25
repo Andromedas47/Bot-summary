@@ -476,6 +476,8 @@ describe("White Sheet fail-closed for unattributed verified transfers", () => {
         status: calculation.status,
         warnings: calculation.warnings,
       },
+      finalizedAt: null,
+      finalizedBy: null,
     };
 
     expect(() => requireTrustedWhiteSheetSummary(pageModel)).toThrow(WhiteSheetHardStopError);
@@ -540,6 +542,8 @@ describe("White Sheet fail-closed for unattributed verified transfers", () => {
         status: calculation.status,
         warnings: calculation.warnings,
       },
+      finalizedAt: null,
+      finalizedBy: null,
     };
 
     expect(() => requireTrustedWhiteSheetSummary(pageModel)).toThrow(WhiteSheetHardStopError);

@@ -12,6 +12,7 @@ interface Fixture {
   rawMessages?: Record<string, unknown>[];
   sessions?: Record<string, unknown>[];
   pending?: Record<string, unknown>[];
+  pendingIngest?: Record<string, unknown>[];
   parseErrors?: Record<string, unknown>[];
   centralPrices?: Record<string, unknown>[];
   errors?: Partial<Record<string, string>>;
@@ -33,6 +34,7 @@ function fakeSupabase(fixture: Fixture): SupabaseClient<Database> {
       case "raw_messages": return fixture.rawMessages ?? [];
       case "produce_sessions": return fixture.sessions ?? [];
       case "pending_sessions": return fixture.pending ?? [];
+      case "pending_session_ingest": return fixture.pendingIngest ?? [];
       case "parse_errors": return fixture.parseErrors ?? [];
       case "central_selling_prices": return fixture.centralPrices ?? [];
       default: throw new Error(`Unexpected table: ${table}`);
@@ -778,5 +780,340 @@ describe("P1 strict business date", () => {
   test("a real leap day is accepted", async () => {
     const report = await loadSalesReport(fakeSupabase(baseFixture()), "2028-02-29");
     expect(report.businessDate).toBe("2028-02-29");
+  });
+});
+
+// ── 04:00 cutoff: LINE event time is the source of truth ────────────────────
+
+/**
+ * 2026-07-26 03:59:59 Bangkok = 2026-07-25T20:59:59Z → business date 2026-07-25.
+ * 2026-07-26 04:00:00 Bangkok = 2026-07-25T21:00:00Z → business date 2026-07-26.
+ * The DB insert lands after the cutoff in both cases, so anything that reads
+ * created_at instead of the event timestamp files the first one on the 26th.
+ */
+const BEFORE_CUTOFF_MS = Date.parse("2026-07-25T20:59:59.000Z");
+const AT_CUTOFF_MS = Date.parse("2026-07-25T21:00:00.000Z");
+const INSERTED_AFTER_CUTOFF = "2026-07-25T21:00:01.000Z";
+
+/** A produce message with NO explicit header date — the fallback decides. */
+const UNDATED_PRODUCE = "18:53 เสือ รายการชั่งเบิกไปตลาด\n18:53 เสือ 1.หมอนทอง119บาท\n38โล";
+/** …and one that names its own date. */
+const DATED_PRODUCE = "18:53 เสือ รายการชั่งเบิกไปตลาด\n25/07/2569\n18:53 เสือ 1.หมอนทอง119บาท\n38โล";
+
+function parseErrorFixture(message: Record<string, unknown>): Fixture {
+  return baseFixture({
+    produce: [],
+    sessions: [],
+    parseErrors: [{ id: "pe-1", parser_name: "weigh-session", raw_message_id: "raw-9" }],
+    rawMessages: [{ id: "raw-9", source_id: SOURCE_A, ...message }],
+  });
+}
+
+describe("P1 business-date fallback uses the LINE event timestamp", () => {
+  test("A. an event at 03:59:59 inserted after 04:00 belongs to the previous date", async () => {
+    const message = {
+      raw_text: UNDATED_PRODUCE,
+      payload: { timestamp: BEFORE_CUTOFF_MS },
+      created_at: INSERTED_AFTER_CUTOFF,
+    };
+
+    const previous = await loadSalesReport(fakeSupabase(parseErrorFixture(message)), "2026-07-25");
+    const next = await loadSalesReport(fakeSupabase(parseErrorFixture(message)), "2026-07-26");
+
+    expect(previous.scopeBlockers).toEqual([{ kind: "message_parser_error", count: 1 }]);
+    // The insert time says the 26th; the event time is authoritative and says no.
+    expect(next.scopeBlockers).toEqual([]);
+  });
+
+  test("B. an event at exactly 04:00:00 belongs to the new business date", async () => {
+    const message = {
+      raw_text: UNDATED_PRODUCE,
+      payload: { timestamp: AT_CUTOFF_MS },
+      created_at: INSERTED_AFTER_CUTOFF,
+    };
+
+    const previous = await loadSalesReport(fakeSupabase(parseErrorFixture(message)), "2026-07-25");
+    const next = await loadSalesReport(fakeSupabase(parseErrorFixture(message)), "2026-07-26");
+
+    expect(previous.scopeBlockers).toEqual([]);
+    expect(next.scopeBlockers).toEqual([{ kind: "message_parser_error", count: 1 }]);
+  });
+
+  test("C. an explicit header date wins over both timestamps", async () => {
+    const message = {
+      raw_text: DATED_PRODUCE, // says 25/07/2569
+      payload: { timestamp: AT_CUTOFF_MS }, // would say the 26th
+      created_at: INSERTED_AFTER_CUTOFF,
+    };
+
+    const named = await loadSalesReport(fakeSupabase(parseErrorFixture(message)), "2026-07-25");
+    const other = await loadSalesReport(fakeSupabase(parseErrorFixture(message)), "2026-07-26");
+
+    expect(named.scopeBlockers).toEqual([{ kind: "message_parser_error", count: 1 }]);
+    expect(other.scopeBlockers).toEqual([]);
+  });
+
+  test("D. a backdated header still wins when ingestion is much later", async () => {
+    const message = {
+      raw_text: DATED_PRODUCE,
+      payload: { timestamp: Date.parse("2026-08-15T06:00:00.000Z") },
+      created_at: "2026-08-15T06:00:01.000Z",
+    };
+
+    const named = await loadSalesReport(fakeSupabase(parseErrorFixture(message)), "2026-07-25");
+    expect(named.scopeBlockers).toEqual([{ kind: "message_parser_error", count: 1 }]);
+  });
+
+  test("E. a malformed payload falls back to the insert time, never to nothing", async () => {
+    const message = {
+      raw_text: UNDATED_PRODUCE,
+      payload: { timestamp: "not-a-number" },
+      created_at: "2026-07-25T06:00:00.000Z",
+    };
+
+    const report = await loadSalesReport(fakeSupabase(parseErrorFixture(message)), DATE);
+    expect(report.scopeBlockers).toEqual([{ kind: "message_parser_error", count: 1 }]);
+  });
+
+  test("E2. no timing evidence at all blocks the requested date", async () => {
+    const message = { raw_text: UNDATED_PRODUCE, payload: null, created_at: null };
+
+    const report = await loadSalesReport(fakeSupabase(parseErrorFixture(message)), "2030-01-01");
+    expect(report.scopeBlockers).toEqual([{ kind: "message_parser_error", count: 1 }]);
+  });
+});
+
+describe("P1 pending sessions use the stored LINE ingest timestamp", () => {
+  function pendingFixture(ingest: Record<string, unknown>[]): Fixture {
+    return baseFixture({
+      produce: [],
+      sessions: [],
+      pending: [
+        {
+          id: "pending-1",
+          session_key: "group:g1:user:u1",
+          session_generation: "gen-1",
+          accumulated_text: UNDATED_PRODUCE,
+          created_at: INSERTED_AFTER_CUTOFF,
+          finalization_status: "pending",
+        },
+      ],
+      pendingIngest: ingest,
+    });
+  }
+
+  test("A. an ingest at 03:59:59 beats a created_at after the cutoff", async () => {
+    const ingest = [
+      {
+        session_key: "group:g1:user:u1",
+        session_generation: "gen-1",
+        line_timestamp_ms: BEFORE_CUTOFF_MS,
+      },
+    ];
+
+    const previous = await loadSalesReport(fakeSupabase(pendingFixture(ingest)), "2026-07-25");
+    const next = await loadSalesReport(fakeSupabase(pendingFixture(ingest)), "2026-07-26");
+
+    expect(previous.scopeBlockers).toEqual([{ kind: "unresolved_pending_session", count: 1 }]);
+    expect(next.scopeBlockers).toEqual([]);
+  });
+
+  test("B. an ingest at exactly 04:00:00 belongs to the new business date", async () => {
+    const ingest = [
+      {
+        session_key: "group:g1:user:u1",
+        session_generation: "gen-1",
+        line_timestamp_ms: AT_CUTOFF_MS,
+      },
+    ];
+
+    const next = await loadSalesReport(fakeSupabase(pendingFixture(ingest)), "2026-07-26");
+    expect(next.scopeBlockers).toEqual([{ kind: "unresolved_pending_session", count: 1 }]);
+  });
+
+  test("the earliest ingest of the generation decides, not a later append", async () => {
+    const ingest = [
+      {
+        session_key: "group:g1:user:u1",
+        session_generation: "gen-1",
+        line_timestamp_ms: AT_CUTOFF_MS + 60_000,
+      },
+      {
+        session_key: "group:g1:user:u1",
+        session_generation: "gen-1",
+        line_timestamp_ms: BEFORE_CUTOFF_MS,
+      },
+    ];
+
+    const previous = await loadSalesReport(fakeSupabase(pendingFixture(ingest)), "2026-07-25");
+    expect(previous.scopeBlockers).toEqual([{ kind: "unresolved_pending_session", count: 1 }]);
+  });
+
+  test("E. with no ingest evidence the created_at fallback applies", async () => {
+    const report = await loadSalesReport(fakeSupabase(pendingFixture([])), "2026-07-26");
+    expect(report.scopeBlockers).toEqual([{ kind: "unresolved_pending_session", count: 1 }]);
+  });
+});
+
+describe("P1 null session_date must not escape", () => {
+  const nullDated = (overrides: Record<string, unknown> = {}) => ({
+    id: "session-nulldate",
+    session_title: "ตลาดกี้",
+    total_items: 3,
+    parser_errors: null,
+    raw_message_id: "raw-9",
+    voided_at: null,
+    session_date: null,
+    ...overrides,
+  });
+
+  function fixture(session: Record<string, unknown>, message: Record<string, unknown>): Fixture {
+    return baseFixture({
+      produce: [],
+      sessions: [session],
+      rawMessages: [{ id: "raw-9", source_id: SOURCE_A, ...message }],
+    });
+  }
+
+  test("an explicit header date attributes it to that day only", async () => {
+    const message = { raw_text: DATED_PRODUCE, payload: { timestamp: AT_CUTOFF_MS }, created_at: INSERTED_AFTER_CUTOFF };
+
+    const named = await loadSalesReport(fakeSupabase(fixture(nullDated(), message)), "2026-07-25");
+    const other = await loadSalesReport(fakeSupabase(fixture(nullDated(), message)), "2026-07-26");
+
+    expect(named.blocked.some((row) => row.reasons.includes("session_date_missing"))).toBe(true);
+    expect(named.markets[0].marketLabel).toContain("ตลาดกี้");
+    // An unrelated null-dated session must not demote every other report.
+    expect(other.blocked).toHaveLength(0);
+    expect(other.scopeBlockers).toEqual([]);
+  });
+
+  test("with no header date the LINE event timestamp attributes it", async () => {
+    const message = { raw_text: UNDATED_PRODUCE, payload: { timestamp: BEFORE_CUTOFF_MS }, created_at: INSERTED_AFTER_CUTOFF };
+
+    const previous = await loadSalesReport(fakeSupabase(fixture(nullDated(), message)), "2026-07-25");
+    const next = await loadSalesReport(fakeSupabase(fixture(nullDated(), message)), "2026-07-26");
+
+    expect(previous.blocked.some((row) => row.reasons.includes("session_date_missing"))).toBe(true);
+    expect(next.blocked).toHaveLength(0);
+  });
+
+  test("an undatable session fails closed on whatever date is asked", async () => {
+    const message = { raw_text: null, payload: null, created_at: null };
+
+    for (const date of [DATE, "2026-01-15"]) {
+      const report = await loadSalesReport(fakeSupabase(fixture(nullDated(), message)), date);
+      expect(report.blocked.some((row) => row.reasons.includes("session_date_missing"))).toBe(true);
+    }
+  });
+
+  test("a voided null-dated session does not block", async () => {
+    // The exclusion is the query: voided rows never reach the audit.
+    await loadSalesReport(fakeSupabase(baseFixture()), DATE);
+    expect(filterLog).toContain("produce_sessions.is:session_date=null");
+    expect(filterLog).toContain("produce_sessions.is:voided_at=null");
+  });
+
+  test("ordinary dated sessions are unaffected", async () => {
+    const report = await loadSalesReport(fakeSupabase(baseFixture()), DATE);
+    expect(report.blocked).toHaveLength(0);
+    expect(report.allMarkets.valueAuthoritative).toBe(true);
+  });
+});
+
+describe("P1 durable evidence for a rejected produce message", () => {
+  const lostMessage = (overrides: Record<string, unknown> = {}) => ({
+    id: "raw-lost",
+    source_id: SOURCE_A,
+    raw_text: DATED_PRODUCE,
+    payload: { timestamp: Date.parse("2026-07-25T06:00:00.000Z") },
+    created_at: "2026-07-25T06:00:01.000Z",
+    is_processed: false,
+    ...overrides,
+  });
+
+  function fixture(messages: Record<string, unknown>[], extra: Fixture = {}): Fixture {
+    return baseFixture({ produce: [], sessions: [], rawMessages: messages, ...extra });
+  }
+
+  test("an unprocessed complete produce message with no evidence at all still blocks", async () => {
+    // This is the case where even the parse_errors write failed. The header
+    // names a market, so the block lands on that market rather than the scope.
+    const named = lostMessage({
+      raw_text: ["18:53 เสือ ตลาดกี้ เบิก 25/07/2569", "18:53 เสือ 1.หมอนทอง119บาท", "38โล"].join("\n"),
+    });
+    const report = await loadSalesReport(fakeSupabase(fixture([named])), DATE);
+
+    expect(report.blocked.some((row) => row.reasons.includes("produce_message_never_landed"))).toBe(true);
+    expect(report.markets[0].marketLabel).toBe("ตลาดกี้");
+    expect(report.allMarkets.quantityAuthoritative).toBe(false);
+  });
+
+  test("a lost message whose header names no market becomes a scope blocker", async () => {
+    const report = await loadSalesReport(fakeSupabase(fixture([lostMessage()])), DATE);
+
+    expect(report.scopeBlockers).toEqual([{ kind: "unattributable_session", count: 1 }]);
+    expect(report.allMarkets.quantityAuthoritative).toBe(false);
+  });
+
+  test("the same message is reported once when the parse_errors write DID succeed", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        fixture([lostMessage()], {
+          parseErrors: [{ id: "pe-1", parser_name: "weigh-session", raw_message_id: "raw-lost" }],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([{ kind: "message_parser_error", count: 1 }]);
+    expect(report.blocked.some((row) => row.reasons.includes("produce_message_never_landed"))).toBe(false);
+  });
+
+  test("a message that did land is not reported as lost", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        fixture([lostMessage({ is_processed: true })], {
+          sessions: [
+            { id: "session-1", total_items: 1, parser_errors: null, raw_message_id: "raw-lost", voided_at: null },
+          ],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.blocked.some((row) => row.reasons.includes("produce_message_never_landed"))).toBe(false);
+  });
+
+  test("a header-only message is left to the pending-session check", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(fixture([lostMessage({ raw_text: "ตลาดกี้ เบิก 25/07/2569" })])),
+      DATE,
+    );
+
+    expect(report.blocked).toHaveLength(0);
+  });
+
+  test("a closing message alone is not mistaken for a complete entry", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(fixture([lostMessage({ raw_text: "จบรายการคืน" })])),
+      DATE,
+    );
+
+    expect(report.blocked).toHaveLength(0);
+  });
+
+  test("an ordinary chat message is never reported", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(fixture([lostMessage({ raw_text: "พรุ่งนี้เจอกันนะ" })])),
+      DATE,
+    );
+
+    expect(report.blocked).toHaveLength(0);
+  });
+
+  test("a lost message is attributed to the day its header names, not its arrival", async () => {
+    const other = await loadSalesReport(fakeSupabase(fixture([lostMessage()])), "2026-07-26");
+    expect(other.blocked).toHaveLength(0);
   });
 });

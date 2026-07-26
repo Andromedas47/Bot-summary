@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { normalizedMarketLabel } from "@/lib/market";
+import { logger } from "@/lib/logger";
 import { RE } from "@/lib/parsers/weigh-session/regex";
 import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
 import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
@@ -303,16 +304,46 @@ async function fetchAllScopeRows<T>(
 /**
  * The business date a produce message belongs to.
  *
- * The explicit header date wins — that is what the finalizer would persist as
- * session_date, and a message typed on the 26th whose header says 25/07/2569 is
- * evidence about the 25th. With no explicit date the deployed fallback applies:
- * the Bangkok business date of when the message arrived, exactly what
- * WeighSessionParser.parse passes as its fallbackDate. One parser, one rule.
+ * Hierarchy, in strict order:
+ *
+ *   1. the explicit header date in the text — what the finalizer would persist
+ *      as session_date, so a message sent on the 26th headed 25/07/2569 is
+ *      evidence about the 25th, whatever any clock says;
+ *   2. otherwise the LINE event timestamp, through the deployed
+ *      bangkokBusinessDateFromTimestamp rule — exactly the fallbackDate
+ *      WeighSessionParser.parse passes;
+ *   3. null, when neither exists — the caller then fails closed.
+ *
+ * `eventTimestampMs` must be the LINE event time, NOT a database insert time.
+ * They straddle the 04:00 cutoff differently: an event sent at 03:59:59 and
+ * inserted at 04:00:01 belongs to the PREVIOUS business date, and using the
+ * insert time would file that produce under the wrong day.
  */
-function produceBusinessDate(text: string | null | undefined, arrivedAt: string | null | undefined): string | null {
-  const fallback = arrivedAt ? bangkokBusinessDateFromTimestamp(Date.parse(arrivedAt)) : null;
+function produceBusinessDate(
+  text: string | null | undefined,
+  eventTimestampMs: number | null,
+): string | null {
+  const fallback = eventTimestampMs === null ? null : bangkokBusinessDateFromTimestamp(eventTimestampMs);
   if (!text || !text.trim()) return fallback;
   return parseWeighSession(text, fallback).date ?? fallback;
+}
+
+/**
+ * The authoritative LINE event time for a raw message.
+ *
+ * raw_messages.payload is the webhook event verbatim (see saveRawMessage), so
+ * payload.timestamp is the same millisecond value the parser saw at ingestion.
+ * created_at is only the row's insert time and is used ONLY when the payload
+ * cannot be interpreted — a documented degradation, not an equivalent.
+ */
+function lineEventTimestampMs(payload: unknown, createdAt: string | null | undefined): number | null {
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    const timestamp = (payload as { timestamp?: unknown }).timestamp;
+    if (typeof timestamp === "number" && Number.isFinite(timestamp)) return timestamp;
+  }
+  if (!createdAt) return null;
+  const parsed = Date.parse(createdAt);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 /**
@@ -344,28 +375,94 @@ async function countUnresolvedPendingSessions(
   const looseClient = supabase as unknown as SupabaseClient<any>;
 
   const rows = await fetchAllScopeRows<{
+    id: string;
+    session_key?: string | null;
+    session_generation?: string | null;
     accumulated_text?: string | null;
     created_at?: string | null;
     finalization_status?: string | null;
   }>("pending session", (from, to) =>
     looseClient
       .from("pending_sessions")
-      .select("id, accumulated_text, created_at, finalization_status")
+      .select("id, session_key, session_generation, accumulated_text, created_at, finalization_status")
       // Resolved rows are the overwhelming majority and can never be evidence
       // of missing produce, so they are excluded server-side; the client-side
       // check below is the authority either way.
       .not("finalization_status", "in", `(${[...RESOLVED_PENDING_STATUSES].join(",")})`)
+      .order("id", { ascending: true })
       .range(from, to),
   );
 
-  return rows.filter((row) => {
-    const status = row.finalization_status ?? "pending";
-    if (RESOLVED_PENDING_STATUSES.has(status)) return false;
-    const date = produceBusinessDate(row.accumulated_text, row.created_at);
+  const unresolved = rows.filter(
+    (row) => !RESOLVED_PENDING_STATUSES.has(row.finalization_status ?? "pending"),
+  );
+  if (unresolved.length === 0) return 0;
+
+  const eventTimes = await pendingIngestEventTimes(looseClient, unresolved);
+
+  return unresolved.filter((row) => {
+    const eventTimestampMs = eventTimes.get(row.id)
+      ?? (row.created_at ? Date.parse(row.created_at) : null);
+    const date = produceBusinessDate(
+      row.accumulated_text,
+      Number.isFinite(eventTimestampMs as number) ? (eventTimestampMs as number) : null,
+    );
     // No date evidence at all: count it. Excluding an unresolved session
     // because its date is unknown is the one direction that loses evidence.
     return date === null || date === businessDate;
   }).length;
+}
+
+/**
+ * The LINE event time of each unresolved session's FIRST ingested message.
+ *
+ * pending_session_ingest stores line_timestamp_ms per (session_key, generation)
+ * — the authoritative send time of the header that opened the session, which is
+ * what the business date must be derived from when no explicit header date
+ * exists. pending_sessions.created_at is the row's insert time and is only used
+ * when no ingest evidence survives.
+ *
+ * A lookup failure is not fatal: the caller then falls back to created_at,
+ * which can only make the attribution more conservative, never less.
+ */
+async function pendingIngestEventTimes(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  looseClient: SupabaseClient<any>,
+  rows: readonly { id: string; session_key?: string | null; session_generation?: string | null }[],
+): Promise<Map<string, number>> {
+  const earliest = new Map<string, number>();
+  const keys = rows.map((row) => row.session_key).filter((key): key is string => Boolean(key));
+  if (keys.length === 0) return earliest;
+
+  const byKeyAndGeneration = new Map<string, string>();
+  for (const row of rows) {
+    if (row.session_key) byKeyAndGeneration.set(`${row.session_key}|${row.session_generation ?? ""}`, row.id);
+  }
+
+  for (const chunk of chunks([...new Set(keys)], LOOKUP_CHUNK_SIZE)) {
+    const { data, error } = await looseClient
+      .from("pending_session_ingest")
+      .select("session_key, session_generation, line_timestamp_ms")
+      .in("session_key", chunk);
+    if (error) {
+      logger.warn("P1 pending ingest timestamp lookup failed — falling back to created_at", {
+        error: error.message,
+      });
+      return earliest;
+    }
+
+    for (const ingest of data ?? []) {
+      const rowId = byKeyAndGeneration.get(
+        `${ingest.session_key}|${ingest.session_generation ?? ""}`,
+      );
+      const timestamp = Number(ingest.line_timestamp_ms);
+      if (!rowId || !Number.isFinite(timestamp)) continue;
+      const current = earliest.get(rowId);
+      if (current === undefined || timestamp < current) earliest.set(rowId, timestamp);
+    }
+  }
+
+  return earliest;
 }
 
 /**
@@ -394,17 +491,11 @@ async function countProduceParseErrors(
 
   // The raw message carries both pieces of evidence a parse error lacks: what
   // was said (is this produce at all?) and which business date it was about.
-  const messages = new Map<string, { raw_text: string | null; created_at: string | null }>();
-  for (const chunk of chunks(distinct.map((row) => row.raw_message_id), LOOKUP_CHUNK_SIZE)) {
-    const { data, error } = await supabase
-      .from("raw_messages")
-      .select("id, raw_text, created_at")
-      .in("id", chunk);
-    if (error) throw new SalesDataError(`parse error message lookup failed: ${error.message}`);
-    for (const row of data ?? []) {
-      messages.set(row.id, { raw_text: row.raw_text, created_at: row.created_at });
-    }
-  }
+  const messages = await fetchRawMessageEvidence(
+    supabase,
+    distinct.map((row) => row.raw_message_id),
+    "parse error message lookup",
+  );
 
   return distinct.filter((row) => {
     const message = messages.get(row.raw_message_id);
@@ -413,14 +504,45 @@ async function countProduceParseErrors(
 
     const isProduce =
       PRODUCE_PARSER_NAMES.has(row.parser_name)
-      || (typeof message.raw_text === "string" && RE.SESSION_START.test(message.raw_text));
+      || (typeof message.rawText === "string" && RE.SESSION_START.test(message.rawText));
     if (!isProduce) return false;
 
     // A crash on a message headed 25/07/2569 is a blocker for the 25th, even
     // when it arrived on the 26th — and it must NOT block the 26th.
-    const date = produceBusinessDate(message.raw_text, message.created_at);
+    const date = produceBusinessDate(message.rawText, message.eventTimestampMs);
     return date === null || date === businessDate;
   }).length;
+}
+
+interface RawMessageEvidence {
+  rawText: string | null;
+  eventTimestampMs: number | null;
+}
+
+/** raw_text plus the authoritative LINE event time, keyed by raw message id. */
+async function fetchRawMessageEvidence(
+  supabase: Supabase,
+  rawMessageIds: readonly string[],
+  label: string,
+): Promise<Map<string, RawMessageEvidence>> {
+  const evidence = new Map<string, RawMessageEvidence>();
+  const unique = [...new Set(rawMessageIds)].filter(Boolean);
+
+  for (const chunk of chunks(unique, LOOKUP_CHUNK_SIZE)) {
+    const { data, error } = await supabase
+      .from("raw_messages")
+      .select("id, raw_text, payload, created_at")
+      .in("id", chunk);
+    if (error) throw new SalesDataError(`${label} failed: ${error.message}`);
+    for (const row of data ?? []) {
+      evidence.set(row.id, {
+        rawText: row.raw_text,
+        eventTimestampMs: lineEventTimestampMs(row.payload, row.created_at),
+      });
+    }
+  }
+
+  return evidence;
 }
 
 /**
@@ -444,7 +566,7 @@ async function loadSessionAudits(
 ): Promise<SalesSessionAudit[]> {
   const { data, error } = await supabase
     .from("produce_sessions")
-    .select("id, session_title, total_items, raw_message_id, voided_at")
+    .select("id, session_title, total_items, raw_message_id, voided_at, session_date")
     .eq("session_date", businessDate)
     .is("voided_at", null);
   if (error) throw new SalesDataError(`produce session audit query failed: ${error.message}`);
@@ -454,6 +576,9 @@ async function loadSessionAudits(
   const missingSources: string[] = [];
 
   for (const session of data ?? []) {
+    // The server filter is re-applied client-side: a null-dated session belongs
+    // to auditNullDatedSessions, which dates it from its own evidence.
+    if (session.session_date !== undefined && session.session_date !== businessDate) continue;
     if (sessionsWithRows.has(session.id)) continue; // already audited through its rows
     if ((session.total_items ?? 0) <= 0) continue; // claimed nothing, lost nothing
     if (session.raw_message_id && !sourceByRawMessageId.has(session.raw_message_id)) {
@@ -476,6 +601,167 @@ async function loadSessionAudits(
       const session = (data ?? []).find((row) => row.id === audit.sessionId);
       if (session?.raw_message_id) audit.sourceId = extra.get(session.raw_message_id) ?? null;
     }
+  }
+
+  audits.push(...(await auditNullDatedSessions(supabase, businessDate)));
+  audits.push(...(await auditLostProduceMessages(supabase, businessDate)));
+  return audits;
+}
+
+/**
+ * True for a message that would have taken the DIRECT single-message produce
+ * path — a real header line plus items or a closer.
+ *
+ * Mirrors the deployed predicate exactly (hasSessionStart + hasSessionEnd /
+ * hasItemLine in webhook-service): SESSION_END lines are skipped before testing
+ * for a header, because "จบรายการคืน" contains คืน and would otherwise read as
+ * one. Reimplemented here rather than imported — webhook-service imports this
+ * module for the สรุปยอดขาย command, and the cycle would be worse than the
+ * duplication.
+ */
+function isCompleteProduceMessage(text: string): boolean {
+  const lines = text.normalize("NFC").split("\n").map((line) => line.trim());
+  const hasHeader = lines.some((line) => !RE.SESSION_END.test(line) && RE.SESSION_START.test(line));
+  if (!hasHeader) return false;
+  return lines.some((line) => RE.SESSION_END.test(line)) || parseWeighSession(text).items.length > 0;
+}
+
+/**
+ * Produce messages that were understood and then vanished.
+ *
+ * The evidence here is an ABSENCE, which is what makes it durable: raw_messages
+ * is written before parsing and is never rolled back, and the webhook marks
+ * is_processed only once the produce has actually landed (or has been proven a
+ * duplicate). So a complete single-message produce entry that is still
+ * unprocessed, has no produce_session and no parse_errors row, is produce that
+ * was rejected without leaving a trace — including the case where the
+ * parse_errors write itself failed. No extra write can be lost, because no
+ * extra write is required.
+ *
+ * Header-only messages and pending appends are excluded by the predicate above;
+ * the pending-session scan already covers those.
+ *
+ * ponytail: the scan starts at the business date's own window — a complete
+ * message reporting date D cannot have been sent before D began. Later
+ * ingestion (backdating) is unbounded, as it must be.
+ */
+async function auditLostProduceMessages(
+  supabase: Supabase,
+  businessDate: string,
+): Promise<SalesSessionAudit[]> {
+  const window = bangkokBusinessDateWindow(businessDate);
+
+  const candidates = await fetchAllScopeRows<{
+    id: string;
+    raw_text: string | null;
+    payload: unknown;
+    created_at: string | null;
+    source_id: string | null;
+  }>("lost produce message", (from, to) =>
+    supabase
+      .from("raw_messages")
+      .select("id, raw_text, payload, created_at, source_id")
+      .eq("is_processed", false)
+      .eq("message_type", "text")
+      .gte("created_at", window.start)
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
+
+  const lost = candidates.filter((row) => {
+    if (!row.raw_text || !isCompleteProduceMessage(row.raw_text)) return false;
+    const date = produceBusinessDate(
+      row.raw_text,
+      lineEventTimestampMs(row.payload, row.created_at),
+    );
+    return date === null || date === businessDate;
+  });
+  if (lost.length === 0) return [];
+
+  // A message that did land, or that already left a parse_errors row, is
+  // accounted for elsewhere — counting it here would double-report it.
+  const accounted = new Set<string>();
+  for (const chunk of chunks(lost.map((row) => row.id), LOOKUP_CHUNK_SIZE)) {
+    const [sessions, errors] = await Promise.all([
+      supabase.from("produce_sessions").select("raw_message_id").in("raw_message_id", chunk),
+      supabase.from("parse_errors").select("raw_message_id").in("raw_message_id", chunk),
+    ]);
+    if (sessions.error) {
+      throw new SalesDataError(`lost produce session lookup failed: ${sessions.error.message}`);
+    }
+    if (errors.error) {
+      throw new SalesDataError(`lost produce error lookup failed: ${errors.error.message}`);
+    }
+    for (const row of sessions.data ?? []) accounted.add(row.raw_message_id);
+    for (const row of errors.data ?? []) accounted.add(row.raw_message_id);
+  }
+
+  return lost
+    .filter((row) => !accounted.has(row.id))
+    .map((row) => ({
+      sessionId: `raw:${row.id}`,
+      sourceId: row.source_id,
+      marketName: normalizedMarketLabel(parseWeighSession(row.raw_text ?? "").session_title) || null,
+      reasons: ["produce_message_never_landed"] as const,
+    }));
+}
+
+/**
+ * Active sessions with NO session_date.
+ *
+ * transaction_date is derived from session_date, so a null-dated session is
+ * invisible to the transaction query AND to the date-scoped audit above — its
+ * produce would simply not exist for any report. The schema allows NULL, so P1
+ * looks for them explicitly rather than trusting that Production has none.
+ *
+ * Each one is dated from its own raw message (explicit header date, else the
+ * LINE event timestamp) and only blocks the date that evidence names — an
+ * unrelated null-dated session must not demote every historical report. When no
+ * evidence can date it at all, it blocks the requested date: unattributable
+ * produce is exactly what fail-closed exists for.
+ */
+async function auditNullDatedSessions(
+  supabase: Supabase,
+  businessDate: string,
+): Promise<SalesSessionAudit[]> {
+  const { data, error } = await supabase
+    .from("produce_sessions")
+    .select("id, session_title, total_items, raw_message_id, voided_at, session_date")
+    .is("session_date", null)
+    .is("voided_at", null);
+  if (error) throw new SalesDataError(`null-dated session audit query failed: ${error.message}`);
+
+  // The null check is re-applied client-side: this audit must only ever see
+  // rows the server filter selected, never a dated session by accident.
+  const sessions = (data ?? []).filter(
+    (session) => session.session_date === null && (session.total_items ?? 0) > 0,
+  );
+  if (sessions.length === 0) return [];
+
+  const messageIds = sessions
+    .map((session) => session.raw_message_id)
+    .filter((id): id is string => Boolean(id));
+  const evidence = await fetchRawMessageEvidence(
+    supabase,
+    messageIds,
+    "null-dated session message lookup",
+  );
+  const sources = await mapRawMessageSources(supabase, [...new Set(messageIds)]);
+
+  const audits: SalesSessionAudit[] = [];
+  for (const session of sessions) {
+    const message = session.raw_message_id ? evidence.get(session.raw_message_id) : undefined;
+    const date = message
+      ? produceBusinessDate(message.rawText, message.eventTimestampMs)
+      : null;
+    if (date !== null && date !== businessDate) continue;
+
+    audits.push({
+      sessionId: session.id,
+      sourceId: session.raw_message_id ? sources.get(session.raw_message_id) ?? null : null,
+      marketName: normalizedMarketLabel(session.session_title) || null,
+      reasons: ["session_date_missing"],
+    });
   }
 
   return audits;

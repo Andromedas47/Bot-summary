@@ -61,6 +61,8 @@ export type SalesBlockReason =
   | "session_parser_errors"
   | "session_item_count_mismatch"
   | "session_rows_missing"
+  | "session_date_missing"
+  | "produce_message_never_landed"
   | "missing_central_price"
   | "central_price_conflict";
 
@@ -621,10 +623,21 @@ export function calculateSalesReport(input: SalesCalculationInput): SalesReport 
   // product. Without it the market would simply not appear, which reads as "no
   // sales here" and is exactly the silence this report must never produce.
   const marketsWithIdentities = new Set(identityRows.map((row) => row.marketKey));
+  const placeholders = new Map<string, SalesIdentityRow>();
   for (const { audit, marketKey } of attributableAudits) {
+    // Several broken sessions can share a market. The first one creates the
+    // placeholder; the rest add their reasons to it, so no finding is lost to
+    // a market that already has a row.
+    const existing = placeholders.get(marketKey);
+    if (existing) {
+      for (const reason of audit.reasons) {
+        if (!existing.reasons.includes(reason)) existing.reasons.push(reason);
+      }
+      continue;
+    }
     if (marketsWithIdentities.has(marketKey)) continue;
     marketsWithIdentities.add(marketKey);
-    identityRows.push({
+    const placeholder: SalesIdentityRow = {
       marketKey,
       marketLabel: identityLabel(audit.marketName),
       sourceId: audit.sourceId,
@@ -640,7 +653,9 @@ export function calculateSalesReport(input: SalesCalculationInput): SalesReport 
       status: "QUANTITY_BLOCKED",
       reasons: [...audit.reasons],
       isSessionPlaceholder: true,
-    });
+    };
+    placeholders.set(marketKey, placeholder);
+    identityRows.push(placeholder);
   }
 
   // An integrity problem that cannot be attributed to one market (an unresolved

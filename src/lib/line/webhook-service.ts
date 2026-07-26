@@ -1518,6 +1518,11 @@ export class WebhookService {
         }
         if (isDuplicate) {
           log.info("duplicate session — skipping insert");
+          // The produce IS recorded, under the message that first carried it.
+          // Marking this one processed keeps "unprocessed complete produce
+          // message" meaning exactly one thing — produce that never landed —
+          // which is what the daily report relies on.
+          await this.markRawMessageProcessed(rawMessageId, log);
           if (replyToken) {
             try {
               await replyLineMessage(replyToken, "รายการนี้เคยบันทึกแล้ว");
@@ -1540,6 +1545,7 @@ export class WebhookService {
         const duplicateAfterPersist = await dedup.record(weighSessionData, rawTextForDedup ?? undefined);
         if (duplicateAfterPersist) {
           log.info("duplicate session recorded concurrently after persist");
+          await this.markRawMessageProcessed(rawMessageId, log);
           if (replyToken) {
             try {
               await replyLineMessage(replyToken, "รายการนี้เคยบันทึกแล้ว");
@@ -1646,6 +1652,16 @@ export class WebhookService {
     return data.id;
   }
 
+  private async markRawMessageProcessed(rawMessageId: string, log: ChildLogger): Promise<void> {
+    const { error } = await this.supabase
+      .from("raw_messages")
+      .update({ is_processed: true })
+      .eq("id", rawMessageId);
+    // Leaving it unprocessed is the safe direction: the report then treats the
+    // message as unaccounted for and blocks, rather than assuming it landed.
+    if (error) log.warn("failed to mark raw message processed", { error: error.message });
+  }
+
   /**
    * Durable evidence that a weighing message was understood but rejected.
    *
@@ -1659,6 +1675,12 @@ export class WebhookService {
    * sender already gets, and the LINE flow is unchanged either way. Retries of
    * the same webhook event can write more than one row for a raw message;
    * readers count distinct raw_message_id, so a retry cannot inflate anything.
+   *
+   * Losing this write does NOT lose the blocker. The raw message stays
+   * is_processed = false with no produce_session behind it, and P1 reports an
+   * unprocessed complete produce message as evidence in its own right (see
+   * auditLostProduceMessages). This row is the readable explanation, not the
+   * only proof.
    */
   private async recordProduceValidationError(
     rawMessageId: string,

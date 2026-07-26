@@ -18,6 +18,8 @@ type Row = Record<string, unknown>;
 /** Only what runParser touches: a raw_messages insert and a parse_errors insert. */
 class RecordingDatabase {
   readonly inserts: Record<string, Row[]> = {};
+  readonly updates: Record<string, Row[]> = {};
+  duplicateSessions = false;
 
   async rpc() {
     return { data: null, error: null };
@@ -53,13 +55,22 @@ class RecordingDatabase {
     node.lt = self;
     node.order = self;
     node.limit = self;
-    node.update = self;
+    node.update = (payload: Row) => {
+      (this.updates[table] ??= []).push(payload);
+      return node;
+    };
     node.delete = self;
     node.upsert = self;
-    node.maybeSingle = async () => ({ data: null, error: null });
+    // Duplicate simulation: imported_sessions already holds this session hash,
+    // and its produce_items rows exist, which is the real duplicate shape.
+    node.maybeSingle = async () => ({
+      data: this.duplicateSessions && table === "imported_sessions" ? { id: "existing" } : null,
+      error: null,
+    });
     node.single = async () => ({ data: null, error: null });
+    const rows = this.duplicateSessions && table === "produce_items" ? [{ id: "item-existing" }] : [];
     node.then = (resolve: (value: unknown) => unknown) =>
-      Promise.resolve({ data: [], error: null }).then(resolve);
+      Promise.resolve({ data: rows, error: null }).then(resolve);
     return node;
   }
 }
@@ -147,5 +158,28 @@ describe("produce validation failure leaves durable evidence", () => {
     await service(db, replies).processEvents([event], "destination");
 
     expect(db.validationErrors()).toHaveLength(1);
+  });
+});
+
+describe("raw message processing state stays unambiguous", () => {
+  it("marks a duplicate produce message processed, so it is not read as lost", async () => {
+    const db = new RecordingDatabase();
+    const replies: string[] = [];
+    db.duplicateSessions = true;
+
+    const event = { ...textEvent(VALID_SESSION), replyToken: undefined } as unknown as LineMessageEvent;
+    await service(db, replies).processEvents([event], "destination");
+
+    // The produce is already recorded under the message that first carried it.
+    expect(db.updates.raw_messages).toContainEqual({ is_processed: true });
+  });
+
+  it("leaves a rejected produce message unprocessed — that absence IS the evidence", async () => {
+    const db = new RecordingDatabase();
+    const replies: string[] = [];
+
+    await service(db, replies).processEvents([textEvent(INVALID_ITEMS)], "destination");
+
+    expect(db.updates.raw_messages ?? []).toHaveLength(0);
   });
 });

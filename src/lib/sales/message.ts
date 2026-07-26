@@ -70,6 +70,8 @@ const REASON_LABELS: Record<SalesBlockReason, string> = {
   session_parser_errors: "อ่านข้อความไม่ครบ",
   session_item_count_mismatch: "จำนวนรายการที่บันทึกไม่ตรง",
   session_rows_missing: "ชุดนี้ไม่มีรายการที่บันทึกไว้เลย",
+  session_date_missing: "ชุดนี้ไม่มีวันที่กำกับ",
+  produce_message_never_landed: "มีข้อความชั่งที่ไม่ได้ถูกบันทึก",
   missing_central_price: "ไม่มีราคากลาง",
   central_price_conflict: "ราคากลางขัดแย้ง รอผู้ดูแลยืนยัน",
 };

@@ -39,6 +39,10 @@ const SATANG_PER_BAHT = 100;
 /** Separator for the composite market key — same construction as the White Sheet scope key. */
 const MARKET_KEY_SEPARATOR = "\u0001";
 
+/** Identity fields for a row that stands in for a broken session. */
+export const SESSION_PLACEHOLDER_PRODUCT = "(ทั้งชุดรายการ)";
+export const SESSION_PLACEHOLDER_UNIT = "-";
+
 export type SalesRowStatus = "TRUSTED" | "VALUE_BLOCKED" | "QUANTITY_BLOCKED";
 
 /**
@@ -56,17 +60,38 @@ export type SalesBlockReason =
   | "duplicate_main_session"
   | "session_parser_errors"
   | "session_item_count_mismatch"
+  | "session_rows_missing"
   | "missing_central_price"
   | "central_price_conflict";
 
 export type SalesScopeBlockerKind =
   | "unresolved_pending_session"
-  | "message_parser_error";
+  | "message_parser_error"
+  | "unattributable_session";
 
 export interface SalesScopeBlocker {
   kind: SalesScopeBlockerKind;
   /** How many occurrences — the report states the count, never a guess at impact. */
   count: number;
+}
+
+/**
+ * A produce session whose persisted rows do not reconcile with what it claimed.
+ *
+ * This is the case transaction rows cannot reveal: a session that persisted NO
+ * rows at all is invisible to any audit that starts from produce_transactions,
+ * yet its total_items says produce was weighed. The loader reconciles sessions
+ * independently and passes the broken ones here.
+ *
+ * Attribution decides the blast radius: a session whose market identity resolves
+ * blocks that market, one whose identity cannot be proven becomes a scope
+ * blocker, because the missing rows could belong to any market.
+ */
+export interface SalesSessionAudit {
+  sessionId: string;
+  sourceId: string | null;
+  marketName: string | null;
+  reasons: readonly SalesBlockReason[];
 }
 
 /**
@@ -102,6 +127,8 @@ export interface SalesCalculationInput {
   priceConflicts?: ReadonlySet<string>;
   /** Integrity problems that cannot be attributed to one market. */
   scopeBlockers?: readonly SalesScopeBlocker[];
+  /** Sessions whose persisted rows do not reconcile with what they claimed. */
+  sessionAudits?: readonly SalesSessionAudit[];
 }
 
 /** One atomic market + product + unit result — the only place a number is computed. */
@@ -122,6 +149,12 @@ export interface SalesIdentityRow {
   expectedSalesSatang: number | null;
   status: SalesRowStatus;
   reasons: SalesBlockReason[];
+  /**
+   * True for a stand-in row that reports a broken session rather than a
+   * product. It is excluded from the product roll-up — there is no product to
+   * roll up — but it appears in its market and in the blocked list.
+   */
+  isSessionPlaceholder?: boolean;
 }
 
 /**
@@ -402,8 +435,11 @@ function identityLabel(marketName: string | null): string {
   return (marketName ?? "").normalize("NFC").trim();
 }
 
+/** The fields any market key derivation needs — a row or a session audit. */
+type MarketIdentitySource = Pick<SalesSourceRow, "sourceId" | "marketName" | "sessionId">;
+
 /** True only when BOTH halves of the market identity are present. */
-function isMarketResolved(row: SalesSourceRow): boolean {
+function isMarketResolved(row: MarketIdentitySource): boolean {
   return Boolean(row.sourceId) && identityLabel(row.marketName).length > 0;
 }
 
@@ -412,7 +448,7 @@ function isMarketResolved(row: SalesSourceRow): boolean {
  * aggregation loop must agree exactly, or a duplicate could be detected against
  * a key no identity is ever filed under.
  */
-function rowMarketKey(row: SalesSourceRow): string {
+function rowMarketKey(row: MarketIdentitySource): string {
   return isMarketResolved(row)
     ? salesMarketKey(row.sourceId as string, identityLabel(row.marketName))
     : unresolvedMarketKey(row.sessionId);
@@ -426,6 +462,26 @@ export function calculateSalesReport(input: SalesCalculationInput): SalesReport 
   const knownNames = knownProductNames(input.rows);
   const duplicateMarkets = duplicateMainSessionMarkets(input.rows);
   const marketIssues = marketIssuesFromSessions(input.rows);
+
+  // Sessions that never reconciled. An attributable one blocks its market — and
+  // gets a placeholder identity below if that market has nothing else, so it is
+  // never silently absent. An unattributable one demotes the whole scope.
+  const attributableAudits: Array<{ audit: SalesSessionAudit; marketKey: string }> = [];
+  let unattributableAudits = 0;
+  for (const audit of input.sessionAudits ?? []) {
+    if (!isMarketResolved(audit)) {
+      unattributableAudits += 1;
+      continue;
+    }
+    const marketKey = rowMarketKey(audit);
+    attributableAudits.push({ audit, marketKey });
+    const reasons = marketIssues.get(marketKey) ?? new Set<SalesBlockReason>();
+    for (const reason of audit.reasons) reasons.add(reason);
+    marketIssues.set(marketKey, reasons);
+  }
+  if (unattributableAudits > 0) {
+    scopeBlockers.push({ kind: "unattributable_session", count: unattributableAudits });
+  }
 
   const aggregates = new Map<string, IdentityAggregate>();
 
@@ -560,6 +616,33 @@ export function calculateSalesReport(input: SalesCalculationInput): SalesReport 
     };
   });
 
+  // A market whose only evidence is a broken session has no identity to carry
+  // the block, so it gets one — a placeholder that reports the session, not a
+  // product. Without it the market would simply not appear, which reads as "no
+  // sales here" and is exactly the silence this report must never produce.
+  const marketsWithIdentities = new Set(identityRows.map((row) => row.marketKey));
+  for (const { audit, marketKey } of attributableAudits) {
+    if (marketsWithIdentities.has(marketKey)) continue;
+    marketsWithIdentities.add(marketKey);
+    identityRows.push({
+      marketKey,
+      marketLabel: identityLabel(audit.marketName),
+      sourceId: audit.sourceId,
+      businessDate,
+      productName: SESSION_PLACEHOLDER_PRODUCT,
+      unit: SESSION_PLACEHOLDER_UNIT,
+      withdrawnQuantity: 0,
+      goodReturnQuantity: 0,
+      damagedReturnQuantity: 0,
+      soldQuantity: null,
+      centralPriceSatang: null,
+      expectedSalesSatang: null,
+      status: "QUANTITY_BLOCKED",
+      reasons: [...audit.reasons],
+      isSessionPlaceholder: true,
+    });
+  }
+
   // An integrity problem that cannot be attributed to one market (an unresolved
   // pending session, a crashed parse) means data may be missing from ANY market,
   // so it demotes every total in the scope rather than only the all-market one.
@@ -583,6 +666,10 @@ export function calculateSalesReport(input: SalesCalculationInput): SalesReport 
     market.rows.push(row);
     accumulate(market.total, row);
     accumulate(allMarkets, row);
+
+    // A placeholder reports a session, not a product — it blocks its market and
+    // appears in the blocked list, but it has no product line to belong to.
+    if (row.isSessionPlaceholder) continue;
 
     const productKey = `${row.productName}${MARKET_KEY_SEPARATOR}${row.unit}`;
     let product = productMap.get(productKey);

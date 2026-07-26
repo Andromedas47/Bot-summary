@@ -34,10 +34,19 @@ export const SALES_TOTAL_HEADING = "ยอดขายรวมทุกตล�
 export const SALES_MARKET_TOTAL_HEADING = "ยอดขายรวม";
 
 export const SALES_PRODUCT_SECTION_HEADING = "📦 ยอดขายรายสินค้า (ทุกตลาด)";
-export const SALES_MARKET_SECTION_HEADING = "🏪 ยอดขายรายตลาด";
 export const SALES_BLOCKED_HEADING = "⛔ รายการที่ยืนยันไม่ได้";
 export const SALES_SCOPE_BLOCKER_HEADING = "⚠️ ข้อมูลวันนี้ยังไม่ครบ";
 export const SALES_EMPTY_NOTICE = "ไม่พบรายการขายสำหรับวันนี้";
+/**
+ * No persisted sales rows AND something is known to be missing. Saying
+ * "ไม่พบรายการขาย" here would report a broken day as a quiet day, so this
+ * wording states the opposite: nothing can be concluded yet.
+ */
+export const SALES_NO_ROWS_BLOCKED_NOTICE =
+  "⛔ ยังสรุปยอดขายไม่ได้ — ไม่พบรายการที่บันทึกไว้ และข้อมูลของวันนี้ยังไม่ครบ";
+/** Used wherever a money figure would otherwise print a misleading 0.00. */
+export const SALES_VALUE_UNAVAILABLE = "ยอดเงินยังคำนวณไม่ได้";
+export const SALES_MARKET_QUANTITY_HEADING = "🏪 ยอดขายรายตลาด (จำนวน)";
 /** Quantity is complete, only the money is not. */
 export const SALES_QUANTITY_ONLY_NOTICE = "จำนวนที่ขายครบถ้วน • ยอดเงินยังไม่ครบ (รอราคากลาง)";
 
@@ -60,6 +69,7 @@ const REASON_LABELS: Record<SalesBlockReason, string> = {
   duplicate_main_session: "มีชุดหลักซ้ำในวันเดียวกัน",
   session_parser_errors: "อ่านข้อความไม่ครบ",
   session_item_count_mismatch: "จำนวนรายการที่บันทึกไม่ตรง",
+  session_rows_missing: "ชุดนี้ไม่มีรายการที่บันทึกไว้เลย",
   missing_central_price: "ไม่มีราคากลาง",
   central_price_conflict: "ราคากลางขัดแย้ง รอผู้ดูแลยืนยัน",
 };
@@ -72,7 +82,10 @@ export function salesReasonLabel(reason: SalesBlockReason): string {
 
 function scopeBlockerLabel(blocker: SalesScopeBlocker): string {
   if (blocker.kind === "unresolved_pending_session") {
-    return `มีชุดข้อมูลที่ยังไม่ปิด ${blocker.count} ชุด`;
+    return `มีชุดข้อมูลที่ยังไม่ปิด/ปิดไม่สำเร็จ ${blocker.count} ชุด`;
+  }
+  if (blocker.kind === "unattributable_session") {
+    return `มีชุดรายการที่บันทึกไม่ครบและระบุตลาดไม่ได้ ${blocker.count} ชุด`;
   }
   return `มีข้อความที่อ่านไม่สำเร็จ ${blocker.count} ข้อความ`;
 }
@@ -92,7 +105,11 @@ function unitLabel(unit: string): string {
 function totalBlock(heading: string, total: SalesTotal): string {
   const lines = [
     total.valueAuthoritative ? heading : SALES_PARTIAL_HEADING,
-    `${satangToBahtText(total.expectedSalesSatang)} บาท`,
+    // Nothing is priced yet: "0.00 บาท" would read as zero revenue, which is a
+    // different (and false) claim from "the value is not calculable".
+    total.trustedRowCount === 0 && !total.valueAuthoritative
+      ? SALES_VALUE_UNAVAILABLE
+      : `${satangToBahtText(total.expectedSalesSatang)} บาท`,
   ];
   if (!total.valueAuthoritative) {
     const blocked = total.valueBlockedRowCount + total.quantityBlockedRowCount;
@@ -143,12 +160,32 @@ function marketBlock(market: SalesMarketSummary): string {
  */
 function productLine(product: SalesProductSummary): string {
   const quantitySuffix = product.total.quantityAuthoritative ? "" : " (บางส่วน)";
-  const valueSuffix = product.total.valueAuthoritative ? "" : " (บางส่วน)";
   return (
     `${product.productName} (${unitLabel(product.unit)})`
     + ` — ขาย ${formatQuantity(product.soldQuantity)}${quantitySuffix}`
-    + ` • ${satangToBahtText(product.total.expectedSalesSatang)} บาท${valueSuffix}`
+    + ` • ${valueText(product.total)}`
   );
+}
+
+/** Money for a subtotal: a figure, a partial figure, or an honest "not yet". */
+function valueText(total: SalesTotal): string {
+  if (total.trustedRowCount === 0 && !total.valueAuthoritative) return SALES_VALUE_UNAVAILABLE;
+  const suffix = total.valueAuthoritative ? "" : " (บางส่วน)";
+  return `${satangToBahtText(total.expectedSalesSatang)} บาท${suffix}`;
+}
+
+/**
+ * Per-market product quantities for the Auto report — "how much did each market
+ * sell?", which market money totals alone cannot answer. Every product is
+ * listed; a push may use as many messages as that takes.
+ */
+function marketQuantityBlock(market: SalesMarketSummary): string {
+  const lines = market.rows.map((row) =>
+    row.soldQuantity === null
+      ? `${row.productName} — ยืนยันจำนวนไม่ได้ (${row.reasons.map(salesReasonLabel).join(", ")})`
+      : `${row.productName} — ขาย ${formatQuantity(row.soldQuantity)} ${unitLabel(row.unit)}`,
+  );
+  return [`🏪 ${marketLabel(market)}`, ...lines, `ยอดขาย ${valueText(market.total)}`].join("\n");
 }
 
 /** One line per blocked identity. Every blocked entry is listed — never a sample. */
@@ -183,8 +220,21 @@ function productBlocks(report: SalesReport): string[] {
   return [[SALES_PRODUCT_SECTION_HEADING, ...report.products.map(productLine)].join("\n")];
 }
 
-function isEmpty(report: SalesReport): boolean {
+function hasNoRows(report: SalesReport): boolean {
   return report.markets.length === 0 && report.blocked.length === 0;
+}
+
+/**
+ * The opening blocks when the day produced no sales rows at all.
+ *
+ * With nothing missing, that is a real answer: no sales. With a scope blocker
+ * present it is NOT — the rows may simply never have landed — so the report
+ * says so and lists every blocker. Returns [] when there are rows to report.
+ */
+function noRowsBlocks(report: SalesReport, header: string): string[] {
+  if (!hasNoRows(report)) return [];
+  if (report.scopeBlockers.length === 0) return [`${header}\n\n${SALES_EMPTY_NOTICE}`];
+  return [`${header}\n\n${SALES_NO_ROWS_BLOCKED_NOTICE}`, ...scopeBlockerBlocks(report)];
 }
 
 /**
@@ -196,7 +246,7 @@ function isEmpty(report: SalesReport): boolean {
  */
 export function buildSalesSummaryBlocks(report: SalesReport): string[] {
   const header = headerBlock(SALES_MANUAL_TITLE, report);
-  if (isEmpty(report)) return [`${header}\n\n${SALES_EMPTY_NOTICE}`];
+  if (hasNoRows(report)) return noRowsBlocks(report, header);
 
   return [
     `${header}\n\n${totalBlock(SALES_TOTAL_HEADING, report.allMarkets)}`,
@@ -228,21 +278,14 @@ export function buildSalesSummaryMessages(
  */
 export function buildSalesAutoBlocks(report: SalesReport): string[] {
   const header = headerBlock(SALES_AUTO_TITLE, report);
-  if (isEmpty(report)) return [`${header}\n\n${SALES_EMPTY_NOTICE}`];
-
-  const marketTotals = report.markets.map(
-    (market) =>
-      `${marketLabel(market)} — ${satangToBahtText(market.total.expectedSalesSatang)} บาท`
-      + `${market.total.valueAuthoritative ? "" : " • บางส่วน"}`,
-  );
+  if (hasNoRows(report)) return noRowsBlocks(report, header);
 
   return [
     `${header}\n\n${totalBlock(SALES_TOTAL_HEADING, report.allMarkets)}`,
     ...scopeBlockerBlocks(report),
     ...productBlocks(report),
-    ...(marketTotals.length > 0
-      ? [[SALES_MARKET_SECTION_HEADING, ...marketTotals].join("\n")]
-      : []),
+    ...(report.markets.length > 0 ? [SALES_MARKET_QUANTITY_HEADING] : []),
+    ...report.markets.map(marketQuantityBlock),
     ...blockedBlocks(report),
   ];
 }

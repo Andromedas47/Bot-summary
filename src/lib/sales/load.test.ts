@@ -23,7 +23,10 @@ interface Fixture {
  * Filters are ignored except where a test depends on one, which keeps the
  * fixture readable — every table returns the rows the test declared.
  */
+const filterLog: string[] = [];
+
 function fakeSupabase(fixture: Fixture): SupabaseClient<Database> {
+  filterLog.length = 0;
   const rowsFor = (table: string): Record<string, unknown>[] => {
     switch (table) {
       case "produce_transactions": return fixture.produce ?? [];
@@ -48,9 +51,16 @@ function fakeSupabase(fixture: Fixture): SupabaseClient<Database> {
       const node: Record<string, unknown> = {};
       const self = () => node;
       node.select = self;
-      node.eq = self;
+      node.eq = (column: string, value: unknown) => {
+        filterLog.push(`${table}.eq:${column}=${String(value)}`);
+        return node;
+      };
       node.in = self;
       node.gte = self;
+      node.is = (column: string, value: unknown) => {
+        filterLog.push(`${table}.is:${column}=${String(value)}`);
+        return node;
+      };
       node.lt = self;
       node.order = self;
       node.range = () => Promise.resolve(result());
@@ -243,7 +253,7 @@ describe("P1 loader", () => {
         baseFixture({
           parseErrors: [
             { id: "pe-1", parser_name: "weigh-session", raw_message_id: "raw-1" },
-            { id: "pe-2", parser_name: "weigh-session", raw_message_id: "raw-1" },
+            { id: "pe-2", parser_name: "weigh-session", raw_message_id: "raw-2" },
           ],
         }),
       ),
@@ -396,5 +406,218 @@ describe("P1 loader", () => {
     await expect(
       loadSalesReport(fakeSupabase(baseFixture({ errors: { pending_sessions: "nope" } })), DATE),
     ).rejects.toThrow("nope");
+  });
+});
+
+describe("P1 pending-session lifecycle", () => {
+  /** The real shape: failed_closed stamps finalized_at but produced nothing. */
+  const FAILED_CLOSED = {
+    id: "pending-failed",
+    accumulated_text: "เบิก 25/07/2569\n1.หมอนทอง\n10 โล",
+    created_at: "2026-07-25T03:00:00.000Z",
+    finalized_at: "2026-07-25T04:00:00.000Z",
+    finalized_produce_session_id: null,
+    finalization_status: "failed_closed",
+  };
+
+  test("failed_closed stays visible even though finalized_at is set", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(baseFixture({ pending: [FAILED_CLOSED] })),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([{ kind: "unresolved_pending_session", count: 1 }]);
+    expect(report.allMarkets.quantityAuthoritative).toBe(false);
+  });
+
+  test("finalized and duplicate are not blockers", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          pending: [
+            { ...FAILED_CLOSED, id: "p-ok", finalization_status: "finalized", finalized_produce_session_id: "session-1" },
+            { ...FAILED_CLOSED, id: "p-dup", finalization_status: "duplicate" },
+          ],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([]);
+  });
+
+  test("a backdated session blocks the date its header names, not the day it was typed", async () => {
+    // Typed on the 5th, header says 04/07/2569 → business date 2026-07-04.
+    const backdated = {
+      ...FAILED_CLOSED,
+      accumulated_text: "ตลาดกี้ เบิก 04/07/2569\n1.หมอนทอง\n10 โล",
+      created_at: "2026-07-05T06:00:00.000Z",
+      finalized_at: null,
+      finalization_status: "pending",
+    };
+
+    const onNamedDate = await loadSalesReport(
+      fakeSupabase(baseFixture({ pending: [backdated], produce: [], sessions: [] })),
+      "2026-07-04",
+    );
+    const onTypedDate = await loadSalesReport(
+      fakeSupabase(baseFixture({ pending: [backdated], produce: [], sessions: [] })),
+      "2026-07-05",
+    );
+
+    expect(onNamedDate.scopeBlockers).toEqual([{ kind: "unresolved_pending_session", count: 1 }]);
+    expect(onTypedDate.scopeBlockers).toEqual([]);
+  });
+
+  test("with no explicit date the deployed created_at fallback applies", async () => {
+    const noDate = {
+      ...FAILED_CLOSED,
+      accumulated_text: "เบิก\n1.หมอนทอง\n10 โล",
+      created_at: "2026-07-25T06:00:00.000Z",
+    };
+
+    const sameDay = await loadSalesReport(fakeSupabase(baseFixture({ pending: [noDate] })), DATE);
+    expect(sameDay.scopeBlockers).toEqual([{ kind: "unresolved_pending_session", count: 1 }]);
+  });
+});
+
+describe("P1 zero-row produce sessions", () => {
+  const BROKEN_SESSION = {
+    id: "session-empty",
+    session_title: "ตลาดกี้",
+    total_items: 4,
+    parser_errors: null,
+    raw_message_id: "raw-1",
+    voided_at: null,
+  };
+
+  test("a session claiming items with no persisted rows fails closed", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          sessions: [{ id: "session-1", total_items: 2, parser_errors: null, raw_message_id: "raw-1", voided_at: null }, BROKEN_SESSION],
+        }),
+      ),
+      DATE,
+    );
+
+    // Same source + label → the existing market is blocked, not the whole scope.
+    expect(report.scopeBlockers).toEqual([]);
+    expect(report.markets[0].total.quantityAuthoritative).toBe(false);
+    expect(report.blocked.some((row) => row.reasons.includes("session_rows_missing"))).toBe(true);
+  });
+
+  test("a session that claimed nothing is not a failure", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          sessions: [
+            { id: "session-1", total_items: 2, parser_errors: null, raw_message_id: "raw-1", voided_at: null },
+            { ...BROKEN_SESSION, total_items: 0 },
+          ],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([]);
+    expect(report.allMarkets.valueAuthoritative).toBe(true);
+  });
+
+  test("a broken session with no provable market becomes a scope blocker", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          sessions: [
+            { id: "session-1", total_items: 2, parser_errors: null, raw_message_id: "raw-1", voided_at: null },
+            { ...BROKEN_SESSION, session_title: null, raw_message_id: "raw-unknown" },
+          ],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([{ kind: "unattributable_session", count: 1 }]);
+  });
+
+  test("a session already audited through its rows is not counted twice", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          sessions: [{ id: "session-1", total_items: 5, parser_errors: null, raw_message_id: "raw-1", voided_at: null }],
+        }),
+      ),
+      DATE,
+    );
+
+    // Counted once, through the row-based item-count mismatch.
+    expect(report.scopeBlockers).toEqual([]);
+    expect(report.blocked).toHaveLength(1);
+    expect(report.blocked[0].reasons).toContain("session_item_count_mismatch");
+    expect(report.blocked[0].reasons).not.toContain("session_rows_missing");
+  });
+});
+
+describe("P1 produce validation failures", () => {
+  const validationError = (overrides: Record<string, unknown> = {}) => ({
+    id: "pe-v1",
+    parser_name: "weigh-session",
+    raw_message_id: "raw-9",
+    ...overrides,
+  });
+
+  test("valid produce leaves no blocker", async () => {
+    const report = await loadSalesReport(fakeSupabase(baseFixture()), DATE);
+    expect(report.scopeBlockers).toEqual([]);
+  });
+
+  test("a produce validation failure blocks the day", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(baseFixture({ parseErrors: [validationError()] })),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([{ kind: "message_parser_error", count: 1 }]);
+  });
+
+  test("an unrelated validation error does not block the day", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          parseErrors: [validationError({ parser_name: "manual-slip-amount" })],
+          rawMessages: [
+            { id: "raw-1", source_id: SOURCE_A, raw_text: null },
+            { id: "raw-9", source_id: SOURCE_A, raw_text: "โอนแล้ว 1200" },
+          ],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([]);
+  });
+
+  test("a webhook retry recording the same failure twice is still one blocker", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          parseErrors: [validationError(), validationError({ id: "pe-v2" })],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([{ kind: "message_parser_error", count: 1 }]);
+  });
+});
+
+describe("P1 session audit scope", () => {
+  test("audits only this business date's active sessions — voided ones are excluded", async () => {
+    await loadSalesReport(fakeSupabase(baseFixture()), DATE);
+
+    // The exclusion is the query itself: a voided session can never reach the
+    // audit, exactly as produce_transactions already excludes its rows.
+    expect(filterLog).toContain(`produce_sessions.eq:session_date=${DATE}`);
+    expect(filterLog).toContain("produce_sessions.is:voided_at=null");
   });
 });

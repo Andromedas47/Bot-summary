@@ -11,9 +11,11 @@ import {
   SALES_EMPTY_NOTICE,
   SALES_MANUAL_TITLE,
   SALES_OVERFLOW_NOTICE,
+  SALES_NO_ROWS_BLOCKED_NOTICE,
   SALES_PARTIAL_HEADING,
   SALES_QUANTITY_ONLY_NOTICE,
   SALES_TOTAL_HEADING,
+  SALES_VALUE_UNAVAILABLE,
 } from "./message";
 
 const DATE = "2026-07-25";
@@ -102,7 +104,7 @@ describe("P1 manual message", () => {
       report(TRUSTED_ROWS, { scopeBlockers: [{ kind: "unresolved_pending_session", count: 2 }] }),
     ).join("\n\n");
 
-    expect(text).toContain("มีชุดข้อมูลที่ยังไม่ปิด 2 ชุด");
+    expect(text).toContain("มีชุดข้อมูลที่ยังไม่ปิด/ปิดไม่สำเร็จ 2 ชุด");
     expect(text).toContain(SALES_PARTIAL_HEADING);
   });
 
@@ -188,7 +190,7 @@ describe("P1 message wording", () => {
     expect(text).toContain(SALES_PARTIAL_HEADING);
     expect(text).toContain(SALES_QUANTITY_ONLY_NOTICE);
     // The quantity is reported in full, the money is marked partial.
-    expect(text).toContain("ชะอม (กำ) — ขาย 5 • 0.00 บาท (บางส่วน)");
+    expect(text).toContain("ชะอม (กำ) — ขาย 5 • ยอดเงินยังคำนวณไม่ได้");
   });
 
   test("a quantity-blocked day does not claim the quantity is complete", () => {
@@ -211,5 +213,134 @@ describe("P1 message wording", () => {
     expect(messages).toHaveLength(5);
     expect(last).toContain(SALES_OVERFLOW_NOTICE.trim());
     expect(last).not.toContain("หน้าเว็บ");
+  });
+});
+
+describe("P1 empty day must not hide blockers", () => {
+  const blockers = [{ kind: "unresolved_pending_session" as const, count: 1 }];
+
+  test("manual: no rows and no blockers is a real 'no sales' answer", () => {
+    const text = buildSalesSummaryBlocks(report([])).join("\n\n");
+    expect(text).toContain(SALES_EMPTY_NOTICE);
+    expect(text).not.toContain(SALES_NO_ROWS_BLOCKED_NOTICE);
+  });
+
+  test("manual: no rows WITH blockers is reported as incomplete, not as no sales", () => {
+    const text = buildSalesSummaryBlocks(report([], { scopeBlockers: blockers })).join("\n\n");
+
+    expect(text).not.toContain(SALES_EMPTY_NOTICE);
+    expect(text).toContain(SALES_NO_ROWS_BLOCKED_NOTICE);
+    expect(text).toContain("มีชุดข้อมูลที่ยังไม่ปิด/ปิดไม่สำเร็จ 1 ชุด");
+  });
+
+  test("auto: no rows WITH blockers is reported as incomplete, not as no sales", () => {
+    const text = buildSalesAutoBlocks(report([], { scopeBlockers: blockers })).join("\n\n");
+
+    expect(text).not.toContain(SALES_EMPTY_NOTICE);
+    expect(text).toContain(SALES_NO_ROWS_BLOCKED_NOTICE);
+    expect(text).toContain("มีชุดข้อมูลที่ยังไม่ปิด/ปิดไม่สำเร็จ 1 ชุด");
+  });
+
+  test("every scope blocker is listed, never summarised away", () => {
+    const text = buildSalesAutoBlocks(
+      report([], {
+        scopeBlockers: [
+          { kind: "unresolved_pending_session" as const, count: 2 },
+          { kind: "message_parser_error" as const, count: 3 },
+          { kind: "unattributable_session" as const, count: 1 },
+        ],
+      }),
+    ).join("\n\n");
+
+    expect(text).toContain("ยังไม่ปิด/ปิดไม่สำเร็จ 2 ชุด");
+    expect(text).toContain("อ่านไม่สำเร็จ 3 ข้อความ");
+    expect(text).toContain("ระบุตลาดไม่ได้ 1 ชุด");
+  });
+});
+
+describe("P1 automatic per-market quantities", () => {
+  test("states how much each market sold, product by product", () => {
+    const text = buildSalesAutoBlocks(
+      report([
+        ...TRUSTED_ROWS,
+        row({ marketName: "ตลาดน้อย", sessionId: "s-b", productName: "แตงโม", unit: "ลูก", quantity: 10 }),
+        row({
+          marketName: "ตลาดน้อย",
+          sessionId: "s-b",
+          productName: "แตงโม",
+          unit: "ลูก",
+          quantity: 2,
+          transactionType: "คืน",
+        }),
+      ]),
+    ).join("\n\n");
+
+    expect(text).toContain("🏪 ตลาดกี้");
+    expect(text).toContain("หมอนทอง — ขาย 7 กิโล");
+    expect(text).toContain("ยอดขาย 840.00 บาท");
+    expect(text).toContain("🏪 ตลาดน้อย");
+    expect(text).toContain("แตงโม — ขาย 8 ลูก");
+  });
+
+  test("a market's quantity is stated even when its value is not", () => {
+    const text = buildSalesAutoBlocks(
+      calculateSalesReport({
+        businessDate: DATE,
+        rows: [row({ quantity: 10 }), row({ quantity: 4, transactionType: "คืน" })],
+      }),
+    ).join("\n\n");
+
+    expect(text).toContain("หมอนทอง — ขาย 6 กิโล");
+    expect(text).toContain(`ยอดขาย ${SALES_VALUE_UNAVAILABLE}`);
+  });
+
+  test("a blocked quantity says so instead of printing a number", () => {
+    const text = buildSalesAutoBlocks(report([row({ quantity: 5 })])).join("\n\n");
+    expect(text).toContain("หมอนทอง — ยืนยันจำนวนไม่ได้ (ยังไม่มีข้อมูลชั่งคืน)");
+  });
+
+  test("no product is dropped to keep the push short", () => {
+    const many: SalesSourceRow[] = [];
+    for (let index = 0; index < 120; index += 1) {
+      many.push(row({ productName: `สินค้า${index}`, unit: "กำ", quantity: 10 }));
+      many.push(row({ productName: `สินค้า${index}`, unit: "กำ", quantity: 3, transactionType: "คืน" }));
+    }
+
+    const text = buildSalesAutoMessages(report(many)).join("\n");
+    for (let index = 0; index < 120; index += 1) {
+      expect(text).toContain(`สินค้า${index} — ขาย 7 กำ`);
+    }
+  });
+});
+
+describe("P1 unpriced value wording", () => {
+  test("an unpriced day never prints a figure that reads as zero revenue", () => {
+    const text = buildSalesSummaryBlocks(
+      calculateSalesReport({
+        businessDate: DATE,
+        rows: [row({ quantity: 10 }), row({ quantity: 4, transactionType: "คืน" })],
+      }),
+    ).join("\n\n");
+
+    expect(text).toContain(SALES_VALUE_UNAVAILABLE);
+    expect(text).not.toContain("0.00 บาท");
+  });
+
+  test("a genuine trusted zero still prints 0.00, because that IS the revenue", () => {
+    const text = buildSalesSummaryBlocks(
+      report([row({ quantity: 10 }), row({ quantity: 10, transactionType: "คืน" })]),
+    ).join("\n\n");
+
+    expect(text).toContain("0.00 บาท");
+    expect(text).not.toContain(SALES_VALUE_UNAVAILABLE);
+  });
+
+  test("a partial subtotal still shows the verified figure alongside the caveat", () => {
+    const text = buildSalesSummaryBlocks(
+      report([...TRUSTED_ROWS, row({ productName: "ชะอม", unit: "กำ", quantity: 5 })]),
+    ).join("\n\n");
+
+    expect(text).toContain(SALES_PARTIAL_HEADING);
+    expect(text).toContain("840.00 บาท");
   });
 });

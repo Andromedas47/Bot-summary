@@ -5,6 +5,8 @@ import {
   previousBangkokBusinessDate,
   resolveSalesSummaryDate,
   salesSummaryRetryKey,
+  DEFAULT_SALES_REVISION,
+  isValidSalesRevision,
   SALES_SUMMARY_TARGETS_ENV,
 } from "./cron";
 
@@ -68,5 +70,36 @@ describe("P1 idempotency keys", () => {
     expect(salesSummaryRetryKey("2026-07-25", "Cgroup", 0)).not.toBe(
       stockSummaryRetryKey("2026-07-25", "Cgroup", 0),
     );
+  });
+});
+
+describe("P1 corrected-resend revisions", () => {
+  const KEY = (revision?: string) =>
+    revision === undefined
+      ? salesSummaryRetryKey("2026-07-25", "Cgroup", 0)
+      : salesSummaryRetryKey("2026-07-25", "Cgroup", 0, revision);
+
+  test("the default revision is what the scheduler gets, and it is stable", () => {
+    expect(KEY()).toBe(KEY(DEFAULT_SALES_REVISION));
+    expect(KEY()).toBe(KEY());
+  });
+
+  test("a named revision produces new deterministic keys", () => {
+    expect(KEY("correction-1")).not.toBe(KEY());
+    // Re-running the same correction is idempotent — LINE sees the same key.
+    expect(KEY("correction-1")).toBe(KEY("correction-1"));
+  });
+
+  test("a second correction is distinct from the first", () => {
+    expect(KEY("correction-2")).not.toBe(KEY("correction-1"));
+  });
+
+  test("revisions are validated, so a stray value cannot become a key", () => {
+    expect(isValidSalesRevision("correction-1")).toBe(true);
+    expect(isValidSalesRevision("default")).toBe(true);
+    expect(isValidSalesRevision("")).toBe(false);
+    expect(isValidSalesRevision("-leading-dash")).toBe(false);
+    expect(isValidSalesRevision("has space")).toBe(false);
+    expect(isValidSalesRevision("a".repeat(65))).toBe(false);
   });
 });

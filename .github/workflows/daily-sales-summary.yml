@@ -34,6 +34,10 @@ on:
         required: false
         type: boolean
         default: true
+      revision:
+        description: "Deliberate corrected resend only. Leave blank for the normal report — a value here mints new LINE retry keys, so the same day is delivered again. Reuse the SAME value to retry a correction without duplicating it."
+        required: false
+        type: string
 
 jobs:
   send:
@@ -48,6 +52,11 @@ jobs:
           fi
           if [ "${{ inputs.debug }}" = "true" ]; then
             if [ -n "$QUERY" ]; then QUERY="$QUERY&debug=1"; else QUERY="?debug=1"; fi
+          fi
+          # No revision input == the scheduled default. The schedule never sets
+          # one, so an automatic run can never mint a new set of retry keys.
+          if [ -n "${{ inputs.revision }}" ]; then
+            if [ -n "$QUERY" ]; then QUERY="$QUERY&revision=${{ inputs.revision }}"; else QUERY="?revision=${{ inputs.revision }}"; fi
           fi
           curl -sf --max-time 60 \
             -X GET \

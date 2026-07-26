@@ -994,3 +994,71 @@ describe("P1 quantity trust is independent of value trust", () => {
     expect(report.products[0].total.quantityAuthoritative).toBe(false);
   });
 });
+
+// ── Sessions that persisted nothing ─────────────────────────────────────────
+
+describe("P1 session audits — a session that persisted no rows", () => {
+  const audit = {
+    sessionId: "session-broken",
+    sourceId: SOURCE_A,
+    marketName: MARKET_A,
+    reasons: ["session_rows_missing"] as const,
+  };
+
+  test("blocks the market it can be attributed to", () => {
+    const report = build(
+      [
+        row({ quantity: 10, transactionType: TX_WITHDRAW }),
+        row({ quantity: 4, transactionType: TX_RETURN }),
+      ],
+      { centralPrices: DURIAN_PRICE, sessionAudits: [audit] },
+    );
+
+    expect(report.markets[0].total.quantityAuthoritative).toBe(false);
+    expect(report.markets[0].rows[0].reasons).toContain("session_rows_missing");
+    // Attributable, so it is a market block — not a whole-scope one.
+    expect(report.scopeBlockers).toEqual([]);
+  });
+
+  test("appears as its own blocked entry when the market has nothing else", () => {
+    const report = build([], { sessionAudits: [audit] });
+
+    expect(report.markets).toHaveLength(1);
+    expect(report.blocked).toHaveLength(1);
+    expect(report.blocked[0].isSessionPlaceholder).toBe(true);
+    expect(report.blocked[0].soldQuantity).toBeNull();
+    expect(report.blocked[0].reasons).toContain("session_rows_missing");
+    // A placeholder reports a session, so it never becomes a product line.
+    expect(report.products).toHaveLength(0);
+  });
+
+  test("becomes a scope blocker when the market cannot be proven", () => {
+    const report = build(
+      [
+        row({ quantity: 10, transactionType: TX_WITHDRAW }),
+        row({ quantity: 4, transactionType: TX_RETURN }),
+      ],
+      {
+        centralPrices: DURIAN_PRICE,
+        sessionAudits: [{ ...audit, sourceId: null, marketName: null }],
+      },
+    );
+
+    expect(report.scopeBlockers).toEqual([{ kind: "unattributable_session", count: 1 }]);
+    expect(report.allMarkets.quantityAuthoritative).toBe(false);
+    expect(report.allMarkets.valueAuthoritative).toBe(false);
+  });
+
+  test("no audits leaves a clean day clean", () => {
+    const report = build(
+      [
+        row({ quantity: 10, transactionType: TX_WITHDRAW }),
+        row({ quantity: 4, transactionType: TX_RETURN }),
+      ],
+      { centralPrices: DURIAN_PRICE, sessionAudits: [] },
+    );
+
+    expect(report.scopeBlockers).toEqual([]);
+    expect(report.allMarkets.valueAuthoritative).toBe(true);
+  });
+});

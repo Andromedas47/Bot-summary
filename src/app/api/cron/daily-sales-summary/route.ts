@@ -5,11 +5,14 @@ import { pushLineMessage } from "@/lib/line/reply";
 import { loadSalesReport } from "@/lib/sales/load";
 import { buildSalesAutoMessages } from "@/lib/sales/message";
 import {
+  DEFAULT_SALES_REVISION,
+  isValidSalesRevision,
   parseSalesSummaryTargets,
   resolveSalesSummaryDate,
   salesSummaryRetryKey,
   SALES_SUMMARY_TARGETS_ENV,
 } from "@/lib/sales/cron";
+import { isIsoDate } from "@/lib/summary/daily-stock-cron";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -30,9 +33,12 @@ export const dynamic = "force-dynamic";
  * Contract (the proven P0 scheduler pattern):
  *   - Auth: Bearer CRON_SECRET, same convention as every other cron route.
  *   - Report date: with no ?date=, the PREVIOUS Bangkok business date. An
- *     explicit ?date=YYYY-MM-DD is used verbatim and never shifted.
- *   - Idempotent: a deterministic X-Line-Retry-Key per (date, target, part)
- *     means a repeated scheduler call cannot produce duplicate LINE messages.
+ *     explicit ?date=YYYY-MM-DD is used verbatim and never shifted; a malformed
+ *     one is a 400, never a silent fallback to another day.
+ *   - Idempotent: a deterministic X-Line-Retry-Key per (revision, date, target,
+ *     part) means a repeated scheduler call cannot produce duplicate LINE
+ *     messages. A deliberate corrected resend passes ?revision=, which is the
+ *     only way to obtain new keys for a day already delivered.
  *   - Per-target isolation: one failing target never blocks the others.
  *   - Any failure returns 500 so the scheduler retries; already-delivered
  *     targets are protected by their retry keys.
@@ -55,12 +61,35 @@ export async function GET(req: NextRequest) {
 
   const dateParam = req.nextUrl.searchParams.get("date");
   const debugMode = req.nextUrl.searchParams.get("debug") === "1";
+
+  // A malformed ?date= is a caller mistake, not a request for yesterday. Falling
+  // back would silently report a different day than the operator asked for — and
+  // could push it to LINE — so it fails before anything is read or sent.
+  if (dateParam !== null && !isIsoDate(dateParam)) {
+    logger.warn("daily sales summary cron rejected - invalid date parameter", { dateParam });
+    return NextResponse.json(
+      { error: "date must be an ISO business date (YYYY-MM-DD)", date: dateParam },
+      { status: 400 },
+    );
+  }
+
+  const revisionParam = req.nextUrl.searchParams.get("revision");
+  if (revisionParam !== null && !isValidSalesRevision(revisionParam)) {
+    logger.warn("daily sales summary cron rejected - invalid revision", { revisionParam });
+    return NextResponse.json(
+      { error: "revision must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}", revision: revisionParam },
+      { status: 400 },
+    );
+  }
+
+  const revision = revisionParam ?? DEFAULT_SALES_REVISION;
   const businessDate = resolveSalesSummaryDate(dateParam);
   const targets = parseSalesSummaryTargets(process.env[SALES_SUMMARY_TARGETS_ENV]);
 
   logger.info("daily sales summary cron started", {
     businessDate,
     hasDateParam: Boolean(dateParam),
+    revision,
     debugMode,
     targetCount: targets.length,
   });
@@ -130,7 +159,7 @@ export async function GET(req: NextRequest) {
   for (const target of targets) {
     try {
       for (const [index, message] of messages.entries()) {
-        await pushLineMessage(target, message, salesSummaryRetryKey(businessDate, target, index));
+        await pushLineMessage(target, message, salesSummaryRetryKey(businessDate, target, index, revision));
       }
       sentCount += 1;
     } catch (error) {

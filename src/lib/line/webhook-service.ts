@@ -1478,6 +1478,7 @@ export class WebhookService {
           log.warn("produce session validation failed — aborting before persistence", {
             errors: validationErrors,
           });
+          await this.recordProduceValidationError(rawMessageId, validationErrors, log);
           if (replyToken) {
             try {
               await this.replyMessage(replyToken, buildWeighSessionValidationReply(ws));
@@ -1491,6 +1492,11 @@ export class WebhookService {
         // Fix 2: empty items guard
         if (ws.items.length === 0) {
           log.warn("parsed session has no items — aborting");
+          await this.recordProduceValidationError(
+            rawMessageId,
+            ["parsed session has no items"],
+            log,
+          );
           if (replyToken) {
             try {
               await replyLineMessage(replyToken, "อ่านรายการไม่สำเร็จ กรุณาตรวจสอบรูปแบบข้อความ");
@@ -1638,6 +1644,43 @@ export class WebhookService {
     }
 
     return data.id;
+  }
+
+  /**
+   * Durable evidence that a weighing message was understood but rejected.
+   *
+   * Without this the path is silent: the parser handles the message, validation
+   * fails, the webhook replies to the sender and returns — no produce_session,
+   * no pending_session, nothing in parse_errors. A daily report can then never
+   * know produce was lost. The existing validation_error type carries it, so no
+   * migration is needed.
+   *
+   * Best-effort by design: a failure to record must not change the reply the
+   * sender already gets, and the LINE flow is unchanged either way. Retries of
+   * the same webhook event can write more than one row for a raw message;
+   * readers count distinct raw_message_id, so a retry cannot inflate anything.
+   */
+  private async recordProduceValidationError(
+    rawMessageId: string,
+    errors: string[],
+    log: ChildLogger,
+  ): Promise<void> {
+    try {
+      const { error } = await this.supabase.from("parse_errors").insert({
+        raw_message_id: rawMessageId,
+        parser_name:    "weigh-session",
+        parser_version: "1.1.0",
+        error_type:     "validation_error",
+        error_message:  `weigh session validation failed: ${errors.join("; ")}`,
+        error_detail:   { validationErrors: errors },
+      });
+      if (error) {
+        log.error("failed to record produce validation error", { error: error.message });
+      }
+    } catch (err) {
+      // Recording evidence must never cost the sender their reply.
+      log.error("failed to record produce validation error", { error: String(err) });
+    }
   }
 
   private async recordUnsupportedType(rawMessageId: string, message: LineMessage): Promise<void> {

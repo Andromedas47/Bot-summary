@@ -29,6 +29,7 @@ function chain(table: string): Record<string, unknown> {
   node.eq = self;
   node.in = self;
   node.gte = self;
+  node.is = self;
   node.lt = self;
   node.order = self;
   node.range = () => Promise.resolve(result());
@@ -311,5 +312,69 @@ describe("daily sales summary cron — debug mode", () => {
     expect(body.blockedCount).toBe(1);
     expect(body.valueAuthoritative).toBe(false);
     expect(body.messages.join("\n")).toContain("ยังไม่มีข้อมูลชั่งคืน");
+  });
+});
+
+describe("daily sales summary cron — explicit date validation", () => {
+  test("a valid explicit date is used exactly as given", async () => {
+    process.env.SALES_SUMMARY_LINE_TARGETS = "Cgroup1";
+    const body = await (await GET(request(`?date=${DATE}`))).json();
+    expect(body.businessDate).toBe(DATE);
+  });
+
+  test("a malformed date is a 400 and sends nothing", async () => {
+    process.env.SALES_SUMMARY_LINE_TARGETS = "Cgroup1";
+
+    for (const bad of ["25-07-2026", "2026-7-5", "yesterday", "2026-07-25T00:00:00Z", ""]) {
+      const res = await GET(request(`?date=${encodeURIComponent(bad)}`));
+      expect(res.status).toBe(400);
+      expect(pushCalls).toHaveLength(0);
+    }
+  });
+
+  test("a malformed date never falls back to the previous business date", async () => {
+    const body = await (await GET(request("?date=31/02/2026"))).json();
+    expect(body.businessDate).toBeUndefined();
+    expect(body.error).toContain("ISO business date");
+  });
+});
+
+describe("daily sales summary cron — corrected resend", () => {
+  async function retryKeys(query: string): Promise<(string | undefined)[]> {
+    pushCalls = [];
+    process.env.SALES_SUMMARY_LINE_TARGETS = "Cgroup1";
+    await GET(request(query));
+    return pushCalls.map((call) => call.retryKey);
+  }
+
+  test("a repeated scheduled run reuses the same retry keys", async () => {
+    const first = await retryKeys(`?date=${DATE}`);
+    const second = await retryKeys(`?date=${DATE}`);
+
+    expect(first.length).toBeGreaterThan(0);
+    expect(second).toEqual(first);
+  });
+
+  test("an explicit revision mints new keys for the same day", async () => {
+    const scheduled = await retryKeys(`?date=${DATE}`);
+    const corrected = await retryKeys(`?date=${DATE}&revision=correction-1`);
+
+    expect(corrected).toHaveLength(scheduled.length);
+    for (const key of corrected) expect(scheduled).not.toContain(key);
+  });
+
+  test("re-running the same revision stays idempotent", async () => {
+    const first = await retryKeys(`?date=${DATE}&revision=correction-1`);
+    const again = await retryKeys(`?date=${DATE}&revision=correction-1`);
+    expect(again).toEqual(first);
+  });
+
+  test("a malformed revision is a 400 and sends nothing", async () => {
+    process.env.SALES_SUMMARY_LINE_TARGETS = "Cgroup1";
+    pushCalls = [];
+
+    const res = await GET(request(`?date=${DATE}&revision=bad%20revision`));
+    expect(res.status).toBe(400);
+    expect(pushCalls).toHaveLength(0);
   });
 });

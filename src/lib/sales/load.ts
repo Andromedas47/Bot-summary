@@ -1,6 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { normalizedMarketLabel } from "@/lib/market";
 import { RE } from "@/lib/parsers/weigh-session/regex";
+import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
+import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
 import { resolveCentralPricesForDate } from "@/lib/white-sheet/load";
 import type { Database } from "@/types/database";
 import {
@@ -8,6 +10,7 @@ import {
   type SalesBlockReason,
   type SalesReport,
   type SalesScopeBlocker,
+  type SalesSessionAudit,
   type SalesSourceRow,
 } from "./calculate";
 
@@ -49,7 +52,10 @@ const PRODUCE_SELECT =
  * excluded on purpose — a sticker or an image is not lost produce data, and
  * treating it as one would block every business date forever.
  */
-const BLOCKING_PARSE_ERROR_TYPES = ["parser_crash", "timeout"] as const;
+const BLOCKING_PARSE_ERROR_TYPES = ["parser_crash", "timeout", "validation_error"] as const;
+
+/** How far after a business date a backdated pending session is still looked for. */
+const PENDING_BACKDATE_DAYS = 7;
 
 /**
  * parse_errors is a generic table: any parser that throws lands in it, and the
@@ -229,12 +235,9 @@ async function loadSessionIssues(
 /**
  * Integrity problems that cannot be pinned to one market.
  *
- * A pending session that never finalized, or a message whose parse crashed, may
- * hold produce lines for ANY market — so neither can be attributed, and both
- * demote every total in the scope rather than a single market's.
- *
- * pending_sessions rows are deleted once finalization succeeds, so a row still
- * present inside the business-date window is by definition unresolved.
+ * A pending session that never produced a produce_session, or a message whose
+ * parse crashed, may hold produce lines for ANY market — so neither can be
+ * attributed, and both demote every total in the scope.
  */
 async function loadScopeBlockers(
   supabase: Supabase,
@@ -243,31 +246,7 @@ async function loadScopeBlockers(
   const window = bangkokBusinessDateWindow(businessDate);
   const blockers: SalesScopeBlocker[] = [];
 
-  // pending_sessions is not part of the generated Database types (it is
-  // operational webhook state, never a report source), so this one read uses a
-  // loosened client exactly as PendingSessionService does.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const looseClient = supabase as unknown as SupabaseClient<any>;
-  const { data: pending, error: pendingError } = await looseClient
-    .from("pending_sessions")
-    .select("id, finalized_at, finalized_produce_session_id, finalization_status")
-    .gte("created_at", window.start)
-    .lt("created_at", window.end);
-  if (pendingError) {
-    throw new SalesDataError(`pending session query failed: ${pendingError.message}`);
-  }
-
-  const unresolvedPending = (pending ?? []).filter(
-    (row: {
-      finalized_at?: string | null;
-      finalized_produce_session_id?: string | null;
-      finalization_status?: string | null;
-    }) =>
-      !row.finalized_at &&
-      !row.finalized_produce_session_id &&
-      row.finalization_status !== "finalized" &&
-      row.finalization_status !== "duplicate",
-  ).length;
+  const unresolvedPending = await countUnresolvedPendingSessions(supabase, businessDate);
   if (unresolvedPending > 0) {
     blockers.push({ kind: "unresolved_pending_session", count: unresolvedPending });
   }
@@ -291,6 +270,80 @@ async function loadScopeBlockers(
 }
 
 /**
+ * Pending produce sessions that never became a produce_session for this
+ * business date.
+ *
+ * TWO deployed facts drive this (see 0036_additional_produce_entries.sql):
+ *
+ * 1. A row is NOT resolved just because finalized_at is set. finalize_* stamps
+ *    finalized_at together with finalization_status = 'failed_closed' when items
+ *    are missing or validation fails — the produce never landed. Only
+ *    'finalized' and 'duplicate' mean the evidence is accounted for; every other
+ *    status ('pending', 'processing', 'failed_closed') is missing evidence.
+ *
+ * 2. created_at is NOT the business date. Backdated input is normal: a session
+ *    typed on the 5th whose header says 04/07/2569 belongs to the 4th. The
+ *    business date comes from the accumulated text through the SAME parser the
+ *    finalizer uses, so P1 can never disagree with what would have been
+ *    persisted. With no explicit date the parser's own deployed fallback
+ *    applies — the Bangkok business date of the row's creation.
+ *
+ * ponytail: the created_at scan is bounded to PENDING_BACKDATE_DAYS after the
+ * business date. A session backdated by longer than that is not seen; widen the
+ * window if real data ever needs it.
+ */
+async function countUnresolvedPendingSessions(
+  supabase: Supabase,
+  businessDate: string,
+): Promise<number> {
+  const window = bangkokBusinessDateWindow(businessDate);
+  const scanEnd = new Date(
+    Date.parse(window.end) + PENDING_BACKDATE_DAYS * 24 * 60 * 60 * 1000,
+  ).toISOString();
+
+  // pending_sessions is not part of the generated Database types (it is
+  // operational webhook state, never a report source), so this one read uses a
+  // loosened client exactly as PendingSessionService does.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const looseClient = supabase as unknown as SupabaseClient<any>;
+  const { data, error } = await looseClient
+    .from("pending_sessions")
+    .select("id, accumulated_text, created_at, finalization_status")
+    .gte("created_at", window.start)
+    .lt("created_at", scanEnd);
+  if (error) throw new SalesDataError(`pending session query failed: ${error.message}`);
+
+  return (data ?? []).filter(
+    (row: { accumulated_text?: string | null; created_at?: string | null; finalization_status?: string | null }) => {
+      const status = row.finalization_status ?? "pending";
+      if (status === "finalized" || status === "duplicate") return false;
+      const date = pendingSessionBusinessDate(row);
+      // No date evidence at all: count it. Excluding an unresolved session
+      // because its date is unknown is the one direction that loses evidence.
+      return date === null || date === businessDate;
+    },
+  ).length;
+}
+
+/**
+ * The business date a pending session's produce belongs to: the explicit header
+ * date when the text carries one, otherwise the deployed fallback (the Bangkok
+ * business date of when it was created). Both come from existing helpers — no
+ * second Buddhist-date parser exists in P1.
+ */
+function pendingSessionBusinessDate(row: {
+  accumulated_text?: string | null;
+  created_at?: string | null;
+}): string | null {
+  const createdFallback = row.created_at
+    ? bangkokBusinessDateFromTimestamp(Date.parse(row.created_at))
+    : null;
+  const text = row.accumulated_text ?? "";
+  if (!text.trim()) return createdFallback;
+  return parseWeighSession(text, createdFallback).date ?? createdFallback;
+}
+
+/**
  * How many of the day's parse failures could have swallowed produce evidence.
  * See PRODUCE_PARSER_NAMES for the rule; the raw-message lookup only runs for
  * rows an unrecognized parser produced.
@@ -299,8 +352,11 @@ async function countProduceParseErrors(
   supabase: Supabase,
   errors: readonly { parser_name: string; raw_message_id: string }[],
 ): Promise<number> {
-  const byParser = errors.filter((row) => PRODUCE_PARSER_NAMES.has(row.parser_name));
-  const unknown = errors.filter((row) => !PRODUCE_PARSER_NAMES.has(row.parser_name));
+  // Distinct raw messages, not rows: a webhook retry can file the same failure
+  // twice, and one lost message is one blocker however often it was recorded.
+  const distinct = [...new Map(errors.map((row) => [row.raw_message_id, row])).values()];
+  const byParser = distinct.filter((row) => PRODUCE_PARSER_NAMES.has(row.parser_name));
+  const unknown = distinct.filter((row) => !PRODUCE_PARSER_NAMES.has(row.parser_name));
   if (unknown.length === 0) return byParser.length;
 
   const texts = new Map<string, string | null>();
@@ -320,6 +376,64 @@ async function countProduceParseErrors(
   }).length;
 
   return byParser.length + relevantUnknown;
+}
+
+/**
+ * Sessions the transaction rows cannot reveal.
+ *
+ * loadSessionIssues starts from produce_transactions, so a session that
+ * persisted NO rows is invisible to it — total_items says produce was weighed
+ * and nothing landed. This audits produce_sessions for the business date
+ * independently, and only reports sessions the row-based path did not already
+ * catch, so a broken session is never counted twice.
+ *
+ * Voided sessions are excluded (produce_transactions is already void-filtered;
+ * a voided session's absence of rows is correct, not a failure). total_items = 0
+ * claims nothing and is left alone.
+ */
+async function loadSessionAudits(
+  supabase: Supabase,
+  businessDate: string,
+  rows: readonly ProduceTransactionRow[],
+  sourceByRawMessageId: ReadonlyMap<string, string>,
+): Promise<SalesSessionAudit[]> {
+  const { data, error } = await supabase
+    .from("produce_sessions")
+    .select("id, session_title, total_items, raw_message_id, voided_at")
+    .eq("session_date", businessDate)
+    .is("voided_at", null);
+  if (error) throw new SalesDataError(`produce session audit query failed: ${error.message}`);
+
+  const sessionsWithRows = new Set(rows.map((row) => row.session_id));
+  const audits: SalesSessionAudit[] = [];
+  const missingSources: string[] = [];
+
+  for (const session of data ?? []) {
+    if (sessionsWithRows.has(session.id)) continue; // already audited through its rows
+    if ((session.total_items ?? 0) <= 0) continue; // claimed nothing, lost nothing
+    if (session.raw_message_id && !sourceByRawMessageId.has(session.raw_message_id)) {
+      missingSources.push(session.raw_message_id);
+    }
+    audits.push({
+      sessionId: session.id,
+      sourceId: sourceByRawMessageId.get(session.raw_message_id) ?? null,
+      marketName: normalizedMarketLabel(session.session_title) || null,
+      reasons: ["session_rows_missing"],
+    });
+  }
+
+  // A broken session's raw message is usually not among the day's transaction
+  // rows, so its source has to be looked up before the market can be attributed.
+  if (missingSources.length > 0) {
+    const extra = await mapRawMessageSources(supabase, [...new Set(missingSources)]);
+    for (const audit of audits) {
+      if (audit.sourceId) continue;
+      const session = (data ?? []).find((row) => row.id === audit.sessionId);
+      if (session?.raw_message_id) audit.sourceId = extra.get(session.raw_message_id) ?? null;
+    }
+  }
+
+  return audits;
 }
 
 /**
@@ -373,11 +487,19 @@ export async function loadSalesReport(
     resolveCentralPricesForDate(supabase, businessDate, rows),
   ]);
 
+  const sessionAudits = await loadSessionAudits(
+    supabase,
+    businessDate,
+    rows,
+    sourceByRawMessageId,
+  );
+
   return calculateSalesReport({
     businessDate,
     rows: adaptRows(rows, sourceByRawMessageId, sessionIssues),
     centralPrices: pricing.prices,
     priceConflicts: pricing.conflicts,
     scopeBlockers,
+    sessionAudits,
   });
 }

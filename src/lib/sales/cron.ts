@@ -27,19 +27,39 @@ export function resolveSalesSummaryDate(dateParam: string | null, timestamp = Da
 }
 
 /**
- * Deterministic X-Line-Retry-Key (UUID shape) per business date + target +
- * message part, so a repeated scheduler call re-derives the same keys and LINE
- * answers 409 instead of delivering the report twice. Same construction as
- * stockSummaryRetryKey — different namespace, so the two reports can never
- * collide on a key.
+ * The revision of a report for one business date.
+ *
+ * DEFAULT_SALES_REVISION is what the scheduler always uses, so a scheduled run —
+ * and any retry of it — derives the same retry keys and LINE refuses the
+ * duplicate. A deliberate corrected resend must name its own revision
+ * explicitly; that changes the key seed, so the corrected report is delivered
+ * once and re-running the SAME revision stays idempotent.
+ *
+ * The scheduler never invents one: a revision only ever arrives through the
+ * authenticated route, which is why this is validated rather than free text.
+ */
+export const DEFAULT_SALES_REVISION = "default";
+const REVISION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+export function isValidSalesRevision(revision: string): boolean {
+  return REVISION_PATTERN.test(revision);
+}
+
+/**
+ * Deterministic X-Line-Retry-Key (UUID shape) per revision + business date +
+ * target + message part, so a repeated scheduler call re-derives the same keys
+ * and LINE answers 409 instead of delivering the report twice. Same
+ * construction as stockSummaryRetryKey — different namespace, so the two
+ * reports can never collide on a key.
  */
 export function salesSummaryRetryKey(
   businessDate: string,
   targetId: string,
   partIndex: number,
+  revision: string = DEFAULT_SALES_REVISION,
 ): string {
   const bytes = createHash("sha256")
-    .update(`daily-sales-summary:${businessDate}:${targetId}:${partIndex}`)
+    .update(`daily-sales-summary:${revision}:${businessDate}:${targetId}:${partIndex}`)
     .digest()
     .subarray(0, 16);
   bytes[6] = (bytes[6] & 0x0f) | 0x50; // UUID version bits (name-based)

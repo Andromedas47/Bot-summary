@@ -21,8 +21,8 @@ name: daily-sales-summary
 # cron firing time is only approximate.
 
 on:
-  # schedule:
-  #   - cron: "10 1 * * *" # 01:10 UTC = 08:10 Asia/Bangkok
+  schedule:
+    - cron: "10 1 * * *" # 01:10 UTC = 08:10 Asia/Bangkok
   workflow_dispatch:
     inputs:
       date:

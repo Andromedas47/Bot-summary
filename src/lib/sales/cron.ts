@@ -22,8 +22,30 @@ export { previousBangkokBusinessDate } from "@/lib/summary/daily-stock-cron";
  * apply — the previous Bangkok business date, the day that just closed.
  */
 export function resolveSalesSummaryDate(dateParam: string | null, timestamp = Date.now()): string {
-  if (dateParam && isIsoDate(dateParam)) return dateParam;
+  if (dateParam && isStrictBusinessDate(dateParam)) return dateParam;
   return previousBangkokBusinessDate(timestamp);
+}
+
+/**
+ * A date that exists, not merely one shaped like a date.
+ *
+ * The shared isIsoDate only checks the YYYY-MM-DD pattern, so 2026-02-31 and
+ * 2026-13-01 pass it. P1 refuses to report on a day that never happened, and
+ * this validator is P1-local: changing isIsoDate would alter P0 Stock's
+ * accepted inputs, which is not something this change can prove safe.
+ *
+ * Round-tripping through UTC is the check — an overflowing day (Feb 31 → Mar 3)
+ * comes back as a different date, and leap years need no special case.
+ */
+export function isStrictBusinessDate(value: string): boolean {
+  if (!isIsoDate(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return (
+    date.getUTCFullYear() === year
+    && date.getUTCMonth() === month - 1
+    && date.getUTCDate() === day
+  );
 }
 
 /**

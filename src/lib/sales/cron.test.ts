@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { STOCK_SUMMARY_TARGETS_ENV, stockSummaryRetryKey } from "@/lib/summary/daily-stock-cron";
+import { isIsoDate, STOCK_SUMMARY_TARGETS_ENV, stockSummaryRetryKey } from "@/lib/summary/daily-stock-cron";
 import {
   parseSalesSummaryTargets,
   previousBangkokBusinessDate,
@@ -7,6 +7,7 @@ import {
   salesSummaryRetryKey,
   DEFAULT_SALES_REVISION,
   isValidSalesRevision,
+  isStrictBusinessDate,
   SALES_SUMMARY_TARGETS_ENV,
 } from "./cron";
 
@@ -101,5 +102,39 @@ describe("P1 corrected-resend revisions", () => {
     expect(isValidSalesRevision("-leading-dash")).toBe(false);
     expect(isValidSalesRevision("has space")).toBe(false);
     expect(isValidSalesRevision("a".repeat(65))).toBe(false);
+  });
+});
+
+describe("P1 strict date validation", () => {
+  test("accepts real dates", () => {
+    for (const good of ["2026-07-25", "2028-02-29", "2026-01-01", "2026-12-31"]) {
+      expect(isStrictBusinessDate(good)).toBe(true);
+    }
+  });
+
+  test("rejects dates that do not exist", () => {
+    for (const bad of ["2026-02-31", "2026-04-31", "2026-13-01", "2026-00-10", "2027-02-29"]) {
+      expect(isStrictBusinessDate(bad)).toBe(false);
+    }
+  });
+
+  test("rejects anything that is not the ISO shape", () => {
+    for (const bad of ["", "25-07-2026", "2026-7-5", "yesterday", "2026-07-25T00:00:00Z"]) {
+      expect(isStrictBusinessDate(bad)).toBe(false);
+    }
+  });
+
+  test("an impossible date is not silently turned into yesterday", () => {
+    // resolveSalesSummaryDate still falls back for a NULL param — the route is
+    // what rejects a malformed one, so the fallback can never mask it.
+    expect(resolveSalesSummaryDate("2026-07-25")).toBe("2026-07-25");
+    expect(resolveSalesSummaryDate("2026-02-31")).toBe(previousBangkokBusinessDate());
+  });
+
+  test("P0 Stock's own date rule is untouched", () => {
+    // isIsoDate is shape-only by design and is shared with P0; P1 layers its
+    // strict check on top rather than changing what P0 accepts.
+    expect(isIsoDate("2026-02-31")).toBe(true);
+    expect(isStrictBusinessDate("2026-02-31")).toBe(false);
   });
 });

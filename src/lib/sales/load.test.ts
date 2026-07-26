@@ -56,6 +56,7 @@ function fakeSupabase(fixture: Fixture): SupabaseClient<Database> {
         return node;
       };
       node.in = self;
+      node.not = self;
       node.gte = self;
       node.is = (column: string, value: unknown) => {
         filterLog.push(`${table}.is:${column}=${String(value)}`);
@@ -619,5 +620,163 @@ describe("P1 session audit scope", () => {
     // audit, exactly as produce_transactions already excludes its rows.
     expect(filterLog).toContain(`produce_sessions.eq:session_date=${DATE}`);
     expect(filterLog).toContain("produce_sessions.is:voided_at=null");
+  });
+});
+
+describe("P1 parse-error business-date attribution", () => {
+  /** Received on the 26th, but the header says 25/07/2569 → the 25th. */
+  const BACKDATED_TEXT = "18:53 เสือ รายการชั่งเบิกไปตลาด\n25/07/2569\n18:53 เสือ 1.หมอนทอง119บาท";
+  const backdatedMessages = [
+    { id: "raw-1", source_id: SOURCE_A, raw_text: null, created_at: "2026-07-25T03:00:00.000Z" },
+    { id: "raw-9", source_id: SOURCE_A, raw_text: BACKDATED_TEXT, created_at: "2026-07-26T06:00:00.000Z" },
+  ];
+
+  test("a backdated produce crash blocks the date the header names", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          parseErrors: [{ id: "pe-1", parser_name: "weigh-session", raw_message_id: "raw-9" }],
+          rawMessages: backdatedMessages,
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([{ kind: "message_parser_error", count: 1 }]);
+  });
+
+  test("…and does not block the day it was received", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          parseErrors: [{ id: "pe-1", parser_name: "weigh-session", raw_message_id: "raw-9" }],
+          rawMessages: backdatedMessages,
+          produce: [],
+          sessions: [],
+        }),
+      ),
+      "2026-07-26",
+    );
+
+    expect(report.scopeBlockers).toEqual([]);
+  });
+
+  test("a backdated produce validation failure behaves identically", async () => {
+    const fixture = (date: string) =>
+      loadSalesReport(
+        fakeSupabase(
+          baseFixture({
+            parseErrors: [
+              { id: "pe-1", parser_name: "weigh-session", raw_message_id: "raw-9", error_type: "validation_error" },
+            ],
+            rawMessages: backdatedMessages,
+            produce: [],
+            sessions: [],
+          }),
+        ),
+        date,
+      );
+
+    expect((await fixture(DATE)).scopeBlockers).toEqual([
+      { kind: "message_parser_error", count: 1 },
+    ]);
+    expect((await fixture("2026-07-26")).scopeBlockers).toEqual([]);
+  });
+
+  test("a same-day produce error still blocks that day", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          parseErrors: [{ id: "pe-1", parser_name: "weigh-session", raw_message_id: "raw-9" }],
+          rawMessages: [
+            backdatedMessages[0],
+            {
+              id: "raw-9",
+              source_id: SOURCE_A,
+              // No explicit header date → the arrival time decides, as deployed.
+              raw_text: "18:53 เสือ รายการชั่งเบิกไปตลาด\n18:53 เสือ 1.หมอนทอง119บาท",
+              created_at: "2026-07-25T06:00:00.000Z",
+            },
+          ],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([{ kind: "message_parser_error", count: 1 }]);
+  });
+
+  test("an unrelated error is still ignored, whatever its date", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          parseErrors: [{ id: "pe-1", parser_name: "manual-slip-amount", raw_message_id: "raw-9" }],
+          rawMessages: [
+            backdatedMessages[0],
+            { id: "raw-9", source_id: SOURCE_A, raw_text: "โอนแล้ว 1200", created_at: "2026-07-25T06:00:00.000Z" },
+          ],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([]);
+  });
+});
+
+describe("P1 pending sessions have no backdating ceiling", () => {
+  test("a session entered three weeks late still blocks the date it names", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          pending: [
+            {
+              id: "pending-late",
+              accumulated_text: "ตลาดกี้ เบิก 25/07/2569\n1.หมอนทอง\n10 โล",
+              created_at: "2026-08-15T06:00:00.000Z", // 21 days after the business date
+              finalized_at: null,
+              finalization_status: "pending",
+            },
+          ],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([{ kind: "unresolved_pending_session", count: 1 }]);
+  });
+
+  test("a long-resolved session never blocks, however old", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          pending: [
+            {
+              id: "pending-old",
+              accumulated_text: "ตลาดกี้ เบิก 25/07/2569\n1.หมอนทอง\n10 โล",
+              created_at: "2026-08-15T06:00:00.000Z",
+              finalized_at: "2026-08-15T06:05:00.000Z",
+              finalization_status: "finalized",
+            },
+          ],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([]);
+  });
+});
+
+describe("P1 strict business date", () => {
+  test("a date that never existed is refused before any read", async () => {
+    for (const bad of ["2026-02-31", "2026-04-31", "2026-13-01", "2026-00-10", "2027-02-29"]) {
+      expect(loadSalesReport(fakeSupabase(baseFixture()), bad)).rejects.toThrow(SalesDataError);
+    }
+  });
+
+  test("a real leap day is accepted", async () => {
+    const report = await loadSalesReport(fakeSupabase(baseFixture()), "2028-02-29");
+    expect(report.businessDate).toBe("2028-02-29");
   });
 });

@@ -3,6 +3,7 @@ import { normalizedMarketLabel } from "@/lib/market";
 import { RE } from "@/lib/parsers/weigh-session/regex";
 import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
 import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
+import { isStrictBusinessDate } from "./cron";
 import { resolveCentralPricesForDate } from "@/lib/white-sheet/load";
 import type { Database } from "@/types/database";
 import {
@@ -54,8 +55,15 @@ const PRODUCE_SELECT =
  */
 const BLOCKING_PARSE_ERROR_TYPES = ["parser_crash", "timeout", "validation_error"] as const;
 
-/** How far after a business date a backdated pending session is still looked for. */
-const PENDING_BACKDATE_DAYS = 7;
+/**
+ * Pending finalization states that account for the produce: 'finalized' created
+ * the produce_session, 'duplicate' proved one already existed. Everything else
+ * ('pending', 'processing', 'failed_closed') is produce that never landed.
+ */
+const RESOLVED_PENDING_STATUSES = new Set(["finalized", "duplicate"]);
+
+/** Safety stop for the undated scope scans — a short read must never pass silently. */
+const SCOPE_SCAN_MAX_PAGES = 50;
 
 /**
  * parse_errors is a generic table: any parser that throws lands in it, and the
@@ -243,7 +251,8 @@ async function loadScopeBlockers(
   supabase: Supabase,
   businessDate: string,
 ): Promise<SalesScopeBlocker[]> {
-  const window = bangkokBusinessDateWindow(businessDate);
+  // No time window here: both scans are attributed by the produce business date
+  // their own evidence names, not by when the row happened to be written.
   const blockers: SalesScopeBlocker[] = [];
 
   const unresolvedPending = await countUnresolvedPendingSessions(supabase, businessDate);
@@ -251,22 +260,59 @@ async function loadScopeBlockers(
     blockers.push({ kind: "unresolved_pending_session", count: unresolvedPending });
   }
 
-  const { data: parseErrors, error: parseErrorsError } = await supabase
-    .from("parse_errors")
-    .select("id, parser_name, raw_message_id")
-    .in("error_type", [...BLOCKING_PARSE_ERROR_TYPES])
-    .gte("created_at", window.start)
-    .lt("created_at", window.end);
-  if (parseErrorsError) {
-    throw new SalesDataError(`parse error query failed: ${parseErrorsError.message}`);
-  }
-
-  const relevant = await countProduceParseErrors(supabase, parseErrors ?? []);
+  const relevant = await countProduceParseErrors(supabase, businessDate);
   if (relevant > 0) {
     blockers.push({ kind: "message_parser_error", count: relevant });
   }
 
   return blockers;
+}
+
+/**
+ * Pages through a narrow scope query with no date bound.
+ *
+ * Both scope scans (unresolved pending sessions, blocking parse errors) are
+ * filtered server-side to states that are rare by construction, then attributed
+ * client-side by their produce business date — the row's own timestamps cannot
+ * do it, because backdated entry is normal. If such a scan ever exceeds
+ * SCOPE_SCAN_MAX_PAGES the loader throws rather than returning a short read: a
+ * truncated scope scan would silently under-report blockers.
+ */
+async function fetchAllScopeRows<T>(
+  label: string,
+  page: (from: number, to: number) => PromiseLike<{
+    data: T[] | null;
+    error: { message: string } | null;
+  }>,
+): Promise<T[]> {
+  const rows: T[] = [];
+
+  for (let index = 0; index < SCOPE_SCAN_MAX_PAGES; index += 1) {
+    const from = index * PAGE_SIZE;
+    const { data, error } = await page(from, from + PAGE_SIZE - 1);
+    if (error) throw new SalesDataError(`${label} query failed: ${error.message}`);
+
+    const batch = data ?? [];
+    rows.push(...batch);
+    if (batch.length < PAGE_SIZE) return rows;
+  }
+
+  throw new SalesDataError(`${label} scan exceeded ${SCOPE_SCAN_MAX_PAGES} pages`);
+}
+
+/**
+ * The business date a produce message belongs to.
+ *
+ * The explicit header date wins — that is what the finalizer would persist as
+ * session_date, and a message typed on the 26th whose header says 25/07/2569 is
+ * evidence about the 25th. With no explicit date the deployed fallback applies:
+ * the Bangkok business date of when the message arrived, exactly what
+ * WeighSessionParser.parse passes as its fallbackDate. One parser, one rule.
+ */
+function produceBusinessDate(text: string | null | undefined, arrivedAt: string | null | undefined): string | null {
+  const fallback = arrivedAt ? bangkokBusinessDateFromTimestamp(Date.parse(arrivedAt)) : null;
+  if (!text || !text.trim()) return fallback;
+  return parseWeighSession(text, fallback).date ?? fallback;
 }
 
 /**
@@ -281,66 +327,45 @@ async function loadScopeBlockers(
  *    'finalized' and 'duplicate' mean the evidence is accounted for; every other
  *    status ('pending', 'processing', 'failed_closed') is missing evidence.
  *
- * 2. created_at is NOT the business date. Backdated input is normal: a session
- *    typed on the 5th whose header says 04/07/2569 belongs to the 4th. The
- *    business date comes from the accumulated text through the SAME parser the
- *    finalizer uses, so P1 can never disagree with what would have been
- *    persisted. With no explicit date the parser's own deployed fallback
- *    applies — the Bangkok business date of the row's creation.
- *
- * ponytail: the created_at scan is bounded to PENDING_BACKDATE_DAYS after the
- * business date. A session backdated by longer than that is not seen; widen the
- * window if real data ever needs it.
+ * 2. created_at is NOT the business date, and nothing limits how late produce
+ *    may be entered. The scan is therefore filtered by STATE, not by time: the
+ *    unresolved rows are the ones that matter, however long ago they were
+ *    created, and each is attributed by the business date its own text names.
+ *    There is no locked rule capping backdating, so P1 imposes no ceiling.
  */
 async function countUnresolvedPendingSessions(
   supabase: Supabase,
   businessDate: string,
 ): Promise<number> {
-  const window = bangkokBusinessDateWindow(businessDate);
-  const scanEnd = new Date(
-    Date.parse(window.end) + PENDING_BACKDATE_DAYS * 24 * 60 * 60 * 1000,
-  ).toISOString();
-
   // pending_sessions is not part of the generated Database types (it is
   // operational webhook state, never a report source), so this one read uses a
   // loosened client exactly as PendingSessionService does.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const looseClient = supabase as unknown as SupabaseClient<any>;
-  const { data, error } = await looseClient
-    .from("pending_sessions")
-    .select("id, accumulated_text, created_at, finalization_status")
-    .gte("created_at", window.start)
-    .lt("created_at", scanEnd);
-  if (error) throw new SalesDataError(`pending session query failed: ${error.message}`);
 
-  return (data ?? []).filter(
-    (row: { accumulated_text?: string | null; created_at?: string | null; finalization_status?: string | null }) => {
-      const status = row.finalization_status ?? "pending";
-      if (status === "finalized" || status === "duplicate") return false;
-      const date = pendingSessionBusinessDate(row);
-      // No date evidence at all: count it. Excluding an unresolved session
-      // because its date is unknown is the one direction that loses evidence.
-      return date === null || date === businessDate;
-    },
-  ).length;
-}
+  const rows = await fetchAllScopeRows<{
+    accumulated_text?: string | null;
+    created_at?: string | null;
+    finalization_status?: string | null;
+  }>("pending session", (from, to) =>
+    looseClient
+      .from("pending_sessions")
+      .select("id, accumulated_text, created_at, finalization_status")
+      // Resolved rows are the overwhelming majority and can never be evidence
+      // of missing produce, so they are excluded server-side; the client-side
+      // check below is the authority either way.
+      .not("finalization_status", "in", `(${[...RESOLVED_PENDING_STATUSES].join(",")})`)
+      .range(from, to),
+  );
 
-/**
- * The business date a pending session's produce belongs to: the explicit header
- * date when the text carries one, otherwise the deployed fallback (the Bangkok
- * business date of when it was created). Both come from existing helpers — no
- * second Buddhist-date parser exists in P1.
- */
-function pendingSessionBusinessDate(row: {
-  accumulated_text?: string | null;
-  created_at?: string | null;
-}): string | null {
-  const createdFallback = row.created_at
-    ? bangkokBusinessDateFromTimestamp(Date.parse(row.created_at))
-    : null;
-  const text = row.accumulated_text ?? "";
-  if (!text.trim()) return createdFallback;
-  return parseWeighSession(text, createdFallback).date ?? createdFallback;
+  return rows.filter((row) => {
+    const status = row.finalization_status ?? "pending";
+    if (RESOLVED_PENDING_STATUSES.has(status)) return false;
+    const date = produceBusinessDate(row.accumulated_text, row.created_at);
+    // No date evidence at all: count it. Excluding an unresolved session
+    // because its date is unknown is the one direction that loses evidence.
+    return date === null || date === businessDate;
+  }).length;
 }
 
 /**
@@ -350,32 +375,52 @@ function pendingSessionBusinessDate(row: {
  */
 async function countProduceParseErrors(
   supabase: Supabase,
-  errors: readonly { parser_name: string; raw_message_id: string }[],
+  businessDate: string,
 ): Promise<number> {
+  const errors = await fetchAllScopeRows<{ parser_name: string; raw_message_id: string }>(
+    "parse error",
+    (from, to) =>
+      supabase
+        .from("parse_errors")
+        .select("id, parser_name, raw_message_id")
+        .in("error_type", [...BLOCKING_PARSE_ERROR_TYPES])
+        .range(from, to),
+  );
+
   // Distinct raw messages, not rows: a webhook retry can file the same failure
   // twice, and one lost message is one blocker however often it was recorded.
   const distinct = [...new Map(errors.map((row) => [row.raw_message_id, row])).values()];
-  const byParser = distinct.filter((row) => PRODUCE_PARSER_NAMES.has(row.parser_name));
-  const unknown = distinct.filter((row) => !PRODUCE_PARSER_NAMES.has(row.parser_name));
-  if (unknown.length === 0) return byParser.length;
+  if (distinct.length === 0) return 0;
 
-  const texts = new Map<string, string | null>();
-  for (const chunk of chunks([...new Set(unknown.map((row) => row.raw_message_id))], LOOKUP_CHUNK_SIZE)) {
+  // The raw message carries both pieces of evidence a parse error lacks: what
+  // was said (is this produce at all?) and which business date it was about.
+  const messages = new Map<string, { raw_text: string | null; created_at: string | null }>();
+  for (const chunk of chunks(distinct.map((row) => row.raw_message_id), LOOKUP_CHUNK_SIZE)) {
     const { data, error } = await supabase
       .from("raw_messages")
-      .select("id, raw_text")
+      .select("id, raw_text, created_at")
       .in("id", chunk);
     if (error) throw new SalesDataError(`parse error message lookup failed: ${error.message}`);
-    for (const row of data ?? []) texts.set(row.id, row.raw_text);
+    for (const row of data ?? []) {
+      messages.set(row.id, { raw_text: row.raw_text, created_at: row.created_at });
+    }
   }
 
-  const relevantUnknown = unknown.filter((row) => {
-    if (!texts.has(row.raw_message_id)) return true; // unreadable → fail closed
-    const text = texts.get(row.raw_message_id);
-    return typeof text === "string" && RE.SESSION_START.test(text);
-  }).length;
+  return distinct.filter((row) => {
+    const message = messages.get(row.raw_message_id);
+    // Unreadable evidence: cannot prove it was not this day's produce.
+    if (!message) return true;
 
-  return byParser.length + relevantUnknown;
+    const isProduce =
+      PRODUCE_PARSER_NAMES.has(row.parser_name)
+      || (typeof message.raw_text === "string" && RE.SESSION_START.test(message.raw_text));
+    if (!isProduce) return false;
+
+    // A crash on a message headed 25/07/2569 is a blocker for the 25th, even
+    // when it arrived on the 26th — and it must NOT block the 26th.
+    const date = produceBusinessDate(message.raw_text, message.created_at);
+    return date === null || date === businessDate;
+  }).length;
 }
 
 /**
@@ -470,8 +515,10 @@ export async function loadSalesReport(
   supabase: Supabase,
   businessDate: string,
 ): Promise<SalesReport> {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(businessDate)) {
-    throw new SalesDataError("businessDate must be an ISO date (YYYY-MM-DD)");
+  // Strict: a day that never existed (2026-02-31) would silently return an
+  // empty, apparently clean report for a date nothing can ever be filed under.
+  if (!isStrictBusinessDate(businessDate)) {
+    throw new SalesDataError("businessDate must be a real ISO date (YYYY-MM-DD)");
   }
 
   const rows = await fetchSalesProduceRows(supabase, businessDate);

@@ -28,6 +28,7 @@ function chain(table: string): Record<string, unknown> {
   node.select = self;
   node.eq = self;
   node.in = self;
+  node.not = self;
   node.gte = self;
   node.is = self;
   node.lt = self;
@@ -376,5 +377,26 @@ describe("daily sales summary cron — corrected resend", () => {
     const res = await GET(request(`?date=${DATE}&revision=bad%20revision`));
     expect(res.status).toBe(400);
     expect(pushCalls).toHaveLength(0);
+  });
+});
+
+describe("daily sales summary cron — impossible dates", () => {
+  test("a well-shaped date that never existed is a 400 with zero sends", async () => {
+    process.env.SALES_SUMMARY_LINE_TARGETS = "Cgroup1";
+    pushCalls = [];
+
+    for (const bad of ["2026-02-31", "2026-04-31", "2026-13-01", "2026-00-10", "2027-02-29"]) {
+      const res = await GET(request(`?date=${bad}`));
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ date: bad });
+    }
+
+    expect(pushCalls).toHaveLength(0);
+  });
+
+  test("a real leap day is accepted", async () => {
+    process.env.SALES_SUMMARY_LINE_TARGETS = "Cgroup1";
+    const body = await (await GET(request("?date=2028-02-29"))).json();
+    expect(body.businessDate).toBe("2028-02-29");
   });
 });

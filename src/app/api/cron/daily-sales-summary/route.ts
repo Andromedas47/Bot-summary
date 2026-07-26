@@ -6,13 +6,13 @@ import { loadSalesReport } from "@/lib/sales/load";
 import { buildSalesAutoMessages } from "@/lib/sales/message";
 import {
   DEFAULT_SALES_REVISION,
+  isStrictBusinessDate,
   isValidSalesRevision,
   parseSalesSummaryTargets,
   resolveSalesSummaryDate,
   salesSummaryRetryKey,
   SALES_SUMMARY_TARGETS_ENV,
 } from "@/lib/sales/cron";
-import { isIsoDate } from "@/lib/summary/daily-stock-cron";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -65,10 +65,10 @@ export async function GET(req: NextRequest) {
   // A malformed ?date= is a caller mistake, not a request for yesterday. Falling
   // back would silently report a different day than the operator asked for — and
   // could push it to LINE — so it fails before anything is read or sent.
-  if (dateParam !== null && !isIsoDate(dateParam)) {
+  if (dateParam !== null && !isStrictBusinessDate(dateParam)) {
     logger.warn("daily sales summary cron rejected - invalid date parameter", { dateParam });
     return NextResponse.json(
-      { error: "date must be an ISO business date (YYYY-MM-DD)", date: dateParam },
+      { error: "date must be a real ISO business date (YYYY-MM-DD)", date: dateParam },
       { status: 400 },
     );
   }

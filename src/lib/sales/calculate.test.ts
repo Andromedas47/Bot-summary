@@ -128,7 +128,7 @@ describe("P1 sold quantity — W − R − D", () => {
     expect(result.soldQuantity).toBe(0);
     expect(result.expectedSalesSatang).toBe(0);
     expect(result.status).toBe("TRUSTED");
-    expect(report.allMarkets.authoritative).toBe(true);
+    expect(report.allMarkets.valueAuthoritative).toBe(true);
   });
 
   test("a recorded zero good return is evidence, not missing evidence", () => {
@@ -147,16 +147,16 @@ describe("P1 sold quantity — W − R − D", () => {
     expect(result.soldQuantity).toBe(10);
   });
 
-  test("a VALUE_BLOCKED quantity is kept out of the product roll-up but still shown", () => {
+  test("a VALUE_BLOCKED quantity still counts — only its value is withheld", () => {
     const report = build([
       row({ quantity: 10, transactionType: TX_WITHDRAW }),
       row({ quantity: 4, transactionType: TX_RETURN }),
     ]);
 
-    // No central price → the value is blocked, so the roll-up claims nothing …
-    expect(report.products[0].soldQuantity).toBe(0);
-    expect(report.products[0].total.authoritative).toBe(false);
-    // … while the identity itself still reports its trustworthy quantity.
+    // No central price blocks the money, never the proven quantity.
+    expect(report.products[0].soldQuantity).toBe(6);
+    expect(report.products[0].total.quantityAuthoritative).toBe(true);
+    expect(report.products[0].total.valueAuthoritative).toBe(false);
     expect(report.blocked[0].soldQuantity).toBe(6);
   });
 
@@ -329,7 +329,7 @@ describe("P1 session integrity", () => {
       expect(blocked.status).toBe("QUANTITY_BLOCKED");
       expect(blocked.reasons).toContain("duplicate_main_session");
     }
-    expect(report.allMarkets.authoritative).toBe(false);
+    expect(report.allMarkets.valueAuthoritative).toBe(false);
   });
 
   test("a duplicate main session in one market does not block another market", () => {
@@ -356,10 +356,10 @@ describe("P1 session integrity", () => {
 
     const clean = report.markets.find((market) => market.marketLabel === MARKET_B);
     expect(clean?.rows[0].status).toBe("TRUSTED");
-    expect(clean?.total.authoritative).toBe(true);
+    expect(clean?.total.valueAuthoritative).toBe(true);
 
     const dirty = report.markets.find((market) => market.marketLabel === MARKET_A);
-    expect(dirty?.total.authoritative).toBe(false);
+    expect(dirty?.total.valueAuthoritative).toBe(false);
   });
 
   test("a session with parser errors blocks every identity in its market", () => {
@@ -416,7 +416,7 @@ describe("P1 session integrity", () => {
     );
 
     const clean = report.markets.find((market) => market.marketLabel === MARKET_B);
-    expect(clean?.total.authoritative).toBe(true);
+    expect(clean?.total.valueAuthoritative).toBe(true);
     expect(report.blocked).toHaveLength(1);
   });
 
@@ -468,9 +468,9 @@ describe("P1 session integrity", () => {
     // The row itself is still individually trusted …
     expect(onlyRow(report).status).toBe("TRUSTED");
     // … but nothing derived from an incomplete day may be called a total.
-    expect(report.allMarkets.authoritative).toBe(false);
-    expect(report.markets[0].total.authoritative).toBe(false);
-    expect(report.products[0].total.authoritative).toBe(false);
+    expect(report.allMarkets.valueAuthoritative).toBe(false);
+    expect(report.markets[0].total.valueAuthoritative).toBe(false);
+    expect(report.products[0].total.valueAuthoritative).toBe(false);
     expect(report.scopeBlockers).toEqual([{ kind: "unresolved_pending_session", count: 1 }]);
   });
 
@@ -485,7 +485,7 @@ describe("P1 session integrity", () => {
         scopeBlockers: [{ kind: "message_parser_error", count: 3 }],
       },
     );
-    expect(report.allMarkets.authoritative).toBe(false);
+    expect(report.allMarkets.valueAuthoritative).toBe(false);
   });
 });
 
@@ -599,7 +599,7 @@ describe("P1 market identity", () => {
 
     expect(report.blocked).toHaveLength(1);
     expect(report.blocked[0].reasons).toContain("market_unresolved");
-    expect(report.allMarkets.authoritative).toBe(false);
+    expect(report.allMarkets.valueAuthoritative).toBe(false);
   });
 
   test("unresolved-market rows from different sessions never merge with each other", () => {
@@ -779,9 +779,9 @@ describe("P1 aggregation authority", () => {
     );
 
     const market = report.markets[0];
-    expect(market.total.authoritative).toBe(false);
+    expect(market.total.valueAuthoritative).toBe(false);
     expect(market.total.trustedRowCount).toBe(1);
-    expect(market.total.blockedRowCount).toBe(1);
+    expect(market.total.quantityBlockedRowCount).toBe(1);
     // The partial figure is still the sum of what IS verified.
     expect(market.total.expectedSalesSatang).toBe(72_000);
   });
@@ -802,7 +802,7 @@ describe("P1 aggregation authority", () => {
     );
 
     const product = report.products[0];
-    expect(product.total.authoritative).toBe(false);
+    expect(product.total.valueAuthoritative).toBe(false);
     expect(product.soldQuantity).toBe(6);
     expect(product.markets).toHaveLength(1);
   });
@@ -815,7 +815,7 @@ describe("P1 aggregation authority", () => {
       ],
       { centralPrices: DURIAN_PRICE },
     );
-    expect(trusted.allMarkets.authoritative).toBe(true);
+    expect(trusted.allMarkets.valueAuthoritative).toBe(true);
 
     const partial = build(
       [
@@ -830,7 +830,7 @@ describe("P1 aggregation authority", () => {
       ],
       { centralPrices: DURIAN_PRICE },
     );
-    expect(partial.allMarkets.authoritative).toBe(false);
+    expect(partial.allMarkets.valueAuthoritative).toBe(false);
   });
 
   test("a VALUE_BLOCKED row demotes its totals and contributes no value", () => {
@@ -839,7 +839,7 @@ describe("P1 aggregation authority", () => {
       row({ quantity: 4, transactionType: TX_RETURN }),
     ]);
 
-    expect(report.allMarkets.authoritative).toBe(false);
+    expect(report.allMarkets.valueAuthoritative).toBe(false);
     expect(report.allMarkets.expectedSalesSatang).toBe(0);
     expect(report.blocked).toHaveLength(1);
   });
@@ -854,5 +854,143 @@ describe("P1 aggregation authority", () => {
       { centralPrices: DURIAN_PRICE },
     );
     expect(report.blocked).toHaveLength(3);
+  });
+});
+
+
+// ── Quantity trust vs value trust ───────────────────────────────────────────
+
+describe("P1 quantity trust is independent of value trust", () => {
+  test("a missing central price never erases a proven sold quantity", () => {
+    const report = build([
+      row({ quantity: 12, transactionType: TX_WITHDRAW }),
+      row({ quantity: 2, transactionType: TX_RETURN }),
+    ]);
+
+    const identity = onlyRow(report);
+    expect(identity.status).toBe("VALUE_BLOCKED");
+    expect(identity.soldQuantity).toBe(10);
+    expect(identity.expectedSalesSatang).toBeNull();
+    expect(report.products[0].soldQuantity).toBe(10);
+  });
+
+  test("a priced and an unpriced product coexist without either losing its truth", () => {
+    // Central prices are keyed by (product, unit), so value trust is decided per
+    // product — quantity trust is decided per identity, and they do not interact.
+    const report = build(
+      [
+        row({ quantity: 12, transactionType: TX_WITHDRAW }),
+        row({ quantity: 2, transactionType: TX_RETURN }),
+        row({ productName: "ชะอม", unit: "กำ", quantity: 8, transactionType: TX_WITHDRAW }),
+        row({ productName: "ชะอม", unit: "กำ", quantity: 3, transactionType: TX_RETURN }),
+      ],
+      { centralPrices: DURIAN_PRICE },
+    );
+
+    const durian = report.products.find((product) => product.productName === "หมอนทอง");
+    const chaOm = report.products.find((product) => product.productName === "ชะอม");
+
+    expect(durian?.soldQuantity).toBe(10);
+    expect(durian?.total.valueAuthoritative).toBe(true);
+    expect(durian?.total.expectedSalesSatang).toBe(120_000);
+
+    expect(chaOm?.soldQuantity).toBe(5);
+    expect(chaOm?.total.quantityAuthoritative).toBe(true);
+    expect(chaOm?.total.valueAuthoritative).toBe(false);
+    expect(chaOm?.total.expectedSalesSatang).toBe(0);
+  });
+
+  test("an unpriced product sums its quantity across markets and reports no value", () => {
+    const report = build([
+      row({ quantity: 12, transactionType: TX_WITHDRAW }),
+      row({ quantity: 2, transactionType: TX_RETURN }),
+      row({ sourceId: SOURCE_B, marketName: MARKET_B, sessionId: "s-b", quantity: 8, transactionType: TX_WITHDRAW }),
+      row({ sourceId: SOURCE_B, marketName: MARKET_B, sessionId: "s-b", quantity: 3, transactionType: TX_RETURN }),
+    ]);
+
+    const product = report.products[0];
+    expect(product.soldQuantity).toBe(15); // 10 + 5, both proven
+    expect(product.markets).toHaveLength(2);
+    for (const entry of product.markets) expect(entry.expectedSalesSatang).toBeNull();
+    expect(product.total.quantityAuthoritative).toBe(true);
+    expect(product.total.valueAuthoritative).toBe(false);
+    expect(product.total.valueBlockedRowCount).toBe(2);
+    expect(product.total.quantityBlockedRowCount).toBe(0);
+  });
+
+  test("a quantity-blocked row contributes neither quantity nor value", () => {
+    const report = build(
+      [
+        row({ quantity: 12, transactionType: TX_WITHDRAW }),
+        row({ quantity: 2, transactionType: TX_RETURN }),
+        // Withdrawal with no return evidence in the other market: not sold out.
+        row({ sourceId: SOURCE_B, marketName: MARKET_B, sessionId: "s-b", quantity: 8, transactionType: TX_WITHDRAW }),
+      ],
+      { centralPrices: DURIAN_PRICE },
+    );
+
+    const product = report.products[0];
+    expect(product.soldQuantity).toBe(10);
+    expect(product.markets).toHaveLength(1);
+    expect(product.total.quantityAuthoritative).toBe(false);
+    expect(product.total.valueAuthoritative).toBe(false);
+    expect(product.total.quantityBlockedRowCount).toBe(1);
+  });
+
+  test("a price conflict blocks value only, never the quantity", () => {
+    const report = build(
+      [
+        row({ quantity: 12, transactionType: TX_WITHDRAW }),
+        row({ quantity: 2, transactionType: TX_RETURN }),
+      ],
+      {
+        centralPrices: DURIAN_PRICE,
+        priceConflicts: new Set([centralPriceMapKey("หมอนทอง", "โล")]),
+      },
+    );
+
+    expect(onlyRow(report).soldQuantity).toBe(10);
+    expect(report.products[0].soldQuantity).toBe(10);
+    expect(report.allMarkets.quantityAuthoritative).toBe(true);
+    expect(report.allMarkets.valueAuthoritative).toBe(false);
+    expect(report.allMarkets.expectedSalesSatang).toBe(0);
+  });
+
+  test("market and all-market totals state the two kinds of trust separately", () => {
+    const report = build(
+      [
+        row({ quantity: 12, transactionType: TX_WITHDRAW }),
+        row({ quantity: 2, transactionType: TX_RETURN }),
+        row({ productName: "ชะอม", unit: "กำ", quantity: 8, transactionType: TX_WITHDRAW }),
+        row({ productName: "ชะอม", unit: "กำ", quantity: 3, transactionType: TX_RETURN }),
+      ],
+      { centralPrices: DURIAN_PRICE },
+    );
+
+    for (const total of [report.markets[0].total, report.allMarkets]) {
+      expect(total.quantityAuthoritative).toBe(true);
+      expect(total.valueAuthoritative).toBe(false);
+      expect(total.trustedRowCount).toBe(1);
+      expect(total.valueBlockedRowCount).toBe(1);
+      expect(total.expectedSalesSatang).toBe(120_000); // TRUSTED rows only
+    }
+  });
+
+  test("a scope blocker demotes quantity authority as well as value", () => {
+    const report = build(
+      [
+        row({ quantity: 12, transactionType: TX_WITHDRAW }),
+        row({ quantity: 2, transactionType: TX_RETURN }),
+      ],
+      {
+        centralPrices: DURIAN_PRICE,
+        scopeBlockers: [{ kind: "unresolved_pending_session", count: 1 }],
+      },
+    );
+
+    expect(report.allMarkets.quantityAuthoritative).toBe(false);
+    expect(report.allMarkets.valueAuthoritative).toBe(false);
+    expect(report.markets[0].total.quantityAuthoritative).toBe(false);
+    expect(report.products[0].total.quantityAuthoritative).toBe(false);
   });
 });

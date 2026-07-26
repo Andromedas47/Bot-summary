@@ -198,7 +198,7 @@ describe("daily sales summary cron — delivery", () => {
     expect(body.sent).toBe(true);
     expect(body.sentCount).toBe(2);
     expect(body.businessDate).toBe(DATE);
-    expect(body.authoritative).toBe(true);
+    expect(body.valueAuthoritative).toBe(true);
     expect(body.expectedSalesSatang).toBe(72_000);
 
     expect(pushCalls.map((call) => call.to)).toEqual(["Cgroup1", "Cgroup2"]);
@@ -309,7 +309,7 @@ describe("daily sales summary cron — debug mode", () => {
     const body = await (await GET(request(`?date=${DATE}&debug=1`))).json();
 
     expect(body.blockedCount).toBe(1);
-    expect(body.authoritative).toBe(false);
+    expect(body.valueAuthoritative).toBe(false);
     expect(body.messages.join("\n")).toContain("ยังไม่มีข้อมูลชั่งคืน");
   });
 });

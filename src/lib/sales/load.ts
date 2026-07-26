@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { normalizedMarketLabel } from "@/lib/market";
+import { RE } from "@/lib/parsers/weigh-session/regex";
 import { resolveCentralPricesForDate } from "@/lib/white-sheet/load";
 import type { Database } from "@/types/database";
 import {
@@ -44,11 +45,31 @@ const PRODUCE_SELECT =
   "id, session_id, market_name, product_name, quantity, unit, transaction_type, base_transaction_type, price_per_unit, basis_quantity, raw_message_id, session_kind, item_created_at" as const;
 
 /**
- * parse_errors rows that mean produce data may be missing. "unsupported_type"
- * is excluded on purpose — a sticker or an image is not lost produce data, and
+ * parse_errors rows that mean data may be missing. "unsupported_type" is
+ * excluded on purpose — a sticker or an image is not lost produce data, and
  * treating it as one would block every business date forever.
  */
 const BLOCKING_PARSE_ERROR_TYPES = ["parser_crash", "timeout"] as const;
+
+/**
+ * parse_errors is a generic table: any parser that throws lands in it, and the
+ * webhook also files "registry" rows for message types nothing handles. Only a
+ * failure that could have swallowed produce evidence (เบิก / คืน / คืนเสีย) may
+ * demote a Sales report, so relevance is decided per row rather than per day.
+ *
+ * Two pieces of evidence, in order:
+ *   1. parser_name — the crash handler stores the parser that was running, and
+ *      the weigh-session parser is the one that produces P1's evidence.
+ *   2. the raw message text — a crash from an unrecognized parser still blocks
+ *      when the message itself looks like a weighing session, which is the same
+ *      RE.SESSION_START test the parser uses to claim a message. That keeps a
+ *      future produce parser fail-closed without P1 having to know its name.
+ *
+ * A non-text message (raw_text null) carries no produce lines by construction,
+ * so an unrelated crash on one does not demote the day. A parse error whose raw
+ * message cannot be read at all is treated as relevant — fail closed.
+ */
+const PRODUCE_PARSER_NAMES = new Set(["weigh-session"]);
 
 export class SalesDataError extends Error {
   constructor(message: string) {
@@ -253,18 +274,52 @@ async function loadScopeBlockers(
 
   const { data: parseErrors, error: parseErrorsError } = await supabase
     .from("parse_errors")
-    .select("id")
+    .select("id, parser_name, raw_message_id")
     .in("error_type", [...BLOCKING_PARSE_ERROR_TYPES])
     .gte("created_at", window.start)
     .lt("created_at", window.end);
   if (parseErrorsError) {
     throw new SalesDataError(`parse error query failed: ${parseErrorsError.message}`);
   }
-  if ((parseErrors ?? []).length > 0) {
-    blockers.push({ kind: "message_parser_error", count: (parseErrors ?? []).length });
+
+  const relevant = await countProduceParseErrors(supabase, parseErrors ?? []);
+  if (relevant > 0) {
+    blockers.push({ kind: "message_parser_error", count: relevant });
   }
 
   return blockers;
+}
+
+/**
+ * How many of the day's parse failures could have swallowed produce evidence.
+ * See PRODUCE_PARSER_NAMES for the rule; the raw-message lookup only runs for
+ * rows an unrecognized parser produced.
+ */
+async function countProduceParseErrors(
+  supabase: Supabase,
+  errors: readonly { parser_name: string; raw_message_id: string }[],
+): Promise<number> {
+  const byParser = errors.filter((row) => PRODUCE_PARSER_NAMES.has(row.parser_name));
+  const unknown = errors.filter((row) => !PRODUCE_PARSER_NAMES.has(row.parser_name));
+  if (unknown.length === 0) return byParser.length;
+
+  const texts = new Map<string, string | null>();
+  for (const chunk of chunks([...new Set(unknown.map((row) => row.raw_message_id))], LOOKUP_CHUNK_SIZE)) {
+    const { data, error } = await supabase
+      .from("raw_messages")
+      .select("id, raw_text")
+      .in("id", chunk);
+    if (error) throw new SalesDataError(`parse error message lookup failed: ${error.message}`);
+    for (const row of data ?? []) texts.set(row.id, row.raw_text);
+  }
+
+  const relevantUnknown = unknown.filter((row) => {
+    if (!texts.has(row.raw_message_id)) return true; // unreadable → fail closed
+    const text = texts.get(row.raw_message_id);
+    return typeof text === "string" && RE.SESSION_START.test(text);
+  }).length;
+
+  return byParser.length + relevantUnknown;
 }
 
 /**

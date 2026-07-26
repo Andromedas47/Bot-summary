@@ -127,7 +127,7 @@ describe("P1 loader", () => {
     expect(report.markets).toHaveLength(1);
     expect(report.markets[0].rows[0].soldQuantity).toBe(6);
     expect(report.markets[0].rows[0].expectedSalesSatang).toBe(72_000);
-    expect(report.allMarkets.authoritative).toBe(true);
+    expect(report.allMarkets.valueAuthoritative).toBe(true);
     expect(report.blocked).toHaveLength(0);
   });
 
@@ -213,7 +213,7 @@ describe("P1 loader", () => {
     );
 
     expect(report.scopeBlockers).toEqual([{ kind: "unresolved_pending_session", count: 1 }]);
-    expect(report.allMarkets.authoritative).toBe(false);
+    expect(report.allMarkets.valueAuthoritative).toBe(false);
   });
 
   test("a finalized pending row is not a blocker", async () => {
@@ -234,17 +234,95 @@ describe("P1 loader", () => {
     );
 
     expect(report.scopeBlockers).toHaveLength(0);
-    expect(report.allMarkets.authoritative).toBe(true);
+    expect(report.allMarkets.valueAuthoritative).toBe(true);
   });
 
-  test("a crashed message parse demotes the day's totals", async () => {
+  test("a crashed Produce parse demotes the day's totals", async () => {
     const report = await loadSalesReport(
-      fakeSupabase(baseFixture({ parseErrors: [{ id: "pe-1" }, { id: "pe-2" }] })),
+      fakeSupabase(
+        baseFixture({
+          parseErrors: [
+            { id: "pe-1", parser_name: "weigh-session", raw_message_id: "raw-1" },
+            { id: "pe-2", parser_name: "weigh-session", raw_message_id: "raw-1" },
+          ],
+        }),
+      ),
       DATE,
     );
 
     expect(report.scopeBlockers).toEqual([{ kind: "message_parser_error", count: 2 }]);
-    expect(report.allMarkets.authoritative).toBe(false);
+    expect(report.allMarkets.quantityAuthoritative).toBe(false);
+    expect(report.allMarkets.valueAuthoritative).toBe(false);
+  });
+
+  test("a crash from an unrelated parser does not demote Sales", async () => {
+    // parse_errors is generic. A slip/OCR/whatever parser blowing up cannot have
+    // swallowed เบิก/คืน lines, and must not block the whole day's sales.
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          parseErrors: [{ id: "pe-1", parser_name: "manual-slip-amount", raw_message_id: "raw-9" }],
+          rawMessages: [
+            { id: "raw-1", source_id: SOURCE_A, raw_text: null },
+            { id: "raw-9", source_id: SOURCE_A, raw_text: "โอนแล้วนะ 1200" },
+          ],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([]);
+    expect(report.allMarkets.valueAuthoritative).toBe(true);
+  });
+
+  test("a crash on a non-text message does not demote Sales", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          parseErrors: [{ id: "pe-1", parser_name: "registry", raw_message_id: "raw-9" }],
+          rawMessages: [
+            { id: "raw-1", source_id: SOURCE_A, raw_text: null },
+            { id: "raw-9", source_id: SOURCE_A, raw_text: null },
+          ],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([]);
+  });
+
+  test("an unknown parser crashing on a weighing message stays fail-closed", async () => {
+    // A parser P1 has never heard of still blocks when the raw message itself
+    // carries produce evidence — that is how a future Produce parser is covered.
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          parseErrors: [{ id: "pe-1", parser_name: "weigh-session-v2", raw_message_id: "raw-9" }],
+          rawMessages: [
+            { id: "raw-1", source_id: SOURCE_A, raw_text: null },
+            { id: "raw-9", source_id: SOURCE_A, raw_text: "เบิก 25/07/2569\n1.หมอนทอง 10 โล" },
+          ],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([{ kind: "message_parser_error", count: 1 }]);
+    expect(report.allMarkets.valueAuthoritative).toBe(false);
+  });
+
+  test("a parse error whose raw message cannot be read stays fail-closed", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          parseErrors: [{ id: "pe-1", parser_name: "mystery", raw_message_id: "raw-gone" }],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([{ kind: "message_parser_error", count: 1 }]);
   });
 
   test("a system-seeded price contradicted by a withdrawal blocks the value", async () => {
@@ -299,7 +377,7 @@ describe("P1 loader", () => {
     );
 
     expect(report.blocked[0].reasons).toContain("market_unresolved");
-    expect(report.allMarkets.authoritative).toBe(false);
+    expect(report.allMarkets.valueAuthoritative).toBe(false);
   });
 
   test("rejects a malformed business date", async () => {

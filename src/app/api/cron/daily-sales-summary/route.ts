@@ -85,7 +85,8 @@ export async function GET(req: NextRequest) {
     blockedCount: report.blocked.length,
     scopeBlockerCount: report.scopeBlockers.length,
     expectedSalesSatang: report.allMarkets.expectedSalesSatang,
-    authoritative: report.allMarkets.authoritative,
+    quantityAuthoritative: report.allMarkets.quantityAuthoritative,
+    valueAuthoritative: report.allMarkets.valueAuthoritative,
   };
 
   if (debugMode) {

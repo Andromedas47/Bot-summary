@@ -10,7 +10,9 @@ import {
   SALES_BLOCKED_HEADING,
   SALES_EMPTY_NOTICE,
   SALES_MANUAL_TITLE,
+  SALES_OVERFLOW_NOTICE,
   SALES_PARTIAL_HEADING,
+  SALES_QUANTITY_ONLY_NOTICE,
   SALES_TOTAL_HEADING,
 } from "./message";
 
@@ -169,5 +171,45 @@ describe("P1 automatic message", () => {
     for (const forbidden of ["เงินสด", "ยอดโอน", "สลิป", "ต้นทุน", "กำไร", "ขาดเกิน"]) {
       expect(text).not.toContain(forbidden);
     }
+  });
+});
+
+describe("P1 message wording", () => {
+  test("a quantity-complete, value-partial day says exactly that", () => {
+    // Sold quantity is proven for both products; only ชะอม lacks a price.
+    const text = buildSalesSummaryBlocks(
+      report([
+        ...TRUSTED_ROWS,
+        row({ productName: "ชะอม", unit: "กำ", quantity: 8 }),
+        row({ productName: "ชะอม", unit: "กำ", quantity: 3, transactionType: "คืน" }),
+      ]),
+    ).join("\n\n");
+
+    expect(text).toContain(SALES_PARTIAL_HEADING);
+    expect(text).toContain(SALES_QUANTITY_ONLY_NOTICE);
+    // The quantity is reported in full, the money is marked partial.
+    expect(text).toContain("ชะอม (กำ) — ขาย 5 • 0.00 บาท (บางส่วน)");
+  });
+
+  test("a quantity-blocked day does not claim the quantity is complete", () => {
+    const text = buildSalesSummaryBlocks(
+      report([...TRUSTED_ROWS, row({ productName: "ชะอม", unit: "กำ", quantity: 5 })]),
+    ).join("\n\n");
+
+    expect(text).not.toContain(SALES_QUANTITY_ONLY_NOTICE);
+  });
+
+  test("the overflow notice never points at a Sales web page that does not exist", () => {
+    const many: SalesSourceRow[] = [];
+    for (let index = 0; index < 400; index += 1) {
+      many.push(row({ productName: `สินค้า${index}`, unit: "กำ", quantity: 5 }));
+    }
+
+    const messages = buildSalesSummaryMessages(report(many));
+    const last = messages[messages.length - 1];
+
+    expect(messages).toHaveLength(5);
+    expect(last).toContain(SALES_OVERFLOW_NOTICE.trim());
+    expect(last).not.toContain("หน้าเว็บ");
   });
 });

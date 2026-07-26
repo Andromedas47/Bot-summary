@@ -125,16 +125,32 @@ export interface SalesIdentityRow {
 }
 
 /**
- * A subtotal plus the only thing that makes it safe to read: whether every
- * identity behind it is trusted. `expectedSalesSatang` sums TRUSTED rows only,
- * so a non-authoritative total is a confirmed-partial figure — it must never be
- * presented as total sales.
+ * A subtotal plus what makes it safe to read.
+ *
+ * Quantity trust and value trust are INDEPENDENT. A missing or disputed central
+ * price says nothing about how much product left the market, so a VALUE_BLOCKED
+ * row still contributes its sold quantity — it only withholds money:
+ *
+ *   QUANTITY_BLOCKED  no quantity, no value
+ *   VALUE_BLOCKED     quantity counts, value withheld
+ *   TRUSTED           both count
+ *
+ * `expectedSalesSatang` therefore sums TRUSTED rows only. When
+ * `valueAuthoritative` is false it is a confirmed-partial figure and must never
+ * be presented as total sales; `quantityAuthoritative` can still be true, and
+ * the quantity may then be reported as complete.
  */
 export interface SalesTotal {
   expectedSalesSatang: number;
-  authoritative: boolean;
+  /** Every identity behind this subtotal has a trusted sold quantity. */
+  quantityAuthoritative: boolean;
+  /** …and a trusted value. Implies quantityAuthoritative. */
+  valueAuthoritative: boolean;
   trustedRowCount: number;
-  blockedRowCount: number;
+  /** Quantity trusted, value withheld. Counted in quantity roll-ups. */
+  valueBlockedRowCount: number;
+  /** Nothing usable. Excluded from every roll-up. */
+  quantityBlockedRowCount: number;
 }
 
 export interface SalesMarketSummary {
@@ -148,13 +164,14 @@ export interface SalesProductMarketBreakdown {
   marketKey: string;
   marketLabel: string;
   soldQuantity: number;
-  expectedSalesSatang: number;
+  /** null when this market's quantity is trusted but its value is not. */
+  expectedSalesSatang: number | null;
 }
 
 export interface SalesProductSummary {
   productName: string;
   unit: string;
-  /** Summed over TRUSTED identities only. */
+  /** Summed over every identity with a trusted quantity — TRUSTED and VALUE_BLOCKED. */
   soldQuantity: number;
   markets: SalesProductMarketBreakdown[];
   total: SalesTotal;
@@ -348,20 +365,32 @@ function marketIssuesFromSessions(
 function emptyTotal(): SalesTotal {
   return {
     expectedSalesSatang: 0,
-    authoritative: true,
+    quantityAuthoritative: true,
+    valueAuthoritative: true,
     trustedRowCount: 0,
-    blockedRowCount: 0,
+    valueBlockedRowCount: 0,
+    quantityBlockedRowCount: 0,
   };
 }
 
+/**
+ * Fold one identity into a subtotal, keeping quantity trust and value trust
+ * independent. A VALUE_BLOCKED row demotes only the money.
+ */
 function accumulate(total: SalesTotal, row: SalesIdentityRow): void {
-  if (row.status === "TRUSTED") {
-    total.expectedSalesSatang += row.expectedSalesSatang ?? 0;
-    total.trustedRowCount += 1;
+  if (row.status === "QUANTITY_BLOCKED") {
+    total.quantityBlockedRowCount += 1;
+    total.quantityAuthoritative = false;
+    total.valueAuthoritative = false;
     return;
   }
-  total.blockedRowCount += 1;
-  total.authoritative = false;
+  if (row.status === "VALUE_BLOCKED") {
+    total.valueBlockedRowCount += 1;
+    total.valueAuthoritative = false;
+    return;
+  }
+  total.expectedSalesSatang += row.expectedSalesSatang ?? 0;
+  total.trustedRowCount += 1;
 }
 
 /**
@@ -568,26 +597,30 @@ export function calculateSalesReport(input: SalesCalculationInput): SalesReport 
       productMap.set(productKey, product);
     }
     accumulate(product.total, row);
-    // Only TRUSTED identities contribute, including to the sold quantity — a
-    // VALUE_BLOCKED row has a trustworthy quantity, but mixing it in would
-    // produce a line whose quantity and value describe different sets of rows.
-    // Its quantity is still shown in full on the market detail and in the
-    // blocked list, so nothing is hidden by leaving it out of the roll-up.
-    if (row.status === "TRUSTED") {
+    // Quantity roll-up takes every identity whose quantity is trusted, which
+    // includes VALUE_BLOCKED ones: a missing central price must not erase a sold
+    // quantity that was already proven. The money is withheld instead — the
+    // breakdown carries a null value for that market, and the product's
+    // expectedSalesSatang stays a TRUSTED-only sum flagged as partial.
+    if (row.status !== "QUANTITY_BLOCKED") {
       product.soldQuantity += row.soldQuantity ?? 0;
       product.markets.push({
         marketKey: row.marketKey,
         marketLabel: row.marketLabel,
         soldQuantity: row.soldQuantity ?? 0,
-        expectedSalesSatang: row.expectedSalesSatang ?? 0,
+        expectedSalesSatang: row.expectedSalesSatang,
       });
     }
   }
 
+  // A scope blocker means evidence may be missing outright, so it demotes both
+  // kinds of trust: neither the quantity nor the value can be called complete.
   if (!scopeTrusted) {
-    allMarkets.authoritative = false;
-    for (const market of marketMap.values()) market.total.authoritative = false;
-    for (const product of productMap.values()) product.total.authoritative = false;
+    for (const total of [allMarkets, ...[...marketMap.values()].map((m) => m.total),
+      ...[...productMap.values()].map((p) => p.total)]) {
+      total.quantityAuthoritative = false;
+      total.valueAuthoritative = false;
+    }
   }
 
   const markets = [...marketMap.values()]

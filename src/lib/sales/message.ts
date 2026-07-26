@@ -38,6 +38,16 @@ export const SALES_MARKET_SECTION_HEADING = "🏪 ยอดขายรายต
 export const SALES_BLOCKED_HEADING = "⛔ รายการที่ยืนยันไม่ได้";
 export const SALES_SCOPE_BLOCKER_HEADING = "⚠️ ข้อมูลวันนี้ยังไม่ครบ";
 export const SALES_EMPTY_NOTICE = "ไม่พบรายการขายสำหรับวันนี้";
+/** Quantity is complete, only the money is not. */
+export const SALES_QUANTITY_ONLY_NOTICE = "จำนวนที่ขายครบถ้วน • ยอดเงินยังไม่ครบ (รอราคากลาง)";
+
+/**
+ * P1 has no Sales web page, so the shared overflow notice — which points at one
+ * — must not be used here. This states only what is true, and names no
+ * destination that does not exist.
+ */
+export const SALES_OVERFLOW_NOTICE =
+  "\n\nแสดงได้ไม่ครบ — ข้อความยาวเกินที่ LINE ตอบได้ในครั้งเดียว";
 
 const REASON_LABELS: Record<SalesBlockReason, string> = {
   invalid_identity: "ข้อมูลสินค้า/หน่วยไม่ครบ",
@@ -81,11 +91,15 @@ function unitLabel(unit: string): string {
  */
 function totalBlock(heading: string, total: SalesTotal): string {
   const lines = [
-    total.authoritative ? heading : SALES_PARTIAL_HEADING,
+    total.valueAuthoritative ? heading : SALES_PARTIAL_HEADING,
     `${satangToBahtText(total.expectedSalesSatang)} บาท`,
   ];
-  if (!total.authoritative) {
-    lines.push(`ยืนยันได้ ${total.trustedRowCount} รายการ • ยืนยันไม่ได้ ${total.blockedRowCount} รายการ`);
+  if (!total.valueAuthoritative) {
+    const blocked = total.valueBlockedRowCount + total.quantityBlockedRowCount;
+    lines.push(`ยืนยันได้ ${total.trustedRowCount} รายการ • ยืนยันไม่ได้ ${blocked} รายการ`);
+    // Quantity trust survives a pricing problem, and saying so is the point of
+    // separating the two: "we know what was sold, not what it is worth".
+    if (total.quantityAuthoritative) lines.push(SALES_QUANTITY_ONLY_NOTICE);
   }
   return lines.join("\n");
 }
@@ -122,11 +136,18 @@ function marketBlock(market: SalesMarketSummary): string {
   ].join("\n");
 }
 
+/**
+ * Quantity and value carry their own "บางส่วน" marker, because they are trusted
+ * independently: a product can have a complete sold quantity and a partial value
+ * when one market is still missing its central price.
+ */
 function productLine(product: SalesProductSummary): string {
-  const suffix = product.total.authoritative ? "" : " • บางส่วน";
+  const quantitySuffix = product.total.quantityAuthoritative ? "" : " (บางส่วน)";
+  const valueSuffix = product.total.valueAuthoritative ? "" : " (บางส่วน)";
   return (
-    `${product.productName} (${unitLabel(product.unit)}) — ขาย ${formatQuantity(product.soldQuantity)}`
-    + ` • ${satangToBahtText(product.total.expectedSalesSatang)} บาท${suffix}`
+    `${product.productName} (${unitLabel(product.unit)})`
+    + ` — ขาย ${formatQuantity(product.soldQuantity)}${quantitySuffix}`
+    + ` • ${satangToBahtText(product.total.expectedSalesSatang)} บาท${valueSuffix}`
   );
 }
 
@@ -194,7 +215,7 @@ export function buildSalesSummaryMessages(
     buildSalesSummaryBlocks(report),
     options.maxCodePoints ?? LINE_MESSAGE_MAX_CODE_POINTS,
   );
-  return capAtMaxMessages(messages, options.maxMessages);
+  return capAtMaxMessages(messages, options.maxMessages, SALES_OVERFLOW_NOTICE);
 }
 
 /**
@@ -212,7 +233,7 @@ export function buildSalesAutoBlocks(report: SalesReport): string[] {
   const marketTotals = report.markets.map(
     (market) =>
       `${marketLabel(market)} — ${satangToBahtText(market.total.expectedSalesSatang)} บาท`
-      + `${market.total.authoritative ? "" : " • บางส่วน"}`,
+      + `${market.total.valueAuthoritative ? "" : " • บางส่วน"}`,
   );
 
   return [

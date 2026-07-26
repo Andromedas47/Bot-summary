@@ -126,16 +126,22 @@ export function truncateAtSectionBoundary(text: string, maxCodePoints: number): 
   return slice.trimEnd();
 }
 
+/**
+ * `notice` lets a caller supply its own overflow wording. It defaults to
+ * OVERFLOW_NOTICE, so every existing caller is byte-for-byte unchanged; reports
+ * with no web page of their own (P1 Sales) pass one that names no destination.
+ */
 export function capAtMaxMessages(
   messages: string[],
   maxMessages: number = LINE_REPLY_MAX_MESSAGES,
+  notice: string = OVERFLOW_NOTICE,
 ): string[] {
   if (messages.length <= maxMessages) return messages;
 
   const kept = messages.slice(0, maxMessages - 1);
   const overflow = messages.slice(maxMessages - 1).join("\n\n");
-  const maxBody = LINE_MESSAGE_MAX_CODE_POINTS - countCodePoints(OVERFLOW_NOTICE);
+  const maxBody = LINE_MESSAGE_MAX_CODE_POINTS - countCodePoints(notice);
   const truncated = truncateAtSectionBoundary(overflow, maxBody);
-  kept.push(`${truncated}${OVERFLOW_NOTICE}`);
+  kept.push(`${truncated}${notice}`);
   return kept;
 }

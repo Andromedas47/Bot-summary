@@ -292,8 +292,11 @@ function unresolvedMarketWarnings(
  * the identity disputed and calculate.ts fails closed for every market
  * touching it. Once an admin has set/corrected the price, a mismatching
  * withdrawal is informational only — the admin decision is final.
+ *
+ * Exported (behavior unchanged) so the P1 Daily Sales loader prices sales
+ * through this exact resolver rather than a second, divergent implementation.
  */
-async function resolveCentralPricesForDate(
+export async function resolveCentralPricesForDate(
   supabase: Supabase,
   businessDate: string,
   dateRows: readonly ProduceTransactionRow[],

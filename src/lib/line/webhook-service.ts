@@ -41,6 +41,10 @@ import { tryFinalizeSettlement } from "@/lib/settlement-finalizer";
 import { parseRemainingFruitCommandFromMessage } from "@/lib/summary/remaining-fruit-command";
 import { fetchRemainingFruitRows } from "@/lib/summary/remaining-fruit-data";
 import { buildRemainingFruitMessagesFromRows } from "@/lib/summary/remaining-fruit-message";
+import { parseSalesSummaryCommandFromMessage } from "@/lib/sales/command";
+import { loadSalesReport } from "@/lib/sales/load";
+import { buildSalesSummaryMessages } from "@/lib/sales/message";
+import { previousBangkokBusinessDate } from "@/lib/sales/cron";
 import {
   SlipSessionService,
   parseSlipSessionHeader,
@@ -370,6 +374,12 @@ export class WebhookService {
         event.type,
         log,
       );
+    }
+
+    // P1 Daily Sales — read-only, same bypass as the remaining-stock command.
+    const salesCmd = parseSalesSummaryCommandFromMessage(text);
+    if (salesCmd) {
+      return this.processSalesSummaryCommand(msgEvent, salesCmd, eventId, event.type, log);
     }
 
     // ── 3.5. Slip session commands (checked before produce session logic) ─────
@@ -996,6 +1006,36 @@ export class WebhookService {
       log.error("remaining fruit command failed", { error: errorMessage });
       if (replyToken) {
         await this.replyMessage(replyToken, "ไม่สามารถสร้างสรุปคงเหลือได้ กรุณาลองใหม่");
+      }
+      return { eventId, eventType, status: "error", parsed: false, error: errorMessage };
+    }
+  }
+
+  // ── P1 Daily Sales summary command ────────────────────────────────────────
+  private async processSalesSummaryCommand(
+    event:     LineMessageEvent,
+    command:   ReturnType<typeof parseSalesSummaryCommandFromMessage> & object,
+    eventId:   string,
+    eventType: string,
+    log:       ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const replyToken = event.replyToken;
+    // With no date the command reports the day that just closed — the same
+    // business date the scheduled 08:10 report uses, so the two never disagree.
+    const businessDate = command.businessDate ?? previousBangkokBusinessDate();
+
+    log.info("sales summary command", { businessDate });
+
+    try {
+      const report = await loadSalesReport(this.supabase, businessDate);
+      const messages = buildSalesSummaryMessages(report);
+      if (replyToken) await this.replyMessages(replyToken, messages);
+      return { eventId, eventType, status: "saved", parsed: false };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("sales summary command failed", { error: errorMessage });
+      if (replyToken) {
+        await this.replyMessage(replyToken, "ไม่สามารถสร้างสรุปยอดขายได้ กรุณาลองใหม่");
       }
       return { eventId, eventType, status: "error", parsed: false, error: errorMessage };
     }

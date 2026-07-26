@@ -1,0 +1,55 @@
+name: daily-sales-summary
+
+# P1 Daily Sales report — how much product was sold and what it is worth at the
+# central selling price, for the PREVIOUS business date.
+#
+# ⚠️ NOT ACTIVATED. The business requirement is 08:10 Asia/Bangkok (01:10 UTC),
+# but the `schedule:` trigger below is deliberately commented out: Production
+# activation requires explicit approval after UAT. Until then this workflow can
+# only be run by hand (workflow_dispatch), which is what UAT uses.
+#
+# To activate, after approval:
+#   1. uncomment the `schedule:` block
+#   2. configure SALES_SUMMARY_LINE_TARGETS in the Vercel project (delivery is
+#      inert while it is unset — the route logs and sends nothing)
+#   3. merge to the default branch (GitHub only runs schedules from there)
+#
+# 08:10 rather than P0 Stock's 08:00 so the two morning reports do not arrive on
+# top of each other. Bangkok is UTC+7 year-round with no DST, so 08:10 Bangkok
+# == 01:10 UTC. GitHub Actions rather than a vercel.json cron for the same
+# reason as daily-stock-summary: this project is on a Vercel Hobby plan where
+# cron firing time is only approximate.
+
+on:
+  # schedule:
+  #   - cron: "10 1 * * *" # 01:10 UTC = 08:10 Asia/Bangkok
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Optional business date override (YYYY-MM-DD). Leave blank for the previous business date."
+        required: false
+        type: string
+      debug:
+        description: "Preview the messages without sending any LINE push."
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call daily-sales-summary cron
+        run: |
+          URL="https://bot-summary.vercel.app/api/cron/daily-sales-summary"
+          QUERY=""
+          if [ -n "${{ inputs.date }}" ]; then
+            QUERY="?date=${{ inputs.date }}"
+          fi
+          if [ "${{ inputs.debug }}" = "true" ]; then
+            if [ -n "$QUERY" ]; then QUERY="$QUERY&debug=1"; else QUERY="?debug=1"; fi
+          fi
+          curl -sf --max-time 60 \
+            -X GET \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "$URL$QUERY"

@@ -1171,10 +1171,18 @@ function lostBlockers(report: Awaited<ReturnType<typeof loadSalesReport>>): numb
 }
 
 describe("P1 lost-produce audit recognises proven duplicates", () => {
-  test("a historical unprocessed duplicate with an existing session hash is not a blocker", async () => {
-    const { session_hash } = hashesOf(DUPLICATE_TEXT);
+  /** The full proof: the dedup reservation AND every item persisted. */
+  function provenDuplicate(text = DUPLICATE_TEXT): Fixture {
+    const { session_hash, item_hashes } = hashesOf(text);
+    return {
+      importedSessions: [{ session_hash }],
+      produceItems: item_hashes.map((item_hash) => ({ item_hash })),
+    };
+  }
+
+  test("D. a historical unprocessed duplicate with the full proof is not a blocker", async () => {
     const report = await loadSalesReport(
-      fakeSupabase(lostFixture([resentMessage()], { importedSessions: [{ session_hash }] })),
+      fakeSupabase(lostFixture([resentMessage()], provenDuplicate())),
       DATE,
     );
 
@@ -1182,14 +1190,8 @@ describe("P1 lost-produce audit recognises proven duplicates", () => {
   });
 
   test("a duplicate whose is_processed update failed is not a blocker", async () => {
-    // Same row shape, proved only by the persisted item hashes.
-    const { item_hashes } = hashesOf(DUPLICATE_TEXT);
     const report = await loadSalesReport(
-      fakeSupabase(
-        lostFixture([resentMessage()], {
-          produceItems: item_hashes.map((item_hash) => ({ item_hash })),
-        }),
-      ),
+      fakeSupabase(lostFixture([resentMessage()], provenDuplicate())),
       DATE,
     );
 
@@ -1197,12 +1199,9 @@ describe("P1 lost-produce audit recognises proven duplicates", () => {
   });
 
   test("a webhook redelivery of the same produce is not a blocker", async () => {
-    const { session_hash } = hashesOf(DUPLICATE_TEXT);
     const report = await loadSalesReport(
       fakeSupabase(
-        lostFixture([resentMessage(), resentMessage({ id: "raw-redelivered" })], {
-          importedSessions: [{ session_hash }],
-        }),
+        lostFixture([resentMessage(), resentMessage({ id: "raw-redelivered" })], provenDuplicate()),
       ),
       DATE,
     );
@@ -1210,22 +1209,55 @@ describe("P1 lost-produce audit recognises proven duplicates", () => {
     expect(lostBlockers(report)).toBe(0);
   });
 
-  test("a successful produce whose processed flag never updated is not a blocker", async () => {
-    const { item_hashes } = hashesOf(DUPLICATE_TEXT);
+  test("C. a ghost reservation — session hash but no persisted items — does NOT excuse it", async () => {
+    // The webhook releases exactly this reservation rather than trusting it.
+    const { session_hash } = hashesOf(DUPLICATE_TEXT);
+    const report = await loadSalesReport(
+      fakeSupabase(lostFixture([resentMessage()], { importedSessions: [{ session_hash }] })),
+      DATE,
+    );
+
+    expect(lostBlockers(report)).toBe(1);
+  });
+
+  test("A. a partially persisted session — item A landed, item B did not — still blocks", async () => {
+    const twoItems = [
+      "18:53 เสือ ตลาดกี้ เบิก 25/07/2569",
+      "18:53 เสือ 1.หมอนทอง119บาท",
+      "38โล",
+      "18:53 เสือ 2.ชะนี100บาท",
+      "12โล",
+    ].join("\n");
+    const { session_hash, item_hashes } = hashesOf(twoItems);
+    expect(item_hashes).toHaveLength(2);
+
     const report = await loadSalesReport(
       fakeSupabase(
-        lostFixture([resentMessage()], {
-          sessions: [
-            {
-              id: "session-landed",
-              session_title: "ตลาดกี้",
-              total_items: 1,
-              parser_errors: null,
-              raw_message_id: "raw-resent",
-              voided_at: null,
-              session_date: DATE,
-            },
-          ],
+        lostFixture([resentMessage({ raw_text: twoItems })], {
+          importedSessions: [{ session_hash }],
+          produceItems: [{ item_hash: item_hashes[0] }], // only item A
+        }),
+      ),
+      DATE,
+    );
+
+    expect(lostBlockers(report)).toBe(1);
+  });
+
+  test("B. the same session with BOTH items persisted is accounted", async () => {
+    const twoItems = [
+      "18:53 เสือ ตลาดกี้ เบิก 25/07/2569",
+      "18:53 เสือ 1.หมอนทอง119บาท",
+      "38โล",
+      "18:53 เสือ 2.ชะนี100บาท",
+      "12โล",
+    ].join("\n");
+    const { session_hash, item_hashes } = hashesOf(twoItems);
+
+    const report = await loadSalesReport(
+      fakeSupabase(
+        lostFixture([resentMessage({ raw_text: twoItems })], {
+          importedSessions: [{ session_hash }],
           produceItems: item_hashes.map((item_hash) => ({ item_hash })),
         }),
       ),
@@ -1235,7 +1267,42 @@ describe("P1 lost-produce audit recognises proven duplicates", () => {
     expect(lostBlockers(report)).toBe(0);
   });
 
-  test("genuinely rejected produce with no proof anywhere is still a blocker", async () => {
+  test("two identical item lines need two persisted rows, not one", async () => {
+    const repeated = [
+      "18:53 เสือ ตลาดกี้ เบิก 25/07/2569",
+      "18:53 เสือ 1.หมอนทอง119บาท",
+      "38โล",
+      "18:53 เสือ 2.หมอนทอง119บาท",
+      "38โล",
+    ].join("\n");
+    const { session_hash, item_hashes } = hashesOf(repeated);
+
+    const halfPersisted = await loadSalesReport(
+      fakeSupabase(
+        lostFixture([resentMessage({ raw_text: repeated })], {
+          importedSessions: [{ session_hash }],
+          produceItems: [{ item_hash: item_hashes[0] }],
+        }),
+      ),
+      DATE,
+    );
+    const fullyPersisted = await loadSalesReport(
+      fakeSupabase(
+        lostFixture([resentMessage({ raw_text: repeated })], {
+          importedSessions: [{ session_hash }],
+          produceItems: item_hashes.map((item_hash) => ({ item_hash })),
+        }),
+      ),
+      DATE,
+    );
+
+    // Identical lines hash identically, so multiplicity is what distinguishes
+    // "both landed" from "one landed twice over".
+    if (new Set(item_hashes).size === 1) expect(lostBlockers(halfPersisted)).toBe(1);
+    expect(lostBlockers(fullyPersisted)).toBe(0);
+  });
+
+  test("F. genuinely rejected produce with no proof anywhere is still a blocker", async () => {
     const report = await loadSalesReport(fakeSupabase(lostFixture([resentMessage()])), DATE);
 
     expect(lostBlockers(report)).toBe(1);
@@ -1258,12 +1325,16 @@ describe("P1 lost-produce audit recognises proven duplicates", () => {
     expect(lostBlockers(report)).toBe(0);
   });
 
-  test("a different session's hash does not excuse a lost message", async () => {
-    const { session_hash } = hashesOf(
-      ["18:53 เสือ ตลาดอื่น เบิก 25/07/2569", "18:53 เสือ 1.ชะนี100บาท", "5โล"].join("\n"),
-    );
+  test("a different session's proof does not excuse a lost message", async () => {
     const report = await loadSalesReport(
-      fakeSupabase(lostFixture([resentMessage()], { importedSessions: [{ session_hash }] })),
+      fakeSupabase(
+        lostFixture(
+          [resentMessage()],
+          provenDuplicate(
+            ["18:53 เสือ ตลาดอื่น เบิก 25/07/2569", "18:53 เสือ 1.ชะนี100บาท", "5โล"].join("\n"),
+          ),
+        ),
+      ),
       DATE,
     );
 

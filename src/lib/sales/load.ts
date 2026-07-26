@@ -708,23 +708,32 @@ async function auditLostProduceMessages(
 }
 
 /**
- * Which candidates are provably accounted for, by any of four routes:
+ * Which candidates are provably accounted for.
  *
  *   1. a produce_session exists for THIS raw message — it landed;
  *   2. a parse_errors row exists for THIS raw message — the parse-error path
  *      already reports it, and counting it twice would inflate the day;
- *   3. imported_sessions holds this session's hash — the deployed duplicate
- *      proof. The produce exists under an EARLIER raw message;
- *   4. produce_items holds one of this session's item hashes — the same proof
- *      one level down, which is what the webhook's own hasPersistedItems check
- *      uses before it will trust a dedup reservation.
+ *   3. DUPLICATE PROOF: imported_sessions holds this exact session hash AND
+ *      every one of the candidate's items is present in produce_items.
  *
- * 3 and 4 reuse computeSessionHash / computeItemHash verbatim from the deployed
- * SessionDedupService: a second approximation of "same produce" would eventually
- * disagree with ingestion, and disagreeing here means inventing lost produce.
+ * Rule 3 is the deployed ingestion rule, both halves of it. The webhook trusts
+ * a dedup reservation only when hasPersistedItems() confirms it is not a ghost
+ * (see runParser: an unbacked reservation is released and the session is NOT
+ * treated as a duplicate), so a session hash alone proves nothing here either.
  *
- * Nothing is written and no flag is repaired — a historical row whose
- * is_processed update never happened is recognised by its hashes, not by state.
+ * The item half is deliberately STRICTER than hasPersistedItems, which asks
+ * only whether ANY item hash exists. "Any" is a sound ghost check next to a
+ * matching session hash, but it is not proof that a whole session landed: a
+ * candidate with items A and B, of which only A was ever persisted, would be
+ * excused while B stayed missing. Every item must be represented, counting
+ * multiplicity so two identical lines need two persisted rows.
+ *
+ * A candidate with no items cannot be proven this way and stays blocked.
+ * computeSessionHash / computeItemHash come verbatim from the deployed
+ * SessionDedupService — no new hash semantics.
+ *
+ * Nothing is written and no flag is repaired: a historical row whose
+ * is_processed update never happened is recognised by its hashes, not its state.
  */
 async function accountedProduceMessages(
   supabase: Supabase,
@@ -747,42 +756,51 @@ async function accountedProduceMessages(
     for (const row of errors.data ?? []) accounted.add(row.raw_message_id);
   }
 
-  // Deployed duplicate proof for whatever is still unexplained.
-  const unexplained = candidates.filter((row) => !accounted.has(row.id));
+  const unexplained = candidates
+    .filter((row) => !accounted.has(row.id))
+    .map((row) => {
+      const parsed = parseWeighSession(row.raw_text ?? "");
+      const itemHashes = parsed.items.map((item) => computeItemHash(parsed, item));
+      return { id: row.id, sessionHash: computeSessionHash(parsed), itemHashes };
+    })
+    // No items → nothing to prove landed. Fail closed.
+    .filter((row) => row.itemHashes.length > 0);
   if (unexplained.length === 0) return accounted;
 
-  const bySessionHash = new Map<string, string[]>();
-  const byItemHash = new Map<string, string[]>();
-  for (const row of unexplained) {
-    const parsed = parseWeighSession(row.raw_text ?? "");
-    const sessionHash = computeSessionHash(parsed);
-    bySessionHash.set(sessionHash, [...(bySessionHash.get(sessionHash) ?? []), row.id]);
-    for (const item of parsed.items) {
-      const itemHash = computeItemHash(parsed, item);
-      byItemHash.set(itemHash, [...(byItemHash.get(itemHash) ?? []), row.id]);
-    }
-  }
-
-  for (const chunk of chunks([...bySessionHash.keys()], LOOKUP_CHUNK_SIZE)) {
+  const importedSessionHashes = new Set<string>();
+  for (const chunk of chunks([...new Set(unexplained.map((row) => row.sessionHash))], LOOKUP_CHUNK_SIZE)) {
     const { data, error } = await supabase
       .from("imported_sessions")
       .select("session_hash")
       .in("session_hash", chunk);
     if (error) throw new SalesDataError(`imported session lookup failed: ${error.message}`);
-    for (const row of data ?? []) {
-      for (const id of bySessionHash.get(row.session_hash) ?? []) accounted.add(id);
-    }
+    for (const row of data ?? []) importedSessionHashes.add(row.session_hash);
   }
 
-  for (const chunk of chunks([...byItemHash.keys()], LOOKUP_CHUNK_SIZE)) {
+  const reserved = unexplained.filter((row) => importedSessionHashes.has(row.sessionHash));
+  if (reserved.length === 0) return accounted;
+
+  // Persisted rows per item hash, so multiplicity is respected.
+  const persistedCounts = new Map<string, number>();
+  const wanted = [...new Set(reserved.flatMap((row) => row.itemHashes))];
+  for (const chunk of chunks(wanted, LOOKUP_CHUNK_SIZE)) {
     const { data, error } = await supabase
       .from("produce_items")
       .select("item_hash")
       .in("item_hash", chunk);
     if (error) throw new SalesDataError(`produce item hash lookup failed: ${error.message}`);
     for (const row of data ?? []) {
-      for (const id of byItemHash.get(row.item_hash ?? "") ?? []) accounted.add(id);
+      const hash = row.item_hash ?? "";
+      persistedCounts.set(hash, (persistedCounts.get(hash) ?? 0) + 1);
     }
+  }
+
+  for (const row of reserved) {
+    const needed = new Map<string, number>();
+    for (const hash of row.itemHashes) needed.set(hash, (needed.get(hash) ?? 0) + 1);
+
+    const complete = [...needed].every(([hash, count]) => (persistedCounts.get(hash) ?? 0) >= count);
+    if (complete) accounted.add(row.id);
   }
 
   return accounted;

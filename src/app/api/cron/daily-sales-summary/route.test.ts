@@ -29,6 +29,7 @@ function chain(table: string): Record<string, unknown> {
   node.eq = self;
   node.in = self;
   node.not = self;
+  node.or = self;
   node.gte = self;
   node.is = self;
   node.lt = self;

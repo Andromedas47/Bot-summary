@@ -1,8 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { normalizedMarketLabel } from "@/lib/market";
-import { logger } from "@/lib/logger";
 import { RE } from "@/lib/parsers/weigh-session/regex";
 import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
+import { computeItemHash, computeSessionHash } from "@/lib/line/session-dedup-service";
 import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
 import { isStrictBusinessDate } from "./cron";
 import { resolveCentralPricesForDate } from "@/lib/white-sheet/load";
@@ -65,6 +65,21 @@ const RESOLVED_PENDING_STATUSES = new Set(["finalized", "duplicate"]);
 
 /** Safety stop for the undated scope scans — a short read must never pass silently. */
 const SCOPE_SCAN_MAX_PAGES = 50;
+
+/**
+ * Server-side prefilter for the lost-produce scan: a provable SUPERSET of
+ * RE.SESSION_START. Every alternative of that regex contains one of these four
+ * substrings (คืนเสีย contains คืน; the bare "เสีย DD/MM/YYYY" form contains
+ * เสีย), so a message this filter drops cannot possibly be a produce message.
+ * It exists only to keep the scan off obvious chat traffic — the authority
+ * remains isCompleteProduceMessage in application code.
+ */
+const PRODUCE_TEXT_FILTER = [
+  "raw_text.ilike.*รายการชั่ง*",
+  "raw_text.ilike.*เบิก*",
+  "raw_text.ilike.*คืน*",
+  "raw_text.ilike.*เสีย*",
+].join(",");
 
 /**
  * parse_errors is a generic table: any parser that throws lands in it, and the
@@ -401,6 +416,8 @@ async function countUnresolvedPendingSessions(
   const eventTimes = await pendingIngestEventTimes(looseClient, unresolved);
 
   return unresolved.filter((row) => {
+    // The lookup succeeded (it throws otherwise), so a missing entry proves the
+    // session predates the ingest ledger — the documented legacy fallback.
     const eventTimestampMs = eventTimes.get(row.id)
       ?? (row.created_at ? Date.parse(row.created_at) : null);
     const date = produceBusinessDate(
@@ -422,8 +439,12 @@ async function countUnresolvedPendingSessions(
  * exists. pending_sessions.created_at is the row's insert time and is only used
  * when no ingest evidence survives.
  *
- * A lookup failure is not fatal: the caller then falls back to created_at,
- * which can only make the attribution more conservative, never less.
+ * A FAILED lookup throws. Falling back to created_at then would invent
+ * authority out of a database error: around the 04:00 cutoff the two timestamps
+ * name different business dates, so a failed query could silently move produce
+ * to the wrong day and leave the report looking clean. Only a lookup that
+ * SUCCEEDED and proved no ledger row exists (sessions predating
+ * pending_session_ingest) may fall back.
  */
 async function pendingIngestEventTimes(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -444,12 +465,7 @@ async function pendingIngestEventTimes(
       .from("pending_session_ingest")
       .select("session_key, session_generation, line_timestamp_ms")
       .in("session_key", chunk);
-    if (error) {
-      logger.warn("P1 pending ingest timestamp lookup failed — falling back to created_at", {
-        error: error.message,
-      });
-      return earliest;
-    }
+    if (error) throw new SalesDataError(`pending ingest timestamp query failed: ${error.message}`);
 
     for (const ingest of data ?? []) {
       const rowId = byKeyAndGeneration.get(
@@ -641,16 +657,17 @@ function isCompleteProduceMessage(text: string): boolean {
  * Header-only messages and pending appends are excluded by the predicate above;
  * the pending-session scan already covers those.
  *
- * ponytail: the scan starts at the business date's own window — a complete
- * message reporting date D cannot have been sent before D began. Later
- * ingestion (backdating) is unbounded, as it must be.
+ * The scan has NO created_at bound in either direction. Production contains
+ * complete produce messages sent BEFORE the date their header names, so a lower
+ * bound would discard real evidence; the explicit produce date is authoritative
+ * and every candidate is parsed before it is attributed. The only server-side
+ * narrowing is a provable SUPERSET of RE.SESSION_START (see
+ * PRODUCE_TEXT_FILTER), which cannot exclude a produce message.
  */
 async function auditLostProduceMessages(
   supabase: Supabase,
   businessDate: string,
 ): Promise<SalesSessionAudit[]> {
-  const window = bangkokBusinessDateWindow(businessDate);
-
   const candidates = await fetchAllScopeRows<{
     id: string;
     raw_text: string | null;
@@ -663,7 +680,7 @@ async function auditLostProduceMessages(
       .select("id, raw_text, payload, created_at, source_id")
       .eq("is_processed", false)
       .eq("message_type", "text")
-      .gte("created_at", window.start)
+      .or(PRODUCE_TEXT_FILTER)
       .order("id", { ascending: true })
       .range(from, to),
   );
@@ -678,10 +695,44 @@ async function auditLostProduceMessages(
   });
   if (lost.length === 0) return [];
 
-  // A message that did land, or that already left a parse_errors row, is
-  // accounted for elsewhere — counting it here would double-report it.
+  const accounted = await accountedProduceMessages(supabase, lost);
+
+  return lost
+    .filter((row) => !accounted.has(row.id))
+    .map((row) => ({
+      sessionId: `raw:${row.id}`,
+      sourceId: row.source_id,
+      marketName: normalizedMarketLabel(parseWeighSession(row.raw_text ?? "").session_title) || null,
+      reasons: ["produce_message_never_landed"] as const,
+    }));
+}
+
+/**
+ * Which candidates are provably accounted for, by any of four routes:
+ *
+ *   1. a produce_session exists for THIS raw message — it landed;
+ *   2. a parse_errors row exists for THIS raw message — the parse-error path
+ *      already reports it, and counting it twice would inflate the day;
+ *   3. imported_sessions holds this session's hash — the deployed duplicate
+ *      proof. The produce exists under an EARLIER raw message;
+ *   4. produce_items holds one of this session's item hashes — the same proof
+ *      one level down, which is what the webhook's own hasPersistedItems check
+ *      uses before it will trust a dedup reservation.
+ *
+ * 3 and 4 reuse computeSessionHash / computeItemHash verbatim from the deployed
+ * SessionDedupService: a second approximation of "same produce" would eventually
+ * disagree with ingestion, and disagreeing here means inventing lost produce.
+ *
+ * Nothing is written and no flag is repaired — a historical row whose
+ * is_processed update never happened is recognised by its hashes, not by state.
+ */
+async function accountedProduceMessages(
+  supabase: Supabase,
+  candidates: readonly { id: string; raw_text: string | null }[],
+): Promise<Set<string>> {
   const accounted = new Set<string>();
-  for (const chunk of chunks(lost.map((row) => row.id), LOOKUP_CHUNK_SIZE)) {
+
+  for (const chunk of chunks(candidates.map((row) => row.id), LOOKUP_CHUNK_SIZE)) {
     const [sessions, errors] = await Promise.all([
       supabase.from("produce_sessions").select("raw_message_id").in("raw_message_id", chunk),
       supabase.from("parse_errors").select("raw_message_id").in("raw_message_id", chunk),
@@ -696,14 +747,45 @@ async function auditLostProduceMessages(
     for (const row of errors.data ?? []) accounted.add(row.raw_message_id);
   }
 
-  return lost
-    .filter((row) => !accounted.has(row.id))
-    .map((row) => ({
-      sessionId: `raw:${row.id}`,
-      sourceId: row.source_id,
-      marketName: normalizedMarketLabel(parseWeighSession(row.raw_text ?? "").session_title) || null,
-      reasons: ["produce_message_never_landed"] as const,
-    }));
+  // Deployed duplicate proof for whatever is still unexplained.
+  const unexplained = candidates.filter((row) => !accounted.has(row.id));
+  if (unexplained.length === 0) return accounted;
+
+  const bySessionHash = new Map<string, string[]>();
+  const byItemHash = new Map<string, string[]>();
+  for (const row of unexplained) {
+    const parsed = parseWeighSession(row.raw_text ?? "");
+    const sessionHash = computeSessionHash(parsed);
+    bySessionHash.set(sessionHash, [...(bySessionHash.get(sessionHash) ?? []), row.id]);
+    for (const item of parsed.items) {
+      const itemHash = computeItemHash(parsed, item);
+      byItemHash.set(itemHash, [...(byItemHash.get(itemHash) ?? []), row.id]);
+    }
+  }
+
+  for (const chunk of chunks([...bySessionHash.keys()], LOOKUP_CHUNK_SIZE)) {
+    const { data, error } = await supabase
+      .from("imported_sessions")
+      .select("session_hash")
+      .in("session_hash", chunk);
+    if (error) throw new SalesDataError(`imported session lookup failed: ${error.message}`);
+    for (const row of data ?? []) {
+      for (const id of bySessionHash.get(row.session_hash) ?? []) accounted.add(id);
+    }
+  }
+
+  for (const chunk of chunks([...byItemHash.keys()], LOOKUP_CHUNK_SIZE)) {
+    const { data, error } = await supabase
+      .from("produce_items")
+      .select("item_hash")
+      .in("item_hash", chunk);
+    if (error) throw new SalesDataError(`produce item hash lookup failed: ${error.message}`);
+    for (const row of data ?? []) {
+      for (const id of byItemHash.get(row.item_hash ?? "") ?? []) accounted.add(id);
+    }
+  }
+
+  return accounted;
 }
 
 /**

@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/database";
+import { computeItemHash, computeSessionHash } from "@/lib/line/session-dedup-service";
+import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
 import { bangkokBusinessDateWindow, loadSalesReport, SalesDataError } from "./load";
 
 const DATE = "2026-07-25";
@@ -14,6 +16,8 @@ interface Fixture {
   pending?: Record<string, unknown>[];
   pendingIngest?: Record<string, unknown>[];
   parseErrors?: Record<string, unknown>[];
+  importedSessions?: Record<string, unknown>[];
+  produceItems?: Record<string, unknown>[];
   centralPrices?: Record<string, unknown>[];
   errors?: Partial<Record<string, string>>;
 }
@@ -36,6 +40,8 @@ function fakeSupabase(fixture: Fixture): SupabaseClient<Database> {
       case "pending_sessions": return fixture.pending ?? [];
       case "pending_session_ingest": return fixture.pendingIngest ?? [];
       case "parse_errors": return fixture.parseErrors ?? [];
+      case "imported_sessions": return fixture.importedSessions ?? [];
+      case "produce_items": return fixture.produceItems ?? [];
       case "central_selling_prices": return fixture.centralPrices ?? [];
       default: throw new Error(`Unexpected table: ${table}`);
     }
@@ -59,6 +65,7 @@ function fakeSupabase(fixture: Fixture): SupabaseClient<Database> {
       };
       node.in = self;
       node.not = self;
+      node.or = self;
       node.gte = self;
       node.is = (column: string, value: unknown) => {
         filterLog.push(`${table}.is:${column}=${String(value)}`);
@@ -1115,5 +1122,260 @@ describe("P1 durable evidence for a rejected produce message", () => {
   test("a lost message is attributed to the day its header names, not its arrival", async () => {
     const other = await loadSalesReport(fakeSupabase(fixture([lostMessage()])), "2026-07-26");
     expect(other.blocked).toHaveLength(0);
+  });
+});
+
+// ── Proven duplicates are not lost produce ─────────────────────────────────
+
+/**
+ * The Production shape: a resend of a complete produce message. The produce
+ * landed under an EARLIER raw message, so this one has no produce_session of
+ * its own, no parse_error of its own, and (historically) is_processed = false.
+ * Only the deployed dedup identity can tell it apart from genuinely lost data.
+ */
+const DUPLICATE_TEXT = [
+  "18:53 เสือ ตลาดกี้ เบิก 25/07/2569",
+  "18:53 เสือ 1.หมอนทอง119บาท",
+  "38โล",
+].join("\n");
+
+function hashesOf(text: string) {
+  const parsed = parseWeighSession(text);
+  return {
+    session_hash: computeSessionHash(parsed),
+    item_hashes: parsed.items.map((item) => computeItemHash(parsed, item)),
+  };
+}
+
+function resentMessage(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "raw-resent",
+    source_id: SOURCE_A,
+    raw_text: DUPLICATE_TEXT,
+    payload: { timestamp: Date.parse("2026-07-25T06:00:00.000Z") },
+    created_at: "2026-07-25T06:00:01.000Z",
+    is_processed: false,
+    ...overrides,
+  };
+}
+
+function lostFixture(messages: Record<string, unknown>[], extra: Fixture = {}): Fixture {
+  return baseFixture({ produce: [], sessions: [], rawMessages: messages, ...extra });
+}
+
+function lostBlockers(report: Awaited<ReturnType<typeof loadSalesReport>>): number {
+  return (
+    report.blocked.filter((row) => row.reasons.includes("produce_message_never_landed")).length
+    + report.scopeBlockers.filter((blocker) => blocker.kind === "unattributable_session").length
+  );
+}
+
+describe("P1 lost-produce audit recognises proven duplicates", () => {
+  test("a historical unprocessed duplicate with an existing session hash is not a blocker", async () => {
+    const { session_hash } = hashesOf(DUPLICATE_TEXT);
+    const report = await loadSalesReport(
+      fakeSupabase(lostFixture([resentMessage()], { importedSessions: [{ session_hash }] })),
+      DATE,
+    );
+
+    expect(lostBlockers(report)).toBe(0);
+  });
+
+  test("a duplicate whose is_processed update failed is not a blocker", async () => {
+    // Same row shape, proved only by the persisted item hashes.
+    const { item_hashes } = hashesOf(DUPLICATE_TEXT);
+    const report = await loadSalesReport(
+      fakeSupabase(
+        lostFixture([resentMessage()], {
+          produceItems: item_hashes.map((item_hash) => ({ item_hash })),
+        }),
+      ),
+      DATE,
+    );
+
+    expect(lostBlockers(report)).toBe(0);
+  });
+
+  test("a webhook redelivery of the same produce is not a blocker", async () => {
+    const { session_hash } = hashesOf(DUPLICATE_TEXT);
+    const report = await loadSalesReport(
+      fakeSupabase(
+        lostFixture([resentMessage(), resentMessage({ id: "raw-redelivered" })], {
+          importedSessions: [{ session_hash }],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(lostBlockers(report)).toBe(0);
+  });
+
+  test("a successful produce whose processed flag never updated is not a blocker", async () => {
+    const { item_hashes } = hashesOf(DUPLICATE_TEXT);
+    const report = await loadSalesReport(
+      fakeSupabase(
+        lostFixture([resentMessage()], {
+          sessions: [
+            {
+              id: "session-landed",
+              session_title: "ตลาดกี้",
+              total_items: 1,
+              parser_errors: null,
+              raw_message_id: "raw-resent",
+              voided_at: null,
+              session_date: DATE,
+            },
+          ],
+          produceItems: item_hashes.map((item_hash) => ({ item_hash })),
+        }),
+      ),
+      DATE,
+    );
+
+    expect(lostBlockers(report)).toBe(0);
+  });
+
+  test("genuinely rejected produce with no proof anywhere is still a blocker", async () => {
+    const report = await loadSalesReport(fakeSupabase(lostFixture([resentMessage()])), DATE);
+
+    expect(lostBlockers(report)).toBe(1);
+    expect(report.blocked[0].reasons).toContain("produce_message_never_landed");
+  });
+
+  test("a validation failure with its parse_error is reported once, not twice", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        lostFixture([resentMessage()], {
+          parseErrors: [
+            { id: "pe-1", parser_name: "weigh-session", raw_message_id: "raw-resent" },
+          ],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([{ kind: "message_parser_error", count: 1 }]);
+    expect(lostBlockers(report)).toBe(0);
+  });
+
+  test("a different session's hash does not excuse a lost message", async () => {
+    const { session_hash } = hashesOf(
+      ["18:53 เสือ ตลาดอื่น เบิก 25/07/2569", "18:53 เสือ 1.ชะนี100บาท", "5โล"].join("\n"),
+    );
+    const report = await loadSalesReport(
+      fakeSupabase(lostFixture([resentMessage()], { importedSessions: [{ session_hash }] })),
+      DATE,
+    );
+
+    expect(lostBlockers(report)).toBe(1);
+  });
+});
+
+describe("P1 lost-produce scan has no created_at lower bound", () => {
+  /** Sent on 20/07 but headed 25/07/2569 — a real future-dated entry shape. */
+  const futureDated = (id: string, header: string) => ({
+    id,
+    source_id: SOURCE_A,
+    raw_text: [header, "18:53 เสือ 1.หมอนทอง119บาท", "38โล"].join("\n"),
+    payload: { timestamp: Date.parse("2026-07-20T06:00:00.000Z") },
+    created_at: "2026-07-20T06:00:01.000Z",
+    is_processed: false,
+  });
+
+  test("a message created days BEFORE the date its header names still blocks that date", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(lostFixture([futureDated("raw-future", "18:53 เสือ ตลาดกี้ เบิก 25/07/2569")])),
+      DATE,
+    );
+
+    expect(lostBlockers(report)).toBe(1);
+  });
+
+  test("…and does not block the day it was actually sent", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(lostFixture([futureDated("raw-future", "18:53 เสือ ตลาดกี้ เบิก 25/07/2569")])),
+      "2026-07-20",
+    );
+
+    expect(lostBlockers(report)).toBe(0);
+  });
+
+  test("four future-dated messages each attach to their own header date", async () => {
+    const messages = [
+      futureDated("raw-f1", "18:53 เสือ ตลาดกี้ เบิก 25/07/2569"),
+      futureDated("raw-f2", "18:53 เสือ ตลาดกี้ เบิก 26/07/2569"),
+      futureDated("raw-f3", "18:53 เสือ ตลาดน้อย เบิก 25/07/2569"),
+      futureDated("raw-f4", "18:53 เสือ ตลาดน้อย คืน 27/07/2569"),
+    ];
+
+    const on25 = await loadSalesReport(fakeSupabase(lostFixture(messages)), "2026-07-25");
+    const on26 = await loadSalesReport(fakeSupabase(lostFixture(messages)), "2026-07-26");
+    const on27 = await loadSalesReport(fakeSupabase(lostFixture(messages)), "2026-07-27");
+
+    expect(lostBlockers(on25)).toBe(2);
+    expect(lostBlockers(on26)).toBe(1);
+    expect(lostBlockers(on27)).toBe(1);
+  });
+});
+
+describe("P1 pending ingest lookup fails closed", () => {
+  const unresolved = {
+    id: "pending-1",
+    session_key: "group:g1:user:u1",
+    session_generation: "gen-1",
+    accumulated_text: UNDATED_PRODUCE, // no explicit date → the timestamp decides
+    created_at: INSERTED_AFTER_CUTOFF,
+    finalization_status: "pending",
+  };
+
+  test("a successful lookup uses the LINE timestamp", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          produce: [],
+          sessions: [],
+          pending: [unresolved],
+          pendingIngest: [
+            {
+              session_key: "group:g1:user:u1",
+              session_generation: "gen-1",
+              line_timestamp_ms: BEFORE_CUTOFF_MS,
+            },
+          ],
+        }),
+      ),
+      "2026-07-25",
+    );
+
+    expect(report.scopeBlockers).toEqual([{ kind: "unresolved_pending_session", count: 1 }]);
+  });
+
+  test("a successful lookup with no ledger row uses the legacy created_at fallback", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({ produce: [], sessions: [], pending: [unresolved], pendingIngest: [] }),
+      ),
+      "2026-07-26", // created_at 04:00:01 Bangkok on the 26th
+    );
+
+    expect(report.scopeBlockers).toEqual([{ kind: "unresolved_pending_session", count: 1 }]);
+  });
+
+  test("a FAILED lookup errors instead of inventing a business date", async () => {
+    // created_at would say the 26th, the LINE timestamp might say the 25th —
+    // a database error must never get to pick.
+    expect(
+      loadSalesReport(
+        fakeSupabase(
+          baseFixture({
+            produce: [],
+            sessions: [],
+            pending: [unresolved],
+            errors: { pending_session_ingest: "connection reset" },
+          }),
+        ),
+        DATE,
+      ),
+    ).rejects.toThrow(SalesDataError);
   });
 });

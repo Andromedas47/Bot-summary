@@ -3,26 +3,19 @@ name: daily-sales-summary
 # P1 Daily Sales report — how much product was sold and what it is worth at the
 # central selling price, for the PREVIOUS business date.
 #
-# ⚠️ NOT ACTIVATED. The business requirement is 08:10 Asia/Bangkok (01:10 UTC),
-# but the `schedule:` trigger below is deliberately commented out: Production
-# activation requires explicit approval after UAT. Until then this workflow can
-# only be run by hand (workflow_dispatch), which is what UAT uses.
+# Business requirement: 08:10 Asia/Bangkok every day (10 minutes after P0 Stock),
+# reporting the PREVIOUS business date. The route resolves that date itself when
+# no ?date= is supplied.
 #
-# To activate, after approval:
-#   1. uncomment the `schedule:` block
-#   2. configure SALES_SUMMARY_LINE_TARGETS in the Vercel project (delivery is
-#      inert while it is unset — the route logs and sends nothing)
-#   3. merge to the default branch (GitHub only runs schedules from there)
+# Automatic scheduling is owned by Supabase Cron (08:10 Asia/Bangkok).
+# This GitHub Actions workflow keeps workflow_dispatch only for
+# manual / debug / emergency runs — it must NOT fire on a schedule.
 #
-# 08:10 rather than P0 Stock's 08:00 so the two morning reports do not arrive on
-# top of each other. Bangkok is UTC+7 year-round with no DST, so 08:10 Bangkok
-# == 01:10 UTC. GitHub Actions rather than a vercel.json cron for the same
-# reason as daily-stock-summary: this project is on a Vercel Hobby plan where
-# cron firing time is only approximate.
+# Delivery stays inert while SALES_SUMMARY_LINE_TARGETS is unset. Bangkok is
+# UTC+7 year-round with no DST. The Production route URL and Bearer
+# CRON_SECRET auth match the Supabase Cron caller.
 
 on:
-  schedule:
-    - cron: "10 1 * * *" # 01:10 UTC = 08:10 Asia/Bangkok
   workflow_dispatch:
     inputs:
       date:
@@ -53,8 +46,8 @@ jobs:
           if [ "${{ inputs.debug }}" = "true" ]; then
             if [ -n "$QUERY" ]; then QUERY="$QUERY&debug=1"; else QUERY="?debug=1"; fi
           fi
-          # No revision input == the scheduled default. The schedule never sets
-          # one, so an automatic run can never mint a new set of retry keys.
+          # No revision input == the normal report keys. A deliberate corrected
+          # resend passes revision= to mint a new set of LINE retry keys.
           if [ -n "${{ inputs.revision }}" ]; then
             if [ -n "$QUERY" ]; then QUERY="$QUERY&revision=${{ inputs.revision }}"; else QUERY="?revision=${{ inputs.revision }}"; fi
           fi

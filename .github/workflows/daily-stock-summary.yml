@@ -6,20 +6,14 @@ name: daily-stock-summary
 # business date (the day that just closed). The route resolves that date itself
 # via previousBangkokBusinessDate, so this workflow passes no ?date=.
 #
-# Timezone: GitHub Actions cron is UTC, exactly like Vercel cron. Bangkok is
-# UTC+7 year-round with no DST, so 08:00 Bangkok == 01:00 UTC.
+# Automatic scheduling is owned by Supabase Cron (08:00 Asia/Bangkok).
+# This GitHub Actions workflow keeps workflow_dispatch only for
+# manual / debug / emergency runs — it must NOT fire on a schedule.
 #
-# Why GitHub Actions rather than a vercel.json cron entry: this project is on a
-# Vercel Hobby plan, where cron firing time is only approximate (a previous
-# commit already removed a Vercel cron for Hobby restrictions). The existing
-# finalize-slip-batches workflow established this pattern.
-#
-# NOTE: GitHub only runs scheduled workflows from the repository's DEFAULT
-# branch. This file does not fire until it is merged to main.
+# Bangkok is UTC+7 year-round with no DST. The Production route URL and
+# Bearer CRON_SECRET auth match the Supabase Cron caller.
 
 on:
-  schedule:
-    - cron: "0 1 * * *" # 01:00 UTC = 08:00 Asia/Bangkok
   workflow_dispatch:
     inputs:
       date:

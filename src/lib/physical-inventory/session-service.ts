@@ -3,7 +3,7 @@
  *
  * Does NOT route LINE webhooks (Slice C).
  * Does NOT write produce_sessions / produce_items / inventory ledger.
- * Finalization goes through finalize_physical_inventory_session RPC.
+ * Admit/finalize go through service_role RPCs with close-barrier + immutability.
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -17,6 +17,11 @@ import {
 } from "./types";
 
 type Supabase = SupabaseClient<Database>;
+
+/** Quiet window after first close before finalize may run (matches migration default). */
+export const PHYSICAL_INVENTORY_CLOSE_QUIET_MS = 8_000;
+/** Hard deadline after first close; later admits fail. */
+export const PHYSICAL_INVENTORY_CLOSE_DEADLINE_MS = 30_000;
 
 export type PhysicalInventorySessionStatus =
   | "open"
@@ -53,6 +58,20 @@ export class PhysicalInventoryAfterCloseError extends Error {
   }
 }
 
+export class PhysicalInventoryAfterCloseBoundaryError extends Error {
+  constructor(message = "after_close_boundary") {
+    super(message);
+    this.name = "PhysicalInventoryAfterCloseBoundaryError";
+  }
+}
+
+export class PhysicalInventoryCloseQuietWindowError extends Error {
+  constructor(message = "close_quiet_window") {
+    super(message);
+    this.name = "PhysicalInventoryCloseQuietWindowError";
+  }
+}
+
 function issuesToJson(issues: PhysicalInventoryParseIssue[]): Json {
   return issues.map((i) => ({
     code: i.code,
@@ -75,6 +94,16 @@ function itemsToJson(items: PhysicalInventoryParsedItem[]): Json {
   })) as unknown as Json;
 }
 
+function mapAdmitError(message: string): Error {
+  if (message.includes("generation_conflict")) return new PhysicalInventoryGenerationConflictError();
+  if (message.includes("session_closed")) return new PhysicalInventoryAfterCloseError();
+  if (message.includes("after_close_boundary")) return new PhysicalInventoryAfterCloseBoundaryError();
+  if (message.includes("deadline_elapsed")) {
+    return new PhysicalInventoryAfterCloseBoundaryError("deadline_elapsed");
+  }
+  return new Error(`admit failed: ${message}`);
+}
+
 export class PhysicalInventorySessionService {
   constructor(private readonly supabase: Supabase) {}
 
@@ -82,11 +111,13 @@ export class PhysicalInventorySessionService {
     sourceId: string,
     senderLineUserId: string,
   ): Promise<PhysicalInventorySessionRow | null> {
+    const sender = senderLineUserId.trim();
+    if (!sender) throw new Error("sender_line_user_id required");
     const { data, error } = await this.supabase
       .from("physical_inventory_sessions")
       .select("*")
       .eq("source_id", sourceId)
-      .eq("sender_line_user_id", senderLineUserId)
+      .eq("sender_line_user_id", sender)
       .in("status", ["open", "closing"])
       .maybeSingle();
     if (error) throw new Error(`findOpenSession failed: ${error.message}`);
@@ -103,10 +134,6 @@ export class PhysicalInventorySessionService {
     return data;
   }
 
-  /**
-   * Open a new Physical Stock session for source + sender.
-   * Fails soft if another open/closing session already exists for that pair.
-   */
   async openSession(params: {
     sourceType: string;
     sourceId: string;
@@ -115,7 +142,10 @@ export class PhysicalInventorySessionService {
     parserVersion?: string;
     headerRawMessageId?: string | null;
   }): Promise<{ opened: boolean; session: PhysicalInventorySessionRow; reason?: "already_open" }> {
-    const existing = await this.findOpenSession(params.sourceId, params.senderLineUserId);
+    const sender = params.senderLineUserId.trim();
+    if (!sender) throw new Error("sender_line_user_id required");
+
+    const existing = await this.findOpenSession(params.sourceId, sender);
     if (existing) {
       return { opened: false, session: existing, reason: "already_open" };
     }
@@ -125,7 +155,7 @@ export class PhysicalInventorySessionService {
       .insert({
         source_type: params.sourceType,
         source_id: params.sourceId,
-        sender_line_user_id: params.senderLineUserId,
+        sender_line_user_id: sender,
         business_date: params.businessDate ?? null,
         warehouse_code: PHYSICAL_INVENTORY_WAREHOUSE_MAIN,
         status: "open",
@@ -140,84 +170,56 @@ export class PhysicalInventorySessionService {
   }
 
   /**
-   * Idempotent LINE event ingest. Duplicate line_event_id for the same session is a no-op.
-   * Stale appends after finalized/failed_closed raise AfterClose.
-   * Generation pin prevents cross-sender/generation confusion.
+   * Admit a LINE event via RPC (close-boundary aware, idempotent).
    */
   async registerIngest(params: {
     sessionId: string;
     expectedGeneration: string;
     lineEventId: string;
+    lineTimestampMs: number;
     lineMessageId?: string | null;
     rawMessageId?: string | null;
     kind: "header" | "item" | "close" | "other";
     rawText: string;
-  }): Promise<{ inserted: boolean; session: PhysicalInventorySessionRow }> {
-    const session = await this.getSession(params.sessionId);
-    if (!session) throw new Error("session not found");
-    if (session.session_generation !== params.expectedGeneration) {
-      throw new PhysicalInventoryGenerationConflictError();
-    }
-    if (session.status === "finalized" || session.status === "failed_closed" || session.status === "voided") {
-      throw new PhysicalInventoryAfterCloseError();
-    }
+    asOf?: string;
+    quietMs?: number;
+    deadlineMs?: number;
+  }): Promise<{
+    accepted: boolean;
+    inserted: boolean;
+    reason: string;
+    session: PhysicalInventorySessionRow;
+  }> {
+    const { data, error } = await this.supabase.rpc("admit_physical_inventory_event", {
+      p_session_id: params.sessionId,
+      p_expected_generation: params.expectedGeneration,
+      p_line_event_id: params.lineEventId,
+      p_line_timestamp_ms: params.lineTimestampMs,
+      p_kind: params.kind,
+      p_raw_text: params.rawText,
+      p_line_message_id: params.lineMessageId ?? null,
+      p_raw_message_id: params.rawMessageId ?? null,
+      p_quiet_ms: params.quietMs ?? PHYSICAL_INVENTORY_CLOSE_QUIET_MS,
+      p_deadline_ms: params.deadlineMs ?? PHYSICAL_INVENTORY_CLOSE_DEADLINE_MS,
+      p_as_of: params.asOf ?? new Date().toISOString(),
+    });
 
-    const { data: existing } = await this.supabase
-      .from("physical_inventory_session_ingests")
-      .select("id")
-      .eq("session_id", params.sessionId)
-      .eq("line_event_id", params.lineEventId)
-      .maybeSingle();
-    if (existing) {
-      return { inserted: false, session };
-    }
+    if (error) throw mapAdmitError(error.message ?? "");
 
-    const nextRev = Number(session.ingest_revision) + 1;
-    const { error: insErr } = await this.supabase
-      .from("physical_inventory_session_ingests")
-      .insert({
-        session_id: params.sessionId,
-        line_event_id: params.lineEventId,
-        line_message_id: params.lineMessageId ?? null,
-        raw_message_id: params.rawMessageId ?? null,
-        kind: params.kind,
-        raw_text: params.rawText,
-        ingest_revision: nextRev,
-      });
-    if (insErr) {
-      // Unique race → treat as idempotent
-      if (insErr.code === "23505") {
-        const fresh = await this.getSession(params.sessionId);
-        return { inserted: false, session: fresh! };
-      }
-      throw new Error(`registerIngest failed: ${insErr.message}`);
-    }
-
-    const patch: Database["public"]["Tables"]["physical_inventory_sessions"]["Update"] = {
-      ingest_revision: nextRev,
-      updated_at: new Date().toISOString(),
+    const row = data as {
+      accepted: boolean;
+      inserted: boolean;
+      reason: string;
+      session_id: string;
     };
-    if (params.kind === "close") {
-      patch.status = "closing";
-      patch.close_requested_at = new Date().toISOString();
-      patch.close_line_event_id = params.lineEventId;
-      if (params.rawMessageId) patch.close_raw_message_id = params.rawMessageId;
-    }
-    if (params.kind === "header" && params.rawMessageId) {
-      patch.header_raw_message_id = params.rawMessageId;
-    }
-
-    const { data: updated, error: updErr } = await this.supabase
-      .from("physical_inventory_sessions")
-      .update(patch)
-      .eq("id", params.sessionId)
-      .eq("session_generation", params.expectedGeneration)
-      .in("status", ["open", "closing"])
-      .select("*")
-      .single();
-
-    if (updErr) throw new Error(`registerIngest session update failed: ${updErr.message}`);
-    return { inserted: true, session: updated };
+    const session = await this.getSession(row.session_id);
+    if (!session) throw new Error("session missing after admit");
+    return {
+      accepted: row.accepted,
+      inserted: row.inserted,
+      reason: row.reason,
+      session,
+    };
   }
 
   async listIngestTexts(sessionId: string): Promise<string[]> {
@@ -232,7 +234,7 @@ export class PhysicalInventorySessionService {
 
   /**
    * Atomic finalize or fail-closed via RPC.
-   * Never creates a partial finalized snapshot.
+   * Successful finalize requires close boundary + quiet window elapsed (pass asOf).
    */
   async finalize(params: {
     sessionId: string;
@@ -241,6 +243,8 @@ export class PhysicalInventorySessionService {
     parsed: PhysicalInventoryParsedSession;
     failClosed?: boolean;
     failReason?: string;
+    /** Clock for quiet-window checks (ISO). Tests advance this past quiet. */
+    asOf?: string;
   }): Promise<{
     ok: boolean;
     idempotent: boolean;
@@ -249,6 +253,7 @@ export class PhysicalInventorySessionService {
     sessionId: string;
     failReason?: string | null;
     itemCount?: number;
+    countedAt?: string | null;
   }> {
     const failClosed =
       params.failClosed === true ||
@@ -279,16 +284,14 @@ export class PhysicalInventorySessionService {
               ? "no_items"
               : "failed_closed")
         : null,
+      p_as_of: params.asOf ?? new Date().toISOString(),
     });
 
     if (error) {
       const msg = error.message ?? "";
-      if (msg.includes("generation_conflict")) {
-        throw new PhysicalInventoryGenerationConflictError();
-      }
-      if (msg.includes("stale_ingest_revision")) {
-        throw new PhysicalInventoryStaleRevisionError();
-      }
+      if (msg.includes("generation_conflict")) throw new PhysicalInventoryGenerationConflictError();
+      if (msg.includes("stale_ingest_revision")) throw new PhysicalInventoryStaleRevisionError();
+      if (msg.includes("close_quiet_window")) throw new PhysicalInventoryCloseQuietWindowError();
       throw new Error(`finalize failed: ${msg}`);
     }
 
@@ -300,6 +303,7 @@ export class PhysicalInventorySessionService {
       session_id: string;
       fail_reason?: string | null;
       item_count?: number;
+      counted_at?: string | null;
     };
 
     return {
@@ -310,6 +314,7 @@ export class PhysicalInventorySessionService {
       sessionId: row.session_id,
       failReason: row.fail_reason,
       itemCount: row.item_count,
+      countedAt: row.counted_at ?? null,
     };
   }
 

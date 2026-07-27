@@ -1050,6 +1050,9 @@ export interface Database {
           parser_version:        string | null;
           opened_at:             string;
           close_requested_at:    string | null;
+          close_event_timestamp_ms: number | null;
+          close_quiet_until:     string | null;
+          close_deadline_at:     string | null;
           closed_at:             string | null;
           failed_closed_at:      string | null;
           fail_reason:           string | null;
@@ -1074,6 +1077,9 @@ export interface Database {
           parser_version?:        string | null;
           opened_at?:             string;
           close_requested_at?:    string | null;
+          close_event_timestamp_ms?: number | null;
+          close_quiet_until?:     string | null;
+          close_deadline_at?:     string | null;
           closed_at?:             string | null;
           failed_closed_at?:      string | null;
           fail_reason?:           string | null;
@@ -1098,6 +1104,9 @@ export interface Database {
           parser_version?:        string | null;
           opened_at?:             string;
           close_requested_at?:    string | null;
+          close_event_timestamp_ms?: number | null;
+          close_quiet_until?:     string | null;
+          close_deadline_at?:     string | null;
           closed_at?:             string | null;
           failed_closed_at?:      string | null;
           fail_reason?:           string | null;
@@ -1119,6 +1128,7 @@ export interface Database {
           session_id:      string;
           line_event_id:   string;
           line_message_id: string | null;
+          line_timestamp_ms: number;
           raw_message_id:  string | null;
           kind:            "header" | "item" | "close" | "other";
           raw_text:        string;
@@ -1130,6 +1140,7 @@ export interface Database {
           session_id:       string;
           line_event_id:    string;
           line_message_id?: string | null;
+          line_timestamp_ms: number;
           raw_message_id?:  string | null;
           kind:             "header" | "item" | "close" | "other";
           raw_text:         string;
@@ -1141,6 +1152,7 @@ export interface Database {
           session_id?:      string;
           line_event_id?:   string;
           line_message_id?: string | null;
+          line_timestamp_ms?: number;
           raw_message_id?:  string | null;
           kind?:            "header" | "item" | "close" | "other";
           raw_text?:        string;
@@ -1503,6 +1515,22 @@ export interface Database {
           finalized_by:            string | null;
         };
       };
+      admit_physical_inventory_event: {
+        Args: {
+          p_session_id:          string;
+          p_expected_generation: string;
+          p_line_event_id:       string;
+          p_line_timestamp_ms:   number;
+          p_kind:                string;
+          p_raw_text:            string;
+          p_line_message_id?:    string | null;
+          p_raw_message_id?:     string | null;
+          p_quiet_ms?:           number;
+          p_deadline_ms?:        number;
+          p_as_of?:              string;
+        };
+        Returns: Json;
+      };
       finalize_physical_inventory_session: {
         Args: {
           p_session_id:               string;
@@ -1514,6 +1542,7 @@ export interface Database {
           p_items:                    Json;
           p_fail_closed:              boolean;
           p_fail_reason?:             string | null;
+          p_as_of?:                   string;
         };
         Returns: Json;
       };

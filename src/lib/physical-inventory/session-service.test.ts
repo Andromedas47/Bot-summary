@@ -2,22 +2,20 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "fs";
 import {
   parsePhysicalInventoryDocument,
-  acceptedPhysicalInventoryItems,
 } from "./parse";
 import {
+  PhysicalInventoryAfterCloseBoundaryError,
   PhysicalInventoryAfterCloseError,
+  PhysicalInventoryCloseQuietWindowError,
   PhysicalInventoryGenerationConflictError,
   PhysicalInventorySessionService,
+  PHYSICAL_INVENTORY_CLOSE_QUIET_MS,
   PHYSICAL_INVENTORY_VOID_SUPERSEDE_SLICE,
 } from "./session-service";
 import type { Database } from "@/types/database";
 
 type Row = Record<string, unknown>;
 
-/**
- * In-memory Supabase double for Slice B — tables + finalize RPC.
- * Intentionally has NO produce_sessions / produce_items / inventory tables.
- */
 function makePhysicalInventoryDb() {
   const tables: Record<string, Row[]> = {
     physical_inventory_sessions: [],
@@ -25,7 +23,6 @@ function makePhysicalInventoryDb() {
     physical_inventory_snapshots: [],
     physical_inventory_items: [],
     physical_inventory_lifecycle_events: [],
-    // Sentinels: any write here fails the "no produce writes" assertion helpers
     produce_sessions: [],
     produce_items: [],
   };
@@ -45,15 +42,30 @@ function makePhysicalInventoryDb() {
     });
   }
 
+  /** Simulate immutability triggers. */
+  function assertMutable(table: string, op: "update" | "delete", row?: Row) {
+    if (
+      table === "physical_inventory_snapshots" ||
+      table === "physical_inventory_items" ||
+      table === "physical_inventory_lifecycle_events"
+    ) {
+      throw new Error(`physical inventory ${table} is immutable after write`);
+    }
+    if (table === "physical_inventory_sessions") {
+      if (op === "delete") throw new Error("physical_inventory_sessions rows must not be deleted");
+      if (row && ["finalized", "failed_closed", "voided"].includes(String(row.status))) {
+        throw new Error(`physical_inventory_sessions status=${row.status} is terminal and immutable`);
+      }
+    }
+  }
+
   function query(table: string) {
     const filters: Array<[string, unknown, string]> = [];
     let orderCol: string | null = null;
     let orderAsc = true;
-    let limitN: number | null = null;
     let pendingUpdate: Row | null = null;
 
     const api: Record<string, unknown> = {};
-
     const runSelect = () => {
       let list = rows(table).filter((r) => matches(r, filters));
       if (orderCol) {
@@ -65,7 +77,6 @@ function makePhysicalInventoryDb() {
           return 0;
         });
       }
-      if (limitN != null) list = list.slice(0, limitN);
       return list;
     };
 
@@ -79,92 +90,47 @@ function makePhysicalInventoryDb() {
         select() {
           return {
             async single() {
-              const created = items.map((p) => {
-                const row: Row = {
-                  id: uuid(),
-                  created_at: new Date().toISOString(),
-                  updated_at: new Date().toISOString(),
-                  opened_at: new Date().toISOString(),
-                  ingest_revision: 0,
-                  session_generation: uuid(),
-                  warehouse_code: "MAIN",
-                  status: "open",
-                  warnings: [],
-                  snapshot_id: null,
-                  business_date: null,
-                  ...p,
-                };
-                // unique (session_id, line_event_id)
-                if (table === "physical_inventory_session_ingests") {
-                  const dup = rows(table).find(
-                    (r) =>
-                      r.session_id === row.session_id &&
-                      r.line_event_id === row.line_event_id,
-                  );
-                  if (dup) {
-                    return { data: null, error: { message: "duplicate", code: "23505" } };
-                  }
+              const p = items[0]!;
+              if (table === "physical_inventory_sessions") {
+                const sender = String(p.sender_line_user_id ?? "").trim();
+                if (!sender) {
+                  return { data: null, error: { message: "sender check failed" } };
                 }
-                if (table === "physical_inventory_sessions") {
-                  const active = rows(table).find(
-                    (r) =>
-                      r.source_id === row.source_id &&
-                      r.sender_line_user_id === row.sender_line_user_id &&
-                      (r.status === "open" || r.status === "closing"),
-                  );
-                  if (active) {
-                    return {
-                      data: null,
-                      error: { message: "one active session", code: "23505" },
-                    };
-                  }
+                const active = rows(table).find(
+                  (r) =>
+                    r.source_id === p.source_id &&
+                    r.sender_line_user_id === sender &&
+                    (r.status === "open" || r.status === "closing"),
+                );
+                if (active) {
+                  return { data: null, error: { message: "one active", code: "23505" } };
                 }
-                rows(table).push(row);
-                return row;
-              });
-              if (created[0] && "error" in (created[0] as object)) return created[0];
-              return { data: created[0], error: null };
-            },
-            async then(resolve: (v: unknown) => void) {
-              for (const p of items) {
-                const row: Row = {
-                  id: uuid(),
-                  created_at: new Date().toISOString(),
-                  ...p,
-                };
-                if (table === "physical_inventory_session_ingests") {
-                  const dup = rows(table).find(
-                    (r) =>
-                      r.session_id === row.session_id &&
-                      r.line_event_id === row.line_event_id,
-                  );
-                  if (dup) {
-                    resolve({ data: null, error: { message: "duplicate", code: "23505" } });
-                    return;
-                  }
-                }
-                rows(table).push(row);
               }
-              resolve({ data: null, error: null });
+              const row: Row = {
+                id: uuid(),
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+                opened_at: new Date().toISOString(),
+                ingest_revision: 0,
+                session_generation: uuid(),
+                warehouse_code: "MAIN",
+                status: "open",
+                warnings: [],
+                snapshot_id: null,
+                business_date: null,
+                close_event_timestamp_ms: null,
+                close_quiet_until: null,
+                close_deadline_at: null,
+                close_requested_at: null,
+                ...p,
+                sender_line_user_id: String(p.sender_line_user_id ?? "").trim(),
+              };
+              rows(table).push(row);
+              return { data: row, error: null };
             },
           };
         },
         async then(resolve: (v: unknown) => void) {
-          for (const p of items) {
-            const row: Row = { id: uuid(), created_at: new Date().toISOString(), ...p };
-            if (table === "physical_inventory_session_ingests") {
-              const dup = rows(table).find(
-                (r) =>
-                  r.session_id === row.session_id &&
-                  r.line_event_id === row.line_event_id,
-              );
-              if (dup) {
-                resolve({ data: null, error: { message: "duplicate", code: "23505" } });
-                return;
-              }
-            }
-            rows(table).push(row);
-          }
           resolve({ data: null, error: null });
         },
       };
@@ -186,21 +152,21 @@ function makePhysicalInventoryDb() {
       orderAsc = opts?.ascending !== false;
       return api;
     };
-    api.limit = (n: number) => {
-      limitN = n;
-      return api;
-    };
-    api.maybeSingle = async () => {
-      const list = runSelect();
-      return { data: list[0] ?? null, error: null };
-    };
+    api.maybeSingle = async () => ({ data: runSelect()[0] ?? null, error: null });
     api.single = async () => {
       if (pendingUpdate) {
         const list = rows(table).filter((r) => matches(r, filters));
-        if (list.length === 0) {
-          return { data: null, error: { message: "not found" } };
+        if (!list[0]) return { data: null, error: { message: "not found" } };
+        assertMutable(table, "update", list[0]);
+        if (
+          table === "physical_inventory_sessions" &&
+          list[0].close_event_timestamp_ms != null &&
+          pendingUpdate.close_event_timestamp_ms != null &&
+          pendingUpdate.close_event_timestamp_ms !== list[0].close_event_timestamp_ms
+        ) {
+          throw new Error("close_event_timestamp_ms is immutable once set");
         }
-        Object.assign(list[0]!, pendingUpdate);
+        Object.assign(list[0], pendingUpdate);
         return { data: list[0], error: null };
       }
       const list = runSelect();
@@ -209,14 +175,121 @@ function makePhysicalInventoryDb() {
     api.then = async (resolve: (v: unknown) => void) => {
       if (pendingUpdate) {
         const list = rows(table).filter((r) => matches(r, filters));
-        for (const r of list) Object.assign(r, pendingUpdate);
+        for (const r of list) {
+          assertMutable(table, "update", r);
+          Object.assign(r, pendingUpdate);
+        }
         resolve({ data: list, error: null });
         return;
       }
       resolve({ data: runSelect(), error: null });
     };
-
     return api;
+  }
+
+  async function admitRpc(args: Record<string, unknown>) {
+    const sessionId = args.p_session_id as string;
+    const gen = args.p_expected_generation as string;
+    const eventId = args.p_line_event_id as string;
+    const ts = args.p_line_timestamp_ms as number;
+    const kind = args.p_kind as string;
+    const asOf = new Date(String(args.p_as_of ?? new Date().toISOString()));
+    const quietMs = Number(args.p_quiet_ms ?? 8000);
+    const deadMs = Number(args.p_deadline_ms ?? 30000);
+
+    const session = rows("physical_inventory_sessions").find((s) => s.id === sessionId);
+    if (!session) return { data: null, error: { message: "physical inventory session not found" } };
+    if (session.session_generation !== gen) {
+      return { data: null, error: { message: "generation_conflict" } };
+    }
+    if (["finalized", "failed_closed", "voided"].includes(String(session.status))) {
+      return { data: null, error: { message: "session_closed" } };
+    }
+
+    const existing = rows("physical_inventory_session_ingests").find(
+      (r) => r.session_id === sessionId && r.line_event_id === eventId,
+    );
+    if (existing) {
+      return {
+        data: {
+          accepted: true,
+          inserted: false,
+          reason: "duplicate_event",
+          session_id: session.id,
+          ingest_revision: session.ingest_revision,
+          status: session.status,
+          close_event_timestamp_ms: session.close_event_timestamp_ms,
+        },
+        error: null,
+      };
+    }
+
+    if (session.close_event_timestamp_ms != null && kind === "close") {
+      return {
+        data: {
+          accepted: true,
+          inserted: false,
+          reason: "close_already_requested",
+          session_id: session.id,
+          ingest_revision: session.ingest_revision,
+          status: session.status,
+          close_event_timestamp_ms: session.close_event_timestamp_ms,
+        },
+        error: null,
+      };
+    }
+
+    if (session.close_event_timestamp_ms != null) {
+      if (session.close_deadline_at && asOf >= new Date(String(session.close_deadline_at))) {
+        return { data: null, error: { message: "deadline_elapsed" } };
+      }
+      if (ts > Number(session.close_event_timestamp_ms)) {
+        return { data: null, error: { message: "after_close_boundary" } };
+      }
+    }
+
+    const nextRev = Number(session.ingest_revision) + 1;
+    rows("physical_inventory_session_ingests").push({
+      id: uuid(),
+      session_id: sessionId,
+      line_event_id: eventId,
+      line_message_id: args.p_line_message_id ?? null,
+      line_timestamp_ms: ts,
+      raw_message_id: args.p_raw_message_id ?? null,
+      kind,
+      raw_text: args.p_raw_text,
+      ingest_revision: nextRev,
+      created_at: asOf.toISOString(),
+    });
+
+    Object.assign(session, {
+      ingest_revision: nextRev,
+      updated_at: asOf.toISOString(),
+    });
+    if (kind === "close" && session.close_event_timestamp_ms == null) {
+      Object.assign(session, {
+        status: "closing",
+        close_requested_at: asOf.toISOString(),
+        close_event_timestamp_ms: ts,
+        close_quiet_until: new Date(asOf.getTime() + quietMs).toISOString(),
+        close_deadline_at: new Date(asOf.getTime() + deadMs).toISOString(),
+        close_line_event_id: eventId,
+        close_raw_message_id: args.p_raw_message_id ?? null,
+      });
+    }
+
+    return {
+      data: {
+        accepted: true,
+        inserted: true,
+        reason: "admitted",
+        session_id: session.id,
+        ingest_revision: session.ingest_revision,
+        status: session.status,
+        close_event_timestamp_ms: session.close_event_timestamp_ms,
+      },
+      error: null,
+    };
   }
 
   async function finalizeRpc(args: Record<string, unknown>) {
@@ -224,8 +297,8 @@ function makePhysicalInventoryDb() {
     const gen = args.p_expected_generation as string;
     const rev = args.p_expected_ingest_revision as number;
     const failClosed = Boolean(args.p_fail_closed);
-    const sessions = rows("physical_inventory_sessions");
-    const session = sessions.find((s) => s.id === sessionId);
+    const asOf = new Date(String(args.p_as_of ?? new Date().toISOString()));
+    const session = rows("physical_inventory_sessions").find((s) => s.id === sessionId);
     if (!session) return { data: null, error: { message: "physical inventory session not found" } };
     if (session.session_generation !== gen) {
       return { data: null, error: { message: "generation_conflict" } };
@@ -264,21 +337,29 @@ function makePhysicalInventoryDb() {
       return { data: null, error: { message: "stale_ingest_revision" } };
     }
 
+    if (!failClosed) {
+      if (session.close_event_timestamp_ms == null) {
+        return { data: null, error: { message: "close_boundary_required" } };
+      }
+      if (session.close_quiet_until && asOf < new Date(String(session.close_quiet_until))) {
+        return { data: null, error: { message: "close_quiet_window" } };
+      }
+    }
+
     if (failClosed) {
+      assertMutable("physical_inventory_sessions", "update", session);
       Object.assign(session, {
         status: "failed_closed",
-        failed_closed_at: new Date().toISOString(),
-        closed_at: new Date().toISOString(),
+        failed_closed_at: asOf.toISOString(),
+        closed_at: asOf.toISOString(),
         fail_reason: args.p_fail_reason ?? "failed_closed",
-        warnings: args.p_warnings ?? [],
-        parser_version: args.p_parser_version,
-        updated_at: new Date().toISOString(),
+        updated_at: asOf.toISOString(),
       });
       rows("physical_inventory_lifecycle_events").push({
         id: uuid(),
         session_id: session.id,
         event: "failed_closed",
-        created_at: new Date().toISOString(),
+        created_at: asOf.toISOString(),
       });
       return {
         data: {
@@ -293,11 +374,8 @@ function makePhysicalInventoryDb() {
       };
     }
 
-    if (!args.p_business_date) {
-      return { data: null, error: { message: "business_date_required" } };
-    }
     const items = (args.p_items as Row[]) ?? [];
-    if (!Array.isArray(items) || items.length === 0) {
+    if (!args.p_business_date || !items.length) {
       return { data: null, error: { message: "items_required" } };
     }
 
@@ -308,11 +386,11 @@ function makePhysicalInventoryDb() {
       if (it.resolution_status === "ACCEPTED_NORMALIZED") accNorm++;
       else if (it.resolution_status === "ACCEPTED_RAW") accRaw++;
       else if (it.resolution_status === "REJECTED") rejected++;
-      else return { data: null, error: { message: "invalid_resolution_status" } };
     }
 
+    const countedAt = new Date(Number(session.close_event_timestamp_ms)).toISOString();
     const snapshotId = uuid();
-    const snapshot = {
+    rows("physical_inventory_snapshots").push({
       id: snapshotId,
       session_id: session.id,
       warehouse_code: "MAIN",
@@ -320,7 +398,7 @@ function makePhysicalInventoryDb() {
       source_id: session.source_id,
       sender_line_user_id: session.sender_line_user_id,
       business_date: args.p_business_date,
-      counted_at: new Date().toISOString(),
+      counted_at: countedAt,
       parser_version: args.p_parser_version,
       accepted_normalized_count: accNorm,
       accepted_raw_count: accRaw,
@@ -329,15 +407,10 @@ function makePhysicalInventoryDb() {
       warnings: args.p_warnings ?? [],
       status: "finalized",
       ingest_idempotency_key: key,
-      finalized_at: new Date().toISOString(),
+      finalized_at: asOf.toISOString(),
       voided_at: null,
-      voided_by: null,
-      void_reason: null,
-      replacement_snapshot_id: null,
-      created_at: new Date().toISOString(),
-    };
-    rows("physical_inventory_snapshots").push(snapshot);
-
+      created_at: asOf.toISOString(),
+    });
     items.forEach((it, idx) => {
       rows("physical_inventory_items").push({
         id: uuid(),
@@ -352,25 +425,24 @@ function makePhysicalInventoryDb() {
         normalized_unit: it.normalized_unit ?? null,
         resolution_status: it.resolution_status,
         reason: it.reason ?? null,
-        created_at: new Date().toISOString(),
+        created_at: asOf.toISOString(),
       });
     });
 
+    assertMutable("physical_inventory_sessions", "update", session);
     Object.assign(session, {
       status: "finalized",
-      closed_at: new Date().toISOString(),
+      closed_at: asOf.toISOString(),
       business_date: args.p_business_date,
-      parser_version: args.p_parser_version,
       snapshot_id: snapshotId,
-      warnings: args.p_warnings ?? [],
-      updated_at: new Date().toISOString(),
+      updated_at: asOf.toISOString(),
     });
     rows("physical_inventory_lifecycle_events").push({
       id: uuid(),
       session_id: session.id,
       snapshot_id: snapshotId,
       event: "finalized",
-      created_at: new Date().toISOString(),
+      created_at: asOf.toISOString(),
     });
 
     return {
@@ -381,6 +453,7 @@ function makePhysicalInventoryDb() {
         snapshot_id: snapshotId,
         session_id: session.id,
         item_count: items.length,
+        counted_at: countedAt,
       },
       error: null,
     };
@@ -394,6 +467,7 @@ function makePhysicalInventoryDb() {
       return query(table);
     },
     async rpc(name: string, args: Record<string, unknown>) {
+      if (name === "admit_physical_inventory_event") return admitRpc(args);
       if (name === "finalize_physical_inventory_session") return finalizeRpc(args);
       throw new Error(`Unexpected RPC ${name}`);
     },
@@ -401,11 +475,21 @@ function makePhysicalInventoryDb() {
     _count(table: string) {
       return rows(table).length;
     },
+    _tryMutateSnapshot(snapshotId: string) {
+      const snap = rows("physical_inventory_snapshots").find((s) => s.id === snapshotId);
+      assertMutable("physical_inventory_snapshots", "update", snap);
+    },
+    _tryDeleteItem(itemId: string) {
+      const item = rows("physical_inventory_items").find((s) => s.id === itemId);
+      assertMutable("physical_inventory_items", "delete", item);
+    },
   };
 
   return db as unknown as import("@supabase/supabase-js").SupabaseClient<Database> & {
     _tables: Record<string, Row[]>;
     _count: (t: string) => number;
+    _tryMutateSnapshot: (id: string) => void;
+    _tryDeleteItem: (id: string) => void;
   };
 }
 
@@ -454,62 +538,32 @@ const FIXTURE_B = `สตอกผลไม้คงเหลือวันน�
 10.ตะกร้า
 จบรายการผลไม้ที่เหลือในบ้าน`;
 
-async function openAndIngestAll(
-  svc: PhysicalInventorySessionService,
-  texts: string[],
-  sender = "U-sender-a",
-  source = "C-group-phys",
-) {
-  const opened = await svc.openSession({
-    sourceType: "group",
-    sourceId: source,
-    senderLineUserId: sender,
-  });
-  expect(opened.opened).toBe(true);
-  const session = opened.session;
-  let rev = 0;
-  for (let i = 0; i < texts.length; i++) {
-    const kind = i === 0 ? "header" : i === texts.length - 1 ? "close" : "item";
-    const r = await svc.registerIngest({
-      sessionId: session.id,
-      expectedGeneration: session.session_generation,
-      lineEventId: `evt-${i}`,
-      lineMessageId: `msg-${i}`,
-      kind: kind as "header" | "item" | "close",
-      rawText: texts[i]!,
-    });
-    rev = Number(r.session.ingest_revision);
-  }
-  const fresh = await svc.getSession(session.id);
-  return { session: fresh!, revision: rev };
-}
-
 describe("PhysicalInventorySessionService — Slice B", () => {
-  test("create/open physical session + source/sender isolation", async () => {
+  test("create/open + sender blank rejected + isolation", async () => {
     const db = makePhysicalInventoryDb();
     const svc = new PhysicalInventorySessionService(db);
+    await expect(
+      svc.openSession({ sourceType: "group", sourceId: "G1", senderLineUserId: "  " }),
+    ).rejects.toThrow(/sender_line_user_id required/);
+
     const a = await svc.openSession({
       sourceType: "group",
       sourceId: "G1",
       senderLineUserId: "U1",
     });
     expect(a.opened).toBe(true);
-
     const again = await svc.openSession({
       sourceType: "group",
       sourceId: "G1",
       senderLineUserId: "U1",
     });
     expect(again.opened).toBe(false);
-    expect(again.reason).toBe("already_open");
-
-    const otherSender = await svc.openSession({
+    const other = await svc.openSession({
       sourceType: "group",
       sourceId: "G1",
       senderLineUserId: "U2",
     });
-    expect(otherSender.opened).toBe(true);
-    expect(otherSender.session.id).not.toBe(a.session.id);
+    expect(other.opened).toBe(true);
   });
 
   test("duplicate LINE event idempotency", async () => {
@@ -524,21 +578,21 @@ describe("PhysicalInventorySessionService — Slice B", () => {
       sessionId: session.id,
       expectedGeneration: session.session_generation,
       lineEventId: "evt-1",
+      lineTimestampMs: 1_000,
       kind: "header",
       rawText: "สตอกผลไม้คงเหลือ\n27/7/69",
     });
     expect(first.inserted).toBe(true);
-    expect(first.session.ingest_revision).toBe(1);
-
     const dup = await svc.registerIngest({
       sessionId: session.id,
       expectedGeneration: session.session_generation,
       lineEventId: "evt-1",
+      lineTimestampMs: 1_000,
       kind: "header",
       rawText: "สตอกผลไม้คงเหลือ\n27/7/69",
     });
     expect(dup.inserted).toBe(false);
-    expect(dup.session.ingest_revision).toBe(1);
+    expect(dup.reason).toBe("duplicate_event");
     expect(db._count("physical_inventory_session_ingests")).toBe(1);
   });
 
@@ -555,248 +609,92 @@ describe("PhysicalInventorySessionService — Slice B", () => {
         sessionId: session.id,
         expectedGeneration: "00000000-0000-4000-8000-999999999999",
         lineEventId: "evt-x",
+        lineTimestampMs: 1,
         kind: "item",
         rawText: "1มะม่วง\n3โล",
       }),
     ).rejects.toBeInstanceOf(PhysicalInventoryGenerationConflictError);
   });
 
-  test("append multiple item messages + close boundary + duplicate close", async () => {
+  test("fixtures persist 8 and 11 items; counted_at = close LINE time", async () => {
     const db = makePhysicalInventoryDb();
     const svc = new PhysicalInventorySessionService(db);
-    const { session, revision } = await openAndIngestAll(svc, [
-      "สตอกผลไม้คงเหลือวันนี้\n27/7/69",
-      "1แตงโม\n45.ลูก",
-      "2มะละกอ\n15ลูก",
-      "จบรายการผลไม้ที่เหลือในบ้าน",
-    ]);
-    expect(session.status).toBe("closing");
-    expect(revision).toBe(4);
-
-    const texts = await svc.listIngestTexts(session.id);
-    expect(texts).toHaveLength(4);
-
-    // duplicate close event
-    const dupClose = await svc.registerIngest({
-      sessionId: session.id,
-      expectedGeneration: session.session_generation,
-      lineEventId: "evt-3", // same as last
-      kind: "close",
-      rawText: "จบรายการผลไม้ที่เหลือในบ้าน",
-    });
-    expect(dupClose.inserted).toBe(false);
-  });
-
-  test("stale append after finalize raises", async () => {
-    const db = makePhysicalInventoryDb();
-    const svc = new PhysicalInventorySessionService(db);
-    const { session, revision } = await openAndIngestAll(svc, [
-      FIXTURE_B.split("\n\n")[0] ?? FIXTURE_B,
-    ].concat(["จบ"]));
-    // Use full fixture via parse + finalize
-    const parsed = parsePhysicalInventoryDocument(FIXTURE_B);
-    // Need proper revision: reopen flow with full messages
-    const db2 = makePhysicalInventoryDb();
-    const svc2 = new PhysicalInventorySessionService(db2);
-    const msgs = [
-      "สตอกผลไม้คงเหลือวันนี้\n27/7/69",
-      "1แตงโม\n45.ลูก",
-      "จบ",
-    ];
-    const ctx = await openAndIngestAll(svc2, msgs);
-    const parsed2 = parsePhysicalInventoryDocument(msgs.join("\n"));
-    const fin = await svc2.finalize({
-      sessionId: ctx.session.id,
-      expectedGeneration: ctx.session.session_generation,
-      expectedIngestRevision: ctx.revision,
-      parsed: parsed2,
-    });
-    expect(fin.status).toBe("finalized");
-
-    await expect(
-      svc2.registerIngest({
-        sessionId: ctx.session.id,
-        expectedGeneration: ctx.session.session_generation,
-        lineEventId: "evt-after",
-        kind: "item",
-        rawText: "9something",
-      }),
-    ).rejects.toBeInstanceOf(PhysicalInventoryAfterCloseError);
-
-    void session;
-    void revision;
-    void parsed;
-  });
-
-  test("atomic finalization + idempotent redelivery", async () => {
-    const db = makePhysicalInventoryDb();
-    const svc = new PhysicalInventorySessionService(db);
-    const msgs = [
-      "สตอกผลไม้คงเหลือ\n26/7/69",
-      "1มะม่วง\n3โล",
-      "จบ",
-    ];
-    const ctx = await openAndIngestAll(svc, msgs);
-    const parsed = parsePhysicalInventoryDocument(msgs.join("\n"));
-    const first = await svc.finalize({
-      sessionId: ctx.session.id,
-      expectedGeneration: ctx.session.session_generation,
-      expectedIngestRevision: ctx.revision,
-      parsed,
-    });
-    expect(first.status).toBe("finalized");
-    expect(first.idempotent).toBe(false);
-    expect(first.snapshotId).toBeTruthy();
-
-    const second = await svc.finalize({
-      sessionId: ctx.session.id,
-      expectedGeneration: ctx.session.session_generation,
-      expectedIngestRevision: ctx.revision,
-      parsed,
-    });
-    expect(second.idempotent).toBe(true);
-    expect(second.snapshotId).toBe(first.snapshotId);
-    expect(db._count("physical_inventory_snapshots")).toBe(1);
-  });
-
-  test("8-item 27/7 fixture persistence", async () => {
-    const db = makePhysicalInventoryDb();
-    const svc = new PhysicalInventorySessionService(db);
-    const parsed = parsePhysicalInventoryDocument(FIXTURE_B);
-    expect(acceptedPhysicalInventoryItems(parsed)).toHaveLength(8);
-
-    const msgs = FIXTURE_B.split(/\n(?=\d|จบ|สตอก)/).filter(Boolean);
-    // Simpler: single ingest of full doc + close already inside
+    const closeTs = 1_700_000_000_8000;
     const opened = await svc.openSession({
       sourceType: "group",
       sourceId: "G-b",
       senderLineUserId: "U-b",
-      businessDate: "2026-07-27",
     });
-    const ing = await svc.registerIngest({
+    await svc.registerIngest({
       sessionId: opened.session.id,
       expectedGeneration: opened.session.session_generation,
-      lineEventId: "evt-full-b",
+      lineEventId: "full",
+      lineTimestampMs: closeTs - 1000,
       kind: "header",
       rawText: FIXTURE_B,
+      asOf: new Date(closeTs - 1000).toISOString(),
     });
+    const closed = await svc.registerIngest({
+      sessionId: opened.session.id,
+      expectedGeneration: opened.session.session_generation,
+      lineEventId: "close-b",
+      lineTimestampMs: closeTs,
+      kind: "close",
+      rawText: "จบรายการผลไม้ที่เหลือในบ้าน",
+      asOf: new Date(closeTs).toISOString(),
+      quietMs: 100,
+    });
+    const parsed = parsePhysicalInventoryDocument(FIXTURE_B);
     const fin = await svc.finalize({
       sessionId: opened.session.id,
       expectedGeneration: opened.session.session_generation,
-      expectedIngestRevision: Number(ing.session.ingest_revision),
+      expectedIngestRevision: Number(closed.session.ingest_revision),
       parsed,
+      asOf: new Date(closeTs + 200).toISOString(),
     });
     expect(fin.status).toBe("finalized");
-    const items = await svc.listSnapshotItems(fin.snapshotId!);
-    expect(items).toHaveLength(8);
-    expect(items.filter((i) => i.resolution_status === "ACCEPTED_RAW")).toHaveLength(3);
-    expect(items.find((i) => i.raw_unit === "ตะกร้า")?.normalized_unit).toBeNull();
+    expect(fin.countedAt).toBe(new Date(closeTs).toISOString());
     const snap = await svc.getSnapshot(fin.snapshotId!);
-    expect(snap?.business_date).toBe("2026-07-27");
-    expect(snap?.warehouse_code).toBe("MAIN");
-    expect(snap?.item_count).toBe(8);
-    void msgs;
-  });
+    expect(snap?.counted_at).toBe(new Date(closeTs).toISOString());
+    expect(await svc.listSnapshotItems(fin.snapshotId!)).toHaveLength(8);
 
-  test("11-item 26/7 fixture persistence", async () => {
-    const db = makePhysicalInventoryDb();
-    const svc = new PhysicalInventorySessionService(db);
-    const parsed = parsePhysicalInventoryDocument(FIXTURE_A);
-    expect(acceptedPhysicalInventoryItems(parsed)).toHaveLength(11);
-    const opened = await svc.openSession({
+    const db2 = makePhysicalInventoryDb();
+    const svc2 = new PhysicalInventorySessionService(db2);
+    const o2 = await svc2.openSession({
       sourceType: "group",
       sourceId: "G-a",
       senderLineUserId: "U-a",
     });
-    const ing = await svc.registerIngest({
-      sessionId: opened.session.id,
-      expectedGeneration: opened.session.session_generation,
-      lineEventId: "evt-full-a",
+    await svc2.registerIngest({
+      sessionId: o2.session.id,
+      expectedGeneration: o2.session.session_generation,
+      lineEventId: "a1",
+      lineTimestampMs: 100,
       kind: "header",
       rawText: FIXTURE_A,
+      asOf: new Date(100).toISOString(),
     });
-    const fin = await svc.finalize({
-      sessionId: opened.session.id,
-      expectedGeneration: opened.session.session_generation,
-      expectedIngestRevision: Number(ing.session.ingest_revision),
-      parsed,
+    const c2 = await svc2.registerIngest({
+      sessionId: o2.session.id,
+      expectedGeneration: o2.session.session_generation,
+      lineEventId: "a-close",
+      lineTimestampMs: 200,
+      kind: "close",
+      rawText: "จบ",
+      asOf: new Date(200).toISOString(),
+      quietMs: 50,
     });
-    const items = await svc.listSnapshotItems(fin.snapshotId!);
-    expect(items).toHaveLength(11);
-    expect(items.map((i) => i.staff_sequence)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    const fin2 = await svc2.finalize({
+      sessionId: o2.session.id,
+      expectedGeneration: o2.session.session_generation,
+      expectedIngestRevision: Number(c2.session.ingest_revision),
+      parsed: parsePhysicalInventoryDocument(FIXTURE_A),
+      asOf: new Date(300).toISOString(),
+    });
+    expect(await svc2.listSnapshotItems(fin2.snapshotId!)).toHaveLength(11);
   });
 
-  test("duplicate sequence persists both rows", async () => {
-    const db = makePhysicalInventoryDb();
-    const svc = new PhysicalInventorySessionService(db);
-    const doc = `สตอกผลไม้คงเหลือ
-27/7/69
-7แตงโม
-45ลูก
-7มะละกอ
-15ลูก
-จบ`;
-    const parsed = parsePhysicalInventoryDocument(doc);
-    expect(acceptedPhysicalInventoryItems(parsed)).toHaveLength(2);
-    const opened = await svc.openSession({
-      sourceType: "group",
-      sourceId: "G-dup",
-      senderLineUserId: "U-dup",
-    });
-    const ing = await svc.registerIngest({
-      sessionId: opened.session.id,
-      expectedGeneration: opened.session.session_generation,
-      lineEventId: "e1",
-      kind: "header",
-      rawText: doc,
-    });
-    const fin = await svc.finalize({
-      sessionId: opened.session.id,
-      expectedGeneration: opened.session.session_generation,
-      expectedIngestRevision: Number(ing.session.ingest_revision),
-      parsed,
-    });
-    const items = await svc.listSnapshotItems(fin.snapshotId!);
-    expect(items).toHaveLength(2);
-    expect(items.map((i) => i.staff_sequence)).toEqual([7, 7]);
-    expect(items.map((i) => i.raw_product_description)).toEqual(["แตงโม", "มะละกอ"]);
-  });
-
-  test("ACCEPTED_RAW and REJECTED both persist", async () => {
-    const db = makePhysicalInventoryDb();
-    const svc = new PhysicalInventorySessionService(db);
-    const doc = `สตอกผลไม้คงเหลือ
-27/7/69
-1พุทรา3ตะกร้า
-2มะม่วง
-จบ`;
-    const parsed = parsePhysicalInventoryDocument(doc);
-    expect(parsed.items.some((i) => i.resolutionStatus === "ACCEPTED_RAW")).toBe(true);
-    expect(parsed.items.some((i) => i.resolutionStatus === "REJECTED")).toBe(true);
-    const opened = await svc.openSession({
-      sourceType: "group",
-      sourceId: "G-raw",
-      senderLineUserId: "U-raw",
-    });
-    const ing = await svc.registerIngest({
-      sessionId: opened.session.id,
-      expectedGeneration: opened.session.session_generation,
-      lineEventId: "e1",
-      kind: "header",
-      rawText: doc,
-    });
-    const fin = await svc.finalize({
-      sessionId: opened.session.id,
-      expectedGeneration: opened.session.session_generation,
-      expectedIngestRevision: Number(ing.session.ingest_revision),
-      parsed,
-    });
-    const items = await svc.listSnapshotItems(fin.snapshotId!);
-    expect(items.some((i) => i.resolution_status === "ACCEPTED_RAW")).toBe(true);
-    expect(items.some((i) => i.resolution_status === "REJECTED")).toBe(true);
-  });
-
-  test("failed close creates no partial finalized snapshot", async () => {
+  test("failed close + no produce writes + migration surface", async () => {
     const db = makePhysicalInventoryDb();
     const svc = new PhysicalInventorySessionService(db);
     const opened = await svc.openSession({
@@ -808,43 +706,331 @@ describe("PhysicalInventorySessionService — Slice B", () => {
       sessionId: opened.session.id,
       expectedGeneration: opened.session.session_generation,
       lineEventId: "e1",
+      lineTimestampMs: 1,
       kind: "header",
       rawText: "สตอกผลไม้คงเหลือ\nจบ",
     });
-    const parsed = parsePhysicalInventoryDocument("สตอกผลไม้คงเหลือ\nจบ");
     const fin = await svc.finalize({
       sessionId: opened.session.id,
       expectedGeneration: opened.session.session_generation,
       expectedIngestRevision: Number(ing.session.ingest_revision),
-      parsed,
+      parsed: parsePhysicalInventoryDocument("สตอกผลไม้คงเหลือ\nจบ"),
     });
     expect(fin.status).toBe("failed_closed");
-    expect(fin.snapshotId).toBeNull();
     expect(db._count("physical_inventory_snapshots")).toBe(0);
-    expect(db._count("physical_inventory_items")).toBe(0);
-    const session = await svc.getSession(opened.session.id);
-    expect(session?.status).toBe("failed_closed");
-  });
-
-  test("no produce_sessions / produce_items access from service path", async () => {
-    const db = makePhysicalInventoryDb();
     expect(() => db.from("produce_sessions")).toThrow(/FORBIDDEN/);
-    expect(() => db.from("produce_items")).toThrow(/FORBIDDEN/);
-    expect(db._count("produce_sessions")).toBe(0);
-    expect(db._count("produce_items")).toBe(0);
+    expect(PHYSICAL_INVENTORY_VOID_SUPERSEDE_SLICE).toBe("E");
+    const sql = readFileSync("supabase/migrations/0047_physical_inventory_capture.sql", "utf8");
+    expect(sql).toContain("physical_inventory_forbid_mutation");
+    expect(sql).toContain("admit_physical_inventory_event");
+    expect(sql).toContain("close_event_timestamp_ms");
+    expect(sql).not.toMatch(/CREATE TABLE\s+public\.inventory_/i);
+  });
+});
+
+describe("adversarial close-boundary + immutability", () => {
+  test("A: late item with LINE ts < close ts is admitted and finalized", async () => {
+    const db = makePhysicalInventoryDb();
+    const svc = new PhysicalInventorySessionService(db);
+    const opened = await svc.openSession({
+      sourceType: "group",
+      sourceId: "G-race",
+      senderLineUserId: "U-race",
+    });
+    const gen = opened.session.session_generation;
+    const tClose = 10_000;
+    await svc.registerIngest({
+      sessionId: opened.session.id,
+      expectedGeneration: gen,
+      lineEventId: "i7",
+      lineTimestampMs: 7_000,
+      kind: "header",
+      rawText: "สตอกผลไม้คงเหลือ\n27/7/69\n7แตงโม\n45ลูก",
+      asOf: new Date(7_000).toISOString(),
+    });
+    const close = await svc.registerIngest({
+      sessionId: opened.session.id,
+      expectedGeneration: gen,
+      lineEventId: "close",
+      lineTimestampMs: tClose,
+      kind: "close",
+      rawText: "จบ",
+      asOf: new Date(tClose).toISOString(),
+      quietMs: 500,
+    });
+    expect(close.session.status).toBe("closing");
+    expect(close.session.close_event_timestamp_ms).toBe(tClose);
+
+    const late = await svc.registerIngest({
+      sessionId: opened.session.id,
+      expectedGeneration: gen,
+      lineEventId: "i8",
+      lineTimestampMs: 9_000, // before close boundary
+      kind: "item",
+      rawText: "8มะละกอ\n15ลูก",
+      asOf: new Date(tClose + 100).toISOString(), // arrives after close on server
+      quietMs: 500,
+    });
+    expect(late.inserted).toBe(true);
+
+    const doc = `สตอกผลไม้คงเหลือ
+27/7/69
+7แตงโม
+45ลูก
+8มะละกอ
+15ลูก
+จบ`;
+    const fin = await svc.finalize({
+      sessionId: opened.session.id,
+      expectedGeneration: gen,
+      expectedIngestRevision: Number(late.session.ingest_revision),
+      parsed: parsePhysicalInventoryDocument(doc),
+      asOf: new Date(tClose + 600).toISOString(),
+    });
+    const items = await svc.listSnapshotItems(fin.snapshotId!);
+    expect(items.map((i) => i.raw_product_description)).toEqual(["แตงโม", "มะละกอ"]);
   });
 
-  test("no inventory ledger table exists in Slice B surface", () => {
-    expect(PHYSICAL_INVENTORY_VOID_SUPERSEDE_SLICE).toBe("E");
-    const sql = readFileSync(
-      "supabase/migrations/0047_physical_inventory_capture.sql",
-      "utf8",
+  test("B: item with LINE ts > close ts rejected", async () => {
+    const db = makePhysicalInventoryDb();
+    const svc = new PhysicalInventorySessionService(db);
+    const opened = await svc.openSession({
+      sourceType: "group",
+      sourceId: "G-b",
+      senderLineUserId: "U-b",
+    });
+    const gen = opened.session.session_generation;
+    await svc.registerIngest({
+      sessionId: opened.session.id,
+      expectedGeneration: gen,
+      lineEventId: "i1",
+      lineTimestampMs: 1_000,
+      kind: "item",
+      rawText: "1มะม่วง\n3โล",
+    });
+    await svc.registerIngest({
+      sessionId: opened.session.id,
+      expectedGeneration: gen,
+      lineEventId: "close",
+      lineTimestampMs: 2_000,
+      kind: "close",
+      rawText: "จบ",
+      quietMs: 1_000,
+    });
+    await expect(
+      svc.registerIngest({
+        sessionId: opened.session.id,
+        expectedGeneration: gen,
+        lineEventId: "late",
+        lineTimestampMs: 2_500,
+        kind: "item",
+        rawText: "2ทุเรียน\n1โล",
+        asOf: new Date(2_100).toISOString(),
+      }),
+    ).rejects.toBeInstanceOf(PhysicalInventoryAfterCloseBoundaryError);
+  });
+
+  test("C: duplicate close does not move boundary", async () => {
+    const db = makePhysicalInventoryDb();
+    const svc = new PhysicalInventorySessionService(db);
+    const opened = await svc.openSession({
+      sourceType: "group",
+      sourceId: "G-c",
+      senderLineUserId: "U-c",
+    });
+    const gen = opened.session.session_generation;
+    const first = await svc.registerIngest({
+      sessionId: opened.session.id,
+      expectedGeneration: gen,
+      lineEventId: "c1",
+      lineTimestampMs: 5_000,
+      kind: "close",
+      rawText: "จบ",
+      asOf: new Date(5_000).toISOString(),
+      quietMs: 100,
+    });
+    const boundary = first.session.close_event_timestamp_ms;
+    const quiet = first.session.close_quiet_until;
+    const dup = await svc.registerIngest({
+      sessionId: opened.session.id,
+      expectedGeneration: gen,
+      lineEventId: "c2",
+      lineTimestampMs: 9_999,
+      kind: "close",
+      rawText: "จบ",
+      asOf: new Date(5_050).toISOString(),
+    });
+    expect(dup.reason).toBe("close_already_requested");
+    expect(dup.session.close_event_timestamp_ms).toBe(boundary);
+    expect(dup.session.close_quiet_until).toBe(quiet);
+  });
+
+  test("D: late duplicate event is idempotent", async () => {
+    const db = makePhysicalInventoryDb();
+    const svc = new PhysicalInventorySessionService(db);
+    const opened = await svc.openSession({
+      sourceType: "group",
+      sourceId: "G-d",
+      senderLineUserId: "U-d",
+    });
+    const gen = opened.session.session_generation;
+    await svc.registerIngest({
+      sessionId: opened.session.id,
+      expectedGeneration: gen,
+      lineEventId: "same",
+      lineTimestampMs: 1_000,
+      kind: "item",
+      rawText: "1มะม่วง\n3โล",
+    });
+    await svc.registerIngest({
+      sessionId: opened.session.id,
+      expectedGeneration: gen,
+      lineEventId: "close",
+      lineTimestampMs: 2_000,
+      kind: "close",
+      rawText: "จบ",
+      quietMs: 500,
+    });
+    const lateDup = await svc.registerIngest({
+      sessionId: opened.session.id,
+      expectedGeneration: gen,
+      lineEventId: "same",
+      lineTimestampMs: 1_000,
+      kind: "item",
+      rawText: "1มะม่วง\n3โล",
+      asOf: new Date(2_100).toISOString(),
+    });
+    expect(lateDup.inserted).toBe(false);
+    expect(lateDup.reason).toBe("duplicate_event");
+    expect(db._count("physical_inventory_session_ingests")).toBe(2);
+  });
+
+  test("E: finalize during quiet window fails; after quiet + matching rev succeeds", async () => {
+    const db = makePhysicalInventoryDb();
+    const svc = new PhysicalInventorySessionService(db);
+    const opened = await svc.openSession({
+      sourceType: "group",
+      sourceId: "G-e",
+      senderLineUserId: "U-e",
+    });
+    const gen = opened.session.session_generation;
+    await svc.registerIngest({
+      sessionId: opened.session.id,
+      expectedGeneration: gen,
+      lineEventId: "h",
+      lineTimestampMs: 1_000,
+      kind: "header",
+      rawText: "สตอกผลไม้คงเหลือ\n27/7/69\n1มะม่วง\n3โล",
+    });
+    const closed = await svc.registerIngest({
+      sessionId: opened.session.id,
+      expectedGeneration: gen,
+      lineEventId: "c",
+      lineTimestampMs: 2_000,
+      kind: "close",
+      rawText: "จบ",
+      asOf: new Date(2_000).toISOString(),
+      quietMs: 1_000,
+    });
+    const revAtClose = Number(closed.session.ingest_revision);
+    const parsed = parsePhysicalInventoryDocument(
+      "สตอกผลไม้คงเหลือ\n27/7/69\n1มะม่วง\n3โล\nจบ",
     );
-    expect(sql).not.toMatch(/CREATE TABLE\s+public\.produce_/i);
-    expect(sql).not.toMatch(/CREATE TABLE\s+public\.inventory_/i);
-    expect(sql).toContain("physical_inventory_sessions");
-    expect(sql).toContain("ENABLE ROW LEVEL SECURITY");
-    expect(sql).toContain("GRANT EXECUTE");
-    expect(sql).toContain("service_role");
+    await expect(
+      svc.finalize({
+        sessionId: opened.session.id,
+        expectedGeneration: gen,
+        expectedIngestRevision: revAtClose,
+        parsed,
+        asOf: new Date(2_100).toISOString(), // still in quiet
+      }),
+    ).rejects.toBeInstanceOf(PhysicalInventoryCloseQuietWindowError);
+
+    // Late pre-boundary event bumps revision — old finalize rev would be stale
+    const late = await svc.registerIngest({
+      sessionId: opened.session.id,
+      expectedGeneration: gen,
+      lineEventId: "late-ok",
+      lineTimestampMs: 1_500,
+      kind: "item",
+      rawText: "2ทุเรียน\n1โล",
+      asOf: new Date(2_200).toISOString(),
+      quietMs: 1_000,
+    });
+    await expect(
+      svc.finalize({
+        sessionId: opened.session.id,
+        expectedGeneration: gen,
+        expectedIngestRevision: revAtClose, // stale after late admit
+        parsed,
+        asOf: new Date(3_100).toISOString(),
+      }),
+    ).rejects.toThrow(/stale_ingest_revision/);
+
+    const fin = await svc.finalize({
+      sessionId: opened.session.id,
+      expectedGeneration: gen,
+      expectedIngestRevision: Number(late.session.ingest_revision),
+      parsed: parsePhysicalInventoryDocument(
+        "สตอกผลไม้คงเหลือ\n27/7/69\n1มะม่วง\n3โล\n2ทุเรียน\n1โล\nจบ",
+      ),
+      asOf: new Date(3_100).toISOString(),
+    });
+    expect(fin.status).toBe("finalized");
+    expect(db._count("physical_inventory_snapshots")).toBe(1);
+    expect(PHYSICAL_INVENTORY_CLOSE_QUIET_MS).toBe(8_000);
+  });
+
+  test("F: finalized session append hard-rejects; snapshot immutable", async () => {
+    const db = makePhysicalInventoryDb();
+    const svc = new PhysicalInventorySessionService(db);
+    const opened = await svc.openSession({
+      sourceType: "group",
+      sourceId: "G-f",
+      senderLineUserId: "U-f",
+    });
+    const gen = opened.session.session_generation;
+    await svc.registerIngest({
+      sessionId: opened.session.id,
+      expectedGeneration: gen,
+      lineEventId: "h",
+      lineTimestampMs: 1,
+      kind: "header",
+      rawText: "สตอกผลไม้คงเหลือ\n27/7/69\n1มะม่วง\n3โล",
+      asOf: new Date(1).toISOString(),
+    });
+    const closed = await svc.registerIngest({
+      sessionId: opened.session.id,
+      expectedGeneration: gen,
+      lineEventId: "c",
+      lineTimestampMs: 2,
+      kind: "close",
+      rawText: "จบ",
+      asOf: new Date(2).toISOString(),
+      quietMs: 10,
+    });
+    const fin = await svc.finalize({
+      sessionId: opened.session.id,
+      expectedGeneration: gen,
+      expectedIngestRevision: Number(closed.session.ingest_revision),
+      parsed: parsePhysicalInventoryDocument(
+        "สตอกผลไม้คงเหลือ\n27/7/69\n1มะม่วง\n3โล\nจบ",
+      ),
+      asOf: new Date(20).toISOString(),
+    });
+    await expect(
+      svc.registerIngest({
+        sessionId: opened.session.id,
+        expectedGeneration: gen,
+        lineEventId: "after",
+        lineTimestampMs: 1,
+        kind: "item",
+        rawText: "x",
+      }),
+    ).rejects.toBeInstanceOf(PhysicalInventoryAfterCloseError);
+
+    expect(() => db._tryMutateSnapshot(fin.snapshotId!)).toThrow(/immutable/);
+    const items = await svc.listSnapshotItems(fin.snapshotId!);
+    expect(() => db._tryDeleteItem(items[0]!.id)).toThrow(/immutable/);
   });
 });

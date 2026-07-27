@@ -9,8 +9,17 @@ export type PhysicalInventoryWarehouseCode = typeof PHYSICAL_INVENTORY_WAREHOUSE
 
 export const PHYSICAL_INVENTORY_PARSER_VERSION = "p2a-physical-1.0.0";
 
+/**
+ * Capture-time acceptance only — NOT canonical inventory identity.
+ *
+ * - ACCEPTED_NORMALIZED: syntactically valid; unit spelling known / product NFC-normalized.
+ *   Must NOT be treated by P2C as an authoritative product master key.
+ * - ACCEPTED_RAW: syntactically valid observation that cannot yet be capture-normalized
+ *   (e.g. unknown unit such as ตะกร้า). Still a saveable observation.
+ * - REJECTED: invalid observation (missing qty/unit/product, non-positive qty, etc.).
+ */
 export type PhysicalInventoryResolutionStatus =
-  | "ACCEPTED_RESOLVED"
+  | "ACCEPTED_NORMALIZED"
   | "ACCEPTED_RAW"
   | "REJECTED";
 
@@ -22,7 +31,10 @@ export interface PhysicalInventoryParsedItem {
   rawUnit: string | null;
   /** Spelling-normalized unit when safely known; never a converted/invented unit. */
   normalizedUnit: string | null;
-  /** Conservative NFC + whitespace collapse only — never fuzzy / P0 alias maps. */
+  /**
+   * Capture-only NFC + whitespace collapse — never fuzzy / P0 aliases / product master.
+   * P2C must not treat this as canonical inventory identity.
+   */
   normalizedProduct: string | null;
   resolutionStatus: PhysicalInventoryResolutionStatus;
   reason: string | null;

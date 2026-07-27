@@ -9,7 +9,6 @@
 import { parseBuddhistDate } from "@/lib/parsers/weigh-session/parser";
 import { isKnownUnit, normalizeUnitAlias } from "@/lib/parsers/weigh-session/units";
 import {
-  classifyPhysicalInventoryStandaloneIntent,
   isPhysicalInventoryHeaderLine,
   matchesPhysicalInventoryCloseLine,
 } from "./classify";
@@ -138,8 +137,9 @@ function resolveAccepted(
   // Spelling aliases only — never resolveUnitQuantity (no ขีด→โล rescale here).
   const unitKnown = isKnownUnit(unitRaw);
   const normalizedUnit = unitKnown ? normalizeUnitAlias(unitRaw) : null;
+  // Capture normalization only — not canonical inventory resolution for P2C.
   const status: PhysicalInventoryResolutionStatus = unitKnown
-    ? "ACCEPTED_RESOLVED"
+    ? "ACCEPTED_NORMALIZED"
     : "ACCEPTED_RAW";
 
   return {
@@ -305,16 +305,14 @@ export function parsePhysicalInventoryDocument(text: string): PhysicalInventoryP
       const seq = Number(indexed[1]);
       const remainder = nfcCollapse(indexed[2] ?? "");
 
+      // Sequence is staff ordering metadata, not item identity — duplicates stay.
       if (seenSequences.has(seq)) {
-        items.push(
-          rejected({
-            sequence: seq,
-            rawText: collapsed,
-            rawProductDescription: remainder || null,
-            reason: "duplicate_sequence",
-          }),
+        pushIssue(
+          warnings,
+          "DUPLICATE_SEQUENCE",
+          `Duplicate sequence number ${seq} — both observations preserved`,
+          collapsed,
         );
-        continue;
       }
       seenSequences.add(seq);
       noteSequenceGaps(seq);
@@ -394,7 +392,7 @@ export function acceptedPhysicalInventoryItems(
 ): PhysicalInventoryParsedItem[] {
   return session.items.filter(
     (it) =>
-      it.resolutionStatus === "ACCEPTED_RESOLVED" ||
+      it.resolutionStatus === "ACCEPTED_NORMALIZED" ||
       it.resolutionStatus === "ACCEPTED_RAW",
   );
 }

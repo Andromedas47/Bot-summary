@@ -85,7 +85,7 @@ describe("parsePhysicalInventoryDocument — Fixture A (26/7/69)", () => {
     expect(bySeq[2]!.quantity).toBe(15);
     expect(bySeq[2]!.rawUnit).toBe("โล");
     expect(bySeq[2]!.normalizedUnit).toBe("โล");
-    expect(bySeq[2]!.resolutionStatus).toBe("ACCEPTED_RESOLVED");
+    expect(bySeq[2]!.resolutionStatus).toBe("ACCEPTED_NORMALIZED");
 
     expect(bySeq[7]!.rawProductDescription).toBe("องุ่นเขียวเลก");
     expect(bySeq[7]!.rawUnit).toBe("ตะกร้า");
@@ -169,23 +169,28 @@ describe("resolution and rejection cases", () => {
 26/7/69
 1มะม่วง3โล
 จบ`);
-    expect(session.items[0]!.resolutionStatus).toBe("ACCEPTED_RESOLVED");
+    expect(session.items[0]!.resolutionStatus).toBe("ACCEPTED_NORMALIZED");
   });
 
-  test("duplicate sequence number", () => {
+  test("duplicate sequence numbers preserve both observations", () => {
     const session = parsePhysicalInventoryDocument(`สตอกผลไม้คงเหลือ
 26/7/69
-1มะม่วง
-3โล
-1ทุเรียน
-2โล
+7แตงโม
+45ลูก
+7มะละกอ
+15ลูก
 จบ`);
-    const dup = session.items.find((i) => i.reason === "duplicate_sequence");
-    expect(dup).toBeTruthy();
-    expect(dup!.resolutionStatus).toBe("REJECTED");
+    expect(session.warnings.some((w) => w.code === "DUPLICATE_SEQUENCE")).toBe(true);
     const accepted = acceptedPhysicalInventoryItems(session);
-    expect(accepted).toHaveLength(1);
-    expect(accepted[0]!.rawProductDescription).toBe("มะม่วง");
+    expect(accepted).toHaveLength(2);
+    expect(accepted.map((i) => i.sequence)).toEqual([7, 7]);
+    expect(accepted[0]!.rawProductDescription).toBe("แตงโม");
+    expect(accepted[0]!.quantity).toBe(45);
+    expect(accepted[0]!.rawUnit).toBe("ลูก");
+    expect(accepted[1]!.rawProductDescription).toBe("มะละกอ");
+    expect(accepted[1]!.quantity).toBe(15);
+    expect(accepted[1]!.rawUnit).toBe("ลูก");
+    expect(accepted.every((i) => i.resolutionStatus !== "REJECTED")).toBe(true);
   });
 
   test("missing sequence in the middle", () => {
@@ -211,14 +216,16 @@ describe("resolution and rejection cases", () => {
     expect(session.items[0]!.normalizedUnit).toBeNull();
   });
 
-  test("unknown product stays distinct ACCEPTED_RESOLVED when unit known", () => {
+  test("unknown product stays distinct ACCEPTED_NORMALIZED when unit known", () => {
     const session = parsePhysicalInventoryDocument(`สตอกผลไม้คงเหลือ
 26/7/69
 1ผลไม้ไม่มีในระบบ
 2โล
 จบ`);
-    expect(session.items[0]!.resolutionStatus).toBe("ACCEPTED_RESOLVED");
+    expect(session.items[0]!.resolutionStatus).toBe("ACCEPTED_NORMALIZED");
     expect(session.items[0]!.rawProductDescription).toBe("ผลไม้ไม่มีในระบบ");
+    // Capture normalize ≠ canonical inventory identity
+    expect(session.items[0]!.normalizedProduct).toBe("ผลไม้ไม่มีในระบบ");
   });
 
   test("repeated product lines preserved independently", () => {
@@ -319,7 +326,7 @@ describe("known unit alias spelling only (no conversion)", () => {
     expect(item.quantity).toBe(10);
     expect(item.rawUnit).toBe("กก");
     expect(item.normalizedUnit).toBe("โล");
-    expect(item.resolutionStatus).toBe("ACCEPTED_RESOLVED");
+    expect(item.resolutionStatus).toBe("ACCEPTED_NORMALIZED");
   });
 
   test("ขีด is known but not rescaled to โล", () => {
@@ -331,6 +338,6 @@ describe("known unit alias spelling only (no conversion)", () => {
     expect(item.quantity).toBe(10);
     expect(item.rawUnit).toBe("ขีด");
     expect(item.normalizedUnit).toBe("ขีด");
-    expect(item.resolutionStatus).toBe("ACCEPTED_RESOLVED");
+    expect(item.resolutionStatus).toBe("ACCEPTED_NORMALIZED");
   });
 });

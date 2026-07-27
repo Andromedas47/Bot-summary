@@ -115,14 +115,17 @@ describe("parseStockSummaryTargets", () => {
 });
 
 describe("scheduler configuration", () => {
-  test("the daily-stock-summary GitHub Actions workflow runs at 08:00 Asia/Bangkok", async () => {
+  test("the daily-stock-summary GitHub Actions workflow is manual-only (Supabase Cron owns schedule)", async () => {
     const yaml = await Bun.file(
       `${import.meta.dir}/../../../.github/workflows/daily-stock-summary.yml`,
     ).text();
 
-    // GitHub Actions cron is UTC, same as Vercel cron. Bangkok is UTC+7 with no
-    // DST, so 08:00 Bangkok is 01:00 UTC year-round.
-    expect(yaml).toContain('- cron: "0 1 * * *"');
+    // Automatic 08:00 Asia/Bangkok scheduling is owned by Supabase Cron.
+    // GitHub keeps workflow_dispatch for manual / debug / emergency only.
+    expect(yaml).toContain("workflow_dispatch:");
+    expect(yaml).not.toMatch(/^\s*schedule:/m);
+    expect(yaml).not.toMatch(/^\s*- cron:/m);
+    expect(yaml).toContain("Supabase Cron");
     expect(yaml).toContain("/api/cron/daily-stock-summary");
     expect(yaml).toContain("Authorization: Bearer ${{ secrets.CRON_SECRET }}");
     // The report date must come from the route's own resolution, not the caller.

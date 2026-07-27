@@ -5,6 +5,7 @@ import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
 import { computeItemHash, computeSessionHash } from "@/lib/line/session-dedup-service";
 import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
 import { isStrictBusinessDate } from "./cron";
+import { isQaMarketLabel } from "./qa-scopes";
 import { resolveCentralPricesForDate } from "@/lib/white-sheet/load";
 import type { Database } from "@/types/database";
 import {
@@ -897,9 +898,19 @@ function adaptRows(
   });
 }
 
+export interface LoadSalesReportOptions {
+  /**
+   * Include known QA/test market scopes. Default false: production reports —
+   * automatic and manual alike — exclude them. Audit paths pass true to see
+   * the raw picture; nothing is ever deleted or repaired either way.
+   */
+  includeQaScopes?: boolean;
+}
+
 export async function loadSalesReport(
   supabase: Supabase,
   businessDate: string,
+  options: LoadSalesReportOptions = {},
 ): Promise<SalesReport> {
   // Strict: a day that never existed (2026-02-31) would silently return an
   // empty, apparently clean report for a date nothing can ever be filed under.
@@ -927,12 +938,21 @@ export async function loadSalesReport(
     sourceByRawMessageId,
   );
 
+  // QA scopes are dropped HERE, before the calculator sees them, so they can
+  // never reach a rollup, a trusted/blocked count or a blocker list. Hiding
+  // them at render time would leave them inside the totals.
+  const keep = options.includeQaScopes
+    ? () => true
+    : (marketName: string | null) => !isQaMarketLabel(marketName);
+
   return calculateSalesReport({
     businessDate,
-    rows: adaptRows(rows, sourceByRawMessageId, sessionIssues),
+    rows: adaptRows(rows, sourceByRawMessageId, sessionIssues).filter((row) =>
+      keep(row.marketName),
+    ),
     centralPrices: pricing.prices,
     priceConflicts: pricing.conflicts,
     scopeBlockers,
-    sessionAudits,
+    sessionAudits: sessionAudits.filter((audit) => keep(audit.marketName)),
   });
 }

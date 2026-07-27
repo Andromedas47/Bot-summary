@@ -82,6 +82,9 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  // Audit escape hatch: debug previews may ask for the raw picture including QA
+  // scopes. It cannot affect a real send — includeQa is honoured in debug only.
+  const includeQaScopes = debugMode && req.nextUrl.searchParams.get("includeQa") === "1";
   const revision = revisionParam ?? DEFAULT_SALES_REVISION;
   const businessDate = resolveSalesSummaryDate(dateParam);
   const targets = parseSalesSummaryTargets(process.env[SALES_SUMMARY_TARGETS_ENV]);
@@ -96,7 +99,7 @@ export async function GET(req: NextRequest) {
 
   let report;
   try {
-    report = await loadSalesReport(createServiceClient(), businessDate);
+    report = await loadSalesReport(createServiceClient(), businessDate, { includeQaScopes });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error("daily sales summary cron failed - report build error", {
@@ -113,6 +116,7 @@ export async function GET(req: NextRequest) {
     productCount: report.products.length,
     blockedCount: report.blocked.length,
     scopeBlockerCount: report.scopeBlockers.length,
+    includeQaScopes,
     expectedSalesSatang: report.allMarkets.expectedSalesSatang,
     quantityAuthoritative: report.allMarkets.quantityAuthoritative,
     valueAuthoritative: report.allMarkets.valueAuthoritative,

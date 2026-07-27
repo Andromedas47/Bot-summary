@@ -1450,3 +1450,103 @@ describe("P1 pending ingest lookup fails closed", () => {
     ).rejects.toThrow(SalesDataError);
   });
 });
+
+// ── QA/test scope exclusion ─────────────────────────────────────────────────
+
+describe("P1 excludes QA market scopes from production reporting", () => {
+  const QA_LABELS = [
+    "ทดสอบเงินโอน",
+    "ทดสอบผลต่าง",
+    "ทดสอบราคาA",
+    "ทดสอบราคาB",
+    "ทดสอบไวท์ชีท",
+    "QAไวท์ชีท",
+  ];
+
+  /** One real market that sells, plus one QA scope that also "sells". */
+  function withQaMarket(label: string): Fixture {
+    return baseFixture({
+      produce: [
+        produceRow({ id: "i1", quantity: 10, transaction_type: "เบิก" }),
+        produceRow({ id: "i2", quantity: 4, transaction_type: "คืน" }),
+        produceRow({ id: "q1", quantity: 100, transaction_type: "เบิก", market_name: label, session_id: "session-qa", raw_message_id: "raw-qa" }),
+        produceRow({ id: "q2", quantity: 40, transaction_type: "คืน", market_name: label, session_id: "session-qa", raw_message_id: "raw-qa" }),
+        // …and a QA row that would otherwise be a blocker.
+        produceRow({ id: "q3", quantity: 7, transaction_type: "เบิก", market_name: label, product_name: "ชะอม", unit: "กำ", session_id: "session-qa", raw_message_id: "raw-qa" }),
+      ],
+      rawMessages: [
+        { id: "raw-1", source_id: SOURCE_A },
+        { id: "raw-qa", source_id: SOURCE_A },
+      ],
+      sessions: [
+        { id: "session-1", total_items: 2, parser_errors: null, raw_message_id: "raw-1", voided_at: null },
+        { id: "session-qa", total_items: 3, parser_errors: null, raw_message_id: "raw-qa", voided_at: null },
+      ],
+    });
+  }
+
+  for (const label of QA_LABELS) {
+    test(`${label} contributes nothing to any rollup or count`, async () => {
+      const report = await loadSalesReport(fakeSupabase(withQaMarket(label)), DATE);
+
+      expect(report.markets.map((market) => market.marketLabel)).toEqual(["ตลาดกี้"]);
+      // Only the real market's 6 × 120.00 survives — the QA 60 sold never lands.
+      expect(report.allMarkets.expectedSalesSatang).toBe(72_000);
+      expect(report.allMarkets.trustedRowCount).toBe(1);
+      expect(report.allMarkets.quantityBlockedRowCount).toBe(0);
+      expect(report.allMarkets.valueBlockedRowCount).toBe(0);
+      expect(report.allMarkets.valueAuthoritative).toBe(true);
+      expect(report.products).toHaveLength(1);
+      expect(report.products[0].soldQuantity).toBe(6);
+      expect(report.blocked).toHaveLength(0);
+    });
+  }
+
+  test("a real market is untouched when no QA scope is present", async () => {
+    const report = await loadSalesReport(fakeSupabase(baseFixture()), DATE);
+
+    expect(report.markets).toHaveLength(1);
+    expect(report.allMarkets.expectedSalesSatang).toBe(72_000);
+    expect(report.allMarkets.valueAuthoritative).toBe(true);
+  });
+
+  test("exclusion is exact — a real market that merely resembles one is kept", async () => {
+    for (const label of ["ทดสอบราคาC", "ทดสอบไวท์ชีทใหม่", "ตลาดทดสอบผลต่าง", "qaไวท์ชีท"]) {
+      const report = await loadSalesReport(fakeSupabase(withQaMarket(label)), DATE);
+
+      expect(report.markets.map((market) => market.marketLabel).sort()).toEqual(
+        ["ตลาดกี้", label].sort(),
+      );
+    }
+  });
+
+  test("a QA session that persisted nothing does not become a blocker either", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          sessions: [
+            { id: "session-1", total_items: 2, parser_errors: null, raw_message_id: "raw-1", voided_at: null },
+            { id: "session-qa", session_title: "ทดสอบไวท์ชีท", total_items: 4, parser_errors: null, raw_message_id: "raw-1", voided_at: null },
+          ],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.blocked).toHaveLength(0);
+    expect(report.scopeBlockers).toEqual([]);
+  });
+
+  test("the audit path can still see QA data — nothing is deleted", async () => {
+    const report = await loadSalesReport(fakeSupabase(withQaMarket("ทดสอบไวท์ชีท")), DATE, {
+      includeQaScopes: true,
+    });
+
+    expect(report.markets.map((market) => market.marketLabel).sort()).toEqual(
+      ["ตลาดกี้", "ทดสอบไวท์ชีท"].sort(),
+    );
+    // 6 real + 60 QA, both priced at 120.00.
+    expect(report.allMarkets.expectedSalesSatang).toBe(72_000 + 720_000);
+    expect(report.blocked).toHaveLength(1);
+  });
+});

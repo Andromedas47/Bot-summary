@@ -46,7 +46,7 @@ export const SALES_NO_ROWS_BLOCKED_NOTICE =
   "⛔ ยังสรุปยอดขายไม่ได้ — ไม่พบรายการที่บันทึกไว้ และข้อมูลของวันนี้ยังไม่ครบ";
 /** Used wherever a money figure would otherwise print a misleading 0.00. */
 export const SALES_VALUE_UNAVAILABLE = "ยอดเงินยังคำนวณไม่ได้";
-export const SALES_MARKET_QUANTITY_HEADING = "🏪 ยอดขายรายตลาด (จำนวน)";
+export const SALES_MARKET_SECTION_HEADING = "🏪 ยอดขายที่ยืนยันได้รายตลาด";
 /** Quantity is complete, only the money is not. */
 export const SALES_QUANTITY_ONLY_NOTICE = "จำนวนที่ขายครบถ้วน • ยอดเงินยังไม่ครบ (รอราคากลาง)";
 
@@ -104,7 +104,7 @@ function unitLabel(unit: string): string {
  * A total plus its heading. The heading is the safety mechanism: an
  * authoritative figure is a total, anything else is explicitly partial.
  */
-function totalBlock(heading: string, total: SalesTotal): string {
+function totalBlock(heading: string, total: SalesTotal, withCounts = true): string {
   const lines = [
     total.valueAuthoritative ? heading : SALES_PARTIAL_HEADING,
     // Nothing is priced yet: "0.00 บาท" would read as zero revenue, which is a
@@ -115,7 +115,11 @@ function totalBlock(heading: string, total: SalesTotal): string {
   ];
   if (!total.valueAuthoritative) {
     const blocked = total.valueBlockedRowCount + total.quantityBlockedRowCount;
-    lines.push(`ยืนยันได้ ${total.trustedRowCount} รายการ • ยืนยันไม่ได้ ${blocked} รายการ`);
+    // The Auto report states these counts on their own lines and passes
+    // withCounts=false, so the figure is never printed twice.
+    if (withCounts) {
+      lines.push(`ยืนยันได้ ${total.trustedRowCount} รายการ • ยืนยันไม่ได้ ${blocked} รายการ`);
+    }
     // Quantity trust survives a pricing problem, and saying so is the point of
     // separating the two: "we know what was sold, not what it is worth".
     if (total.quantityAuthoritative) lines.push(SALES_QUANTITY_ONLY_NOTICE);
@@ -177,17 +181,29 @@ function valueText(total: SalesTotal): string {
 }
 
 /**
- * Per-market product quantities for the Auto report — "how much did each market
- * sell?", which market money totals alone cannot answer. Every product is
- * listed; a push may use as many messages as that takes.
+ * Blocked entries as reason counts, for the Auto report.
+ *
+ * The morning push answers "how much did we sell, and how much of it can I
+ * trust". Two hundred individual blocked lines answer neither and bury the
+ * number. Every blocked row is still listed in full by the manual
+ * สรุปยอดขาย command and by the cron route's debug preview — this groups,
+ * it never drops.
  */
-function marketQuantityBlock(market: SalesMarketSummary): string {
-  const lines = market.rows.map((row) =>
-    row.soldQuantity === null
-      ? `${row.productName} — ยืนยันจำนวนไม่ได้ (${row.reasons.map(salesReasonLabel).join(", ")})`
-      : `${row.productName} — ขาย ${formatQuantity(row.soldQuantity)} ${unitLabel(row.unit)}`,
-  );
-  return [`🏪 ${marketLabel(market)}`, ...lines, `ยอดขาย ${valueText(market.total)}`].join("\n");
+function blockedReasonBlocks(report: SalesReport): string[] {
+  if (report.blocked.length === 0) return [];
+
+  const counts = new Map<SalesBlockReason, number>();
+  for (const row of report.blocked) {
+    // A row blocked for two reasons counts under both: these are reason totals,
+    // not a partition of the rows.
+    for (const reason of row.reasons) counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  }
+
+  const lines = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || salesReasonLabel(a[0]).localeCompare(salesReasonLabel(b[0]), "th"))
+    .map(([reason, count]) => `• ${salesReasonLabel(reason)} — ${count} รายการ`);
+
+  return [[SALES_BLOCKED_HEADING, ...lines].join("\n")];
 }
 
 /** One line per blocked identity. Every blocked entry is listed — never a sample. */
@@ -282,13 +298,22 @@ export function buildSalesAutoBlocks(report: SalesReport): string[] {
   const header = headerBlock(SALES_AUTO_TITLE, report);
   if (hasNoRows(report)) return noRowsBlocks(report, header);
 
+  const counts = [
+    `✅ ยืนยันได้ ${report.allMarkets.trustedRowCount} รายการ`,
+    `⚠️ ยืนยันไม่ได้ ${report.allMarkets.valueBlockedRowCount + report.allMarkets.quantityBlockedRowCount} รายการ`,
+  ].join("\n");
+
+  const marketTotals = report.markets.map(
+    (market) => `${marketLabel(market)} — ${valueText(market.total)}`,
+  );
+
   return [
-    `${header}\n\n${totalBlock(SALES_TOTAL_HEADING, report.allMarkets)}`,
+    `${header}\n\n${totalBlock(SALES_TOTAL_HEADING, report.allMarkets, false)}\n\n${counts}`,
     ...scopeBlockerBlocks(report),
-    ...productBlocks(report),
-    ...(report.markets.length > 0 ? [SALES_MARKET_QUANTITY_HEADING] : []),
-    ...report.markets.map(marketQuantityBlock),
-    ...blockedBlocks(report),
+    ...(marketTotals.length > 0
+      ? [[SALES_MARKET_SECTION_HEADING, ...marketTotals].join("\n")]
+      : []),
+    ...blockedReasonBlocks(report),
   ];
 }
 

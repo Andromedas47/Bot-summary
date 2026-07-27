@@ -12,6 +12,8 @@ import {
   SALES_MANUAL_TITLE,
   SALES_OVERFLOW_NOTICE,
   SALES_NO_ROWS_BLOCKED_NOTICE,
+  SALES_MARKET_SECTION_HEADING,
+  SALES_PRODUCT_SECTION_HEADING,
   SALES_PARTIAL_HEADING,
   SALES_QUANTITY_ONLY_NOTICE,
   SALES_TOTAL_HEADING,
@@ -136,35 +138,75 @@ describe("P1 manual message", () => {
   });
 });
 
-describe("P1 automatic message", () => {
+describe("P1 automatic message — executive summary", () => {
   test("carries the same numbers under the automatic title", () => {
     const text = buildSalesAutoBlocks(report(TRUSTED_ROWS)).join("\n\n");
     expect(text).toContain(SALES_AUTO_TITLE);
     expect(text).toContain("840.00 บาท");
-    expect(text).toContain("หมอนทอง (กิโล) — ขาย 7 • 840.00 บาท");
   });
 
-  test("lists every blocked entry, never truncated", () => {
+  test("states trusted and untrusted row counts", () => {
+    const text = buildSalesAutoBlocks(
+      report([...TRUSTED_ROWS, row({ productName: "ชะอม", unit: "กำ", quantity: 5 })]),
+    ).join("\n\n");
+
+    expect(text).toContain("✅ ยืนยันได้ 1 รายการ");
+    expect(text).toContain("⚠️ ยืนยันไม่ได้ 1 รายการ");
+  });
+
+  test("gives per-market confirmed totals, marking partial ones", () => {
+    const text = buildSalesAutoBlocks(
+      report([
+        ...TRUSTED_ROWS,
+        row({ marketName: "ตลาดน้อย", sessionId: "s-b", productName: "ชะอม", unit: "กำ", quantity: 5 }),
+      ]),
+    ).join("\n\n");
+
+    expect(text).toContain(SALES_MARKET_SECTION_HEADING);
+    expect(text).toContain("ตลาดกี้ — 840.00 บาท");
+    expect(text).toContain(`ตลาดน้อย — ${SALES_VALUE_UNAVAILABLE}`);
+  });
+
+  test("groups blocked entries by reason instead of listing every row", () => {
     const many: SalesSourceRow[] = [];
-    for (let index = 0; index < 200; index += 1) {
+    for (let index = 0; index < 40; index += 1) {
       many.push(row({ productName: `สินค้า${index}`, unit: "กำ", quantity: 5 }));
     }
 
     const built = report(many);
-    const text = buildSalesAutoMessages(built).join("\n");
+    const text = buildSalesAutoBlocks(built).join("\n\n");
 
-    expect(built.blocked).toHaveLength(200);
-    for (const blocked of built.blocked) expect(text).toContain(blocked.productName);
+    expect(built.blocked).toHaveLength(40);
+    expect(text).toContain("• ยังไม่มีข้อมูลชั่งคืน — 40 รายการ");
+    // The rows themselves are the manual command's job, not the morning push.
+    expect(text).not.toContain("สินค้า0 (กำ)");
   });
 
-  test("is not capped at five messages — a push may use as many parts as it needs", () => {
+  test("drops the full product dump", () => {
+    const text = buildSalesAutoBlocks(report(TRUSTED_ROWS)).join("\n\n");
+    expect(text).not.toContain(SALES_PRODUCT_SECTION_HEADING);
+    expect(text).not.toContain("หมอนทอง (กิโล) — ขาย 7");
+  });
+
+  test("a real production-shaped day fits in two LINE messages", () => {
+    // 2026-07-25 shape: ~17 markets, ~130 products, ~160 blocked identities.
     const many: SalesSourceRow[] = [];
-    for (let index = 0; index < 600; index += 1) {
-      many.push(row({ productName: `สินค้า${index}`, unit: "กำ", quantity: 5 }));
+    for (let market = 0; market < 17; market += 1) {
+      for (let product = 0; product < 8; product += 1) {
+        const base = {
+          marketName: `ตลาด${market}`,
+          sessionId: `s-${market}`,
+          productName: `สินค้า${product}`,
+          unit: "กำ",
+        };
+        many.push(row({ ...base, quantity: 10 }));
+        // Half the identities close properly, half stay blocked.
+        if (product % 2 === 0) many.push(row({ ...base, quantity: 4, transactionType: "คืน" }));
+      }
     }
 
     const messages = buildSalesAutoMessages(report(many));
-    expect(messages.length).toBeGreaterThan(5);
+    expect(messages.length).toBeLessThanOrEqual(2);
     for (const message of messages) expect([...message].length).toBeLessThanOrEqual(4000);
   });
 
@@ -173,6 +215,15 @@ describe("P1 automatic message", () => {
     for (const forbidden of ["เงินสด", "ยอดโอน", "สลิป", "ต้นทุน", "กำไร", "ขาดเกิน"]) {
       expect(text).not.toContain(forbidden);
     }
+  });
+
+  test("scope blockers are still stated in full — fail-closed is not summarised away", () => {
+    const text = buildSalesAutoBlocks(
+      report(TRUSTED_ROWS, { scopeBlockers: [{ kind: "unresolved_pending_session", count: 2 }] }),
+    ).join("\n\n");
+
+    expect(text).toContain("มีชุดข้อมูลที่ยังไม่ปิด/ปิดไม่สำเร็จ 2 ชุด");
+    expect(text).toContain(SALES_PARTIAL_HEADING);
   });
 });
 
@@ -258,58 +309,17 @@ describe("P1 empty day must not hide blockers", () => {
   });
 });
 
-describe("P1 automatic per-market quantities", () => {
-  test("states how much each market sold, product by product", () => {
-    const text = buildSalesAutoBlocks(
-      report([
-        ...TRUSTED_ROWS,
-        row({ marketName: "ตลาดน้อย", sessionId: "s-b", productName: "แตงโม", unit: "ลูก", quantity: 10 }),
-        row({
-          marketName: "ตลาดน้อย",
-          sessionId: "s-b",
-          productName: "แตงโม",
-          unit: "ลูก",
-          quantity: 2,
-          transactionType: "คืน",
-        }),
-      ]),
-    ).join("\n\n");
+describe("P1 manual message keeps the full audit detail", () => {
+  test("the manual reply still lists products and every blocked row", () => {
+    const built = report([
+      ...TRUSTED_ROWS,
+      row({ productName: "ชะอม", unit: "กำ", quantity: 5 }),
+    ]);
+    const text = buildSalesSummaryBlocks(built).join("\n\n");
 
-    expect(text).toContain("🏪 ตลาดกี้");
-    expect(text).toContain("หมอนทอง — ขาย 7 กิโล");
-    expect(text).toContain("ยอดขาย 840.00 บาท");
-    expect(text).toContain("🏪 ตลาดน้อย");
-    expect(text).toContain("แตงโม — ขาย 8 ลูก");
-  });
-
-  test("a market's quantity is stated even when its value is not", () => {
-    const text = buildSalesAutoBlocks(
-      calculateSalesReport({
-        businessDate: DATE,
-        rows: [row({ quantity: 10 }), row({ quantity: 4, transactionType: "คืน" })],
-      }),
-    ).join("\n\n");
-
-    expect(text).toContain("หมอนทอง — ขาย 6 กิโล");
-    expect(text).toContain(`ยอดขาย ${SALES_VALUE_UNAVAILABLE}`);
-  });
-
-  test("a blocked quantity says so instead of printing a number", () => {
-    const text = buildSalesAutoBlocks(report([row({ quantity: 5 })])).join("\n\n");
-    expect(text).toContain("หมอนทอง — ยืนยันจำนวนไม่ได้ (ยังไม่มีข้อมูลชั่งคืน)");
-  });
-
-  test("no product is dropped to keep the push short", () => {
-    const many: SalesSourceRow[] = [];
-    for (let index = 0; index < 120; index += 1) {
-      many.push(row({ productName: `สินค้า${index}`, unit: "กำ", quantity: 10 }));
-      many.push(row({ productName: `สินค้า${index}`, unit: "กำ", quantity: 3, transactionType: "คืน" }));
-    }
-
-    const text = buildSalesAutoMessages(report(many)).join("\n");
-    for (let index = 0; index < 120; index += 1) {
-      expect(text).toContain(`สินค้า${index} — ขาย 7 กำ`);
-    }
+    expect(text).toContain(SALES_PRODUCT_SECTION_HEADING);
+    expect(text).toContain("เบิก 10 • คืน 2 • เสีย 1");
+    for (const blocked of built.blocked) expect(text).toContain(blocked.productName);
   });
 });
 

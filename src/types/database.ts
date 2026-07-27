@@ -1036,6 +1036,275 @@ export interface Database {
         };
         Relationships: [];
       };
+
+      physical_inventory_sessions: {
+        Row: {
+          id:                    string;
+          source_type:           string;
+          source_id:             string;
+          sender_line_user_id:   string;
+          session_generation:    string;
+          business_date:         string | null;
+          warehouse_code:        string;
+          status:                "open" | "closing" | "finalized" | "failed_closed" | "voided";
+          parser_version:        string | null;
+          opened_at:             string;
+          close_requested_at:    string | null;
+          closed_at:             string | null;
+          failed_closed_at:      string | null;
+          fail_reason:           string | null;
+          ingest_revision:       number;
+          snapshot_id:           string | null;
+          header_raw_message_id: string | null;
+          close_raw_message_id:  string | null;
+          close_line_event_id:   string | null;
+          warnings:              Json;
+          created_at:            string;
+          updated_at:            string;
+        };
+        Insert: {
+          id?:                    string;
+          source_type:            string;
+          source_id:              string;
+          sender_line_user_id:    string;
+          session_generation?:    string;
+          business_date?:         string | null;
+          warehouse_code?:        string;
+          status?:                "open" | "closing" | "finalized" | "failed_closed" | "voided";
+          parser_version?:        string | null;
+          opened_at?:             string;
+          close_requested_at?:    string | null;
+          closed_at?:             string | null;
+          failed_closed_at?:      string | null;
+          fail_reason?:           string | null;
+          ingest_revision?:       number;
+          snapshot_id?:           string | null;
+          header_raw_message_id?: string | null;
+          close_raw_message_id?:  string | null;
+          close_line_event_id?:   string | null;
+          warnings?:              Json;
+          created_at?:            string;
+          updated_at?:            string;
+        };
+        Update: {
+          id?:                    string;
+          source_type?:           string;
+          source_id?:             string;
+          sender_line_user_id?:   string;
+          session_generation?:    string;
+          business_date?:         string | null;
+          warehouse_code?:        string;
+          status?:                "open" | "closing" | "finalized" | "failed_closed" | "voided";
+          parser_version?:        string | null;
+          opened_at?:             string;
+          close_requested_at?:    string | null;
+          closed_at?:             string | null;
+          failed_closed_at?:      string | null;
+          fail_reason?:           string | null;
+          ingest_revision?:       number;
+          snapshot_id?:           string | null;
+          header_raw_message_id?: string | null;
+          close_raw_message_id?:  string | null;
+          close_line_event_id?:   string | null;
+          warnings?:              Json;
+          created_at?:            string;
+          updated_at?:            string;
+        };
+        Relationships: [];
+      };
+
+      physical_inventory_session_ingests: {
+        Row: {
+          id:              string;
+          session_id:      string;
+          line_event_id:   string;
+          line_message_id: string | null;
+          raw_message_id:  string | null;
+          kind:            "header" | "item" | "close" | "other";
+          raw_text:        string;
+          ingest_revision: number;
+          created_at:      string;
+        };
+        Insert: {
+          id?:              string;
+          session_id:       string;
+          line_event_id:    string;
+          line_message_id?: string | null;
+          raw_message_id?:  string | null;
+          kind:             "header" | "item" | "close" | "other";
+          raw_text:         string;
+          ingest_revision:  number;
+          created_at?:      string;
+        };
+        Update: {
+          id?:              string;
+          session_id?:      string;
+          line_event_id?:   string;
+          line_message_id?: string | null;
+          raw_message_id?:  string | null;
+          kind?:            "header" | "item" | "close" | "other";
+          raw_text?:        string;
+          ingest_revision?: number;
+          created_at?:      string;
+        };
+        Relationships: [];
+      };
+
+      physical_inventory_snapshots: {
+        Row: {
+          id:                        string;
+          session_id:                string;
+          warehouse_code:            string;
+          source_type:               string;
+          source_id:                 string;
+          sender_line_user_id:       string;
+          business_date:             string;
+          counted_at:                string;
+          parser_version:            string;
+          accepted_normalized_count: number;
+          accepted_raw_count:        number;
+          rejected_count:            number;
+          item_count:                number;
+          warnings:                  Json;
+          status:                    "finalized" | "voided" | "superseded";
+          ingest_idempotency_key:    string;
+          finalized_at:              string;
+          voided_at:                 string | null;
+          voided_by:                 string | null;
+          void_reason:               string | null;
+          replacement_snapshot_id:   string | null;
+          created_at:                string;
+        };
+        Insert: {
+          id?:                        string;
+          session_id:                 string;
+          warehouse_code?:            string;
+          source_type:                string;
+          source_id:                  string;
+          sender_line_user_id:        string;
+          business_date:              string;
+          counted_at?:                string;
+          parser_version:             string;
+          accepted_normalized_count?: number;
+          accepted_raw_count?:        number;
+          rejected_count?:            number;
+          item_count?:                number;
+          warnings?:                  Json;
+          status?:                    "finalized" | "voided" | "superseded";
+          ingest_idempotency_key:     string;
+          finalized_at?:              string;
+          voided_at?:                 string | null;
+          voided_by?:                 string | null;
+          void_reason?:               string | null;
+          replacement_snapshot_id?:   string | null;
+          created_at?:                string;
+        };
+        Update: {
+          id?:                        string;
+          session_id?:                string;
+          warehouse_code?:            string;
+          source_type?:               string;
+          source_id?:                 string;
+          sender_line_user_id?:       string;
+          business_date?:             string;
+          counted_at?:                string;
+          parser_version?:            string;
+          accepted_normalized_count?: number;
+          accepted_raw_count?:        number;
+          rejected_count?:            number;
+          item_count?:                number;
+          warnings?:                  Json;
+          status?:                    "finalized" | "voided" | "superseded";
+          ingest_idempotency_key?:    string;
+          finalized_at?:              string;
+          voided_at?:                 string | null;
+          voided_by?:                 string | null;
+          void_reason?:               string | null;
+          replacement_snapshot_id?:   string | null;
+          created_at?:                string;
+        };
+        Relationships: [];
+      };
+
+      physical_inventory_items: {
+        Row: {
+          id:                      string;
+          snapshot_id:             string;
+          item_ordinal:            number;
+          staff_sequence:          number | null;
+          raw_text:                string;
+          raw_product_description: string | null;
+          normalized_product:      string | null;
+          quantity:                number | null;
+          raw_unit:                string | null;
+          normalized_unit:         string | null;
+          resolution_status:       "ACCEPTED_NORMALIZED" | "ACCEPTED_RAW" | "REJECTED";
+          reason:                  string | null;
+          created_at:              string;
+        };
+        Insert: {
+          id?:                      string;
+          snapshot_id:              string;
+          item_ordinal:             number;
+          staff_sequence?:          number | null;
+          raw_text:                 string;
+          raw_product_description?: string | null;
+          normalized_product?:      string | null;
+          quantity?:                number | null;
+          raw_unit?:                string | null;
+          normalized_unit?:         string | null;
+          resolution_status:        "ACCEPTED_NORMALIZED" | "ACCEPTED_RAW" | "REJECTED";
+          reason?:                  string | null;
+          created_at?:              string;
+        };
+        Update: {
+          id?:                      string;
+          snapshot_id?:             string;
+          item_ordinal?:            number;
+          staff_sequence?:          number | null;
+          raw_text?:                string;
+          raw_product_description?: string | null;
+          normalized_product?:      string | null;
+          quantity?:                number | null;
+          raw_unit?:                string | null;
+          normalized_unit?:         string | null;
+          resolution_status?:       "ACCEPTED_NORMALIZED" | "ACCEPTED_RAW" | "REJECTED";
+          reason?:                  string | null;
+          created_at?:              string;
+        };
+        Relationships: [];
+      };
+
+      physical_inventory_lifecycle_events: {
+        Row: {
+          id:          string;
+          session_id:  string;
+          snapshot_id: string | null;
+          event:       "finalized" | "failed_closed" | "voided" | "superseded";
+          actor:       string | null;
+          detail:      Json;
+          created_at:  string;
+        };
+        Insert: {
+          id?:          string;
+          session_id:   string;
+          snapshot_id?: string | null;
+          event:        "finalized" | "failed_closed" | "voided" | "superseded";
+          actor?:       string | null;
+          detail?:      Json;
+          created_at?:  string;
+        };
+        Update: {
+          id?:          string;
+          session_id?:  string;
+          snapshot_id?: string | null;
+          event?:       "finalized" | "failed_closed" | "voided" | "superseded";
+          actor?:       string | null;
+          detail?:      Json;
+          created_at?:  string;
+        };
+        Relationships: [];
+      };
     };
     Views: {
       produce_transactions: {
@@ -1234,6 +1503,20 @@ export interface Database {
           finalized_by:            string | null;
         };
       };
+      finalize_physical_inventory_session: {
+        Args: {
+          p_session_id:               string;
+          p_expected_generation:      string;
+          p_expected_ingest_revision: number;
+          p_business_date:            string | null;
+          p_parser_version:           string;
+          p_warnings:                 Json;
+          p_items:                    Json;
+          p_fail_closed:              boolean;
+          p_fail_reason?:             string | null;
+        };
+        Returns: Json;
+      };
     };
     CompositeTypes: { [_ in never]: never };
     Enums: {
@@ -1260,3 +1543,6 @@ export type ManualSlipEntryRow           = Database["public"]["Tables"]["manual_
 export type TransferReconciliationRow      = Database["public"]["Tables"]["transfer_reconciliations"]["Row"];
 export type SettlementFinalizationRow      = Database["public"]["Tables"]["settlement_finalizations"]["Row"];
 export type DigitalWhiteSheetCashEntryRow  = Database["public"]["Tables"]["digital_white_sheet_cash_entries"]["Row"];
+export type PhysicalInventorySessionRow    = Database["public"]["Tables"]["physical_inventory_sessions"]["Row"];
+export type PhysicalInventorySnapshotRow   = Database["public"]["Tables"]["physical_inventory_snapshots"]["Row"];
+export type PhysicalInventoryItemRow       = Database["public"]["Tables"]["physical_inventory_items"]["Row"];

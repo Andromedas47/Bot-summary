@@ -177,6 +177,8 @@ describe("P1 automatic message — executive summary", () => {
     const text = buildSalesAutoBlocks(built).join("\n\n");
 
     expect(built.blocked).toHaveLength(40);
+    expect(text).toContain(SALES_BLOCKED_HEADING);
+    expect(text).toContain("1 รายการอาจพบมากกว่า 1 สาเหตุ");
     expect(text).toContain("• ยังไม่มีข้อมูลชั่งคืน — 40 รายการ");
     // The rows themselves are the manual command's job, not the morning push.
     expect(text).not.toContain("สินค้า0 (กำ)");

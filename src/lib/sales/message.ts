@@ -34,7 +34,8 @@ export const SALES_TOTAL_HEADING = "ยอดขายรวมทุกตล�
 export const SALES_MARKET_TOTAL_HEADING = "ยอดขายรวม";
 
 export const SALES_PRODUCT_SECTION_HEADING = "📦 ยอดขายรายสินค้า (ทุกตลาด)";
-export const SALES_BLOCKED_HEADING = "⛔ รายการที่ยืนยันไม่ได้";
+export const SALES_BLOCKED_HEADING =
+  "⛔ สาเหตุที่ยังยืนยันไม่ได้\n(1 รายการอาจพบมากกว่า 1 สาเหตุ)";
 export const SALES_SCOPE_BLOCKER_HEADING = "⚠️ ข้อมูลวันนี้ยังไม่ครบ";
 export const SALES_EMPTY_NOTICE = "ไม่พบรายการขายสำหรับวันนี้";
 /**
@@ -46,7 +47,7 @@ export const SALES_NO_ROWS_BLOCKED_NOTICE =
   "⛔ ยังสรุปยอดขายไม่ได้ — ไม่พบรายการที่บันทึกไว้ และข้อมูลของวันนี้ยังไม่ครบ";
 /** Used wherever a money figure would otherwise print a misleading 0.00. */
 export const SALES_VALUE_UNAVAILABLE = "ยอดเงินยังคำนวณไม่ได้";
-export const SALES_MARKET_SECTION_HEADING = "🏪 ยอดขายที่ยืนยันได้รายตลาด";
+export const SALES_MARKET_SECTION_HEADING = "🏪 สถานะยอดขายรายตลาด";
 /** Quantity is complete, only the money is not. */
 export const SALES_QUANTITY_ONLY_NOTICE = "จำนวนที่ขายครบถ้วน • ยอดเงินยังไม่ครบ (รอราคากลาง)";
 

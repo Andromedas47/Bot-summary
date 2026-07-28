@@ -632,12 +632,18 @@ describe("0049 — structured finalization parses only the admitted set", () => 
 // ── 20. No cancel, no hard delete ─────────────────────────────────────────────
 
 describe("0049 — command surface", () => {
-  it("exposes exactly open, append, close and status", async () => {
+  it("exposes open, append, close, confirm and status (0050 adds confirm)", async () => {
     const source = await Bun.file(
       new URL("./produce-session-commands.ts", import.meta.url),
     ).text();
     const kinds = [...source.matchAll(/kind: "(\w+)";/g)].map((m) => m[1]);
-    expect([...new Set(kinds)].sort()).toEqual(["append", "close", "open", "status"]);
+    expect([...new Set(kinds)].sort()).toEqual([
+      "append",
+      "close",
+      "confirm",
+      "open",
+      "status",
+    ]);
     expect(source).not.toContain('"cancel"');
     expect(source).not.toMatch(/\.delete\(/);
   });

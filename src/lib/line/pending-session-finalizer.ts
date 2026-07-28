@@ -40,10 +40,16 @@ export interface PendingFinalizerRun {
   finalized: number;
   duplicate: number;
   pending: number;
+  /** 0050: structured sessions waiting for operator review confirmation. */
+  awaitingConfirmation: number;
   failedClosed: number;
   staleSnapshot: number;
   skipped: number;
   errors: number;
+}
+
+export function buildReviewNotConfirmedMessage(): string {
+  return "หมดเวลารอการยืนยัน จึงไม่บันทึกรายการ";
 }
 
 const defaultPush: PushMessage = (to, text) => pushLineMessage(to, text);
@@ -349,7 +355,9 @@ export async function finalizePendingGeneration(
   } else if (result.status === "failed_closed") {
     message = result.reason === "missing_items"
       ? buildMissingItemsMessage(result.missing ?? [], true)
-      : buildWeighSessionValidationReply(parsed);
+      : result.reason === "review_not_confirmed"
+        ? buildReviewNotConfirmedMessage()
+        : buildWeighSessionValidationReply(parsed);
   } else if (result.status === "finalized" && !result.notification_id) {
     // Rolling-deploy fallback: the pre-0034 RPC cannot create an outbox row.
     // Once 0034 is installed, notification_id is always returned and success
@@ -429,6 +437,7 @@ export async function finalizeDuePendingGenerations(
     finalized: 0,
     duplicate: 0,
     pending: 0,
+    awaitingConfirmation: 0,
     failedClosed: 0,
     staleSnapshot: 0,
     skipped: 0,
@@ -440,7 +449,9 @@ export async function finalizeDuePendingGenerations(
       const result = await finalizePendingGeneration(supabase, snapshot, push);
       if (result.status === "finalized") run.finalized += 1;
       else if (result.status === "duplicate") run.duplicate += 1;
-      else if (result.status === "pending") run.pending += 1;
+      else if (result.status === "pending" && result.reason === "awaiting_confirmation") {
+        run.awaitingConfirmation += 1;
+      } else if (result.status === "pending") run.pending += 1;
       else if (result.status === "failed_closed") run.failedClosed += 1;
       else if (result.status === "stale_snapshot") run.staleSnapshot += 1;
       else run.skipped += 1;

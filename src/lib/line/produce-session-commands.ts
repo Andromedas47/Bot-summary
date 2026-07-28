@@ -72,6 +72,13 @@ export interface CloseProduceSessionCommand {
   expectedSessionGeneration?: string | null;
 }
 
+/** Control-event confirmation that releases the 0050 finalization hold. */
+export interface ConfirmProduceSessionCommand {
+  kind: "confirm";
+  lineEventId: string;
+  expectedSessionGeneration?: string | null;
+}
+
 export interface StatusProduceSessionCommand {
   kind: "status";
 }
@@ -80,14 +87,22 @@ export type ProduceSessionCommand =
   | OpenProduceSessionCommand
   | AppendProduceSessionCommand
   | CloseProduceSessionCommand
+  | ConfirmProduceSessionCommand
   | StatusProduceSessionCommand;
 
 export type ProduceCommandResult =
   | { ok: true; kind: "open"; outcome: "opened" | "rotated" | "idempotent"; sessionKey: string; sessionGeneration: string }
   | { ok: true; kind: "append"; sessionKey: string; session: StructuredPendingSession }
   | { ok: true; kind: "close"; sessionKey: string; reason: "first_close" | "close_already_requested"; session: StructuredPendingSession }
+  | {
+      ok: true;
+      kind: "confirm";
+      sessionKey: string;
+      reason: "confirmed" | "already_confirmed";
+      session: StructuredPendingSession;
+    }
   | { ok: true; kind: "status"; sessionKey: string; structured: boolean; session: StructuredPendingSession | null }
-  | { ok: false; reason: ProduceCommandRejection; detail?: string };
+  | { ok: false; reason: ProduceCommandRejection; detail?: string; admission_count?: number; ingest_count?: number; straggler_count?: number };
 
 export type ProduceCommandRejection =
   | "missing_line_user_id"
@@ -98,7 +113,11 @@ export type ProduceCommandRejection =
   | "ownership_conflict"
   | "generation_conflict"
   | "structured_header_refused"
-  | "terminalized";
+  | "terminalized"
+  | "not_closing"
+  | "not_held"
+  | "hold_expired"
+  | "not_ready";
 
 /** Mirrors getPendingSessionKey in verify.ts, including its fail-closed nulls. */
 export function produceSessionKey(source: ProduceCommandSource): string | null {
@@ -161,10 +180,11 @@ export class ProduceSessionCommandService {
     if (badSource) return { ok: false, reason: "invalid_source", detail: badSource };
 
     switch (command.kind) {
-      case "open":   return this.open(command, source, sessionKey);
-      case "append": return this.append(command, source, sessionKey);
-      case "close":  return this.close(command, source, sessionKey);
-      case "status": return this.status(sessionKey);
+      case "open":    return this.open(command, source, sessionKey);
+      case "append":  return this.append(command, source, sessionKey);
+      case "close":   return this.close(command, source, sessionKey);
+      case "confirm": return this.confirm(command, source, sessionKey);
+      case "status":  return this.status(sessionKey);
     }
   }
 
@@ -319,6 +339,58 @@ export class ProduceSessionCommandService {
       kind: "close",
       sessionKey,
       reason: result.reason as "first_close" | "close_already_requested",
+      session: result.session as StructuredPendingSession,
+    };
+  }
+
+  /**
+   * Confirm finalization for a held structured session.
+   * Writes no admission/ingest/synthetic text and does not persist Produce rows.
+   */
+  private async confirm(
+    command: ConfirmProduceSessionCommand,
+    source: ProduceCommandSource,
+    sessionKey: string,
+  ): Promise<ProduceCommandResult> {
+    if (!command.lineEventId?.trim()) {
+      return { ok: false, reason: "invalid_command", detail: "lineEventId is required" };
+    }
+
+    const result = await this.pending.confirmFinalization(
+      sessionKey,
+      source.lineUserId!,
+      command.lineEventId,
+      command.expectedSessionGeneration ?? null,
+    );
+
+    if (!result.accepted) {
+      const reason = result.reason;
+      if (reason === "not_found")           return { ok: false, reason: "not_found" };
+      if (reason === "not_structured")      return { ok: false, reason: "not_structured" };
+      if (reason === "ownership_conflict")  return { ok: false, reason: "ownership_conflict" };
+      if (reason === "generation_conflict") return { ok: false, reason: "generation_conflict" };
+      if (reason === "terminalized")        return { ok: false, reason: "terminalized" };
+      if (reason === "not_closing")         return { ok: false, reason: "not_closing" };
+      if (reason === "not_held")            return { ok: false, reason: "not_held" };
+      if (reason === "hold_expired")        return { ok: false, reason: "hold_expired" };
+      if (reason === "not_ready") {
+        return {
+          ok: false,
+          reason: "not_ready",
+          detail: result.readiness_reason ?? reason,
+          admission_count: result.admission_count,
+          ingest_count: result.ingest_count,
+          straggler_count: result.straggler_count,
+        };
+      }
+      return { ok: false, reason: "invalid_command", detail: reason };
+    }
+
+    return {
+      ok: true,
+      kind: "confirm",
+      sessionKey,
+      reason: result.reason as "confirmed" | "already_confirmed",
       session: result.session as StructuredPendingSession,
     };
   }

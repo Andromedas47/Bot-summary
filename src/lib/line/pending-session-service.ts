@@ -59,6 +59,20 @@ export interface PendingSession {
     | "pending" | "processing" | "failed_closed" | "duplicate" | "finalized";
   finalization_error?:            unknown | null;
   finalized_produce_session_id?:  string | null;
+  /** 0050: structured review hold — non-NULL blocks Produce persistence. */
+  finalize_hold_until?:           string | null;
+  finalize_confirmed_at?:         string | null;
+  finalize_confirm_line_event_id?: string | null;
+}
+
+export interface ConfirmFinalizationResult {
+  accepted: boolean;
+  reason?: string;
+  readiness_reason?: string;
+  admission_count?: number;
+  ingest_count?: number;
+  straggler_count?: number;
+  session?: PendingSession;
 }
 
 export interface TryFinalizeResult {
@@ -304,6 +318,30 @@ export class PendingSessionService {
       throw new Error(`pending session not found for append: ${sessionKey}`);
     }
     return result.session as PendingSession;
+  }
+
+  /**
+   * Releases a structured finalization hold after operator confirmation.
+   * Control event only: no admission, ingest, synthetic text, or Produce write.
+   */
+  async confirmFinalization(
+    sessionKey: string,
+    lineUserId: string,
+    confirmLineEventId: string,
+    expectedGeneration?: string | null,
+  ): Promise<ConfirmFinalizationResult> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data, error } = await (this.supabase as any).rpc(
+      "confirm_produce_structured_finalization",
+      {
+        p_session_key:                 sessionKey,
+        p_line_user_id:                lineUserId,
+        p_confirm_line_event_id:       confirmLineEventId,
+        p_expected_session_generation: expectedGeneration ?? null,
+      },
+    );
+    if (error) throw new Error(`structured finalization confirm failed: ${error.message}`);
+    return data as ConfirmFinalizationResult;
   }
 
   async tryFinalizeGeneration(

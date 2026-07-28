@@ -11,9 +11,12 @@
 --   first close freezes close_event_timestamp_ms (LINE event time)
 --   quiet = 8s, deadline = 30s from clock_timestamp() at first close (fixed)
 --   late arrivals with line_timestamp_ms <= boundary may still admit until deadline
---   line_timestamp_ms > boundary is rejected
+--   line_timestamp_ms > boundary is rejected on admit after boundary exists
+--   pre-close admits with line_timestamp_ms > eventual boundary stay as immutable
+--     evidence but are excluded from the authoritative finalizable ingest set/hash
 --   duplicate close does not move boundary / quiet / deadline
 --   BOTH finalize and failed_closed require CLOSING + barrier elapsed
+--   get_physical_inventory_finalize_candidate: one SQL statement / one snapshot
 --
 -- counted_at on snapshots = timestamptz of close_event_timestamp_ms
 -- (staff close/count-completion instant), NOT server receipt time.
@@ -210,7 +213,8 @@ COMMENT ON COLUMN public.physical_inventory_snapshots.counted_at IS
   '(LINE close event). Not the server finalize/receipt clock.';
 
 COMMENT ON COLUMN public.physical_inventory_snapshots.finalized_ingest_hash IS
-  'SHA-256 hex of the authoritative admitted ingest set (ordered by ingest_revision).';
+  'SHA-256 hex of the authoritative close-boundary-eligible ingest set '
+  '(ordered by ingest_revision). Post-boundary evidence rows are omitted.';
 
 CREATE INDEX physical_inventory_snapshots_business_date_idx
   ON public.physical_inventory_snapshots (business_date DESC, source_id);
@@ -386,7 +390,9 @@ CREATE TRIGGER physical_inventory_lifecycle_session_snapshot_guard
   BEFORE INSERT ON public.physical_inventory_lifecycle_events
   FOR EACH ROW EXECUTE FUNCTION public.physical_inventory_lifecycle_session_snapshot_guard();
 
--- ── Ingest set hash (deterministic, ordered) ─────────────────────────────────
+-- ── Ingest set hash (deterministic, ordered, close-boundary eligible only) ───
+-- Authoritative finalize set excludes non-close rows with line_timestamp_ms
+-- strictly after the frozen close_event_timestamp_ms. Evidence rows remain.
 
 CREATE OR REPLACE FUNCTION public.physical_inventory_compute_ingest_set_hash(
   p_session_id uuid
@@ -408,7 +414,13 @@ AS $$
             ORDER BY i.ingest_revision ASC, i.line_event_id ASC
           )
           FROM public.physical_inventory_session_ingests i
+          JOIN public.physical_inventory_sessions s ON s.id = i.session_id
           WHERE i.session_id = p_session_id
+            AND (
+              s.close_event_timestamp_ms IS NULL
+              OR i.kind = 'close'
+              OR i.line_timestamp_ms <= s.close_event_timestamp_ms
+            )
         ),
         ''
       ),
@@ -629,6 +641,8 @@ DECLARE
   v_next_rev  bigint;
   v_now       timestamptz := clock_timestamp();
   v_event     text;
+  v_excluded  int := 0;
+  v_reason    text := 'admitted';
 BEGIN
   IF p_session_id IS NULL OR p_expected_generation IS NULL THEN
     RAISE EXCEPTION 'session_id and expected_generation required';
@@ -672,7 +686,8 @@ BEGIN
       'session_id', v_session.id,
       'ingest_revision', v_session.ingest_revision,
       'status', v_session.status,
-      'close_event_timestamp_ms', v_session.close_event_timestamp_ms
+      'close_event_timestamp_ms', v_session.close_event_timestamp_ms,
+      'post_boundary_excluded_count', 0
     );
   END IF;
 
@@ -693,6 +708,27 @@ BEGIN
     RAISE EXCEPTION 'session_closed';
   END IF;
 
+  -- Re-check identity under session lock (concurrent identical delivery).
+  SELECT * INTO v_existing
+  FROM public.physical_inventory_session_ingests
+  WHERE line_event_id = v_event;
+
+  IF FOUND THEN
+    IF v_existing.session_id IS DISTINCT FROM p_session_id THEN
+      RAISE EXCEPTION 'line_event_conflict';
+    END IF;
+    RETURN jsonb_build_object(
+      'accepted', true,
+      'inserted', false,
+      'reason', 'duplicate_event',
+      'session_id', v_session.id,
+      'ingest_revision', v_session.ingest_revision,
+      'status', v_session.status,
+      'close_event_timestamp_ms', v_session.close_event_timestamp_ms,
+      'post_boundary_excluded_count', 0
+    );
+  END IF;
+
   -- Duplicate close without a new ingest row: do not move boundary.
   IF v_session.close_event_timestamp_ms IS NOT NULL AND p_kind = 'close' THEN
     RETURN jsonb_build_object(
@@ -702,7 +738,8 @@ BEGIN
       'session_id', v_session.id,
       'ingest_revision', v_session.ingest_revision,
       'status', v_session.status,
-      'close_event_timestamp_ms', v_session.close_event_timestamp_ms
+      'close_event_timestamp_ms', v_session.close_event_timestamp_ms,
+      'post_boundary_excluded_count', 0
     );
   END IF;
 
@@ -715,15 +752,57 @@ BEGIN
     END IF;
   END IF;
 
+  -- First close: count already-admitted post-boundary non-close evidence.
+  -- Those rows stay immutable; hash/candidate exclude them from the
+  -- authoritative finalizable set (never silently include).
+  IF p_kind = 'close' AND v_session.close_event_timestamp_ms IS NULL THEN
+    SELECT count(*)::int INTO v_excluded
+    FROM public.physical_inventory_session_ingests i
+    WHERE i.session_id = p_session_id
+      AND i.kind IS DISTINCT FROM 'close'
+      AND i.line_timestamp_ms > p_line_timestamp_ms;
+    IF v_excluded > 0 THEN
+      v_reason := 'admitted_close_with_post_boundary_exclusions';
+    END IF;
+  END IF;
+
   v_next_rev := v_session.ingest_revision + 1;
 
-  INSERT INTO public.physical_inventory_session_ingests (
-    session_id, line_event_id, line_message_id, line_timestamp_ms,
-    raw_message_id, kind, raw_text, ingest_revision, created_at
-  ) VALUES (
-    p_session_id, v_event, p_line_message_id, p_line_timestamp_ms,
-    p_raw_message_id, p_kind, p_raw_text, v_next_rev, v_now
-  );
+  BEGIN
+    INSERT INTO public.physical_inventory_session_ingests (
+      session_id, line_event_id, line_message_id, line_timestamp_ms,
+      raw_message_id, kind, raw_text, ingest_revision, created_at
+    ) VALUES (
+      p_session_id, v_event, p_line_message_id, p_line_timestamp_ms,
+      p_raw_message_id, p_kind, p_raw_text, v_next_rev, v_now
+    );
+  EXCEPTION
+    WHEN unique_violation THEN
+      -- Concurrent identical delivery lost the race after lock serialization
+      -- edge cases (or revision collision). Preserve idempotent semantics.
+      SELECT * INTO v_existing
+      FROM public.physical_inventory_session_ingests
+      WHERE line_event_id = v_event;
+      IF NOT FOUND THEN
+        RAISE;
+      END IF;
+      IF v_existing.session_id IS DISTINCT FROM p_session_id THEN
+        RAISE EXCEPTION 'line_event_conflict';
+      END IF;
+      SELECT * INTO v_session
+      FROM public.physical_inventory_sessions
+      WHERE id = p_session_id;
+      RETURN jsonb_build_object(
+        'accepted', true,
+        'inserted', false,
+        'reason', 'duplicate_event',
+        'session_id', v_session.id,
+        'ingest_revision', v_session.ingest_revision,
+        'status', v_session.status,
+        'close_event_timestamp_ms', v_session.close_event_timestamp_ms,
+        'post_boundary_excluded_count', 0
+      );
+  END;
 
   UPDATE public.physical_inventory_sessions
   SET ingest_revision = v_next_rev,
@@ -765,11 +844,12 @@ BEGIN
   RETURN jsonb_build_object(
     'accepted', true,
     'inserted', true,
-    'reason', 'admitted',
+    'reason', v_reason,
     'session_id', v_session.id,
     'ingest_revision', v_session.ingest_revision,
     'status', v_session.status,
-    'close_event_timestamp_ms', v_session.close_event_timestamp_ms
+    'close_event_timestamp_ms', v_session.close_event_timestamp_ms,
+    'post_boundary_excluded_count', v_excluded
   );
 END;
 $$;
@@ -778,7 +858,10 @@ COMMENT ON FUNCTION public.admit_physical_inventory_event(
   uuid, uuid, text, bigint, text, text, text, uuid
 ) IS
   'SECURITY DEFINER. Admit a Physical Stock LINE event with DB-clock close barrier. '
-  'Global line_event_id uniqueness; terminal redelivery of known events is idempotent.';
+  'Global line_event_id uniqueness; concurrent duplicate delivery is idempotent '
+  '(re-check under session lock + unique_violation handler). '
+  'First close excludes already-admitted post-boundary non-close evidence from '
+  'the authoritative finalizable set without deleting ingest rows.';
 
 REVOKE ALL ON FUNCTION public.admit_physical_inventory_event(
   uuid, uuid, text, bigint, text, text, text, uuid
@@ -790,71 +873,106 @@ GRANT EXECUTE ON FUNCTION public.admit_physical_inventory_event(
   uuid, uuid, text, bigint, text, text, text, uuid
 ) TO service_role;
 
--- ── Finalize candidate (one consistent read) ─────────────────────────────────
+-- ── Finalize candidate (one SQL statement = one snapshot) ────────────────────
 
 CREATE OR REPLACE FUNCTION public.get_physical_inventory_finalize_candidate(
   p_session_id          uuid,
   p_expected_generation uuid
 ) RETURNS jsonb
 LANGUAGE plpgsql
+STABLE
 SECURITY DEFINER
 SET search_path = public
 AS $$
 DECLARE
-  v_session public.physical_inventory_sessions%ROWTYPE;
-  v_hash    text;
-  v_ingests jsonb;
+  v_result jsonb;
 BEGIN
   IF p_session_id IS NULL OR p_expected_generation IS NULL THEN
     RAISE EXCEPTION 'session_id and expected_generation required';
   END IF;
 
-  SELECT * INTO v_session
-  FROM public.physical_inventory_sessions
-  WHERE id = p_session_id;
+  -- Single SQL statement → one PostgreSQL snapshot for generation, revision,
+  -- ordered eligible ingests, and hash. No long locks; finalizer re-verifies.
+  SELECT jsonb_build_object(
+    'session_id', s.id,
+    'session_generation', s.session_generation,
+    'status', s.status,
+    'ingest_revision', s.ingest_revision,
+    'ingest_set_hash', encode(
+      digest(
+        coalesce(
+          (
+            SELECT string_agg(
+              i.line_event_id
+                || E'\x1f' || i.line_timestamp_ms::text
+                || E'\x1f' || i.kind
+                || E'\x1f' || i.raw_text,
+              E'\n'
+              ORDER BY i.ingest_revision ASC, i.line_event_id ASC
+            )
+            FROM public.physical_inventory_session_ingests i
+            WHERE i.session_id = s.id
+              AND (
+                s.close_event_timestamp_ms IS NULL
+                OR i.kind = 'close'
+                OR i.line_timestamp_ms <= s.close_event_timestamp_ms
+              )
+          ),
+          ''
+        ),
+        'sha256'
+      ),
+      'hex'
+    ),
+    'close_event_timestamp_ms', s.close_event_timestamp_ms,
+    'close_quiet_until', s.close_quiet_until,
+    'close_deadline_at', s.close_deadline_at,
+    'ingests', coalesce(
+      (
+        SELECT jsonb_agg(row_to_json(x)::jsonb ORDER BY x.ingest_revision)
+        FROM (
+          SELECT
+            i.line_event_id,
+            i.line_timestamp_ms,
+            i.kind,
+            i.raw_text,
+            i.ingest_revision,
+            i.line_message_id,
+            i.raw_message_id
+          FROM public.physical_inventory_session_ingests i
+          WHERE i.session_id = s.id
+            AND (
+              s.close_event_timestamp_ms IS NULL
+              OR i.kind = 'close'
+              OR i.line_timestamp_ms <= s.close_event_timestamp_ms
+            )
+          ORDER BY i.ingest_revision ASC
+        ) x
+      ),
+      '[]'::jsonb
+    )
+  )
+  INTO v_result
+  FROM public.physical_inventory_sessions s
+  WHERE s.id = p_session_id
+    AND s.session_generation = p_expected_generation;
 
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'physical inventory session not found';
-  END IF;
-  IF v_session.session_generation IS DISTINCT FROM p_expected_generation THEN
+  IF v_result IS NULL THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM public.physical_inventory_sessions WHERE id = p_session_id
+    ) THEN
+      RAISE EXCEPTION 'physical inventory session not found';
+    END IF;
     RAISE EXCEPTION 'generation_conflict';
   END IF;
 
-  v_hash := public.physical_inventory_compute_ingest_set_hash(p_session_id);
-
-  SELECT coalesce(jsonb_agg(row_to_json(x)::jsonb ORDER BY x.ingest_revision), '[]'::jsonb)
-  INTO v_ingests
-  FROM (
-    SELECT
-      i.line_event_id,
-      i.line_timestamp_ms,
-      i.kind,
-      i.raw_text,
-      i.ingest_revision,
-      i.line_message_id,
-      i.raw_message_id
-    FROM public.physical_inventory_session_ingests i
-    WHERE i.session_id = p_session_id
-    ORDER BY i.ingest_revision ASC
-  ) x;
-
-  RETURN jsonb_build_object(
-    'session_id', v_session.id,
-    'session_generation', v_session.session_generation,
-    'status', v_session.status,
-    'ingest_revision', v_session.ingest_revision,
-    'ingest_set_hash', v_hash,
-    'close_event_timestamp_ms', v_session.close_event_timestamp_ms,
-    'close_quiet_until', v_session.close_quiet_until,
-    'close_deadline_at', v_session.close_deadline_at,
-    'ingests', v_ingests
-  );
+  RETURN v_result;
 END;
 $$;
 
 COMMENT ON FUNCTION public.get_physical_inventory_finalize_candidate(uuid, uuid) IS
-  'SECURITY DEFINER. One DB-consistent read of generation/revision/hash/ordered ingests '
-  'for parser finalize. Parser stays in application code.';
+  'SECURITY DEFINER. One SQL-statement snapshot of generation/revision/hash/ordered '
+  'close-boundary-eligible ingests for parser finalize. Parser stays in app code.';
 
 REVOKE ALL ON FUNCTION public.get_physical_inventory_finalize_candidate(uuid, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.get_physical_inventory_finalize_candidate(uuid, uuid)

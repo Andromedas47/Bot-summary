@@ -19,19 +19,32 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
   v_err text;
+  v_state text;
+  v_raised boolean := false;
 BEGIN
+  -- Catch only the EXECUTE'd statement. Assertion failures are raised AFTER
+  -- this block so they cannot substring-match p_needle (false PASS).
   BEGIN
     EXECUTE p_sql;
-    RAISE EXCEPTION 'p2a_0047_hardening FAIL: % (expected error containing %)', p_msg, p_needle;
   EXCEPTION
     WHEN OTHERS THEN
-      GET STACKED DIAGNOSTICS v_err = MESSAGE_TEXT;
-      IF position(lower(p_needle) IN lower(v_err)) = 0 THEN
-        RAISE EXCEPTION
-          'p2a_0047_hardening FAIL: % — got "%" (wanted substring "%")',
-          p_msg, v_err, p_needle;
-      END IF;
+      v_raised := true;
+      GET STACKED DIAGNOSTICS
+        v_err = MESSAGE_TEXT,
+        v_state = RETURNED_SQLSTATE;
   END;
+
+  IF NOT v_raised THEN
+    RAISE EXCEPTION
+      'p2a_0047_hardening FAIL: % (expected error containing "%"; statement succeeded)',
+      p_msg, p_needle;
+  END IF;
+
+  IF position(lower(p_needle) IN lower(v_err)) = 0 THEN
+    RAISE EXCEPTION
+      'p2a_0047_hardening FAIL: % — got "%" sqlstate=% (wanted substring "%")',
+      p_msg, v_err, v_state, p_needle;
+  END IF;
 END;
 $$;
 
@@ -542,6 +555,178 @@ BEGIN
     'lifecycle snapshot_id must belong to lifecycle session_id',
     '14: lifecycle session/snapshot mismatch'
   );
+END;
+$$;
+
+-- ── 15A. Boundary order: item T1, close T2, item T3(>T2) → T3 rejected ───────
+DO $$
+DECLARE
+  r jsonb;
+  cand jsonb;
+  v_sid uuid;
+  v_gen uuid;
+  n_t3 int;
+  n_cand_t3 int;
+BEGIN
+  r := public.open_physical_inventory_session(
+    'group', 'G-inv-a', 'U-inv-a', 'evt-inv-a-h', 10000, 'header', NULL, NULL, NULL, 'test'
+  );
+  v_sid := (r->>'session_id')::uuid;
+  v_gen := (r->>'session_generation')::uuid;
+
+  r := public.admit_physical_inventory_event(
+    v_sid, v_gen, 'evt-inv-a-t1', 11000, 'item', 'T1', NULL, NULL
+  );
+  PERFORM pg_temp.p2a_assert(COALESCE((r->>'inserted')::boolean, false), '15A: T1 admitted');
+
+  r := public.admit_physical_inventory_event(
+    v_sid, v_gen, 'evt-inv-a-close', 12000, 'close', 'จบ', NULL, NULL
+  );
+  PERFORM pg_temp.p2a_assert(COALESCE((r->>'inserted')::boolean, false), '15A: close admitted');
+  PERFORM pg_temp.p2a_assert((r->>'close_event_timestamp_ms') = '12000', '15A: boundary T2');
+
+  PERFORM pg_temp.p2a_expect_error(
+    format(
+      $q$SELECT public.admit_physical_inventory_event(
+        %L::uuid, %L::uuid, 'evt-inv-a-t3', 13000, 'item', 'T3', NULL, NULL)$q$,
+      v_sid, v_gen
+    ),
+    'after_close_boundary',
+    '15A: T3 after boundary rejected'
+  );
+
+  SELECT count(*) INTO n_t3
+  FROM public.physical_inventory_session_ingests
+  WHERE session_id = v_sid AND line_event_id = 'evt-inv-a-t3';
+  PERFORM pg_temp.p2a_assert(n_t3 = 0, '15A: T3 not in evidence');
+
+  cand := public.get_physical_inventory_finalize_candidate(v_sid, v_gen);
+  SELECT count(*) INTO n_cand_t3
+  FROM jsonb_array_elements(cand->'ingests') e
+  WHERE e->>'line_event_id' = 'evt-inv-a-t3';
+  PERFORM pg_temp.p2a_assert(n_cand_t3 = 0, '15A: T3 not in candidate');
+END;
+$$;
+
+-- ── 15B. Inversion: item T1, item T3(>T2), close T2 later → T3 excluded ──────
+DO $$
+DECLARE
+  r jsonb;
+  cand jsonb;
+  v_sid uuid;
+  v_gen uuid;
+  n_t3_evidence int;
+  n_cand_t3 int;
+  v_ids text;
+BEGIN
+  r := public.open_physical_inventory_session(
+    'group', 'G-inv-b', 'U-inv-b', 'evt-inv-b-h', 20000, 'header', NULL, NULL, NULL, 'test'
+  );
+  v_sid := (r->>'session_id')::uuid;
+  v_gen := (r->>'session_generation')::uuid;
+
+  PERFORM public.admit_physical_inventory_event(
+    v_sid, v_gen, 'evt-inv-b-t1', 21000, 'item', 'T1', NULL, NULL
+  );
+  r := public.admit_physical_inventory_event(
+    v_sid, v_gen, 'evt-inv-b-t3', 23000, 'item', 'T3', NULL, NULL
+  );
+  PERFORM pg_temp.p2a_assert(COALESCE((r->>'inserted')::boolean, false), '15B: T3 admitted while open');
+
+  r := public.admit_physical_inventory_event(
+    v_sid, v_gen, 'evt-inv-b-close', 22000, 'close', 'จบ', NULL, NULL
+  );
+  PERFORM pg_temp.p2a_assert(COALESCE((r->>'inserted')::boolean, false), '15B: close admitted');
+  PERFORM pg_temp.p2a_assert((r->>'close_event_timestamp_ms') = '22000', '15B: boundary T2');
+  PERFORM pg_temp.p2a_assert(
+    COALESCE((r->>'post_boundary_excluded_count')::int, 0) >= 1,
+    '15B: close reports post-boundary exclusions'
+  );
+  PERFORM pg_temp.p2a_assert(
+    (r->>'reason') = 'admitted_close_with_post_boundary_exclusions',
+    '15B: explicit exclusion reason'
+  );
+
+  -- Evidence retained (immutable), but not in authoritative candidate set.
+  SELECT count(*) INTO n_t3_evidence
+  FROM public.physical_inventory_session_ingests
+  WHERE session_id = v_sid AND line_event_id = 'evt-inv-b-t3';
+  PERFORM pg_temp.p2a_assert(n_t3_evidence = 1, '15B: T3 evidence retained');
+
+  cand := public.get_physical_inventory_finalize_candidate(v_sid, v_gen);
+  SELECT count(*) INTO n_cand_t3
+  FROM jsonb_array_elements(cand->'ingests') e
+  WHERE e->>'line_event_id' = 'evt-inv-b-t3';
+  PERFORM pg_temp.p2a_assert(n_cand_t3 = 0, '15B: T3 excluded from candidate');
+
+  SELECT string_agg(e->>'line_event_id', ',' ORDER BY (e->>'ingest_revision')::bigint)
+  INTO v_ids
+  FROM jsonb_array_elements(cand->'ingests') e;
+  PERFORM pg_temp.p2a_assert(
+    position('evt-inv-b-t3' IN coalesce(v_ids, '')) = 0,
+    '15B: candidate ids omit T3'
+  );
+  PERFORM pg_temp.p2a_assert(
+    cand->>'ingest_set_hash' = public.physical_inventory_compute_ingest_set_hash(v_sid),
+    '15B: candidate hash matches compute hash'
+  );
+END;
+$$;
+
+-- ── 15C. Pre-boundary item T0 (<T2) admitted before close → valid ────────────
+DO $$
+DECLARE
+  r jsonb;
+  cand jsonb;
+  v_sid uuid;
+  v_gen uuid;
+  n_t0 int;
+BEGIN
+  r := public.open_physical_inventory_session(
+    'group', 'G-inv-c', 'U-inv-c', 'evt-inv-c-h', 30000, 'header', NULL, NULL, NULL, 'test'
+  );
+  v_sid := (r->>'session_id')::uuid;
+  v_gen := (r->>'session_generation')::uuid;
+
+  PERFORM public.admit_physical_inventory_event(
+    v_sid, v_gen, 'evt-inv-c-t1', 31000, 'item', 'T1', NULL, NULL
+  );
+  r := public.admit_physical_inventory_event(
+    v_sid, v_gen, 'evt-inv-c-t0', 30500, 'item', 'T0', NULL, NULL
+  );
+  PERFORM pg_temp.p2a_assert(COALESCE((r->>'inserted')::boolean, false), '15C: T0 admitted before close');
+
+  r := public.admit_physical_inventory_event(
+    v_sid, v_gen, 'evt-inv-c-close', 32000, 'close', 'จบ', NULL, NULL
+  );
+  PERFORM pg_temp.p2a_assert(COALESCE((r->>'inserted')::boolean, false), '15C: close admitted');
+  PERFORM pg_temp.p2a_assert(
+    COALESCE((r->>'post_boundary_excluded_count')::int, 0) = 0,
+    '15C: no exclusions'
+  );
+
+  cand := public.get_physical_inventory_finalize_candidate(v_sid, v_gen);
+  SELECT count(*) INTO n_t0
+  FROM jsonb_array_elements(cand->'ingests') e
+  WHERE e->>'line_event_id' = 'evt-inv-c-t0';
+  PERFORM pg_temp.p2a_assert(n_t0 = 1, '15C: T0 remains in candidate');
+END;
+$$;
+
+-- ── 16. expect_error helper must FAIL when statement unexpectedly succeeds ───
+DO $$
+BEGIN
+  BEGIN
+    PERFORM pg_temp.p2a_expect_error('SELECT 1', 'line_event_conflict', '16: should fail');
+    RAISE EXCEPTION 'p2a_0047_hardening FAIL: 16 expect_error falsely passed on success';
+  EXCEPTION
+    WHEN OTHERS THEN
+      IF position('expected error containing' IN SQLERRM) = 0
+         OR position('statement succeeded' IN SQLERRM) = 0 THEN
+        RAISE EXCEPTION
+          'p2a_0047_hardening FAIL: 16 unexpected error from expect_error: %', SQLERRM;
+      END IF;
+  END;
 END;
 $$;
 

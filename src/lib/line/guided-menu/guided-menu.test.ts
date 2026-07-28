@@ -5,17 +5,22 @@ import {
   ALL_TX_CODES,
   TX_CODE_TO_BASE,
   TX_CODE_TO_LABEL,
+  PREVIEW_OPERATOR_NOTICE,
+  PREVIEW_SCENARIOS,
   applyScenarioInPreview,
   applyScenarioToSession,
+  collectOperatorVisibleText,
   decodeGuidedMenuPostback,
   encodeGuidedMenuPostback,
   emptySelection,
   formatBusinessDateThai,
   initialGuidedMenuFlow,
   looksLikeSyntheticThaiProduceHeader,
+  openCommandFromActiveSession,
   postbackData,
   reduceGuidedMenuPostback,
   resolveGuidedBusinessDate,
+  sampleActiveSessionBase,
   toPreviewOpenProduceSessionCommand,
   type GuidedMenuTxCode,
 } from "./index";
@@ -177,7 +182,7 @@ describe("guided menu V1 — received vs parsed counts", () => {
     expect(flow.screen).toBe("ack_compact");
     const text = flow.messages[0].type === "text" ? flow.messages[0].text : "";
     expect(text).toContain("รับข้อความแล้ว 4 ข้อความ");
-    expect(text).toContain("รายการรอตรวจ 4 รายการ");
+    expect(text).toContain("อ่านได้ 4 รายการ");
     expect(text).not.toContain("บันทึกแล้ว");
   });
 
@@ -343,6 +348,167 @@ describe("guided menu V1 — success only after explicit confirmation", () => {
   });
 });
 
+describe("guided menu V1 polish — state hardening", () => {
+  it("Back from market returns to type select; Back from date returns to market", () => {
+    let flow = initialGuidedMenuFlow();
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("start"),
+      selection: flow.selection,
+      activeSession: null,
+      lineTimestampMs: TS,
+    });
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("select_tx", { tx: "s" }),
+      selection: flow.selection,
+      activeSession: null,
+      lineTimestampMs: TS,
+    });
+    expect(flow.screen).toBe("market_select");
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("back", { tx: "s" }),
+      selection: flow.selection,
+      activeSession: null,
+      lineTimestampMs: TS,
+    });
+    expect(flow.screen).toBe("main_menu");
+    expect(flow.selection.txCode).toBeNull();
+
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("select_tx", { tx: "b" }),
+      selection: flow.selection,
+      activeSession: null,
+      lineTimestampMs: TS,
+    });
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("select_market", { tx: "b", mid: MARKET }),
+      selection: flow.selection,
+      activeSession: null,
+      lineTimestampMs: TS,
+    });
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("back", { tx: "b", mid: MARKET }),
+      selection: flow.selection,
+      activeSession: null,
+      lineTimestampMs: TS,
+    });
+    expect(flow.screen).toBe("market_select");
+  });
+
+  it("reset via menu clears selection and session", () => {
+    let flow = loadValidScenario();
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("menu"),
+      selection: flow.selection,
+      activeSession: flow.activeSession,
+      lineTimestampMs: TS,
+    });
+    expect(flow.screen).toBe("start_menu");
+    expect(flow.selection).toEqual(emptySelection());
+    expect(flow.activeSession).toBeNull();
+    expect(flow.openCommand).toBeNull();
+    expect(flow.closeCommand).toBeNull();
+  });
+
+  it("double finalize stays on single success", () => {
+    let flow = loadValidScenario();
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("review_close"),
+      selection: flow.selection,
+      activeSession: flow.activeSession,
+      lineTimestampMs: TS,
+    });
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("barrier_ready"),
+      selection: flow.selection,
+      activeSession: flow.activeSession,
+      lineTimestampMs: TS,
+    });
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("confirm_persist"),
+      selection: flow.selection,
+      activeSession: flow.activeSession,
+      lineTimestampMs: TS,
+    });
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("finalize"),
+      selection: flow.selection,
+      activeSession: flow.activeSession,
+      lineTimestampMs: TS,
+    });
+    expect(flow.screen).toBe("success");
+    const first = flow.closeCommand;
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("finalize"),
+      selection: flow.selection,
+      activeSession: flow.activeSession,
+      lineTimestampMs: TS,
+    });
+    expect(flow.screen).toBe("success");
+    expect(flow.closeCommand!.expectedItemCount).toBe(first!.expectedItemCount);
+  });
+
+  it("barrier_ready rejected unless waiting", () => {
+    let flow = loadValidScenario();
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("barrier_ready"),
+      selection: flow.selection,
+      activeSession: flow.activeSession,
+      lineTimestampMs: TS,
+    });
+    expect(flow.screen).toBe("error");
+    expect(flow.error).toBe("barrier_not_waiting");
+  });
+
+  it("waiting scenario isolates barrier counts from valid fixture", () => {
+    let flow = openSession("b");
+    flow = applyScenarioInPreview({
+      activeSession: flow.activeSession!,
+      scenarioId: "waiting",
+    });
+    expect(flow.screen).toBe("close_barrier");
+    expect(flow.activeSession!.admittedEventCount).toBeGreaterThan(flow.activeSession!.ingestedEventCount);
+    expect(flow.activeSession!.persistedSimulated).toBe(false);
+
+    flow = applyScenarioInPreview({
+      activeSession: flow.activeSession!,
+      scenarioId: "partial_error",
+    });
+    expect(flow.screen).toBe("ack_compact");
+    expect(flow.activeSession!.blockingIssueCount).toBe(1);
+    expect(flow.activeSession!.closeBarrierStatus).toBe("idle");
+  });
+
+  it("operator-visible content keeps บันทึกแล้ว only on success", () => {
+    let flow = loadValidScenario();
+    let visible = collectOperatorVisibleText(flow.messages);
+    expect(visible).toContain(PREVIEW_OPERATOR_NOTICE);
+    expect(visible).not.toContain("บันทึกแล้ว");
+
+    flow = openSession("k");
+    visible = collectOperatorVisibleText(flow.messages);
+    expect(visible).toContain("ส่งต่อข้อความรายการสินค้ามาได้เหมือนเดิม");
+    expect(visible).toContain("หรือคัดลอกมาวางทั้งชุดได้");
+    expect(visible).not.toContain("admitted");
+    expect(visible).not.toContain("ingested");
+  });
+
+  it("adapter output matches visible session confirmation values", () => {
+    const flow = openSession("k", "yesterday");
+    const cmd = openCommandFromActiveSession(flow.activeSession!);
+    expect(cmd.initialTransactionType).toBe("คืน");
+    expect(cmd.businessDate).toBe(flow.activeSession!.businessDateIso);
+    expect(cmd.marketLabel).toBe(flow.activeSession!.marketLabel);
+    expect(cmd.staffLabel).toBe(flow.activeSession!.staffLabel);
+  });
+
+  it("counts derive from fixture data", () => {
+    const session = applyScenarioToSession(sampleActiveSessionBase(), "valid");
+    expect(session.receivedMessageCount).toBe(PREVIEW_SCENARIOS.valid.receivedMessages.length);
+    expect(session.parsedItemCount).toBe(PREVIEW_SCENARIOS.valid.items.length);
+    expect(session.blockingIssueCount).toBe(PREVIEW_SCENARIOS.valid.issues.length);
+  });
+});
+
 describe("guided menu V1 — postback encode/decode + tamper rejection", () => {
   it("round-trips compact versioned payloads", () => {
     const payload = {
@@ -452,7 +618,7 @@ describe("guided menu V1 — status screens", () => {
     });
     expect(flow.screen).toBe("session_status");
     const validText = flow.messages[0].type === "text" ? flow.messages[0].text : "";
-    expect(validText).toContain("ข้อความที่รับแล้ว");
+    expect(validText).toContain("รับข้อความแล้ว");
     expect(validText).toContain("ยังไม่บันทึก");
 
     flow = loadBlockingScenario();

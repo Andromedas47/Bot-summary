@@ -1,6 +1,18 @@
+/**
+ * Guided menu → 0049 typed command adapter (preview boundary).
+ *
+ * TODO(0049-integration): replace Preview* types with real exports from
+ * `produce-session-commands.ts` after controlled merge. Do not import from
+ * another worktree path.
+ *
+ * TODO(0050-integration): operator identity + opaque menu state token (`tok`)
+ * will replace preview placeholders for staffLabel / session continuity.
+ */
+
 import { PREVIEW_LINE_EVENT_ID, PREVIEW_STAFF_LABEL } from "./config";
 import { resolveTransactionTime } from "./dates";
 import type {
+  GuidedMenuActiveSession,
   GuidedMenuBaseTransactionType,
   PreviewCloseProduceSessionCommand,
   PreviewOpenProduceSessionCommand,
@@ -21,13 +33,23 @@ export interface OpenCommandAdapterInput {
 }
 
 /**
- * Map final confirmation into the typed shape expected by 0049.
+ * Preview placeholders that real LINE / 0049 / 0050 values will replace.
  *
- * TODO(0049-integration): swap PreviewOpenProduceSessionCommand for the real
- * OpenProduceSessionCommand export after controlled merge of
- * feat/produce-structured-session-foundation. Do not import unfinished code
- * across worktrees.
- *
+ * | Field | Preview source | Future source |
+ * |---|---|---|
+ * | lineEventId | PREVIEW_LINE_EVENT_ID | LINE webhook event.id |
+ * | lineTimestampMs | preview clock / event | LINE event.timestamp |
+ * | transactionTime | derived from lineTimestampMs | same, or operator-declared |
+ * | staffLabel | PREVIEW_STAFF_LABEL | 0050 operator identity |
+ * | marketLabel | config lookup by mid | same config resolution |
+ */
+export const PREVIEW_COMMAND_PLACEHOLDERS = {
+  lineEventId: PREVIEW_LINE_EVENT_ID,
+  staffLabel: PREVIEW_STAFF_LABEL,
+} as const;
+
+/**
+ * Map validated Guided Menu confirmation into the typed shape expected by 0049.
  * Never synthesizes a Thai session header string.
  */
 export function toPreviewOpenProduceSessionCommand(
@@ -52,11 +74,25 @@ export function toPreviewOpenProduceSessionCommand(
     businessDate: input.businessDate,
     transactionTime: resolveTransactionTime(input.lineTimestampMs),
     transactionTimeSource: input.transactionTimeSource ?? "line_event",
-    staffLabel: input.staffLabel ?? PREVIEW_STAFF_LABEL,
+    staffLabel: input.staffLabel ?? PREVIEW_COMMAND_PLACEHOLDERS.staffLabel,
     marketLabel: input.marketLabel,
-    lineEventId: input.lineEventId ?? PREVIEW_LINE_EVENT_ID,
+    lineEventId: input.lineEventId ?? PREVIEW_COMMAND_PLACEHOLDERS.lineEventId,
     lineTimestampMs: input.lineTimestampMs,
   };
+}
+
+/** Build open command from an already-opened preview session (display ↔ emit parity). */
+export function openCommandFromActiveSession(
+  session: GuidedMenuActiveSession,
+  lineTimestampMs = session.openedAtMs,
+): PreviewOpenProduceSessionCommand {
+  return toPreviewOpenProduceSessionCommand({
+    initialTransactionType: session.baseTransactionType,
+    businessDate: session.businessDateIso,
+    marketLabel: session.marketLabel,
+    staffLabel: session.staffLabel,
+    lineTimestampMs,
+  });
 }
 
 export function toPreviewCloseProduceSessionCommand(input: {
@@ -66,7 +102,7 @@ export function toPreviewCloseProduceSessionCommand(input: {
 }): PreviewCloseProduceSessionCommand {
   return {
     kind: "close",
-    lineEventId: input.lineEventId ?? PREVIEW_LINE_EVENT_ID,
+    lineEventId: input.lineEventId ?? PREVIEW_COMMAND_PLACEHOLDERS.lineEventId,
     lineTimestampMs: input.lineTimestampMs,
     expectedItemCount: input.observedItemCount,
   };
@@ -74,8 +110,6 @@ export function toPreviewCloseProduceSessionCommand(input: {
 
 /** Guard used by tests — guided menu must never emit a textual produce header. */
 export function looksLikeSyntheticThaiProduceHeader(text: string): boolean {
-  // Matches common header shapes like "ต้อม-พาซิโอ้ผัก เบิก 30/06/2569"
-  // or "พี่ดำ-วิหาร ชั่งคืน" — guided flow must not generate these.
   return /[ก-๙].+-.+\s+(เบิก|ชั่งคืน|คืน|คืนเสีย)(\s|$)/.test(text)
     || /จบรายการ(เบิก|ชั่งคืน|คืนเสีย|คืน)/.test(text);
 }

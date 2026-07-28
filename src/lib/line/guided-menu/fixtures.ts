@@ -101,21 +101,23 @@ export interface PreviewScenarioFixture {
   receivedMessages: PreviewReceivedMessage[];
   items: PreviewParsedItem[];
   issues: PreviewBlockingIssue[];
+  /** When true, admitted > ingested after apply. */
+  barrierWaiting?: boolean;
 }
 
 export const PREVIEW_SCENARIOS: Record<PreviewScenarioId, PreviewScenarioFixture> = {
   valid: {
     id: "valid",
-    label: "ครบถ้วน (valid)",
-    description: "Forwarded events + pasted block — all items parse cleanly",
+    label: "ใช้งานปกติ",
+    description: "ส่งต่อหลายข้อความ + วางทั้งชุด — อ่านได้ครบ ไม่มีจุดต้องตรวจ",
     receivedMessages: [...FORWARDED_EVENTS, PASTED_BLOCK],
     items: VALID_ITEMS,
     issues: [],
   },
   partial_error: {
     id: "partial_error",
-    label: "มีจุดต้องตรวจ (blocking)",
-    description: "3 valid items + 1 malformed raw block",
+    label: "มีรายการผิด",
+    description: "อ่านได้บางส่วน + มีข้อความผิดชัดเจน — ยังบันทึกไม่ได้",
     receivedMessages: [
       ...FORWARDED_EVENTS,
       {
@@ -126,6 +128,15 @@ export const PREVIEW_SCENARIOS: Record<PreviewScenarioId, PreviewScenarioFixture
     ],
     items: PARTIAL_ITEMS,
     issues: [BLOCKING_ISSUE],
+  },
+  waiting: {
+    id: "waiting",
+    label: "รอข้อความค้าง",
+    description: "ข้อความเข้ามาแล้วบางส่วน — กำลังรอข้อความที่ส่งค้างอยู่",
+    receivedMessages: [...FORWARDED_EVENTS, PASTED_BLOCK],
+    items: VALID_ITEMS,
+    issues: [],
+    barrierWaiting: true,
   },
 };
 
@@ -167,7 +178,7 @@ export function applyScenarioToSession(
   const fixture = PREVIEW_SCENARIOS[scenarioId];
   const items = withTxType(fixture.items, session.baseTransactionType);
   const received = fixture.receivedMessages;
-  return {
+  const base: GuidedMenuActiveSession = {
     ...session,
     receivedMessages: received,
     items,
@@ -182,19 +193,22 @@ export function applyScenarioToSession(
     reviewStatus: fixture.issues.length > 0 ? "blocking" : "valid",
     persistedSimulated: false,
   };
+  if (fixture.barrierWaiting) {
+    return applyCloseBarrierWaiting(base);
+  }
+  return base;
 }
 
 /** Close-barrier waiting: admitted ahead of ingested (in-flight forwards). */
 export function applyCloseBarrierWaiting(
   session: GuidedMenuActiveSession,
 ): GuidedMenuActiveSession {
-  const admitted = Math.max(session.admittedEventCount, session.receivedMessageCount);
+  const admitted = Math.max(session.admittedEventCount, session.receivedMessageCount, 1);
   return {
     ...session,
     closeBarrierStatus: "waiting",
     reviewStatus: "none",
     admittedEventCount: admitted,
-    // One in-flight event not yet ingested
     ingestedEventCount: Math.max(0, admitted - 1),
     persistedSimulated: false,
   };
@@ -250,4 +264,19 @@ export function sampleActiveSessionBase(
     ...emptySessionIntake(),
     ...overrides,
   };
+}
+
+/** Collect operator-visible text from preview messages (phone mock content). */
+export function collectOperatorVisibleText(
+  messages: Array<{ type: string; text?: string; contents?: unknown; altText?: string }>,
+): string {
+  const parts: string[] = [];
+  for (const message of messages) {
+    if (message.type === "text" && message.text) parts.push(message.text);
+    if (message.type === "flex") {
+      parts.push(JSON.stringify(message.contents ?? {}));
+      if (message.altText) parts.push(message.altText);
+    }
+  }
+  return parts.join("\n");
 }

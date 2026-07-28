@@ -19,6 +19,18 @@ import {
 } from "./types";
 
 const PREVIEW_BADGE = "PREVIEW ONLY";
+/** Operator-facing notice for open/close/persist screens. */
+export const PREVIEW_OPERATOR_NOTICE = "พรีวิวเท่านั้น — ยังไม่มีการบันทึกข้อมูลจริง";
+
+function noticeText() {
+  return {
+    type: "text" as const,
+    text: PREVIEW_OPERATOR_NOTICE,
+    size: "xs" as const,
+    color: "#B45309",
+    wrap: true,
+  };
+}
 
 function postbackAction(
   label: string,
@@ -93,6 +105,14 @@ function flexShell(
             color: "#FBBF24",
             size: "xs",
             weight: "bold",
+          },
+          {
+            type: "text",
+            text: PREVIEW_OPERATOR_NOTICE,
+            color: "#FDE68A",
+            size: "xxs",
+            wrap: true,
+            margin: "sm",
           },
           {
             type: "text",
@@ -315,18 +335,11 @@ export function buildConfirmOpenFlex(input: {
     "ยืนยันเปิดรายการ",
     "ยืนยันรายละเอียด",
     [
-      {
-        type: "text",
-        text: "ตรวจสอบก่อนเปิด — ยังไม่ส่ง LINE / ไม่เขียนฐานข้อมูล",
-        size: "xs",
-        color: "#B45309",
-        wrap: true,
-      },
+      noticeText(),
       ...summaryRows([
         { label: "ประเภท", value: input.transactionLabel },
         { label: "ตลาด", value: input.marketLabel },
-        { label: "วันที่ (พ.ศ.)", value: input.businessDateThai },
-        { label: "วันที่ (ISO)", value: input.businessDateIso },
+        { label: "วันที่", value: input.businessDateThai },
         { label: "พนักงาน", value: input.staffLabel },
       ]),
     ],
@@ -340,18 +353,20 @@ export function buildConfirmOpenFlex(input: {
 export function buildActiveSessionOpenedMessage(session: GuidedMenuActiveSession): LineTextMessage {
   const text = [
     `[${PREVIEW_BADGE}]`,
+    PREVIEW_OPERATOR_NOTICE,
     "เปิดรายการแล้ว ✅",
     "",
     `${session.staffLabel} — ${session.marketLabel}`,
     `${session.transactionLabel} — ${session.businessDateThai}`,
     "",
-    "ส่งต่อข้อความรายการสินค้ามาได้เลย",
-    "(ส่งต่อจากแชทอื่น / วางข้อความตามปกติ — ไม่ใช่ฟอร์มสินค้า)",
-    "เมื่อส่งครบ กด “ตรวจและจบรายการ”",
+    "ส่งต่อข้อความรายการสินค้ามาได้เหมือนเดิม",
+    "หรือคัดลอกมาวางทั้งชุดได้",
     "",
-    `ข้อความที่รับแล้ว: ${session.receivedMessageCount}`,
-    `รายการที่อ่านได้: ${session.parsedItemCount}`,
-    `จุดต้องตรวจ: ${session.blockingIssueCount}`,
+    "เมื่อส่งครบ ให้กด “ตรวจและจบรายการ”",
+    "",
+    `รับข้อความแล้ว: ${session.receivedMessageCount}`,
+    `อ่านได้: ${session.parsedItemCount}`,
+    `ต้องตรวจ: ${session.blockingIssueCount}`,
   ].join("\n");
 
   return {
@@ -373,12 +388,12 @@ export function buildActiveSessionQuickReplies(): LineQuickReply {
 export function buildCompactAckMessage(session: GuidedMenuActiveSession): LineTextMessage {
   const text = [
     `[${PREVIEW_BADGE}]`,
+    PREVIEW_OPERATOR_NOTICE,
     `รับข้อความแล้ว ${session.receivedMessageCount} ข้อความ ✅`,
-    `ขณะนี้พบรายการรอตรวจ ${session.parsedItemCount} รายการ`,
+    `ขณะนี้อ่านได้ ${session.parsedItemCount} รายการ`,
     "",
-    "รับข้อความแล้ว = ได้รับเหตุการณ์ LINE แล้ว",
-    "รายการรอตรวจ = อ่าน/ประกอบรายการได้แล้ว (ยังไม่บันทึก)",
-    "ยังไม่ถึงขั้นยืนยันสุดท้าย",
+    "รับข้อความแล้ว = ได้รับข้อความเข้ามาแล้ว",
+    "อ่านได้ = แยกเป็นรายการสินค้าแล้ว (ยังไม่บันทึก)",
   ].join("\n");
 
   return {
@@ -401,14 +416,15 @@ export function buildSessionStatusMessage(session: GuidedMenuActiveSession): Lin
 
   const text = [
     `[${PREVIEW_BADGE}]`,
-    "สถานะเซสชัน",
+    PREVIEW_OPERATOR_NOTICE,
+    "สถานะรายการ",
     `${session.staffLabel} — ${session.marketLabel}`,
     `${session.transactionLabel} — ${session.businessDateThai}`,
     "",
-    `ข้อความที่รับแล้ว: ${session.receivedMessageCount}`,
-    `รายการที่อ่านได้: ${session.parsedItemCount}`,
-    `จุดต้องตรวจ: ${session.blockingIssueCount}`,
-    "สถานะบันทึก: ยังไม่บันทึก",
+    `รับข้อความแล้ว: ${session.receivedMessageCount}`,
+    `อ่านได้: ${session.parsedItemCount}`,
+    `ต้องตรวจ: ${session.blockingIssueCount}`,
+    "ยังไม่บันทึก",
     "",
     itemLines.length > 0 ? "ตัวอย่างรายการ:" : "ยังไม่มีรายการ",
     ...itemLines,
@@ -428,24 +444,24 @@ export function buildSessionStatusMessage(session: GuidedMenuActiveSession): Lin
 
 /** Close barrier — waiting for in-flight forwarded LINE events. Not persisted. */
 export function buildCloseBarrierMessage(session: GuidedMenuActiveSession): LineTextMessage {
+  const waitingCount = Math.max(0, session.admittedEventCount - session.ingestedEventCount);
   const text = [
     `[${PREVIEW_BADGE}]`,
+    PREVIEW_OPERATOR_NOTICE,
     "รับคำสั่งจบแล้ว",
     "กำลังรอข้อความที่ส่งค้างอยู่…",
     "",
-    "กำลังรอเหตุการณ์ที่ส่งต่อเข้ามายังค้างอยู่",
+    waitingCount > 0
+      ? `ยังมีข้อความที่กำลังส่งเข้ามา ค้างอยู่ประมาณ ${waitingCount} ข้อความ`
+      : "กำลังตรวจสอบว่าข้อความครบหรือยัง",
     "ยังไม่มีการบันทึกข้อมูลใด ๆ",
-    "",
-    `admitted: ${session.admittedEventCount}`,
-    `ingested: ${session.ingestedEventCount}`,
-    `สถานะ barrier: ${session.closeBarrierStatus}`,
   ].join("\n");
 
   return {
     type: "text",
     text,
     quickReply: quickReply([
-      postbackAction("รอครบแล้ว (พรีวิว)", postbackData("barrier_ready")),
+      postbackAction("ข้อความครบแล้ว", postbackData("barrier_ready")),
       postbackAction("กลับ", postbackData("close_cancel")),
     ]),
   };
@@ -472,6 +488,7 @@ export function buildReviewValidFlex(session: GuidedMenuActiveSession): LineFlex
     "พร้อมบันทึก",
     `พร้อมบันทึก ${session.parsedItemCount} รายการ`,
     [
+      noticeText(),
       {
         type: "text",
         text: "ไม่มีจุดต้องตรวจ — ยังไม่บันทึกจนกว่าจะยืนยัน",
@@ -497,6 +514,7 @@ export function buildReviewBlockingFlex(session: GuidedMenuActiveSession): LineF
     "ยังบันทึกไม่ได้",
     "ยังบันทึกไม่ได้",
     [
+      noticeText(),
       {
         type: "text",
         text: `อ่านครบ: ${session.parsedItemCount} รายการ`,
@@ -537,7 +555,7 @@ export function buildReviewBlockingFlex(session: GuidedMenuActiveSession): LineF
       },
     ],
     [
-      bubbleButton("ส่งข้อความแก้ไข", postbackData("send_fix"), "secondary"),
+      bubbleButton("ส่งข้อความแก้ไข", postbackData("send_fix")),
       bubbleButton("กลับไปส่งเพิ่ม", postbackData("send_more"), "secondary"),
       bubbleButton("กลับไปตรวจ", postbackData("back_review"), "secondary"),
     ],
@@ -549,6 +567,7 @@ export function buildFinalConfirmFlex(session: GuidedMenuActiveSession): LineFle
     "ยืนยันบันทึก",
     "ยืนยันบันทึก?",
     [
+      noticeText(),
       {
         type: "text",
         text: "ต้องกดยืนยันชัดเจน — ไม่บันทึกอัตโนมัติ",
@@ -563,13 +582,6 @@ export function buildFinalConfirmFlex(session: GuidedMenuActiveSession): LineFle
         { label: "วันที่", value: session.businessDateThai },
         { label: "จำนวนรายการ", value: String(session.parsedItemCount) },
       ]),
-      {
-        type: "text",
-        text: "PREVIEW ONLY — จำลองการบันทึกเท่านั้น",
-        size: "xs",
-        color: "#B45309",
-        margin: "md",
-      },
     ],
     [
       bubbleButton("ยืนยันบันทึก", postbackData("finalize")),
@@ -583,13 +595,13 @@ export function buildSuccessMessage(session: GuidedMenuActiveSession): LineTextM
     type: "text",
     text: [
       `[${PREVIEW_BADGE}]`,
-      "บันทึกแล้ว ✅ (จำลองพรีวิว)",
+      PREVIEW_OPERATOR_NOTICE,
+      "บันทึกแล้ว ✅",
+      "(จำลองพรีวิว — ไม่เขียนฐานข้อมูลจริง)",
       "",
       `${session.staffLabel} — ${session.marketLabel}`,
       `${session.transactionLabel} — ${session.businessDateThai}`,
       `รวม ${session.parsedItemCount} รายการ`,
-      "",
-      "ไม่มีการเขียนฐานข้อมูลจริง / ไม่ส่ง LINE API",
     ].join("\n"),
     quickReply: quickReply([
       postbackAction("กลับเมนู", postbackData("menu")),

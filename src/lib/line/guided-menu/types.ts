@@ -266,4 +266,4 @@ export interface PreviewCloseProduceSessionCommand {
 }
 
 /** Preview scenario ids for the admin page. */
-export type PreviewScenarioId = "valid" | "partial_error";
+export type PreviewScenarioId = "valid" | "partial_error" | "waiting";

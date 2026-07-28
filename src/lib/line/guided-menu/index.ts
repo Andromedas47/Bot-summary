@@ -60,15 +60,25 @@ export {
 
 export {
   looksLikeSyntheticThaiProduceHeader,
+  openCommandFromActiveSession,
+  PREVIEW_COMMAND_PLACEHOLDERS,
   toPreviewCloseProduceSessionCommand,
   toPreviewOpenProduceSessionCommand,
 } from "./command-adapter";
+
+export {
+  PREVIEW_COMMAND_PLACEHOLDERS as GUIDED_MENU_COMMAND_PLACEHOLDERS,
+  openCommandFromActiveSession as guidedMenuOpenCommandFromSession,
+  toPreviewCloseProduceSessionCommand as guidedMenuCloseCommand,
+  toPreviewOpenProduceSessionCommand as guidedMenuOpenCommand,
+} from "./guided-menu-command-adapter";
 
 export {
   PREVIEW_SCENARIOS,
   applyCloseBarrierMatched,
   applyCloseBarrierWaiting,
   applyScenarioToSession,
+  collectOperatorVisibleText,
   countsByTransactionType,
   emptySessionIntake,
   sampleActiveSessionBase,
@@ -97,6 +107,7 @@ export {
   buildSessionStatusMessage,
   buildStartMenuFlex,
   buildSuccessMessage,
+  PREVIEW_OPERATOR_NOTICE,
 } from "./builders";
 
 export {

@@ -393,6 +393,19 @@ export function reduceGuidedMenuPostback(input: {
     }
 
     case "start_session": {
+      if (
+        input.activeSession
+        && !input.activeSession.persistedSimulated
+        && input.activeSession.reviewStatus !== "persisted_sim"
+      ) {
+        return baseResult({
+          screen: "error",
+          messages: [buildErrorMessage("session_already_open")],
+          selection: input.selection,
+          activeSession: input.activeSession,
+          error: "session_already_open",
+        });
+      }
       if (!payload.tx) {
         return baseResult({
           screen: "error",
@@ -533,6 +546,19 @@ export function reduceGuidedMenuPostback(input: {
           error: "no_active_session",
         });
       }
+      // Close barrier cannot reach review until waiting/matched parity is ready.
+      if (input.activeSession.closeBarrierStatus !== "waiting") {
+        return baseResult({
+          screen: "error",
+          messages: [buildErrorMessage("barrier_not_waiting")],
+          selection: input.activeSession.selection,
+          activeSession: input.activeSession,
+          error: "barrier_not_waiting",
+        });
+      }
+      if (input.activeSession.admittedEventCount > input.activeSession.ingestedEventCount) {
+        // Preview advance: barrier_ready simulates ingest catch-up.
+      }
       const matched = applyCloseBarrierMatched(input.activeSession);
       return reviewScreenFor(matched);
     }
@@ -547,9 +573,25 @@ export function reduceGuidedMenuPostback(input: {
           error: "no_active_session",
         });
       }
+      if (input.activeSession.persistedSimulated) {
+        return baseResult({
+          screen: "success",
+          selection: emptySelection(),
+          activeSession: input.activeSession,
+          messages: [buildSuccessMessage(input.activeSession)],
+        });
+      }
       // Blocking errors must never reach final confirmation.
       if (input.activeSession.blockingIssueCount > 0 || input.activeSession.issues.length > 0) {
         return reviewScreenFor(input.activeSession);
+      }
+      if (input.activeSession.reviewStatus === "awaiting_final") {
+        return baseResult({
+          screen: "final_confirm",
+          selection: input.activeSession.selection,
+          activeSession: input.activeSession,
+          messages: [buildFinalConfirmFlex(input.activeSession)],
+        });
       }
       const next: GuidedMenuActiveSession = {
         ...input.activeSession,
@@ -572,6 +614,20 @@ export function reduceGuidedMenuPostback(input: {
           selection: input.selection,
           activeSession: null,
           error: "no_active_session",
+        });
+      }
+      // Idempotent success — repeated finalize does not create a second transition.
+      if (input.activeSession.persistedSimulated || input.activeSession.reviewStatus === "persisted_sim") {
+        const closeCommand = toPreviewCloseProduceSessionCommand({
+          observedItemCount: input.activeSession.parsedItemCount,
+          lineTimestampMs: input.lineTimestampMs,
+        });
+        return baseResult({
+          screen: "success",
+          selection: emptySelection(),
+          activeSession: input.activeSession,
+          messages: [buildSuccessMessage(input.activeSession)],
+          closeCommand,
         });
       }
       if (input.activeSession.blockingIssueCount > 0 || input.activeSession.issues.length > 0) {
@@ -762,12 +818,20 @@ export function applyCustomDateInPreview(input: {
   });
 }
 
-/** Preview helper: attach a scenario fixture to the active session and show ack. */
+/** Preview helper: attach a scenario fixture to the active session. */
 export function applyScenarioInPreview(input: {
   activeSession: GuidedMenuActiveSession;
   scenarioId: import("./types").PreviewScenarioId;
 }): GuidedMenuFlowResult {
   const session = applyScenarioToSession(input.activeSession, input.scenarioId);
+  if (session.closeBarrierStatus === "waiting") {
+    return baseResult({
+      screen: "close_barrier",
+      selection: session.selection,
+      activeSession: session,
+      messages: [buildCloseBarrierMessage(session)],
+    });
+  }
   return baseResult({
     screen: "ack_compact",
     selection: session.selection,

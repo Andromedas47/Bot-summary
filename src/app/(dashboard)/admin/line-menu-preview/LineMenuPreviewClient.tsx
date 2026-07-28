@@ -2,19 +2,20 @@
 
 import { useMemo, useState } from "react";
 import {
+  applyCloseBarrierWaiting,
   applyCustomDateInPreview,
   applyScenarioInPreview,
+  applyScenarioToSession,
   buildAllPreviewStates,
   emptySelection,
   initialGuidedMenuFlow,
+  PREVIEW_OPERATOR_NOTICE,
   PREVIEW_SCENARIOS,
   PREVIEW_STAFF_LABEL,
   reduceGuidedMenuPostback,
   sampleActiveSessionBase,
   sampleSelection,
   TX_CODE_TO_LABEL,
-  applyCloseBarrierWaiting,
-  applyScenarioToSession,
   type GuidedMenuFlowResult,
   type LinePreviewMessage,
   type PreviewScenarioId,
@@ -62,7 +63,9 @@ function PhoneFrame({
         <div className="bg-[#747F8D] px-3 py-2 text-center text-[0.75rem] font-medium text-white">
           {title}
         </div>
-        <div className="min-h-[520px] space-y-3 bg-[#8CABD8] p-3">{children}</div>
+        <div className="min-h-[480px] max-h-[70vh] space-y-3 overflow-y-auto overflow-x-hidden bg-[#8CABD8] p-3">
+          {children}
+        </div>
       </div>
     </div>
   );
@@ -86,9 +89,9 @@ function FlexBubbleView({ message }: { message: Extract<LinePreviewMessage, { ty
           <p
             key={i}
             className={
-              c.size === "xs"
-                ? "text-[0.6875rem] font-bold text-amber-300"
-                : "text-base font-bold text-white"
+              c.size === "xs" || c.size === "xxs"
+                ? "break-words text-[0.6875rem] font-bold text-amber-300"
+                : "break-words text-base font-bold text-white"
             }
           >
             {c.text}
@@ -119,7 +122,9 @@ function FlexBubbleView({ message }: { message: Extract<LinePreviewMessage, { ty
                 {kids.map((k, j) => (
                   <span
                     key={j}
-                    className={k.weight === "bold" ? "flex-[3] font-semibold text-slate-900" : "flex-[2] text-slate-500"}
+                    className={`min-w-0 break-words ${
+                      k.weight === "bold" ? "flex-[3] font-semibold text-slate-900" : "flex-[2] text-slate-500"
+                    }`}
                   >
                     {k.text}
                   </span>
@@ -134,7 +139,7 @@ function FlexBubbleView({ message }: { message: Extract<LinePreviewMessage, { ty
         {(footer?.contents ?? []).map((btn, i) => (
           <div
             key={i}
-            className={`rounded-xl px-3 py-3 text-center text-sm font-semibold ${
+            className={`min-h-11 rounded-xl px-3 py-3 text-center text-sm font-semibold ${
               btn.style === "secondary"
                 ? "bg-slate-100 text-slate-700"
                 : "bg-[#06C755] text-white"
@@ -150,8 +155,8 @@ function FlexBubbleView({ message }: { message: Extract<LinePreviewMessage, { ty
 
 function TextBubbleView({ message }: { message: Extract<LinePreviewMessage, { type: "text" }> }) {
   return (
-    <div className="max-w-[85%] rounded-2xl rounded-bl-md bg-white px-3.5 py-2.5 shadow-sm">
-      <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-800">{message.text}</p>
+    <div className="max-w-[92%] rounded-2xl rounded-bl-md bg-white px-3.5 py-2.5 shadow-sm">
+      <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-800">{message.text}</p>
     </div>
   );
 }
@@ -192,6 +197,7 @@ export function LineMenuPreviewClient() {
   const [customIso, setCustomIso] = useState("2026-07-27");
   const [scenarioId, setScenarioId] = useState<PreviewScenarioId>("valid");
   const [galleryId, setGalleryId] = useState("start_menu");
+  const [history, setHistory] = useState<string[]>(["start_menu"]);
 
   const gallery = useMemo(() => {
     const base = sampleActiveSessionBase({ openedAtMs: nowMs });
@@ -215,99 +221,100 @@ export function LineMenuPreviewClient() {
   const currentMessages = flow.messages;
   const targets = currentMessages.flatMap(extractPostbackTargets);
   const session = flow.activeSession;
-  const typedCommand = flow.openCommand ?? flow.closeCommand;
+  const openCommand = flow.openCommand;
+  const closeCommand = flow.closeCommand;
   const txLabel = flow.selection.txCode ? TX_CODE_TO_LABEL[flow.selection.txCode] : null;
   const galleryMessage = gallery.find((g) => g.id === galleryId)?.message;
 
+  function pushHistory(screen: string) {
+    setHistory((prev) => [...prev.slice(-19), screen]);
+  }
+
   function handlePostback(data: string, label: string) {
     setLastActionLabel(label);
-    setFlow((prev) =>
-      reduceGuidedMenuPostback({
+    setFlow((prev) => {
+      const next = reduceGuidedMenuPostback({
         data,
         selection: prev.selection,
         activeSession: prev.activeSession,
         lineTimestampMs: nowMs,
-      }),
-    );
+      });
+      pushHistory(next.screen);
+      return next;
+    });
   }
 
   function handleCustomDateConfirm() {
     setLastActionLabel("ยืนยันวันที่กำหนดเอง");
-    setFlow(
-      applyCustomDateInPreview({
-        selection: flow.selection,
-        iso: customIso,
-        lineTimestampMs: nowMs,
-      }),
-    );
+    const next = applyCustomDateInPreview({
+      selection: flow.selection,
+      iso: customIso,
+      lineTimestampMs: nowMs,
+    });
+    pushHistory(next.screen);
+    setFlow(next);
   }
 
   function loadScenario(id: PreviewScenarioId) {
     setScenarioId(id);
     setFlow((prev) => {
       if (!prev.activeSession) return prev;
-      setLastActionLabel(`โหลดสถานการณ์: ${PREVIEW_SCENARIOS[id].label}`);
-      return applyScenarioInPreview({
+      setLastActionLabel(`สถานการณ์: ${PREVIEW_SCENARIOS[id].label}`);
+      const next = applyScenarioInPreview({
         activeSession: prev.activeSession,
         scenarioId: id,
       });
+      pushHistory(next.screen);
+      return next;
     });
   }
 
   function resetFlow() {
     setLastActionLabel(null);
     setScenarioId("valid");
+    setHistory(["start_menu"]);
     setFlow(initialGuidedMenuFlow());
   }
 
   return (
     <div className="space-y-6">
       <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3">
-        <p className="text-sm font-semibold text-amber-900">
-          PREVIEW ONLY — ไม่ส่ง LINE / ไม่เขียนฐานข้อมูล / ไม่เรียก Production
-        </p>
+        <p className="text-sm font-semibold text-amber-900">{PREVIEW_OPERATOR_NOTICE}</p>
         <p className="mt-1 text-sm text-amber-800">
-          V1 flow: เริ่มรายการ → ประเภท → ตลาด → วันที่ → เปิดรายการ → ส่งต่อข้อความ → ตรวจและจบ → ยืนยันบันทึก
+          จำลองเมนูสำหรับผู้ใช้ — รายละเอียดเทคนิคอยู่แผงด้านขวาเท่านั้น
         </p>
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
-        <div className="space-y-4">
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]">
+        <div className="min-w-0 space-y-4">
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={resetFlow}
-              className="rounded-lg bg-slate-900 px-3 py-2 text-sm font-semibold text-white"
+              className="min-h-10 rounded-lg bg-slate-900 px-3 py-2 text-sm font-semibold text-white"
             >
-              รีเซ็ตโฟลว์
+              รีเซ็ต
             </button>
             <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
-              หน้าจอ: {flow.screen}
+              {flow.screen}
             </span>
             {txLabel && (
               <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
-                ประเภท: {txLabel}
-              </span>
-            )}
-            {lastActionLabel && (
-              <span className="rounded-full bg-sky-50 px-3 py-1 text-xs font-medium text-sky-700">
-                ล่าสุด: {lastActionLabel}
+                {txLabel}
               </span>
             )}
           </div>
 
           {session && (
-            <div className="rounded-xl border border-slate-200 bg-white p-3 space-y-2">
-              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                โหลดสถานการณ์ข้อความ (พรีวิว)
-              </p>
+            <div className="space-y-2 rounded-xl border border-slate-200 bg-white p-3">
+              <p className="text-xs font-semibold text-slate-500">สถานการณ์ตัวอย่าง</p>
               <div className="flex flex-wrap gap-2">
                 {(Object.keys(PREVIEW_SCENARIOS) as PreviewScenarioId[]).map((id) => (
                   <button
                     key={id}
                     type="button"
                     onClick={() => loadScenario(id)}
-                    className={`rounded-lg px-3 py-2 text-xs font-semibold ${
+                    className={`min-h-10 rounded-lg px-3 py-2 text-xs font-semibold ${
                       scenarioId === id
                         ? "bg-slate-900 text-white"
                         : "border border-slate-200 bg-white text-slate-700"
@@ -318,6 +325,20 @@ export function LineMenuPreviewClient() {
                 ))}
               </div>
               <p className="text-xs text-slate-500">{PREVIEW_SCENARIOS[scenarioId].description}</p>
+              <div className="grid grid-cols-3 gap-2 text-center text-xs">
+                <div className="rounded-lg bg-slate-50 p-2">
+                  <div className="font-semibold text-slate-900">{session.receivedMessageCount}</div>
+                  <div className="text-slate-500">รับแล้ว</div>
+                </div>
+                <div className="rounded-lg bg-slate-50 p-2">
+                  <div className="font-semibold text-slate-900">{session.parsedItemCount}</div>
+                  <div className="text-slate-500">อ่านได้</div>
+                </div>
+                <div className="rounded-lg bg-slate-50 p-2">
+                  <div className="font-semibold text-slate-900">{session.blockingIssueCount}</div>
+                  <div className="text-slate-500">ต้องตรวจ</div>
+                </div>
+              </div>
             </div>
           )}
 
@@ -333,8 +354,8 @@ export function LineMenuPreviewClient() {
 
           {flow.screen === "custom_date" && (
             <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
-              <p className="text-sm font-semibold text-slate-900">เลือกวันที่ (พรีวิว)</p>
-              <p className="text-xs text-slate-500">แสดงผลเป็น พ.ศ. ในสรุป — ค่าคำสั่งเป็น ISO</p>
+              <p className="text-sm font-semibold text-slate-900">เลือกวันที่</p>
+              <p className="text-xs text-slate-500">ผู้ใช้เห็น พ.ศ. — ค่าคำสั่งเป็น ISO ในแผงเทคนิค</p>
               <input
                 type="date"
                 value={customIso}
@@ -354,23 +375,40 @@ export function LineMenuPreviewClient() {
           <ActionPad targets={targets} onAction={handlePostback} />
         </div>
 
-        <div className="space-y-4">
-          <section className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
-            <h2 className="text-sm font-semibold text-slate-900">คำสั่ง typed (0049 shape)</h2>
-            {typedCommand ? (
-              <pre className="overflow-x-auto rounded-lg bg-slate-950 p-3 text-[0.75rem] leading-relaxed text-emerald-300">
-                {JSON.stringify(typedCommand, null, 2)}
-              </pre>
-            ) : (
-              <p className="text-sm text-slate-500">ยังไม่มีคำสั่ง — เปิดรายการหรือยืนยันบันทึกก่อน</p>
-            )}
-            <p className="text-xs text-slate-500">ไม่สร้างหัวข้อไทยสังเคราะห์</p>
+        <div className="min-w-0 space-y-4">
+          <section className="space-y-2 rounded-xl border border-slate-200 bg-white p-4">
+            <h2 className="text-sm font-semibold text-slate-900">แผงเทคนิค (นักพัฒนา)</h2>
+            <p className="text-xs text-slate-500">
+              สิ่งที่จำลอง: เปิด/ปิดรายการ, นับข้อความ, ตรวจรายการ, ยืนยันบันทึก — ไม่ส่ง LINE และไม่เขียน DB
+            </p>
+            <div className="flex flex-wrap gap-2 text-xs">
+              <span className="rounded bg-slate-100 px-2 py-1">state: {flow.screen}</span>
+              {lastActionLabel && (
+                <span className="rounded bg-sky-50 px-2 py-1 text-sky-800">action: {lastActionLabel}</span>
+              )}
+              {flow.error && (
+                <span className="rounded bg-rose-50 px-2 py-1 text-rose-700">error: {flow.error}</span>
+              )}
+            </div>
+            <p className="break-all text-[0.6875rem] text-slate-500">history: {history.join(" → ")}</p>
           </section>
 
-          <section className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
-            <h2 className="text-sm font-semibold text-slate-900">สถานะเซสชัน / close barrier</h2>
+          <section className="space-y-2 rounded-xl border border-slate-200 bg-white p-4">
+            <h2 className="text-sm font-semibold text-slate-900">คำสั่งที่จำลอง (0049 shape)</h2>
+            <p className="text-xs font-medium text-slate-500">Open</p>
+            <pre className="max-h-48 overflow-auto rounded-lg bg-slate-950 p-3 text-[0.7rem] leading-relaxed text-emerald-300">
+              {openCommand ? JSON.stringify(openCommand, null, 2) : "—"}
+            </pre>
+            <p className="text-xs font-medium text-slate-500">Close</p>
+            <pre className="max-h-40 overflow-auto rounded-lg bg-slate-950 p-3 text-[0.7rem] leading-relaxed text-emerald-200">
+              {closeCommand ? JSON.stringify(closeCommand, null, 2) : "—"}
+            </pre>
+          </section>
+
+          <section className="space-y-2 rounded-xl border border-slate-200 bg-white p-4">
+            <h2 className="text-sm font-semibold text-slate-900">นับข้อความ / barrier</h2>
             {session ? (
-              <pre className="max-h-72 overflow-auto rounded-lg bg-slate-950 p-3 text-[0.75rem] leading-relaxed text-amber-200">
+              <pre className="max-h-64 overflow-auto rounded-lg bg-slate-950 p-3 text-[0.7rem] leading-relaxed text-amber-200">
                 {JSON.stringify(
                   {
                     receivedMessageCount: session.receivedMessageCount,
@@ -381,7 +419,8 @@ export function LineMenuPreviewClient() {
                     closeBarrierStatus: session.closeBarrierStatus,
                     reviewStatus: session.reviewStatus,
                     persistedSimulated: session.persistedSimulated,
-                    items: session.items.map((i) => i.rawPreview),
+                    businessDateIso: session.businessDateIso,
+                    businessDateThai: session.businessDateThai,
                     issues: session.issues,
                   },
                   null,
@@ -393,14 +432,14 @@ export function LineMenuPreviewClient() {
             )}
           </section>
 
-          <section className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
+          <section className="space-y-2 rounded-xl border border-slate-200 bg-white p-4">
             <h2 className="text-sm font-semibold text-slate-900">LINE message JSON</h2>
-            <pre className="max-h-80 overflow-auto rounded-lg bg-slate-950 p-3 text-[0.75rem] leading-relaxed text-sky-200">
+            <pre className="max-h-64 overflow-auto rounded-lg bg-slate-950 p-3 text-[0.7rem] leading-relaxed text-sky-200">
               {JSON.stringify(currentMessages, null, 2)}
             </pre>
           </section>
 
-          <section className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
+          <section className="space-y-2 rounded-xl border border-slate-200 bg-white p-4">
             <h2 className="text-sm font-semibold text-slate-900">แกลเลอรีทุกสถานะ</h2>
             <div className="flex flex-wrap gap-2">
               {gallery.map((g) => (
@@ -419,15 +458,14 @@ export function LineMenuPreviewClient() {
               ))}
             </div>
             {galleryMessage && (
-              <pre className="max-h-64 overflow-auto rounded-lg bg-slate-50 p-3 text-[0.6875rem] text-slate-700">
+              <pre className="max-h-48 overflow-auto rounded-lg bg-slate-50 p-3 text-[0.6875rem] text-slate-700">
                 {JSON.stringify(galleryMessage, null, 2)}
               </pre>
             )}
           </section>
 
-          <section className="space-y-1 rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-xs text-slate-600">
+          <section className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-xs text-slate-600">
             <p>selection: {JSON.stringify(flow.selection)}</p>
-            <p>error: {flow.error ?? "—"}</p>
             <p>emptySelection: {JSON.stringify(emptySelection())}</p>
           </section>
         </div>

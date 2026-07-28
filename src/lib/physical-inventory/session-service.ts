@@ -3,14 +3,16 @@
  *
  * Does NOT route LINE webhooks (Slice C).
  * Does NOT write produce_sessions / produce_items / inventory ledger.
- * Admit/finalize go through service_role RPCs with close-barrier + immutability.
+ * Open/admit/candidate/finalize go through service_role SECURITY DEFINER RPCs.
+ *
+ * Barrier timing is DB-authoritative (clock_timestamp): quiet 8s / deadline 30s.
+ * Test clocks exist only in in-memory test stubs — never as Production RPC args.
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/types/database";
 import {
   PHYSICAL_INVENTORY_PARSER_VERSION,
-  PHYSICAL_INVENTORY_WAREHOUSE_MAIN,
   type PhysicalInventoryParsedItem,
   type PhysicalInventoryParsedSession,
   type PhysicalInventoryParseIssue,
@@ -18,9 +20,9 @@ import {
 
 type Supabase = SupabaseClient<Database>;
 
-/** Quiet window after first close before finalize may run (matches migration default). */
+/** Documented Production quiet window (matches migration / Produce 0032). */
 export const PHYSICAL_INVENTORY_CLOSE_QUIET_MS = 8_000;
-/** Hard deadline after first close; later admits fail. */
+/** Documented Production hard deadline after first close. */
 export const PHYSICAL_INVENTORY_CLOSE_DEADLINE_MS = 30_000;
 
 export type PhysicalInventorySessionStatus =
@@ -37,6 +39,26 @@ export type PhysicalInventorySnapshotRow =
 export type PhysicalInventoryItemRow =
   Database["public"]["Tables"]["physical_inventory_items"]["Row"];
 
+export type PhysicalInventoryFinalizeCandidate = {
+  sessionId: string;
+  sessionGeneration: string;
+  status: PhysicalInventorySessionStatus;
+  ingestRevision: number;
+  ingestSetHash: string;
+  closeEventTimestampMs: number | null;
+  closeQuietUntil: string | null;
+  closeDeadlineAt: string | null;
+  ingests: Array<{
+    line_event_id: string;
+    line_timestamp_ms: number;
+    kind: string;
+    raw_text: string;
+    ingest_revision: number;
+    line_message_id?: string | null;
+    raw_message_id?: string | null;
+  }>;
+};
+
 export class PhysicalInventoryGenerationConflictError extends Error {
   constructor(message = "generation_conflict") {
     super(message);
@@ -48,6 +70,13 @@ export class PhysicalInventoryStaleRevisionError extends Error {
   constructor(message = "stale_ingest_revision") {
     super(message);
     this.name = "PhysicalInventoryStaleRevisionError";
+  }
+}
+
+export class PhysicalInventoryStaleIngestHashError extends Error {
+  constructor(message = "stale_ingest_hash") {
+    super(message);
+    this.name = "PhysicalInventoryStaleIngestHashError";
   }
 }
 
@@ -69,6 +98,20 @@ export class PhysicalInventoryCloseQuietWindowError extends Error {
   constructor(message = "close_quiet_window") {
     super(message);
     this.name = "PhysicalInventoryCloseQuietWindowError";
+  }
+}
+
+export class PhysicalInventoryLineEventConflictError extends Error {
+  constructor(message = "line_event_conflict") {
+    super(message);
+    this.name = "PhysicalInventoryLineEventConflictError";
+  }
+}
+
+export class PhysicalInventoryCloseBoundaryRequiredError extends Error {
+  constructor(message = "close_boundary_required") {
+    super(message);
+    this.name = "PhysicalInventoryCloseBoundaryRequiredError";
   }
 }
 
@@ -94,14 +137,22 @@ function itemsToJson(items: PhysicalInventoryParsedItem[]): Json {
   })) as unknown as Json;
 }
 
-function mapAdmitError(message: string): Error {
+function mapRpcError(message: string, kind: "admit" | "finalize" | "open" | "candidate"): Error {
   if (message.includes("generation_conflict")) return new PhysicalInventoryGenerationConflictError();
   if (message.includes("session_closed")) return new PhysicalInventoryAfterCloseError();
-  if (message.includes("after_close_boundary")) return new PhysicalInventoryAfterCloseBoundaryError();
-  if (message.includes("deadline_elapsed")) {
-    return new PhysicalInventoryAfterCloseBoundaryError("deadline_elapsed");
+  if (message.includes("after_close_boundary") || message.includes("deadline_elapsed")) {
+    return new PhysicalInventoryAfterCloseBoundaryError(
+      message.includes("deadline_elapsed") ? "deadline_elapsed" : "after_close_boundary",
+    );
   }
-  return new Error(`admit failed: ${message}`);
+  if (message.includes("line_event_conflict")) return new PhysicalInventoryLineEventConflictError();
+  if (message.includes("stale_ingest_revision")) return new PhysicalInventoryStaleRevisionError();
+  if (message.includes("stale_ingest_hash")) return new PhysicalInventoryStaleIngestHashError();
+  if (message.includes("close_quiet_window")) return new PhysicalInventoryCloseQuietWindowError();
+  if (message.includes("close_boundary_required")) {
+    return new PhysicalInventoryCloseBoundaryRequiredError();
+  }
+  return new Error(`${kind} failed: ${message}`);
 }
 
 export class PhysicalInventorySessionService {
@@ -134,43 +185,64 @@ export class PhysicalInventorySessionService {
     return data;
   }
 
+  /**
+   * Atomic open via RPC. Same opened LINE event → idempotent same session.
+   */
   async openSession(params: {
-    sourceType: string;
+    sourceType: "user" | "group" | "room";
     sourceId: string;
     senderLineUserId: string;
+    openedLineEventId: string;
+    lineTimestampMs: number;
+    rawText: string;
+    lineMessageId?: string | null;
+    rawMessageId?: string | null;
     businessDate?: string | null;
     parserVersion?: string;
-    headerRawMessageId?: string | null;
-  }): Promise<{ opened: boolean; session: PhysicalInventorySessionRow; reason?: "already_open" }> {
+  }): Promise<{
+    opened: boolean;
+    idempotent: boolean;
+    reason: string;
+    session: PhysicalInventorySessionRow;
+  }> {
     const sender = params.senderLineUserId.trim();
     if (!sender) throw new Error("sender_line_user_id required");
+    const eventId = params.openedLineEventId.trim();
+    if (!eventId) throw new Error("opened_line_event_id required");
 
-    const existing = await this.findOpenSession(params.sourceId, sender);
-    if (existing) {
-      return { opened: false, session: existing, reason: "already_open" };
-    }
+    const { data, error } = await this.supabase.rpc("open_physical_inventory_session", {
+      p_source_type: params.sourceType,
+      p_source_id: params.sourceId,
+      p_sender_line_user_id: sender,
+      p_opened_line_event_id: eventId,
+      p_line_timestamp_ms: params.lineTimestampMs,
+      p_raw_text: params.rawText,
+      p_line_message_id: params.lineMessageId ?? null,
+      p_raw_message_id: params.rawMessageId ?? null,
+      p_business_date: params.businessDate ?? null,
+      p_parser_version: params.parserVersion ?? PHYSICAL_INVENTORY_PARSER_VERSION,
+    });
 
-    const { data, error } = await this.supabase
-      .from("physical_inventory_sessions")
-      .insert({
-        source_type: params.sourceType,
-        source_id: params.sourceId,
-        sender_line_user_id: sender,
-        business_date: params.businessDate ?? null,
-        warehouse_code: PHYSICAL_INVENTORY_WAREHOUSE_MAIN,
-        status: "open",
-        parser_version: params.parserVersion ?? PHYSICAL_INVENTORY_PARSER_VERSION,
-        header_raw_message_id: params.headerRawMessageId ?? null,
-      })
-      .select("*")
-      .single();
+    if (error) throw mapRpcError(error.message ?? "", "open");
 
-    if (error) throw new Error(`openSession failed: ${error.message}`);
-    return { opened: true, session: data };
+    const row = data as {
+      opened: boolean;
+      idempotent: boolean;
+      reason: string;
+      session_id: string;
+    };
+    const session = await this.getSession(row.session_id);
+    if (!session) throw new Error("session missing after open");
+    return {
+      opened: row.opened,
+      idempotent: row.idempotent,
+      reason: row.reason,
+      session,
+    };
   }
 
   /**
-   * Admit a LINE event via RPC (close-boundary aware, idempotent).
+   * Admit a LINE event via RPC (close-boundary aware, globally idempotent).
    */
   async registerIngest(params: {
     sessionId: string;
@@ -181,9 +253,6 @@ export class PhysicalInventorySessionService {
     rawMessageId?: string | null;
     kind: "header" | "item" | "close" | "other";
     rawText: string;
-    asOf?: string;
-    quietMs?: number;
-    deadlineMs?: number;
   }): Promise<{
     accepted: boolean;
     inserted: boolean;
@@ -199,12 +268,9 @@ export class PhysicalInventorySessionService {
       p_raw_text: params.rawText,
       p_line_message_id: params.lineMessageId ?? null,
       p_raw_message_id: params.rawMessageId ?? null,
-      p_quiet_ms: params.quietMs ?? PHYSICAL_INVENTORY_CLOSE_QUIET_MS,
-      p_deadline_ms: params.deadlineMs ?? PHYSICAL_INVENTORY_CLOSE_DEADLINE_MS,
-      p_as_of: params.asOf ?? new Date().toISOString(),
     });
 
-    if (error) throw mapAdmitError(error.message ?? "");
+    if (error) throw mapRpcError(error.message ?? "", "admit");
 
     const row = data as {
       accepted: boolean;
@@ -222,6 +288,42 @@ export class PhysicalInventorySessionService {
     };
   }
 
+  async getFinalizeCandidate(params: {
+    sessionId: string;
+    expectedGeneration: string;
+  }): Promise<PhysicalInventoryFinalizeCandidate> {
+    const { data, error } = await this.supabase.rpc(
+      "get_physical_inventory_finalize_candidate",
+      {
+        p_session_id: params.sessionId,
+        p_expected_generation: params.expectedGeneration,
+      },
+    );
+    if (error) throw mapRpcError(error.message ?? "", "candidate");
+    const row = data as {
+      session_id: string;
+      session_generation: string;
+      status: PhysicalInventorySessionStatus;
+      ingest_revision: number;
+      ingest_set_hash: string;
+      close_event_timestamp_ms: number | null;
+      close_quiet_until: string | null;
+      close_deadline_at: string | null;
+      ingests: PhysicalInventoryFinalizeCandidate["ingests"];
+    };
+    return {
+      sessionId: row.session_id,
+      sessionGeneration: row.session_generation,
+      status: row.status,
+      ingestRevision: Number(row.ingest_revision),
+      ingestSetHash: row.ingest_set_hash,
+      closeEventTimestampMs: row.close_event_timestamp_ms,
+      closeQuietUntil: row.close_quiet_until,
+      closeDeadlineAt: row.close_deadline_at,
+      ingests: row.ingests ?? [],
+    };
+  }
+
   async listIngestTexts(sessionId: string): Promise<string[]> {
     const { data, error } = await this.supabase
       .from("physical_inventory_session_ingests")
@@ -234,17 +336,17 @@ export class PhysicalInventorySessionService {
 
   /**
    * Atomic finalize or fail-closed via RPC.
-   * Successful finalize requires close boundary + quiet window elapsed (pass asOf).
+   * Requires CLOSING + quiet/deadline barrier + matching revision+hash.
+   * Call getFinalizeCandidate first; parse that exact ingest set; then finalize.
    */
   async finalize(params: {
     sessionId: string;
     expectedGeneration: string;
     expectedIngestRevision: number;
+    expectedIngestHash: string;
     parsed: PhysicalInventoryParsedSession;
     failClosed?: boolean;
     failReason?: string;
-    /** Clock for quiet-window checks (ISO). Tests advance this past quiet. */
-    asOf?: string;
   }): Promise<{
     ok: boolean;
     idempotent: boolean;
@@ -254,6 +356,8 @@ export class PhysicalInventorySessionService {
     failReason?: string | null;
     itemCount?: number;
     countedAt?: string | null;
+    finalizedIngestRevision?: number | null;
+    finalizedIngestHash?: string | null;
   }> {
     const failClosed =
       params.failClosed === true ||
@@ -267,6 +371,7 @@ export class PhysicalInventorySessionService {
       p_session_id: params.sessionId,
       p_expected_generation: params.expectedGeneration,
       p_expected_ingest_revision: params.expectedIngestRevision,
+      p_expected_ingest_hash: params.expectedIngestHash,
       p_business_date: params.parsed.businessDate,
       p_parser_version: params.parsed.parserVersion || PHYSICAL_INVENTORY_PARSER_VERSION,
       p_warnings: issuesToJson([
@@ -284,16 +389,9 @@ export class PhysicalInventorySessionService {
               ? "no_items"
               : "failed_closed")
         : null,
-      p_as_of: params.asOf ?? new Date().toISOString(),
     });
 
-    if (error) {
-      const msg = error.message ?? "";
-      if (msg.includes("generation_conflict")) throw new PhysicalInventoryGenerationConflictError();
-      if (msg.includes("stale_ingest_revision")) throw new PhysicalInventoryStaleRevisionError();
-      if (msg.includes("close_quiet_window")) throw new PhysicalInventoryCloseQuietWindowError();
-      throw new Error(`finalize failed: ${msg}`);
-    }
+    if (error) throw mapRpcError(error.message ?? "", "finalize");
 
     const row = data as {
       ok: boolean;
@@ -304,6 +402,8 @@ export class PhysicalInventorySessionService {
       fail_reason?: string | null;
       item_count?: number;
       counted_at?: string | null;
+      finalized_ingest_revision?: number | null;
+      finalized_ingest_hash?: string | null;
     };
 
     return {
@@ -315,6 +415,8 @@ export class PhysicalInventorySessionService {
       failReason: row.fail_reason,
       itemCount: row.item_count,
       countedAt: row.counted_at ?? null,
+      finalizedIngestRevision: row.finalized_ingest_revision ?? null,
+      finalizedIngestHash: row.finalized_ingest_hash ?? null,
     };
   }
 

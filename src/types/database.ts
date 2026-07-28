@@ -1040,9 +1040,10 @@ export interface Database {
       physical_inventory_sessions: {
         Row: {
           id:                    string;
-          source_type:           string;
+          source_type:           "user" | "group" | "room";
           source_id:             string;
           sender_line_user_id:   string;
+          opened_line_event_id:  string;
           session_generation:    string;
           business_date:         string | null;
           warehouse_code:        string;
@@ -1067,9 +1068,10 @@ export interface Database {
         };
         Insert: {
           id?:                    string;
-          source_type:            string;
+          source_type:            "user" | "group" | "room";
           source_id:              string;
           sender_line_user_id:    string;
+          opened_line_event_id:   string;
           session_generation?:    string;
           business_date?:         string | null;
           warehouse_code?:        string;
@@ -1094,9 +1096,10 @@ export interface Database {
         };
         Update: {
           id?:                    string;
-          source_type?:           string;
+          source_type?:           "user" | "group" | "room";
           source_id?:             string;
           sender_line_user_id?:   string;
+          opened_line_event_id?:  string;
           session_generation?:    string;
           business_date?:         string | null;
           warehouse_code?:        string;
@@ -1180,6 +1183,8 @@ export interface Database {
           warnings:                  Json;
           status:                    "finalized" | "voided" | "superseded";
           ingest_idempotency_key:    string;
+          finalized_ingest_revision: number;
+          finalized_ingest_hash:     string;
           finalized_at:              string;
           voided_at:                 string | null;
           voided_by:                 string | null;
@@ -1204,6 +1209,8 @@ export interface Database {
           warnings?:                  Json;
           status?:                    "finalized" | "voided" | "superseded";
           ingest_idempotency_key:     string;
+          finalized_ingest_revision:  number;
+          finalized_ingest_hash:      string;
           finalized_at?:              string;
           voided_at?:                 string | null;
           voided_by?:                 string | null;
@@ -1228,6 +1235,8 @@ export interface Database {
           warnings?:                  Json;
           status?:                    "finalized" | "voided" | "superseded";
           ingest_idempotency_key?:    string;
+          finalized_ingest_revision?: number;
+          finalized_ingest_hash?:     string;
           finalized_at?:              string;
           voided_at?:                 string | null;
           voided_by?:                 string | null;
@@ -1515,6 +1524,21 @@ export interface Database {
           finalized_by:            string | null;
         };
       };
+      open_physical_inventory_session: {
+        Args: {
+          p_source_type:          string;
+          p_source_id:            string;
+          p_sender_line_user_id:  string;
+          p_opened_line_event_id: string;
+          p_line_timestamp_ms:    number;
+          p_raw_text:             string;
+          p_line_message_id?:     string | null;
+          p_raw_message_id?:      string | null;
+          p_business_date?:       string | null;
+          p_parser_version?:      string | null;
+        };
+        Returns: Json;
+      };
       admit_physical_inventory_event: {
         Args: {
           p_session_id:          string;
@@ -1525,9 +1549,13 @@ export interface Database {
           p_raw_text:            string;
           p_line_message_id?:    string | null;
           p_raw_message_id?:     string | null;
-          p_quiet_ms?:           number;
-          p_deadline_ms?:        number;
-          p_as_of?:              string;
+        };
+        Returns: Json;
+      };
+      get_physical_inventory_finalize_candidate: {
+        Args: {
+          p_session_id:          string;
+          p_expected_generation: string;
         };
         Returns: Json;
       };
@@ -1536,15 +1564,19 @@ export interface Database {
           p_session_id:               string;
           p_expected_generation:      string;
           p_expected_ingest_revision: number;
+          p_expected_ingest_hash:     string;
           p_business_date:            string | null;
           p_parser_version:           string;
           p_warnings:                 Json;
           p_items:                    Json;
           p_fail_closed:              boolean;
           p_fail_reason?:             string | null;
-          p_as_of?:                   string;
         };
         Returns: Json;
+      };
+      physical_inventory_compute_ingest_set_hash: {
+        Args: { p_session_id: string };
+        Returns: string;
       };
     };
     CompositeTypes: { [_ in never]: never };

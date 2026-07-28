@@ -4,7 +4,7 @@ import { logger } from "@/lib/logger";
 import { pushLineMessage } from "@/lib/line/reply";
 import { loadStockSummary } from "@/lib/summary/stock-summary-service";
 import { findLatestStockDataDate } from "@/lib/summary/remaining-fruit-data";
-import type { LatestDataHint } from "@/lib/summary/latest-data-hint";
+import type { LatestDataLookup } from "@/lib/summary/latest-data-hint";
 import {
   buildStockSnapshotMessages,
   isStockSnapshotEmpty,
@@ -89,11 +89,16 @@ export async function GET(req: NextRequest) {
   }
 
   // Only an empty date asks what the latest date with data was, so a normal
-  // morning pays for nothing extra. The hint is context, never a substitute:
+  // morning pays for nothing extra. The lookup is context, never a substitute:
   // failing the whole delivery because it could not be read would be a worse
   // outcome than sending the empty state without it.
-  let latest: LatestDataHint | null = null;
-  if (isStockSnapshotEmpty(summary)) {
+  //
+  // A failure stays "unavailable" and NEVER becomes "none" — the report would
+  // otherwise tell the business its records are empty on the strength of a
+  // database error. The error text is logged here and never reaches LINE.
+  const isEmpty = isStockSnapshotEmpty(summary);
+  let latest: LatestDataLookup = { status: "unavailable" };
+  if (isEmpty) {
     try {
       latest = await findLatestStockDataDate(supabase, businessDate);
     } catch (error) {
@@ -128,8 +133,10 @@ export async function GET(req: NextRequest) {
       productCount,
       incompleteCount: summary.incomplete.length,
       isComplete: summary.isComplete,
-      latestDataDate: latest?.date ?? null,
-      latestDataMarketCount: latest?.marketCount ?? null,
+      // null status = never attempted, because the date had data.
+      latestLookupStatus: isEmpty ? latest.status : null,
+      latestDataDate: latest.status === "found" ? latest.hint.date : null,
+      latestDataMarketCount: latest.status === "found" ? latest.hint.marketCount : null,
       messageCount: messages.length,
       targetCount: targets.length,
       wouldSendLine: targets.length > 0,

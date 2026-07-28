@@ -21,7 +21,11 @@ interface Call {
   filters: Record<string, unknown>;
 }
 
-function client(rows: readonly Row[]) {
+/** `failOn` returns an error message for the query it wants to break. */
+function client(
+  rows: readonly Row[],
+  failOn: (filters: Record<string, unknown>) => string | null = () => null,
+) {
   const calls: Call[] = [];
 
   const supabase = {
@@ -54,12 +58,18 @@ function client(rows: readonly Row[]) {
         );
       };
 
+      const answer = (slice: () => Row[]) => {
+        const failure = failOn(filters);
+        return Promise.resolve(
+          failure ? { data: null, error: { message: failure } } : { data: slice(), error: null },
+        );
+      };
+
       node.limit = (n: number) => {
         filters.limit = n;
-        return Promise.resolve({ data: matching().slice(0, n), error: null });
+        return answer(() => matching().slice(0, n));
       };
-      node.range = (from: number, to: number) =>
-        Promise.resolve({ data: matching().slice(from, to + 1), error: null });
+      node.range = (from: number, to: number) => answer(() => matching().slice(from, to + 1));
 
       return node;
     },
@@ -78,8 +88,8 @@ describe("findLatestSalesDataDate", () => {
     ]);
 
     expect(await findLatestSalesDataDate(supabase, "2026-07-25")).toEqual({
-      date: "2026-07-24",
-      marketCount: 2,
+      status: "found",
+      hint: { date: "2026-07-24", marketCount: 2 },
     });
   });
 
@@ -90,13 +100,36 @@ describe("findLatestSalesDataDate", () => {
       { transaction_date: "2026-08-01", market_name: "ตลาดกี้" },
     ]);
 
-    expect((await findLatestSalesDataDate(supabase, "2026-07-25"))?.date).toBe("2026-07-24");
+    expect(await findLatestSalesDataDate(supabase, "2026-07-25")).toEqual({
+      status: "found",
+      hint: { date: "2026-07-24", marketCount: 1 },
+    });
     expect(calls[0].filters["lt:transaction_date"]).toBe("2026-07-25");
   });
 
-  test("returns null when no earlier sales evidence exists at all", async () => {
+  test("reports a PROVEN empty history as 'none'", async () => {
     const { supabase } = client([{ transaction_date: "2026-07-26", market_name: "ตลาดกี้" }]);
-    expect(await findLatestSalesDataDate(supabase, "2026-07-25")).toBeNull();
+    expect(await findLatestSalesDataDate(supabase, "2026-07-25")).toEqual({ status: "none" });
+  });
+
+  test("a failed date probe throws — it never degrades to 'none'", async () => {
+    const { supabase } = client(
+      [{ transaction_date: "2026-07-24", market_name: "ตลาดกี้" }],
+      (filters) => (filters["lt:transaction_date"] ? "probe exploded" : null),
+    );
+
+    // "none" claims the business has never sold anything. A database error is
+    // not evidence for that; throwing is what lets the caller say "unavailable".
+    expect(findLatestSalesDataDate(supabase, "2026-07-25")).rejects.toThrow("probe exploded");
+  });
+
+  test("a failed market count throws even though the date was found", async () => {
+    const { supabase } = client(
+      [{ transaction_date: "2026-07-24", market_name: "ตลาดกี้" }],
+      (filters) => (filters["eq:transaction_date"] ? "count exploded" : null),
+    );
+
+    expect(findLatestSalesDataDate(supabase, "2026-07-25")).rejects.toThrow("count exploded");
   });
 
   test("QA/test scopes are excluded from the market count, as in the report", async () => {
@@ -107,8 +140,8 @@ describe("findLatestSalesDataDate", () => {
     ]);
 
     expect(await findLatestSalesDataDate(supabase, "2026-07-25")).toEqual({
-      date: "2026-07-24",
-      marketCount: 1,
+      status: "found",
+      hint: { date: "2026-07-24", marketCount: 1 },
     });
   });
 
@@ -137,8 +170,8 @@ describe("findLatestSalesDataDate", () => {
     ]);
 
     expect(await findLatestSalesDataDate(supabase, "2026-07-25")).toEqual({
-      date: "2026-07-24",
-      marketCount: 1,
+      status: "found",
+      hint: { date: "2026-07-24", marketCount: 1 },
     });
   });
 });

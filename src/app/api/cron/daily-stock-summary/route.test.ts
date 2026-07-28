@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { NextRequest } from "next/server";
+import { LATEST_DATA_UNAVAILABLE_NOTICE } from "@/lib/summary/latest-data-hint";
 
 // ── Stubs ──────────────────────────────────────────────────────────────────
 //
@@ -342,14 +343,18 @@ describe("daily stock summary cron — empty business date", () => {
     };
   }
 
-  test("states the requested date is empty and points at the latest date with data", async () => {
+  test("found: states the requested date is empty and points at the latest date", async () => {
     emptyDayWith({ date: "2026-07-26", markets: ["ตลาดกี้", "เฉลิม72 ผลไม้", "ตลาดกี้"] });
     process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
 
-    const res = await GET(request(`?date=${REQUESTED}`));
-    const text = pushCalls.map((call) => call.text).join("\n\n");
+    const res = await GET(request(`?date=${REQUESTED}&debug=1`));
+    const body = await res.json();
+    const text = body.messages.join("\n\n");
 
     expect(res.status).toBe(200);
+    expect(body.latestLookupStatus).toBe("found");
+    expect(body.latestDataDate).toBe("2026-07-26");
+    expect(body.latestDataMarketCount).toBe(2);
     expect(text).toContain("ยังไม่พบข้อมูลชั่งคืนประจำวันที่ 27 กรกฎาคม 2569");
     expect(text).toContain("ข้อมูลล่าสุดที่มีคือวันที่ 26 กรกฎาคม 2569");
     expect(text).toContain("พบข้อมูล 2 ตลาด");
@@ -359,7 +364,7 @@ describe("daily stock summary cron — empty business date", () => {
     expect(text).not.toContain("ข้อมูลจาก 0 ตลาด • พบคงเหลือ 0 ตลาด");
   });
 
-  test("says no ชั่งคืน exists at all when history is empty", async () => {
+  test("none: says no ชั่งคืน exists when the query PROVED history is empty", async () => {
     emptyDayWith(null);
     process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
 
@@ -368,9 +373,10 @@ describe("daily stock summary cron — empty business date", () => {
 
     expect(text).toContain("ยังไม่พบข้อมูลชั่งคืนในระบบ");
     expect(text).not.toContain("ข้อมูลล่าสุดที่มีคือ");
+    expect(text).not.toContain(LATEST_DATA_UNAVAILABLE_NOTICE);
   });
 
-  test("a failed latest-date lookup still delivers the empty report", async () => {
+  test("unavailable: a failed date probe never becomes a 'no history' claim", async () => {
     produceByQuery = (filters) =>
       filters["lt:transaction_date"] === REQUESTED
         ? { data: null, error: { message: "probe exploded" } }
@@ -380,10 +386,40 @@ describe("daily stock summary cron — empty business date", () => {
     const res = await GET(request(`?date=${REQUESTED}`));
     const text = pushCalls.map((call) => call.text).join("\n\n");
 
-    // Context is a nicety; the empty state itself is not.
+    // The empty state is still delivered in full …
     expect(res.status).toBe(200);
+    expect(pushCalls).toHaveLength(1);
     expect(text).toContain("ยังไม่พบข้อมูลชั่งคืนประจำวันที่ 27 กรกฎาคม 2569");
-    expect(text).toContain("ยังไม่พบข้อมูลชั่งคืนในระบบ");
+    expect(text).toContain(LATEST_DATA_UNAVAILABLE_NOTICE);
+    // … without telling the business its records are empty on the strength of
+    // a database error, and without leaking the error text to LINE.
+    expect(text).not.toContain("ยังไม่พบข้อมูลชั่งคืนในระบบ");
+    expect(text).not.toContain("probe exploded");
+  });
+
+  test("unavailable: a date found but a failed market count is not a latest-date claim", async () => {
+    produceByQuery = (filters) => {
+      if (filters["lt:transaction_date"] === REQUESTED) {
+        return { data: [{ transaction_date: "2026-07-26" }], error: null };
+      }
+      if (filters["eq:transaction_date"] === "2026-07-26") {
+        return { data: null, error: { message: "count exploded" } };
+      }
+      return { data: [], error: null };
+    };
+    process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
+
+    const res = await GET(request(`?date=${REQUESTED}&debug=1`));
+    const body = await res.json();
+    const text = body.messages.join("\n\n");
+
+    expect(res.status).toBe(200);
+    expect(body.latestLookupStatus).toBe("unavailable");
+    expect(body.latestDataDate).toBeNull();
+    expect(text).toContain(LATEST_DATA_UNAVAILABLE_NOTICE);
+    // Half an answer is not offered as a whole one.
+    expect(text).not.toContain("26 กรกฎาคม 2569");
+    expect(text).not.toContain("ยังไม่พบข้อมูลชั่งคืนในระบบ");
   });
 
   test("a date WITH data never runs the lookup", async () => {
@@ -395,10 +431,14 @@ describe("daily stock summary cron — empty business date", () => {
     produceResult = { data: produceRows(), error: null };
     process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
 
-    const res = await GET(request("?date=2026-07-25"));
+    const res = await GET(request("?date=2026-07-25&debug=1"));
+    const body = await res.json();
 
     expect(res.status).toBe(200);
     expect(probed).toBe(false);
-    expect(pushCalls[0].text).toContain("ข้อมูลจาก 2 ตลาด • พบคงเหลือ 1 ตลาด");
+    // null status = never attempted, distinct from all three real outcomes.
+    expect(body.latestLookupStatus).toBeNull();
+    expect(body.messages[0]).toContain("ข้อมูลจาก 2 ตลาด • พบคงเหลือ 1 ตลาด");
+    expect(body.messages.join("\n")).not.toContain(LATEST_DATA_UNAVAILABLE_NOTICE);
   });
 });

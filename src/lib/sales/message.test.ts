@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { centralPriceMapKey } from "@/lib/white-sheet/pricing";
 import { LINE_MESSAGE_MAX_CODE_POINTS } from "@/lib/summary/line-chunking";
+import {
+  LATEST_DATA_UNAVAILABLE_NOTICE,
+  type LatestDataLookup,
+} from "@/lib/summary/latest-data-hint";
 import { calculateSalesReport, type SalesSourceRow } from "./calculate";
 import {
   salesAutoNeedsLatestDataHint,
@@ -322,17 +326,21 @@ describe("P1 empty day must not hide blockers", () => {
 });
 
 describe("P1 auto empty state", () => {
+  const FOUND: LatestDataLookup = {
+    status: "found",
+    hint: { date: "2026-07-24", marketCount: 10 },
+  };
+
   test("names the requested date instead of a vague 'today'", () => {
-    const text = buildSalesAutoBlocks(report([])).join("\n\n");
+    const text = buildSalesAutoBlocks(report([]), { status: "none" }).join("\n\n");
 
     expect(text).toContain(SALES_AUTO_TITLE);
     expect(text).toContain(`${SALES_NO_DATA_PREFIX} 25 กรกฎาคม 2569`);
     expect(text).not.toContain(SALES_EMPTY_NOTICE);
   });
 
-  test("shows the latest date with sales as context, never as the day's total", () => {
-    const text = buildSalesAutoBlocks(report([]), { date: "2026-07-24", marketCount: 10 })
-      .join("\n\n");
+  test("found: shows the latest date as context, never as the day's total", () => {
+    const text = buildSalesAutoBlocks(report([]), FOUND).join("\n\n");
 
     expect(text).toContain(`${SALES_NO_DATA_PREFIX} 25 กรกฎาคม 2569`);
     expect(text).toContain("ข้อมูลล่าสุดที่มีคือวันที่ 24 กรกฎาคม 2569");
@@ -343,35 +351,56 @@ describe("P1 auto empty state", () => {
     expect(text).not.toContain("ข้อมูลวันที่ 24 กรกฎาคม 2569");
     expect(text).not.toContain(SALES_TOTAL_HEADING);
     expect(text).not.toContain("บาท");
+    expect(text).not.toContain(LATEST_DATA_UNAVAILABLE_NOTICE);
   });
 
-  test("says so plainly when no sales exist anywhere", () => {
-    const text = buildSalesAutoBlocks(report([]), null).join("\n\n");
+  test("none: says plainly that no sales exist anywhere", () => {
+    const text = buildSalesAutoBlocks(report([]), { status: "none" }).join("\n\n");
 
     expect(text).toContain(SALES_NO_HISTORY_NOTICE);
     expect(text).not.toContain("ข้อมูลล่าสุดที่มีคือ");
+    expect(text).not.toContain(LATEST_DATA_UNAVAILABLE_NOTICE);
+  });
+
+  test("unavailable: says the check failed and never claims history is empty", () => {
+    const text = buildSalesAutoBlocks(report([]), { status: "unavailable" }).join("\n\n");
+
+    expect(text).toContain(`${SALES_NO_DATA_PREFIX} 25 กรกฎาคม 2569`);
+    expect(text).toContain(LATEST_DATA_UNAVAILABLE_NOTICE);
+    expect(text).not.toContain(SALES_NO_HISTORY_NOTICE);
+    expect(text).not.toContain("ข้อมูลล่าสุดที่มีคือ");
+  });
+
+  test("an unpassed lookup defaults to 'could not check', never to 'nothing exists'", () => {
+    const text = buildSalesAutoBlocks(report([])).join("\n\n");
+
+    expect(text).toContain(LATEST_DATA_UNAVAILABLE_NOTICE);
+    expect(text).not.toContain(SALES_NO_HISTORY_NOTICE);
   });
 
   test("omits the market count when the latest date resolved no market", () => {
-    const text = buildSalesAutoBlocks(report([]), { date: "2026-07-24", marketCount: 0 })
-      .join("\n\n");
+    const text = buildSalesAutoBlocks(report([]), {
+      status: "found",
+      hint: { date: "2026-07-24", marketCount: 0 },
+    }).join("\n\n");
 
     expect(text).toContain("ข้อมูลล่าสุดที่มีคือวันที่ 24 กรกฎาคม 2569");
     expect(text).not.toContain("พบข้อมูล 0 ตลาด");
   });
 
-  test("a day with sales ignores the hint entirely", () => {
-    expect(buildSalesAutoBlocks(report(TRUSTED_ROWS), { date: "2026-07-24", marketCount: 10 }))
-      .toEqual(buildSalesAutoBlocks(report(TRUSTED_ROWS)));
+  test("a day with sales renders identically in all three lookup states", () => {
+    const baseline = buildSalesAutoBlocks(report(TRUSTED_ROWS), { status: "none" });
+
+    expect(buildSalesAutoBlocks(report(TRUSTED_ROWS), FOUND)).toEqual(baseline);
+    expect(buildSalesAutoBlocks(report(TRUSTED_ROWS), { status: "unavailable" })).toEqual(baseline);
   });
 
-  test("the empty state fits in a single LINE message", () => {
-    const messages = buildSalesAutoMessages(report([]), {
-      latest: { date: "2026-07-24", marketCount: 10 },
-    });
-
-    expect(messages).toHaveLength(1);
-    expect(messages[0].length).toBeLessThanOrEqual(LINE_MESSAGE_MAX_CODE_POINTS);
+  test("the empty state fits in a single LINE message in every state", () => {
+    for (const latest of [FOUND, { status: "none" } as const, { status: "unavailable" } as const]) {
+      const messages = buildSalesAutoMessages(report([]), { latest });
+      expect(messages).toHaveLength(1);
+      expect(messages[0].length).toBeLessThanOrEqual(LINE_MESSAGE_MAX_CODE_POINTS);
+    }
   });
 });
 

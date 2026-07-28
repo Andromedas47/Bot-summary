@@ -22,6 +22,46 @@ export interface LatestDataHint {
 }
 
 /**
+ * The outcome of asking history a question — three states, never two.
+ *
+ * A nullable hint could not tell "history holds nothing" apart from "history
+ * could not be read", and the report rendered both as "ยังไม่พบ…ในระบบ". That
+ * is a claim about the data, and it is false whenever the lookup failed: an
+ * outage would have told the business its records were empty.
+ *
+ *   found       — a real earlier date, with its market count
+ *   none        — the query SUCCEEDED and history genuinely holds nothing
+ *   unavailable — the question could not be answered; assert nothing
+ *
+ * "unavailable" also covers a partial answer: a date found whose market count
+ * could not then be read is not a latest-date claim worth making, because the
+ * count is half of what the reader is being told.
+ */
+export type LatestDataLookup =
+  | { status: "found"; hint: LatestDataHint }
+  | { status: "none" }
+  | { status: "unavailable" };
+
+/**
+ * Said when history could not be consulted. Deliberately says nothing about
+ * whether data exists — the one thing a failed lookup cannot know.
+ */
+export const LATEST_DATA_UNAVAILABLE_NOTICE = "ยังตรวจสอบข้อมูลล่าสุดไม่ได้";
+
+/**
+ * The closing block of an empty report: the latest date we have, an honest
+ * "nothing in the system", or an honest "could not check".
+ *
+ * `noneNotice` is the report's own wording for a genuinely empty history —
+ * ชั่งคืน and รายการขาย are different claims and must stay separate.
+ */
+export function latestDataBlock(lookup: LatestDataLookup, noneNotice: string): string {
+  if (lookup.status === "found") return latestDataHintBlock(lookup.hint);
+  if (lookup.status === "unavailable") return LATEST_DATA_UNAVAILABLE_NOTICE;
+  return noneNotice;
+}
+
+/**
  * The "here is the latest data we do have" block.
  *
  * It names its own date explicitly, so it can never be read as the requested

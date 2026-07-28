@@ -25,7 +25,12 @@ const TX_RETURN = "คืน";
 const TX_WITHDRAW = "เบิก";
 const TX_DAMAGED = "คืนเสีย";
 
-function client(rows: readonly (Row & { transaction_type?: string })[], calls: Call[] = []) {
+/** `failOn` returns an error message for the query it wants to break. */
+function client(
+  rows: readonly (Row & { transaction_type?: string })[],
+  failOn: (filters: Record<string, unknown>) => string | null = () => null,
+  calls: Call[] = [],
+) {
   const supabase = {
     from(table: string) {
       const filters: Record<string, unknown> = {};
@@ -62,12 +67,18 @@ function client(rows: readonly (Row & { transaction_type?: string })[], calls: C
         return result.sort((a, b) => (b.transaction_date ?? "").localeCompare(a.transaction_date ?? ""));
       };
 
+      const answer = (slice: () => Row[]) => {
+        const failure = failOn(filters);
+        return Promise.resolve(
+          failure ? { data: null, error: { message: failure } } : { data: slice(), error: null },
+        );
+      };
+
       node.limit = (n: number) => {
         filters.limit = n;
-        return Promise.resolve({ data: matching().slice(0, n), error: null });
+        return answer(() => matching().slice(0, n));
       };
-      node.range = (from: number, to: number) =>
-        Promise.resolve({ data: matching().slice(from, to + 1), error: null });
+      node.range = (from: number, to: number) => answer(() => matching().slice(from, to + 1));
 
       return node;
     },
@@ -91,8 +102,8 @@ describe("findLatestStockDataDate", () => {
     ]);
 
     expect(await findLatestStockDataDate(supabase, "2026-07-25")).toEqual({
-      date: "2026-07-24",
-      marketCount: 2,
+      status: "found",
+      hint: { date: "2026-07-24", marketCount: 2 },
     });
   });
 
@@ -105,13 +116,35 @@ describe("findLatestStockDataDate", () => {
 
     const latest = await findLatestStockDataDate(supabase, "2026-07-25");
 
-    expect(latest?.date).toBe("2026-07-24");
+    expect(latest).toEqual({ status: "found", hint: { date: "2026-07-24", marketCount: 1 } });
     expect(calls[0].filters["lt:transaction_date"]).toBe("2026-07-25");
   });
 
-  test("returns null when no earlier ชั่งคืน exists at all", async () => {
+  test("reports a PROVEN empty history as 'none'", async () => {
     const { supabase } = client([returnRow("2026-07-26", "ตลาดกี้")]);
-    expect(await findLatestStockDataDate(supabase, "2026-07-25")).toBeNull();
+    expect(await findLatestStockDataDate(supabase, "2026-07-25")).toEqual({ status: "none" });
+  });
+
+  test("a failed date probe throws — it never degrades to 'none'", async () => {
+    const { supabase } = client(
+      [returnRow("2026-07-24", "ตลาดกี้")],
+      (filters) => (filters["lt:transaction_date"] ? "probe exploded" : null),
+    );
+
+    // "none" is a claim about the business's records; a database error is not
+    // evidence for it. Throwing is what lets the caller say "unavailable".
+    expect(findLatestStockDataDate(supabase, "2026-07-25")).rejects.toThrow("probe exploded");
+  });
+
+  test("a failed market count throws even though the date was found", async () => {
+    const { supabase } = client(
+      [returnRow("2026-07-24", "ตลาดกี้")],
+      (filters) => (filters["eq:transaction_date"] ? "count exploded" : null),
+    );
+
+    // Half an answer is not an answer: the count is part of what the reader is
+    // being told, so a date without it must not be presented at all.
+    expect(findLatestStockDataDate(supabase, "2026-07-25")).rejects.toThrow("count exploded");
   });
 
   test("เบิก and คืนเสีย never make a date count as having stock data", async () => {
@@ -123,8 +156,8 @@ describe("findLatestStockDataDate", () => {
 
     // Remaining stock means good return only — never เบิก − คืนเสีย.
     expect(await findLatestStockDataDate(supabase, "2026-07-25")).toEqual({
-      date: "2026-07-20",
-      marketCount: 1,
+      status: "found",
+      hint: { date: "2026-07-20", marketCount: 1 },
     });
     expect(calls[0].filters["in:transaction_type"]).toEqual([TX_RETURN]);
   });
@@ -156,8 +189,8 @@ describe("findLatestStockDataDate", () => {
     ]);
 
     expect(await findLatestStockDataDate(supabase, "2026-07-25")).toEqual({
-      date: "2026-07-24",
-      marketCount: 1,
+      status: "found",
+      hint: { date: "2026-07-24", marketCount: 1 },
     });
   });
 });

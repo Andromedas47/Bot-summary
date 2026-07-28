@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { NextRequest } from "next/server";
+import { LATEST_DATA_UNAVAILABLE_NOTICE } from "@/lib/summary/latest-data-hint";
 
 // ── Stubs ──────────────────────────────────────────────────────────────────
 //
@@ -445,7 +446,7 @@ describe("daily sales summary cron — empty business date", () => {
     };
   }
 
-  test("states the requested date is empty and points at the latest date with sales", async () => {
+  test("found: states the requested date is empty and points at the latest date", async () => {
     emptyDayWith({ date: "2026-07-26", markets: ["ตลาดกี้", "เฉลิม72 ผลไม้", "ตลาดกี้"] });
     process.env.SALES_SUMMARY_LINE_TARGETS = "Cgroup1";
 
@@ -461,23 +462,28 @@ describe("daily sales summary cron — empty business date", () => {
     expect(text).toContain("ข้อมูลวันที่ 27 กรกฎาคม 2569");
     expect(text).not.toContain("บาท");
     expect(body.businessDate).toBe(REQUESTED);
+    expect(body.latestLookupStatus).toBe("found");
     expect(body.latestDataDate).toBe("2026-07-26");
     expect(body.latestDataMarketCount).toBe(2);
     expect(body.expectedSalesSatang).toBe(0);
   });
 
-  test("says no sales exist at all when history is empty", async () => {
+  test("none: says no sales exist when the query PROVED history is empty", async () => {
     emptyDayWith(null);
     process.env.SALES_SUMMARY_LINE_TARGETS = "Cgroup1";
 
-    await GET(request(`?date=${REQUESTED}`));
+    const res = await GET(request(`?date=${REQUESTED}`));
+    const body = await res.json();
     const text = pushCalls.map((call) => call.text).join("\n\n");
 
+    expect(body.latestLookupStatus).toBe("none");
+    expect(res.status).toBe(200);
     expect(text).toContain("ยังไม่พบรายการขายในระบบ");
     expect(text).not.toContain("ข้อมูลล่าสุดที่มีคือ");
+    expect(text).not.toContain(LATEST_DATA_UNAVAILABLE_NOTICE);
   });
 
-  test("a failed latest-date lookup still delivers the empty report", async () => {
+  test("unavailable: a failed date probe never becomes a 'no history' claim", async () => {
     tables = { ...salesDay(), produce_transactions: [], produce_sessions: [] };
     produceByQuery = (filters) =>
       filters["lt:transaction_date"] === REQUESTED
@@ -486,11 +492,45 @@ describe("daily sales summary cron — empty business date", () => {
     process.env.SALES_SUMMARY_LINE_TARGETS = "Cgroup1";
 
     const res = await GET(request(`?date=${REQUESTED}`));
+    const body = await res.json();
+    const text = pushCalls.map((call) => call.text).join("\n\n");
+
+    // The empty state is still delivered in full …
+    expect(res.status).toBe(200);
+    expect(pushCalls).toHaveLength(1);
+    expect(body.latestLookupStatus).toBe("unavailable");
+    expect(text).toContain("ยังไม่พบรายการขายประจำวันที่ 27 กรกฎาคม 2569");
+    expect(text).toContain(LATEST_DATA_UNAVAILABLE_NOTICE);
+    // … without claiming the business has never sold anything, and without
+    // leaking the error text to LINE.
+    expect(text).not.toContain("ยังไม่พบรายการขายในระบบ");
+    expect(text).not.toContain("probe exploded");
+  });
+
+  test("unavailable: a date found but a failed market count is not a latest-date claim", async () => {
+    tables = { ...salesDay(), produce_transactions: [], produce_sessions: [] };
+    produceByQuery = (filters) => {
+      if (filters["lt:transaction_date"] === REQUESTED) {
+        return { data: [{ transaction_date: "2026-07-26" }], error: null, count: 1 };
+      }
+      if (filters["eq:transaction_date"] === "2026-07-26") {
+        return { data: null, error: { message: "count exploded" }, count: null };
+      }
+      return null;
+    };
+    process.env.SALES_SUMMARY_LINE_TARGETS = "Cgroup1";
+
+    const res = await GET(request(`?date=${REQUESTED}`));
+    const body = await res.json();
     const text = pushCalls.map((call) => call.text).join("\n\n");
 
     expect(res.status).toBe(200);
-    expect(text).toContain("ยังไม่พบรายการขายประจำวันที่ 27 กรกฎาคม 2569");
-    expect(text).toContain("ยังไม่พบรายการขายในระบบ");
+    expect(body.latestLookupStatus).toBe("unavailable");
+    expect(body.latestDataDate).toBeNull();
+    expect(text).toContain(LATEST_DATA_UNAVAILABLE_NOTICE);
+    // Half an answer is not offered as a whole one.
+    expect(text).not.toContain("26 กรกฎาคม 2569");
+    expect(text).not.toContain("ยังไม่พบรายการขายในระบบ");
   });
 
   test("a date WITH sales never runs the lookup", async () => {
@@ -506,7 +546,10 @@ describe("daily sales summary cron — empty business date", () => {
 
     expect(res.status).toBe(200);
     expect(probed).toBe(false);
+    // null status = never attempted, distinct from all three real outcomes.
+    expect(body.latestLookupStatus).toBeNull();
     expect(body.latestDataDate).toBeNull();
     expect(pushCalls[0].text).toContain("บาท");
+    expect(pushCalls[0].text).not.toContain(LATEST_DATA_UNAVAILABLE_NOTICE);
   });
 });

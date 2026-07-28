@@ -7,7 +7,7 @@ import {
   STOCK_UNIDENTIFIED_HEADING,
   stockDisplayUnit,
 } from "@/lib/summary/stock-summary-message";
-import { latestDataHintBlock, type LatestDataHint } from "@/lib/summary/latest-data-hint";
+import { latestDataBlock, type LatestDataLookup } from "@/lib/summary/latest-data-hint";
 import { chunkBlocks, countCodePoints } from "@/lib/summary/line-chunking";
 
 /**
@@ -219,9 +219,15 @@ export function isStockSnapshotEmpty(summary: StockSummary): boolean {
   );
 }
 
+/**
+ * `latest` is used ONLY by the empty state; a day with data renders identically
+ * whatever is passed. It defaults to "unavailable" rather than "none" on
+ * purpose: a caller that did not look cannot claim history is empty, and the
+ * non-claiming state is the only safe default.
+ */
 export function buildStockSnapshotBlocks(
   summary: StockSummary,
-  latest: LatestDataHint | null = null,
+  latest: LatestDataLookup = { status: "unavailable" },
 ): string[] {
   const requestedDate = formatThaiDate(summary.businessDate);
 
@@ -232,7 +238,7 @@ export function buildStockSnapshotBlocks(
       [
         `${STOCK_SNAPSHOT_TITLE}\nข้อมูลวันที่ ${requestedDate}`,
         `${STOCK_SNAPSHOT_NO_DATA_PREFIX} ${requestedDate}`,
-        latest ? latestDataHintBlock(latest) : STOCK_SNAPSHOT_NO_HISTORY_NOTICE,
+        latestDataBlock(latest, STOCK_SNAPSHOT_NO_HISTORY_NOTICE),
       ].join("\n\n"),
     ];
   }
@@ -258,10 +264,10 @@ export function buildStockSnapshotBlocks(
  */
 export function buildStockSnapshotMessages(
   summary: StockSummary,
-  options: { maxCodePoints?: number; latest?: LatestDataHint | null } = {},
+  options: { maxCodePoints?: number; latest?: LatestDataLookup } = {},
 ): string[] {
   return chunkBlocks(
-    buildStockSnapshotBlocks(summary, options.latest ?? null),
+    buildStockSnapshotBlocks(summary, options.latest),
     options.maxCodePoints ?? SNAPSHOT_MESSAGE_MAX_CODE_POINTS,
   );
 }

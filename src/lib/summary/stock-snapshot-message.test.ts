@@ -11,6 +11,7 @@ import {
   STOCK_SNAPSHOT_TITLE,
 } from "./stock-snapshot-message";
 import { countCodePoints, LINE_MESSAGE_MAX_CODE_POINTS, OVERFLOW_NOTICE } from "./line-chunking";
+import { LATEST_DATA_UNAVAILABLE_NOTICE, type LatestDataLookup } from "./latest-data-hint";
 import type { RemainingFruitSourceRow } from "./remaining-fruit";
 
 const DATE = "2026-07-25";
@@ -227,9 +228,13 @@ describe("stock snapshot completeness", () => {
 
 describe("stock snapshot empty state", () => {
   const empty = () => buildStockSummaryFromRows(DATE, []);
+  const FOUND: LatestDataLookup = {
+    status: "found",
+    hint: { date: "2026-07-24", marketCount: 10 },
+  };
 
   test("names the requested date and drops the zero-market coverage line", () => {
-    const text = buildStockSnapshotBlocks(empty()).join("\n\n");
+    const text = buildStockSnapshotBlocks(empty(), { status: "none" }).join("\n\n");
 
     expect(text).toContain(`${STOCK_SNAPSHOT_TITLE}\nข้อมูลวันที่ 25 กรกฎาคม 2569`);
     expect(text).toContain(`${STOCK_SNAPSHOT_NO_DATA_PREFIX} 25 กรกฎาคม 2569`);
@@ -238,11 +243,8 @@ describe("stock snapshot empty state", () => {
     expect(text).not.toContain("พบคงเหลือ 0 ตลาด");
   });
 
-  test("shows the latest date that has data as context, never as the report", () => {
-    const text = buildStockSnapshotBlocks(empty(), {
-      date: "2026-07-24",
-      marketCount: 10,
-    }).join("\n\n");
+  test("found: shows the latest date as context, never as the report", () => {
+    const text = buildStockSnapshotBlocks(empty(), FOUND).join("\n\n");
 
     expect(text).toContain(`${STOCK_SNAPSHOT_NO_DATA_PREFIX} 25 กรกฎาคม 2569`);
     expect(text).toContain("ข้อมูลล่าสุดที่มีคือวันที่ 24 กรกฎาคม 2569");
@@ -252,18 +254,40 @@ describe("stock snapshot empty state", () => {
     expect(text).toContain("ข้อมูลวันที่ 25 กรกฎาคม 2569");
     expect(text).not.toContain("ข้อมูลวันที่ 24 กรกฎาคม 2569");
     expect(text).not.toContain(STOCK_SNAPSHOT_NO_HISTORY_NOTICE);
+    expect(text).not.toContain(LATEST_DATA_UNAVAILABLE_NOTICE);
   });
 
-  test("says so plainly when no ชั่งคืน exists anywhere", () => {
-    const text = buildStockSnapshotBlocks(empty(), null).join("\n\n");
+  test("none: says plainly that no ชั่งคืน exists anywhere", () => {
+    const text = buildStockSnapshotBlocks(empty(), { status: "none" }).join("\n\n");
 
     expect(text).toContain(STOCK_SNAPSHOT_NO_HISTORY_NOTICE);
     expect(text).not.toContain("ข้อมูลล่าสุดที่มีคือ");
+    expect(text).not.toContain(LATEST_DATA_UNAVAILABLE_NOTICE);
+  });
+
+  test("unavailable: says the check failed and never claims history is empty", () => {
+    const text = buildStockSnapshotBlocks(empty(), { status: "unavailable" }).join("\n\n");
+
+    // The requested-date statement is still delivered in full …
+    expect(text).toContain(`${STOCK_SNAPSHOT_NO_DATA_PREFIX} 25 กรกฎาคม 2569`);
+    expect(text).toContain(LATEST_DATA_UNAVAILABLE_NOTICE);
+    // … and the false claim is absent.
+    expect(text).not.toContain(STOCK_SNAPSHOT_NO_HISTORY_NOTICE);
+    expect(text).not.toContain("ข้อมูลล่าสุดที่มีคือ");
+  });
+
+  test("an unpassed lookup defaults to 'could not check', never to 'nothing exists'", () => {
+    const text = buildStockSnapshotBlocks(empty()).join("\n\n");
+
+    expect(text).toContain(LATEST_DATA_UNAVAILABLE_NOTICE);
+    expect(text).not.toContain(STOCK_SNAPSHOT_NO_HISTORY_NOTICE);
   });
 
   test("omits the market count when the latest date resolved no market", () => {
-    const text = buildStockSnapshotBlocks(empty(), { date: "2026-07-24", marketCount: 0 })
-      .join("\n\n");
+    const text = buildStockSnapshotBlocks(empty(), {
+      status: "found",
+      hint: { date: "2026-07-24", marketCount: 0 },
+    }).join("\n\n");
 
     expect(text).toContain("ข้อมูลล่าสุดที่มีคือวันที่ 24 กรกฎาคม 2569");
     expect(text).not.toContain("พบข้อมูล 0 ตลาด");
@@ -275,28 +299,27 @@ describe("stock snapshot empty state", () => {
     ]);
 
     expect(isStockSnapshotEmpty(summary)).toBe(false);
-    const text = buildStockSnapshotBlocks(summary, { date: "2026-07-24", marketCount: 10 })
-      .join("\n\n");
+    const text = buildStockSnapshotBlocks(summary, FOUND).join("\n\n");
     expect(text).toContain("ข้อมูลจาก 1 ตลาด • พบคงเหลือ 0 ตลาด");
     expect(text).not.toContain("ข้อมูลล่าสุดที่มีคือ");
+    expect(text).not.toContain(LATEST_DATA_UNAVAILABLE_NOTICE);
   });
 
-  test("a day with stock ignores the hint entirely", () => {
+  test("a day with stock renders identically in all three lookup states", () => {
     const summary = buildStockSummaryFromRows(DATE, [row()]);
+    const baseline = buildStockSnapshotBlocks(summary, { status: "none" });
 
     expect(isStockSnapshotEmpty(summary)).toBe(false);
-    expect(buildStockSnapshotBlocks(summary, { date: "2026-07-24", marketCount: 10 })).toEqual(
-      buildStockSnapshotBlocks(summary),
-    );
+    expect(buildStockSnapshotBlocks(summary, FOUND)).toEqual(baseline);
+    expect(buildStockSnapshotBlocks(summary, { status: "unavailable" })).toEqual(baseline);
   });
 
-  test("the empty state fits in a single LINE message", () => {
-    const messages = buildStockSnapshotMessages(empty(), {
-      latest: { date: "2026-07-24", marketCount: 10 },
-    });
-
-    expect(messages).toHaveLength(1);
-    expect(countCodePoints(messages[0])).toBeLessThanOrEqual(LINE_MESSAGE_MAX_CODE_POINTS);
+  test("the empty state fits in a single LINE message in every state", () => {
+    for (const latest of [FOUND, { status: "none" } as const, { status: "unavailable" } as const]) {
+      const messages = buildStockSnapshotMessages(empty(), { latest });
+      expect(messages).toHaveLength(1);
+      expect(countCodePoints(messages[0])).toBeLessThanOrEqual(LINE_MESSAGE_MAX_CODE_POINTS);
+    }
   });
 });
 

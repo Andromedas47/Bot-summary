@@ -4,7 +4,7 @@ import { logger } from "@/lib/logger";
 import { pushLineMessage } from "@/lib/line/reply";
 import { findLatestSalesDataDate, loadSalesReport } from "@/lib/sales/load";
 import { buildSalesAutoMessages, salesAutoNeedsLatestDataHint } from "@/lib/sales/message";
-import type { LatestDataHint } from "@/lib/summary/latest-data-hint";
+import type { LatestDataLookup } from "@/lib/summary/latest-data-hint";
 import {
   DEFAULT_SALES_REVISION,
   isStrictBusinessDate,
@@ -113,11 +113,16 @@ export async function GET(req: NextRequest) {
   }
 
   // Only an empty date asks what the latest date with sales was, so a normal
-  // morning pays for nothing extra. The hint is context, never a substitute:
+  // morning pays for nothing extra. The lookup is context, never a substitute:
   // failing the whole delivery because it could not be read would be worse than
   // sending the empty state without it.
-  let latest: LatestDataHint | null = null;
-  if (salesAutoNeedsLatestDataHint(report)) {
+  //
+  // A failure stays "unavailable" and NEVER becomes "none" — the report would
+  // otherwise tell the business it has never sold anything on the strength of a
+  // database error. The error text is logged here and never reaches LINE.
+  const needsLookup = salesAutoNeedsLatestDataHint(report);
+  let latest: LatestDataLookup = { status: "unavailable" };
+  if (needsLookup) {
     try {
       latest = await findLatestSalesDataDate(supabase, businessDate);
     } catch (error) {
@@ -131,8 +136,10 @@ export async function GET(req: NextRequest) {
   const messages = buildSalesAutoMessages(report, { latest });
   const stats = {
     businessDate,
-    latestDataDate: latest?.date ?? null,
-    latestDataMarketCount: latest?.marketCount ?? null,
+    // null status = never attempted, because the date had sales.
+    latestLookupStatus: needsLookup ? latest.status : null,
+    latestDataDate: latest.status === "found" ? latest.hint.date : null,
+    latestDataMarketCount: latest.status === "found" ? latest.hint.marketCount : null,
     marketCount: report.markets.length,
     productCount: report.products.length,
     blockedCount: report.blocked.length,

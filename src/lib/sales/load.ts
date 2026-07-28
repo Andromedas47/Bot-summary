@@ -7,7 +7,7 @@ import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
 import { isStrictBusinessDate } from "./cron";
 import { isQaMarketLabel } from "./qa-scopes";
 import { resolveCentralPricesForDate } from "@/lib/white-sheet/load";
-import type { LatestDataHint } from "@/lib/summary/latest-data-hint";
+import type { LatestDataLookup } from "@/lib/summary/latest-data-hint";
 import type { Database } from "@/types/database";
 import {
   calculateSalesReport,
@@ -211,11 +211,16 @@ export async function fetchSalesProduceRows(
  * The market count uses the same normalizedMarketLabel identity and the same QA
  * exclusion the report applies, so it counts the markets a reader would see.
  * Rows whose market cannot be resolved have no market to count.
+ *
+ * Returns "none" ONLY when the query succeeded and proved there is nothing
+ * earlier. A read failure THROWS rather than degrading to "none" — the caller
+ * turns that into "unavailable", because a database error is not evidence that
+ * the business has never sold anything.
  */
 export async function findLatestSalesDataDate(
   supabase: Supabase,
   beforeDate: string,
-): Promise<LatestDataHint | null> {
+): Promise<LatestDataLookup> {
   const { data, error } = await supabase
     .from("produce_transactions")
     .select("transaction_date")
@@ -225,7 +230,7 @@ export async function findLatestSalesDataDate(
   if (error) throw new SalesDataError(`latest sales date query failed: ${error.message}`);
 
   const date = data?.[0]?.transaction_date ?? null;
-  if (!date) return null;
+  if (!date) return { status: "none" };
 
   // Bounded by construction: one business date, paged like every other read here.
   const markets = new Set<string>();
@@ -251,7 +256,7 @@ export async function findLatestSalesDataDate(
     offset += PAGE_SIZE;
   }
 
-  return { date, marketCount: markets.size };
+  return { status: "found", hint: { date, marketCount: markets.size } };
 }
 
 async function mapRawMessageSources(

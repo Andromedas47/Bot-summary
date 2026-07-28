@@ -3,7 +3,7 @@ import type { Database } from "@/types/database";
 import { KNOWN_TX_TYPES, transactionBucket } from "@/lib/summary/transactions";
 import type { RemainingFruitSourceRow } from "@/lib/summary/remaining-fruit";
 import { cleanMarketName } from "@/lib/market";
-import type { LatestDataHint } from "@/lib/summary/latest-data-hint";
+import type { LatestDataLookup } from "@/lib/summary/latest-data-hint";
 import { logger } from "@/lib/logger";
 
 const PAGE = 1000;
@@ -82,11 +82,16 @@ export async function fetchRemainingFruitRows(
  * the same cleanMarketName boundary the report uses for market identity. Rows
  * whose market could not be resolved have no market to count; they are not
  * silently attributed to one.
+ *
+ * Returns "none" ONLY when the query succeeded and proved there is nothing
+ * earlier. A read failure THROWS rather than degrading to "none" — the caller
+ * turns that into "unavailable", because a database error is not evidence that
+ * the business has no records.
  */
 export async function findLatestStockDataDate(
   supabase: SupabaseClient<Database>,
   beforeDate: string,
-): Promise<LatestDataHint | null> {
+): Promise<LatestDataLookup> {
   const { data, error } = await supabase
     .from("produce_transactions")
     .select("transaction_date")
@@ -97,7 +102,7 @@ export async function findLatestStockDataDate(
   if (error) throw new Error(error.message);
 
   const date = data?.[0]?.transaction_date ?? null;
-  if (!date) return null;
+  if (!date) return { status: "none" };
 
   // Bounded by construction: one business date, paged like every other read in
   // this module so a busy day is counted in full rather than truncated.
@@ -123,7 +128,7 @@ export async function findLatestStockDataDate(
     offset += PAGE;
   }
 
-  return { date, marketCount: markets.size };
+  return { status: "found", hint: { date, marketCount: markets.size } };
 }
 
 async function attachSessionIdentity(

@@ -5,7 +5,7 @@ import {
   chunkBlocks,
   LINE_MESSAGE_MAX_CODE_POINTS,
 } from "@/lib/summary/line-chunking";
-import { latestDataHintBlock, type LatestDataHint } from "@/lib/summary/latest-data-hint";
+import { latestDataBlock, type LatestDataLookup } from "@/lib/summary/latest-data-hint";
 import {
   satangToBahtText,
   type SalesBlockReason,
@@ -319,11 +319,13 @@ export function salesAutoNeedsLatestDataHint(report: SalesReport): boolean {
  * the day gets as many parts as it needs.
  *
  * `latest` is the empty state's context block and is used ONLY there — a day
- * with sales renders exactly as before, whatever is passed.
+ * with sales renders exactly as before, whatever is passed. It defaults to
+ * "unavailable" rather than "none" on purpose: a caller that did not look
+ * cannot claim there is no sales history.
  */
 export function buildSalesAutoBlocks(
   report: SalesReport,
-  latest: LatestDataHint | null = null,
+  latest: LatestDataLookup = { status: "unavailable" },
 ): string[] {
   const header = headerBlock(SALES_AUTO_TITLE, report);
   if (salesAutoNeedsLatestDataHint(report)) {
@@ -331,7 +333,7 @@ export function buildSalesAutoBlocks(
       [
         header,
         `${SALES_NO_DATA_PREFIX} ${formatThaiDate(report.businessDate)}`,
-        latest ? latestDataHintBlock(latest) : SALES_NO_HISTORY_NOTICE,
+        latestDataBlock(latest, SALES_NO_HISTORY_NOTICE),
       ].join("\n\n"),
     ];
   }
@@ -358,10 +360,10 @@ export function buildSalesAutoBlocks(
 
 export function buildSalesAutoMessages(
   report: SalesReport,
-  options: { maxCodePoints?: number; latest?: LatestDataHint | null } = {},
+  options: { maxCodePoints?: number; latest?: LatestDataLookup } = {},
 ): string[] {
   return chunkBlocks(
-    buildSalesAutoBlocks(report, options.latest ?? null),
+    buildSalesAutoBlocks(report, options.latest),
     options.maxCodePoints ?? LINE_MESSAGE_MAX_CODE_POINTS,
   );
 }

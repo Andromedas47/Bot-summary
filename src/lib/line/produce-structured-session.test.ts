@@ -332,6 +332,21 @@ describe("0049 — structured sessions refuse a text header", () => {
     expect(containsProduceHeader("จบรายการเบิก")).toBe(false);
   });
 
+  it("mirrors the webhook header predicate (no bare SESSION_START false positives)", () => {
+    // Product names that embed คืน / เบิก / คืนเสีย must not look like headers.
+    expect(containsProduceHeader("1.ผักคืนถิ่น10บาท")).toBe(false);
+    expect(containsProduceHeader("1.เบิกทอง10บาท")).toBe(false);
+    expect(containsProduceHeader("2.คืนเสียแพค5บาท")).toBe(false);
+
+    // Valid headers: seller/market, date, or รายการ… opener.
+    expect(containsProduceHeader("พี่ดำ-วิหาร เบิก 10/6/2569")).toBe(true);
+    expect(containsProduceHeader("พี่ปลา-ราชพฤกษ์ คืน 29/5/2569")).toBe(true);
+    expect(containsProduceHeader("น้อย-วัดตะกล่ำ ชั่งคืน 29/5/2569")).toBe(true);
+    expect(containsProduceHeader("เบิก 29/5/2569")).toBe(true);
+    expect(containsProduceHeader("รายการชั่งคืน")).toBe(true);
+    expect(containsProduceHeader("รายการชั่งเบิก")).toBe(true);
+  });
+
   it("refuses to drive a legacy row with structured commands", async () => {
     const { result } = run(
       { kind: "append", text: "1.แตงโม10บาท", lineEventId: "e", lineTimestampMs: 1 },

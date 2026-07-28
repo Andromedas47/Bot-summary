@@ -9,8 +9,8 @@ import {
   type StructuredSessionMetadata,
   type TransactionTimeSource,
 } from "@/lib/parsers/weigh-session/seed";
+import { findProduceSessionHeader } from "@/lib/line/webhook-service";
 import { ADDITIONAL_TYPE_MAP } from "@/lib/parsers/weigh-session/parser";
-import { RE } from "@/lib/parsers/weigh-session/regex";
 import type { BaseTransactionType, SessionKind } from "@/lib/parsers/weigh-session/types";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -115,17 +115,13 @@ export function produceSessionKey(source: ProduceCommandSource): string | null {
 /**
  * True when the text carries a produce session header.
  *
- * Used to refuse a textual header inside a structured session. SESSION_END
- * lines like "จบรายการคืน" also match SESSION_START, so they are excluded first
- * — the same ordering the webhook header predicate uses.
+ * Delegates to the webhook's findProduceSessionHeader so structured-append
+ * refusal and pending creation/rotation share one predicate: SESSION_START
+ * plus seller/market, a รายการ… opener, or a date — never bare เบิก/คืน/คืนเสีย
+ * embedded in a product name.
  */
 export function containsProduceHeader(text: string): boolean {
-  return text.split("\n").some((rawLine) => {
-    const line = rawLine.trim();
-    if (!line) return false;
-    if (RE.SESSION_END.test(line)) return false;
-    return RE.ADDITIONAL_HEADER.test(line) || RE.SESSION_START.test(line) || RE.SELLER_MARKET.test(line);
-  });
+  return findProduceSessionHeader(text) !== null;
 }
 
 /**

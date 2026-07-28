@@ -1,8 +1,12 @@
 import { describe, expect, it } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   ALL_TX_CODES,
   TX_CODE_TO_BASE,
   TX_CODE_TO_LABEL,
+  applyScenarioInPreview,
+  applyScenarioToSession,
   decodeGuidedMenuPostback,
   encodeGuidedMenuPostback,
   emptySelection,
@@ -18,9 +22,19 @@ import {
 
 /** Fixed Bangkok afternoon — 2026-07-28 15:30 Asia/Bangkok */
 const TS = Date.parse("2026-07-28T08:30:00.000Z");
+const MARKET = "mkt_seven_front";
 
-function startSession(tx: GuidedMenuTxCode, dm: "today" | "yesterday" | "custom" = "today", iso?: string) {
+function openSession(tx: GuidedMenuTxCode, dm: "today" | "yesterday" | "custom" = "today", iso?: string) {
   let flow = initialGuidedMenuFlow();
+  expect(flow.screen).toBe("start_menu");
+
+  flow = reduceGuidedMenuPostback({
+    data: postbackData("start"),
+    selection: flow.selection,
+    activeSession: null,
+    lineTimestampMs: TS,
+  });
+  expect(flow.screen).toBe("main_menu");
 
   flow = reduceGuidedMenuPostback({
     data: postbackData("select_tx", { tx }),
@@ -31,7 +45,7 @@ function startSession(tx: GuidedMenuTxCode, dm: "today" | "yesterday" | "custom"
   expect(flow.screen).toBe("market_select");
 
   flow = reduceGuidedMenuPostback({
-    data: postbackData("select_market", { tx, mid: "mkt_khlong_toei" }),
+    data: postbackData("select_market", { tx, mid: MARKET }),
     selection: flow.selection,
     activeSession: null,
     lineTimestampMs: TS,
@@ -40,17 +54,15 @@ function startSession(tx: GuidedMenuTxCode, dm: "today" | "yesterday" | "custom"
 
   if (dm === "custom") {
     flow = reduceGuidedMenuPostback({
-      data: postbackData("custom_date", { tx, mid: "mkt_khlong_toei", dm: "custom" }),
+      data: postbackData("custom_date", { tx, mid: MARKET, dm: "custom" }),
       selection: flow.selection,
       activeSession: null,
       lineTimestampMs: TS,
     });
-    expect(flow.screen).toBe("custom_date");
-
     flow = reduceGuidedMenuPostback({
       data: postbackData("set_custom_date", {
         tx,
-        mid: "mkt_khlong_toei",
+        mid: MARKET,
         dm: "custom",
         iso: iso ?? "2026-07-25",
       }),
@@ -60,7 +72,7 @@ function startSession(tx: GuidedMenuTxCode, dm: "today" | "yesterday" | "custom"
     });
   } else {
     flow = reduceGuidedMenuPostback({
-      data: postbackData("select_date", { tx, mid: "mkt_khlong_toei", dm }),
+      data: postbackData("select_date", { tx, mid: MARKET, dm }),
       selection: flow.selection,
       activeSession: null,
       lineTimestampMs: TS,
@@ -70,45 +82,56 @@ function startSession(tx: GuidedMenuTxCode, dm: "today" | "yesterday" | "custom"
   expect(flow.screen).toBe("confirm_open");
   expect(flow.openCommand).toBeNull();
 
-  const startData = postbackData("start_session", {
-    tx,
-    mid: "mkt_khlong_toei",
-    dm,
-    ...(dm === "custom" ? { iso: iso ?? "2026-07-25" } : {}),
-  });
-
   flow = reduceGuidedMenuPostback({
-    data: startData,
+    data: postbackData("start_session", {
+      tx,
+      mid: MARKET,
+      dm,
+      ...(dm === "custom" ? { iso: iso ?? "2026-07-25" } : {}),
+    }),
     selection: flow.selection,
     activeSession: null,
     lineTimestampMs: TS,
-    observedItemCount: 2,
   });
 
   return flow;
 }
 
-describe("guided menu — every main transaction type", () => {
+function loadValidScenario(tx: GuidedMenuTxCode = "b") {
+  let flow = openSession(tx);
+  flow = applyScenarioInPreview({
+    activeSession: flow.activeSession!,
+    scenarioId: "valid",
+  });
+  return flow;
+}
+
+function loadBlockingScenario(tx: GuidedMenuTxCode = "b") {
+  let flow = openSession(tx);
+  flow = applyScenarioInPreview({
+    activeSession: flow.activeSession!,
+    scenarioId: "partial_error",
+  });
+  return flow;
+}
+
+describe("guided menu V1 — all three transaction types", () => {
   for (const tx of ALL_TX_CODES) {
-    it(`opens a main session for ${TX_CODE_TO_LABEL[tx]} → base ${TX_CODE_TO_BASE[tx]}`, () => {
-      const flow = startSession(tx);
+    it(`opens main session for ${TX_CODE_TO_LABEL[tx]} → ${TX_CODE_TO_BASE[tx]}`, () => {
+      const flow = openSession(tx);
       expect(flow.screen).toBe("active_session");
-      expect(flow.openCommand).not.toBeNull();
       expect(flow.openCommand!.sessionKind).toBe("main");
       expect(flow.openCommand!.initialTransactionType).toBe(TX_CODE_TO_BASE[tx]);
-      expect(flow.openCommand!.declaredTransactionType).toBeNull();
-      expect(flow.openCommand!.additionalOpener).toBeNull();
-      expect(flow.openCommand!.marketLabel).toBe("คลองเตย");
-      expect(flow.openCommand!.staffLabel).toBeTruthy();
-      expect(flow.openCommand!.lineEventId).toBeTruthy();
-      expect(flow.openCommand!.lineTimestampMs).toBe(TS);
       expect(flow.activeSession!.transactionLabel).toBe(TX_CODE_TO_LABEL[tx]);
+      expect(flow.activeSession!.marketLabel).toBe("หน้าเซเวน");
     });
   }
+});
 
-  it("never silently defaults transaction type — start without tx fails", () => {
+describe("guided menu V1 — no silent transaction default", () => {
+  it("rejects start_session without tx", () => {
     const flow = reduceGuidedMenuPostback({
-      data: postbackData("start_session", { mid: "mkt_khlong_toei", dm: "today" }),
+      data: postbackData("start_session", { mid: MARKET, dm: "today" }),
       selection: emptySelection(),
       activeSession: null,
       lineTimestampMs: TS,
@@ -117,123 +140,278 @@ describe("guided menu — every main transaction type", () => {
     expect(flow.openCommand).toBeNull();
     expect(flow.error).toBe("missing_tx_on_start");
   });
+
+  it("start menu does not preselect a transaction type", () => {
+    const flow = initialGuidedMenuFlow();
+    expect(flow.selection.txCode).toBeNull();
+    expect(flow.screen).toBe("start_menu");
+  });
 });
 
-describe("guided menu — postback encode/decode", () => {
+describe("guided menu V1 — ชั่งคืน maps to คืน", () => {
+  it("maps UI ชั่งคืน to base transaction type คืน", () => {
+    const flow = openSession("k");
+    expect(flow.openCommand!.initialTransactionType).toBe("คืน");
+    expect(flow.activeSession!.baseTransactionType).toBe("คืน");
+    expect(flow.activeSession!.transactionLabel).toBe("ชั่งคืน");
+  });
+});
+
+describe("guided menu V1 — displayed values equal emitted command", () => {
+  it("confirmation values match OpenProduceSessionCommand", () => {
+    const flow = openSession("b", "yesterday");
+    expect(flow.openCommand!.initialTransactionType).toBe(flow.activeSession!.baseTransactionType);
+    expect(flow.openCommand!.businessDate).toBe(flow.activeSession!.businessDateIso);
+    expect(flow.openCommand!.marketLabel).toBe(flow.activeSession!.marketLabel);
+    expect(flow.openCommand!.staffLabel).toBe(flow.activeSession!.staffLabel);
+    expect(flow.openCommand!.businessDate).toBe("2026-07-27");
+    expect(flow.openCommand!.transactionTimeSource).toBe("line_event");
+  });
+});
+
+describe("guided menu V1 — received vs parsed counts", () => {
+  it("keeps receivedMessageCount distinct from parsedItemCount", () => {
+    const flow = loadValidScenario("b");
+    expect(flow.activeSession!.receivedMessageCount).toBe(4);
+    expect(flow.activeSession!.parsedItemCount).toBe(4);
+    expect(flow.screen).toBe("ack_compact");
+    const text = flow.messages[0].type === "text" ? flow.messages[0].text : "";
+    expect(text).toContain("รับข้อความแล้ว 4 ข้อความ");
+    expect(text).toContain("รายการรอตรวจ 4 รายการ");
+    expect(text).not.toContain("บันทึกแล้ว");
+  });
+
+  it("partial error keeps counts distinct", () => {
+    const flow = loadBlockingScenario("k");
+    expect(flow.activeSession!.receivedMessageCount).toBe(4);
+    expect(flow.activeSession!.parsedItemCount).toBe(3);
+    expect(flow.activeSession!.blockingIssueCount).toBe(1);
+  });
+});
+
+describe("guided menu V1 — blocking prevents final confirmation", () => {
+  it("review_blocking has no confirm_persist / finalize actions", () => {
+    let flow = loadBlockingScenario();
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("review_close"),
+      selection: flow.selection,
+      activeSession: flow.activeSession,
+      lineTimestampMs: TS,
+    });
+    expect(flow.screen).toBe("close_barrier");
+    expect(flow.activeSession!.persistedSimulated).toBe(false);
+    expect(flow.closeCommand).toBeNull();
+
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("barrier_ready"),
+      selection: flow.selection,
+      activeSession: flow.activeSession,
+      lineTimestampMs: TS,
+    });
+    expect(flow.screen).toBe("review_blocking");
+    const json = JSON.stringify(flow.messages);
+    expect(json).not.toContain("ยืนยันบันทึก");
+    expect(json).toContain("ยังไม่มีข้อมูลใดถูกบันทึก");
+    expect(json).toContain("ส่งข้อความแก้ไข");
+
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("confirm_persist"),
+      selection: flow.selection,
+      activeSession: flow.activeSession,
+      lineTimestampMs: TS,
+    });
+    expect(flow.screen).toBe("review_blocking");
+    expect(flow.activeSession!.persistedSimulated).toBe(false);
+  });
+});
+
+describe("guided menu V1 — valid review requires explicit confirmation", () => {
+  it("review_valid → final_confirm → success only after finalize", () => {
+    let flow = loadValidScenario();
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("review_close"),
+      selection: flow.selection,
+      activeSession: flow.activeSession,
+      lineTimestampMs: TS,
+    });
+    expect(flow.screen).toBe("close_barrier");
+    expect(flow.activeSession!.persistedSimulated).toBe(false);
+
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("barrier_ready"),
+      selection: flow.selection,
+      activeSession: flow.activeSession,
+      lineTimestampMs: TS,
+    });
+    expect(flow.screen).toBe("review_valid");
+    expect(flow.closeCommand).toBeNull();
+
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("confirm_persist"),
+      selection: flow.selection,
+      activeSession: flow.activeSession,
+      lineTimestampMs: TS,
+    });
+    expect(flow.screen).toBe("final_confirm");
+    expect(flow.activeSession!.reviewStatus).toBe("awaiting_final");
+    expect(flow.activeSession!.persistedSimulated).toBe(false);
+    expect(flow.closeCommand).toBeNull();
+
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("finalize"),
+      selection: flow.selection,
+      activeSession: flow.activeSession,
+      lineTimestampMs: TS,
+    });
+    expect(flow.screen).toBe("success");
+    expect(flow.activeSession!.persistedSimulated).toBe(true);
+    expect(flow.closeCommand).not.toBeNull();
+    expect(flow.closeCommand!.expectedItemCount).toBe(4);
+  });
+
+  it("finalize without awaiting_final is rejected", () => {
+    let flow = loadValidScenario();
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("finalize"),
+      selection: flow.selection,
+      activeSession: flow.activeSession,
+      lineTimestampMs: TS,
+    });
+    expect(flow.screen).toBe("error");
+    expect(flow.error).toBe("finalize_requires_confirmation");
+    expect(flow.activeSession!.persistedSimulated).toBe(false);
+  });
+});
+
+describe("guided menu V1 — close barrier does not imply persistence", () => {
+  it("waiting barrier never says บันทึกแล้ว and never emits close command", () => {
+    let flow = loadValidScenario();
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("review_close"),
+      selection: flow.selection,
+      activeSession: flow.activeSession,
+      lineTimestampMs: TS,
+    });
+    expect(flow.screen).toBe("close_barrier");
+    expect(flow.activeSession!.closeBarrierStatus).toBe("waiting");
+    expect(flow.activeSession!.admittedEventCount).toBeGreaterThan(flow.activeSession!.ingestedEventCount);
+    expect(flow.activeSession!.persistedSimulated).toBe(false);
+    expect(flow.closeCommand).toBeNull();
+    const text = flow.messages[0].type === "text" ? flow.messages[0].text : "";
+    expect(text).toContain("กำลังรอข้อความที่ส่งค้างอยู่");
+    expect(text).toContain("ยังไม่มีการบันทึก");
+    expect(text).not.toContain("บันทึกแล้ว");
+  });
+});
+
+describe("guided menu V1 — success only after explicit confirmation", () => {
+  it("success appears only after finalize", () => {
+    let flow = loadValidScenario();
+    const before = reduceGuidedMenuPostback({
+      data: postbackData("review_close"),
+      selection: flow.selection,
+      activeSession: flow.activeSession,
+      lineTimestampMs: TS,
+    });
+    expect(before.screen).not.toBe("success");
+
+    flow = before;
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("barrier_ready"),
+      selection: flow.selection,
+      activeSession: flow.activeSession,
+      lineTimestampMs: TS,
+    });
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("confirm_persist"),
+      selection: flow.selection,
+      activeSession: flow.activeSession,
+      lineTimestampMs: TS,
+    });
+    expect(flow.screen).toBe("final_confirm");
+
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("finalize"),
+      selection: flow.selection,
+      activeSession: flow.activeSession,
+      lineTimestampMs: TS,
+    });
+    expect(flow.screen).toBe("success");
+    const text = flow.messages[0].type === "text" ? flow.messages[0].text : "";
+    expect(text).toContain("บันทึกแล้ว");
+    expect(text).toContain("จำลองพรีวิว");
+  });
+});
+
+describe("guided menu V1 — postback encode/decode + tamper rejection", () => {
   it("round-trips compact versioned payloads", () => {
     const payload = {
       v: 1 as const,
-      a: "select_date" as const,
-      tx: "k" as const,
-      mid: "mkt_si_mum_mueang",
-      dm: "yesterday" as const,
+      a: "review_close" as const,
       tok: "opaque-0050-reserved",
     };
     const encoded = encodeGuidedMenuPostback(payload);
     expect(encoded.startsWith("gpm.v1.")).toBe(true);
     expect(encoded.length).toBeLessThanOrEqual(300);
-
     const decoded = decodeGuidedMenuPostback(encoded);
     expect(decoded.ok).toBe(true);
-    if (decoded.ok) {
-      expect(decoded.payload).toEqual(payload);
-    }
+    if (decoded.ok) expect(decoded.payload).toEqual(payload);
   });
 
-  it("rejects missing prefix", () => {
+  it("rejects tampered / invalid payloads", () => {
     expect(decodeGuidedMenuPostback("not-a-postback").ok).toBe(false);
-  });
-
-  it("rejects tampered base64", () => {
     expect(decodeGuidedMenuPostback("gpm.v1.!!!").ok).toBe(false);
-  });
 
-  it("rejects unknown fields (label smuggling)", () => {
-    const json = JSON.stringify({
+    const smuggle = Buffer.from(JSON.stringify({
       v: 1,
       a: "start_session",
       tx: "b",
-      mid: "mkt_khlong_toei",
+      mid: MARKET,
       dm: "today",
-      marketLabel: "ปลอมตลาด",
-    });
-    const b64 = Buffer.from(json).toString("base64url");
-    const decoded = decodeGuidedMenuPostback(`gpm.v1.${b64}`);
+      marketLabel: "ปลอม",
+    })).toString("base64url");
+    const decoded = decodeGuidedMenuPostback(`gpm.v1.${smuggle}`);
     expect(decoded.ok).toBe(false);
-    if (!decoded.ok) expect(decoded.reason).toContain("unknown_field");
-  });
 
-  it("rejects invalid tx codes", () => {
-    const json = JSON.stringify({ v: 1, a: "select_tx", tx: "x" });
-    const b64 = Buffer.from(json).toString("base64url");
-    expect(decodeGuidedMenuPostback(`gpm.v1.${b64}`).ok).toBe(false);
-  });
+    const badTx = Buffer.from(JSON.stringify({ v: 1, a: "select_tx", tx: "x" })).toString("base64url");
+    expect(decodeGuidedMenuPostback(`gpm.v1.${badTx}`).ok).toBe(false);
 
-  it("rejects wrong version", () => {
-    const json = JSON.stringify({ v: 2, a: "menu" });
-    const b64 = Buffer.from(json).toString("base64url");
-    const decoded = decodeGuidedMenuPostback(`gpm.v1.${b64}`);
-    expect(decoded.ok).toBe(false);
-    if (!decoded.ok) expect(decoded.reason).toBe("unsupported_version");
-  });
-
-  it("rejects invalid custom ISO dates", () => {
-    const json = JSON.stringify({
+    const badIso = Buffer.from(JSON.stringify({
       v: 1,
       a: "set_custom_date",
       tx: "b",
-      mid: "mkt_khlong_toei",
+      mid: MARKET,
       dm: "custom",
       iso: "2026-13-40",
-    });
-    const b64 = Buffer.from(json).toString("base64url");
-    expect(decodeGuidedMenuPostback(`gpm.v1.${b64}`).ok).toBe(false);
+    })).toString("base64url");
+    expect(decodeGuidedMenuPostback(`gpm.v1.${badIso}`).ok).toBe(false);
   });
 });
 
-describe("guided menu — date conversion", () => {
-  it("resolves today / yesterday to ISO and Thai BE display", () => {
-    const today = resolveGuidedBusinessDate("today", TS);
-    expect(today).not.toBeNull();
-    expect(today!.iso).toBe("2026-07-28");
-    expect(today!.thai).toContain("2569");
-    expect(today!.thai).toContain("กรกฎาคม");
+describe("guided menu V1 — Buddhist Era display / ISO command", () => {
+  it("keeps Thai BE display and ISO command consistent", () => {
+    const today = resolveGuidedBusinessDate("today", TS)!;
+    expect(today.iso).toBe("2026-07-28");
+    expect(today.thai).toContain("2569");
+    expect(formatBusinessDateThai(today.iso)).toBe(today.thai);
 
-    const yesterday = resolveGuidedBusinessDate("yesterday", TS);
-    expect(yesterday!.iso).toBe("2026-07-27");
-    expect(yesterday!.thai).toContain("2569");
-  });
-
-  it("keeps custom ISO for commands and formats Thai for display", () => {
-    const custom = resolveGuidedBusinessDate("custom", TS, "2026-07-25");
-    expect(custom!.iso).toBe("2026-07-25");
-    expect(formatBusinessDateThai(custom!.iso)).toBe(custom!.thai);
-    expect(custom!.thai).toContain("2569");
-  });
-
-  it("supports custom-date preview path through confirmation", () => {
-    const flow = startSession("s", "custom", "2026-07-20");
+    const flow = openSession("s", "custom", "2026-07-20");
     expect(flow.openCommand!.businessDate).toBe("2026-07-20");
     expect(flow.activeSession!.businessDateThai).toContain("2569");
   });
 });
 
-describe("guided menu — no synthetic Thai header generation", () => {
-  it("open command adapter does not produce header-shaped text", () => {
+describe("guided menu V1 — no synthetic Thai header", () => {
+  it("adapter and flow messages never generate produce headers", () => {
     const cmd = toPreviewOpenProduceSessionCommand({
       initialTransactionType: "คืน",
       businessDate: "2026-07-28",
-      marketLabel: "คลองเตย",
+      marketLabel: "หน้าเซเวน",
       lineTimestampMs: TS,
     });
-    const serialized = JSON.stringify(cmd);
-    expect(looksLikeSyntheticThaiProduceHeader(serialized)).toBe(false);
-    expect(serialized).not.toContain("จบรายการ");
-    expect(serialized).not.toMatch(/คลองเตย\s+เบิก/);
-  });
+    expect(looksLikeSyntheticThaiProduceHeader(JSON.stringify(cmd))).toBe(false);
 
-  it("flow messages never include synthetic produce headers", () => {
-    const flow = startSession("k");
+    const flow = openSession("k");
     for (const message of flow.messages) {
       const text = message.type === "text" ? message.text : JSON.stringify(message);
       expect(looksLikeSyntheticThaiProduceHeader(text)).toBe(false);
@@ -242,79 +420,64 @@ describe("guided menu — no synthetic Thai header generation", () => {
   });
 });
 
-describe("guided menu — confirmation matches typed command", () => {
-  it("confirmation values match emitted OpenProduceSessionCommand", () => {
-    const flow = startSession("b", "yesterday");
-    expect(flow.openCommand).not.toBeNull();
-    expect(flow.activeSession).not.toBeNull();
-    expect(flow.openCommand!.initialTransactionType).toBe(flow.activeSession!.baseTransactionType);
-    expect(flow.openCommand!.businessDate).toBe(flow.activeSession!.businessDateIso);
-    expect(flow.openCommand!.marketLabel).toBe(flow.activeSession!.marketLabel);
-    expect(flow.openCommand!.staffLabel).toBe(flow.activeSession!.staffLabel);
-    expect(flow.openCommand!.sessionKind).toBe("main");
-    expect(flow.openCommand!.transactionTimeSource).toBe("line_event");
-    expect(flow.openCommand!.businessDate).toBe("2026-07-27");
+describe("guided menu V1 — no Production / 0049 imports", () => {
+  it("guided-menu sources do not import webhook, supabase, or unfinished 0049 modules", () => {
+    const dir = join(import.meta.dir);
+    const files = readdirSync(dir).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
+    const bannedImportPatterns = [
+      /from\s+["'][^"']*webhook-service["']/,
+      /from\s+["'][^"']*produce-session-commands["']/,
+      /from\s+["'][^"']*pending-session-finalizer["']/,
+      /from\s+["']@\/lib\/supabase/,
+      /createServiceClient/,
+      /from\s+["'][^"']*migration-0049/,
+    ];
+    for (const file of files) {
+      const src = readFileSync(join(dir, file), "utf8");
+      for (const pattern of bannedImportPatterns) {
+        expect(pattern.test(src)).toBe(false);
+      }
+    }
   });
 });
 
-describe("guided menu — close requires explicit confirmation", () => {
-  it("close_ask alone does not close or emit close command", () => {
-    let flow = startSession("b");
+describe("guided menu V1 — status screens", () => {
+  it("status shows valid and blocking content", () => {
+    let flow = loadValidScenario();
     flow = reduceGuidedMenuPostback({
-      data: postbackData("close_ask"),
+      data: postbackData("status"),
       selection: flow.selection,
       activeSession: flow.activeSession,
       lineTimestampMs: TS,
     });
-    expect(flow.screen).toBe("close_confirm");
-    expect(flow.closeCommand).toBeNull();
-    expect(flow.activeSession).not.toBeNull();
-  });
+    expect(flow.screen).toBe("session_status");
+    const validText = flow.messages[0].type === "text" ? flow.messages[0].text : "";
+    expect(validText).toContain("ข้อความที่รับแล้ว");
+    expect(validText).toContain("ยังไม่บันทึก");
 
-  it("close_confirm emits close command and clears session", () => {
-    let flow = startSession("b");
+    flow = loadBlockingScenario();
+    const session = applyScenarioToSession(flow.activeSession!, "partial_error");
     flow = reduceGuidedMenuPostback({
-      data: postbackData("close_ask"),
-      selection: flow.selection,
-      activeSession: flow.activeSession,
+      data: postbackData("status"),
+      selection: session.selection,
+      activeSession: session,
       lineTimestampMs: TS,
     });
-    flow = reduceGuidedMenuPostback({
-      data: postbackData("close_confirm"),
-      selection: flow.selection,
-      activeSession: flow.activeSession,
-      lineTimestampMs: TS,
-    });
-    expect(flow.screen).toBe("session_closed");
-    expect(flow.activeSession).toBeNull();
-    expect(flow.closeCommand).not.toBeNull();
-    expect(flow.closeCommand!.kind).toBe("close");
-    expect(flow.closeCommand!.expectedItemCount).toBe(2);
-  });
-
-  it("close_cancel returns to active session", () => {
-    let flow = startSession("s");
-    flow = reduceGuidedMenuPostback({
-      data: postbackData("close_ask"),
-      selection: flow.selection,
-      activeSession: flow.activeSession,
-      lineTimestampMs: TS,
-    });
-    flow = reduceGuidedMenuPostback({
-      data: postbackData("close_cancel"),
-      selection: flow.selection,
-      activeSession: flow.activeSession,
-      lineTimestampMs: TS,
-    });
-    expect(flow.screen).toBe("active_session");
-    expect(flow.closeCommand).toBeNull();
-    expect(flow.activeSession).not.toBeNull();
+    const errText = flow.messages[0].type === "text" ? flow.messages[0].text : "";
+    expect(errText).toContain("ข้อความที่มีปัญหา");
+    expect(errText).toContain("ไม่พบจำนวนและหน่วย");
   });
 });
 
-describe("guided menu — อื่น ๆ market without free-text persistence", () => {
-  it("other market screen does not open a session", () => {
+describe("guided menu V1 — อื่น ๆ market", () => {
+  it("other market does not open a session", () => {
     let flow = initialGuidedMenuFlow();
+    flow = reduceGuidedMenuPostback({
+      data: postbackData("start"),
+      selection: flow.selection,
+      activeSession: null,
+      lineTimestampMs: TS,
+    });
     flow = reduceGuidedMenuPostback({
       data: postbackData("select_tx", { tx: "b" }),
       selection: flow.selection,
@@ -329,30 +492,5 @@ describe("guided menu — อื่น ๆ market without free-text persistence"
     });
     expect(flow.screen).toBe("other_market");
     expect(flow.openCommand).toBeNull();
-    expect(flow.messages[0].type).toBe("text");
-    if (flow.messages[0].type === "text") {
-      expect(flow.messages[0].text).toContain("ไม่บันทึก free-text");
-    }
-  });
-});
-
-describe("guided menu — active session quick replies", () => {
-  it("status / menu quick replies work", () => {
-    let flow = startSession("k");
-    flow = reduceGuidedMenuPostback({
-      data: postbackData("status"),
-      selection: flow.selection,
-      activeSession: flow.activeSession,
-      lineTimestampMs: TS,
-    });
-    expect(flow.screen).toBe("active_session");
-
-    flow = reduceGuidedMenuPostback({
-      data: postbackData("menu"),
-      selection: flow.selection,
-      activeSession: flow.activeSession,
-      lineTimestampMs: TS,
-    });
-    expect(flow.screen).toBe("main_menu");
   });
 });

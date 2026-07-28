@@ -10,7 +10,7 @@ export default function LineMenuPreviewPage() {
       <div className="p-4 sm:p-6 space-y-4">
         <Card>
           <CardHeader>
-            <CardTitle>Guided Produce Menu — UX Preview</CardTitle>
+            <CardTitle>Guided Produce Menu V1 — UX Preview</CardTitle>
             <p className="text-sm text-slate-500">
               Backoffice-only · local React state · ไม่ผูก webhook / ไม่เขียน DB / ไม่ส่ง LINE API
             </p>

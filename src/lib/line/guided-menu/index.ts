@@ -1,4 +1,6 @@
 export type {
+  CloseBarrierStatus,
+  DecodePostbackResult,
   GuidedMenuAction,
   GuidedMenuActiveSession,
   GuidedMenuBaseTransactionType,
@@ -14,8 +16,13 @@ export type {
   LinePreviewMessage,
   LineQuickReply,
   LineTextMessage,
+  PreviewBlockingIssue,
   PreviewCloseProduceSessionCommand,
   PreviewOpenProduceSessionCommand,
+  PreviewParsedItem,
+  PreviewReceivedMessage,
+  PreviewScenarioId,
+  ReviewStatus,
 } from "./types";
 
 export {
@@ -58,22 +65,43 @@ export {
 } from "./command-adapter";
 
 export {
+  PREVIEW_SCENARIOS,
+  applyCloseBarrierMatched,
+  applyCloseBarrierWaiting,
+  applyScenarioToSession,
+  countsByTransactionType,
+  emptySessionIntake,
+  sampleActiveSessionBase,
+  sampleSelection,
+} from "./fixtures";
+
+export {
+  buildActiveSessionOpenedMessage,
   buildActiveSessionQuickReplies,
   buildActiveSessionStatusMessage,
   buildAllPreviewStates,
+  buildCloseBarrierMessage,
   buildCloseConfirmFlex,
+  buildCompactAckMessage,
   buildConfirmOpenFlex,
   buildCustomDatePrompt,
   buildDateSelectFlex,
   buildErrorMessage,
+  buildFinalConfirmFlex,
   buildMainMenuFlex,
   buildMarketSelectFlex,
   buildOtherMarketMessage,
+  buildReviewBlockingFlex,
+  buildReviewValidFlex,
   buildSessionClosedMessage,
+  buildSessionStatusMessage,
+  buildStartMenuFlex,
+  buildSuccessMessage,
 } from "./builders";
 
 export {
   applyCustomDateInPreview,
+  applyScenarioInPreview,
   emptySelection,
   initialGuidedMenuFlow,
   reduceGuidedMenuPostback,

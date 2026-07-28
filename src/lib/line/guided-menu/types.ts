@@ -15,7 +15,9 @@ export type GuidedMenuBaseTransactionType = "เบิก" | "คืน" | "ค�
 
 export type GuidedMenuDateMode = "today" | "yesterday" | "custom";
 
+/** Existing screens retained + V1 completion screens. */
 export type GuidedMenuScreen =
+  | "start_menu"
   | "main_menu"
   | "market_select"
   | "date_select"
@@ -23,12 +25,22 @@ export type GuidedMenuScreen =
   | "other_market"
   | "confirm_open"
   | "active_session"
+  | "ack_compact"
+  | "session_status"
+  | "close_barrier"
+  | "review_valid"
+  | "review_blocking"
+  | "final_confirm"
+  | "success"
+  /** @deprecated Retained for gallery/compat — maps to review path messaging. */
   | "close_confirm"
+  /** @deprecated Retained for gallery/compat — success alias. */
   | "session_closed"
   | "error";
 
 export type GuidedMenuAction =
   | "menu"
+  | "start"
   | "select_tx"
   | "select_market"
   | "other_market"
@@ -36,9 +48,20 @@ export type GuidedMenuAction =
   | "custom_date"
   | "set_custom_date"
   | "confirm_open"
+  | "edit_open"
   | "start_session"
   | "status"
+  | "show_ack"
+  | "review_close"
+  /** Retained alias → review_close */
   | "close_ask"
+  | "barrier_ready"
+  | "confirm_persist"
+  | "finalize"
+  | "send_more"
+  | "send_fix"
+  | "back_review"
+  /** Retained — must NOT finalize; used only as legacy alias path */
   | "close_confirm"
   | "close_cancel"
   | "back";
@@ -81,7 +104,7 @@ export interface GuidedMenuMarketOption {
 export interface GuidedProducePostbackV1 {
   v: 1;
   a: GuidedMenuAction;
-  /** Opaque state/token reserved for 0050. */
+  /** Opaque state/token reserved for 0050. TODO(0050-integration). */
   tok?: string;
   tx?: GuidedMenuTxCode;
   mid?: string;
@@ -94,16 +117,46 @@ export type DecodePostbackResult =
   | { ok: true; payload: GuidedProducePostbackV1 }
   | { ok: false; reason: string };
 
-/**
- * Accumulated guided selections validated in-process.
- * Used to build LINE messages and the typed open command preview.
- */
 export interface GuidedMenuSelection {
   txCode: GuidedMenuTxCode | null;
   marketId: string | null;
   dateMode: GuidedMenuDateMode | null;
   customIsoDate: string | null;
 }
+
+/** Preview-only: one received LINE text event (forwarded or pasted). */
+export interface PreviewReceivedMessage {
+  eventId: string;
+  kind: "forwarded" | "pasted_block";
+  rawText: string;
+}
+
+export interface PreviewParsedItem {
+  itemNumber: number;
+  productName: string;
+  pricePerUnit: number;
+  quantity: number | null;
+  unit: string | null;
+  transactionType: GuidedMenuBaseTransactionType;
+  rawPreview: string;
+}
+
+export interface PreviewBlockingIssue {
+  itemNumber: number | null;
+  rawText: string;
+  message: string;
+}
+
+/** TODO(0049-integration): align with admitted/ingested ledger once 0049 merges. */
+export type CloseBarrierStatus = "idle" | "waiting" | "matched";
+
+/** TODO(0049-integration): final review/persist boundary. */
+export type ReviewStatus =
+  | "none"
+  | "valid"
+  | "blocking"
+  | "awaiting_final"
+  | "persisted_sim";
 
 export interface GuidedMenuActiveSession {
   selection: GuidedMenuSelection;
@@ -113,8 +166,23 @@ export interface GuidedMenuActiveSession {
   transactionLabel: GuidedMenuTransactionLabel;
   baseTransactionType: GuidedMenuBaseTransactionType;
   staffLabel: string;
-  observedItemCount: number;
   openedAtMs: number;
+  /** Distinct from parsedItemCount — webhook/events received. */
+  receivedMessageCount: number;
+  /** Distinct from receivedMessageCount — reconstructed produce items. */
+  parsedItemCount: number;
+  blockingIssueCount: number;
+  /** @deprecated Prefer parsedItemCount — kept for older callers. */
+  observedItemCount: number;
+  admittedEventCount: number;
+  ingestedEventCount: number;
+  closeBarrierStatus: CloseBarrierStatus;
+  reviewStatus: ReviewStatus;
+  receivedMessages: PreviewReceivedMessage[];
+  items: PreviewParsedItem[];
+  issues: PreviewBlockingIssue[];
+  /** True only after explicit finalize in preview (simulated). */
+  persistedSimulated: boolean;
 }
 
 export type LineQuickReplyItem = {
@@ -131,7 +199,6 @@ export type LineQuickReply = {
   items: LineQuickReplyItem[];
 };
 
-/** Minimal Flex bubble shape used by the preview builders. */
 export type LineFlexBubble = {
   type: "bubble";
   size?: "mega" | "kilo" | "micro";
@@ -162,7 +229,7 @@ export interface GuidedMenuFlowResult {
   activeSession: GuidedMenuActiveSession | null;
   /** Typed open command emitted only after explicit start — never a Thai header. */
   openCommand: PreviewOpenProduceSessionCommand | null;
-  /** Close command preview after explicit confirm. */
+  /** Close/finalize command preview after explicit final confirmation. */
   closeCommand: PreviewCloseProduceSessionCommand | null;
   error: string | null;
   previewOnly: true;
@@ -197,3 +264,6 @@ export interface PreviewCloseProduceSessionCommand {
   lineTimestampMs: number;
   expectedItemCount: number;
 }
+
+/** Preview scenario ids for the admin page. */
+export type PreviewScenarioId = "valid" | "partial_error";

@@ -1,15 +1,19 @@
 import type { GuidedMenuMarketOption, GuidedMenuTransactionLabel } from "./types";
 
-/** Configurable preview markets — labels resolve from id, never from postback text. */
+/**
+ * Configurable preview markets — labels resolve from id, never from postback text.
+ * Spec examples: หน้าเซเวน / วัดตะกล่ำ / ตลาดอื่น
+ */
 export const PREVIEW_MARKET_OPTIONS: readonly GuidedMenuMarketOption[] = [
-  { id: "mkt_khlong_toei", label: "คลองเตย" },
-  { id: "mkt_si_mum_mueang", label: "สี่มุมเมือง" },
-  { id: "mkt_other", label: "อื่น ๆ" },
+  { id: "mkt_seven_front", label: "หน้าเซเวน" },
+  { id: "mkt_wat_taklam", label: "วัดตะกล่ำ" },
+  { id: "mkt_other", label: "ตลาดอื่น" },
 ] as const;
 
 export const OTHER_MARKET_ID = "mkt_other";
 
-export const PREVIEW_STAFF_LABEL = "พนักงานตัวอย่าง";
+/** Spec example staff label for confirmation / success copy. */
+export const PREVIEW_STAFF_LABEL = "ดำ";
 
 export const PREVIEW_LINE_EVENT_ID = "preview-line-event";
 

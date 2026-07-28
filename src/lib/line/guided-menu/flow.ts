@@ -10,16 +10,28 @@ import {
 } from "./command-adapter";
 import { resolveGuidedBusinessDate } from "./dates";
 import {
-  buildActiveSessionStatusMessage,
-  buildCloseConfirmFlex,
+  applyCloseBarrierMatched,
+  applyCloseBarrierWaiting,
+  applyScenarioToSession,
+  emptySessionIntake,
+} from "./fixtures";
+import {
+  buildActiveSessionOpenedMessage,
+  buildCloseBarrierMessage,
+  buildCompactAckMessage,
   buildConfirmOpenFlex,
   buildCustomDatePrompt,
   buildDateSelectFlex,
   buildErrorMessage,
+  buildFinalConfirmFlex,
   buildMainMenuFlex,
   buildMarketSelectFlex,
   buildOtherMarketMessage,
-  buildSessionClosedMessage,
+  buildReviewBlockingFlex,
+  buildReviewValidFlex,
+  buildSessionStatusMessage,
+  buildStartMenuFlex,
+  buildSuccessMessage,
 } from "./builders";
 import { decodeGuidedMenuPostback, postbackData } from "./postback";
 import {
@@ -102,10 +114,29 @@ function buildConfirm(sel: GuidedMenuSelection, lineTimestampMs: number): Guided
   });
 }
 
+function reviewScreenFor(session: GuidedMenuActiveSession): GuidedMenuFlowResult {
+  if (session.blockingIssueCount > 0 || session.issues.length > 0) {
+    const next = { ...session, reviewStatus: "blocking" as const, persistedSimulated: false };
+    return baseResult({
+      screen: "review_blocking",
+      selection: next.selection,
+      activeSession: next,
+      messages: [buildReviewBlockingFlex(next)],
+    });
+  }
+  const next = { ...session, reviewStatus: "valid" as const, persistedSimulated: false };
+  return baseResult({
+    screen: "review_valid",
+    selection: next.selection,
+    activeSession: next,
+    messages: [buildReviewValidFlex(next)],
+  });
+}
+
 export function initialGuidedMenuFlow(): GuidedMenuFlowResult {
   return baseResult({
-    screen: "main_menu",
-    messages: [buildMainMenuFlex()],
+    screen: "start_menu",
+    messages: [buildStartMenuFlex()],
     selection: emptySelection(),
     activeSession: null,
   });
@@ -120,8 +151,6 @@ export function reduceGuidedMenuPostback(input: {
   selection: GuidedMenuSelection;
   activeSession: GuidedMenuActiveSession | null;
   lineTimestampMs: number;
-  /** Preview-only: bump observed count when simulating appends. */
-  observedItemCount?: number;
 }): GuidedMenuFlowResult {
   const decoded = decodeGuidedMenuPostback(input.data);
   if (!decoded.ok) {
@@ -140,6 +169,14 @@ export function reduceGuidedMenuPostback(input: {
   switch (payload.a) {
     case "menu":
       return initialGuidedMenuFlow();
+
+    case "start":
+      return baseResult({
+        screen: "main_menu",
+        selection: emptySelection(),
+        activeSession: null,
+        messages: [buildMainMenuFlex()],
+      });
 
     case "select_tx": {
       if (!payload.tx) {
@@ -332,6 +369,29 @@ export function reduceGuidedMenuPostback(input: {
       return confirm;
     }
 
+    case "edit_open": {
+      if (!payload.tx || !payload.mid) {
+        return baseResult({
+          screen: "main_menu",
+          selection: emptySelection(),
+          activeSession: null,
+          messages: [buildMainMenuFlex()],
+        });
+      }
+      const next: GuidedMenuSelection = {
+        txCode: payload.tx,
+        marketId: payload.mid,
+        dateMode: null,
+        customIsoDate: null,
+      };
+      return baseResult({
+        screen: "date_select",
+        selection: next,
+        activeSession: null,
+        messages: [buildDateSelectFlex(next)],
+      });
+    }
+
     case "start_session": {
       if (!payload.tx) {
         return baseResult({
@@ -342,7 +402,6 @@ export function reduceGuidedMenuPostback(input: {
           error: "missing_tx_on_start",
         });
       }
-      // Never silently default transaction type.
       const market = payload.mid ? findMarketOption(payload.mid) : null;
       if (!market || !payload.mid || payload.mid === OTHER_MARKET_ID || !isKnownMarketId(payload.mid)) {
         return baseResult({
@@ -394,15 +453,15 @@ export function reduceGuidedMenuPostback(input: {
         transactionLabel: TX_CODE_TO_LABEL[payload.tx],
         baseTransactionType: TX_CODE_TO_BASE[payload.tx],
         staffLabel: PREVIEW_STAFF_LABEL,
-        observedItemCount: input.observedItemCount ?? 0,
         openedAtMs: input.lineTimestampMs,
+        ...emptySessionIntake(),
       };
 
       return baseResult({
         screen: "active_session",
         selection: activeSession.selection,
         activeSession,
-        messages: [buildActiveSessionStatusMessage(activeSession)],
+        messages: [buildActiveSessionOpenedMessage(activeSession)],
         openCommand,
       });
     }
@@ -418,13 +477,32 @@ export function reduceGuidedMenuPostback(input: {
         });
       }
       return baseResult({
-        screen: "active_session",
+        screen: "session_status",
         selection: input.activeSession.selection,
         activeSession: input.activeSession,
-        messages: [buildActiveSessionStatusMessage(input.activeSession)],
+        messages: [buildSessionStatusMessage(input.activeSession)],
       });
     }
 
+    case "show_ack": {
+      if (!input.activeSession) {
+        return baseResult({
+          screen: "error",
+          messages: [buildErrorMessage("no_active_session")],
+          selection: input.selection,
+          activeSession: null,
+          error: "no_active_session",
+        });
+      }
+      return baseResult({
+        screen: "ack_compact",
+        selection: input.activeSession.selection,
+        activeSession: input.activeSession,
+        messages: [buildCompactAckMessage(input.activeSession)],
+      });
+    }
+
+    case "review_close":
     case "close_ask": {
       if (!input.activeSession) {
         return baseResult({
@@ -435,16 +513,17 @@ export function reduceGuidedMenuPostback(input: {
           error: "no_active_session",
         });
       }
+      // Close barrier first — does not imply persistence.
+      const waiting = applyCloseBarrierWaiting(input.activeSession);
       return baseResult({
-        screen: "close_confirm",
-        selection: input.activeSession.selection,
-        activeSession: input.activeSession,
-        messages: [buildCloseConfirmFlex(input.activeSession)],
+        screen: "close_barrier",
+        selection: waiting.selection,
+        activeSession: waiting,
+        messages: [buildCloseBarrierMessage(waiting)],
       });
     }
 
-    case "close_confirm": {
-      // Explicit confirmation required — close_ask alone must not close.
+    case "barrier_ready": {
       if (!input.activeSession) {
         return baseResult({
           screen: "error",
@@ -454,28 +533,144 @@ export function reduceGuidedMenuPostback(input: {
           error: "no_active_session",
         });
       }
+      const matched = applyCloseBarrierMatched(input.activeSession);
+      return reviewScreenFor(matched);
+    }
+
+    case "confirm_persist": {
+      if (!input.activeSession) {
+        return baseResult({
+          screen: "error",
+          messages: [buildErrorMessage("no_active_session")],
+          selection: input.selection,
+          activeSession: null,
+          error: "no_active_session",
+        });
+      }
+      // Blocking errors must never reach final confirmation.
+      if (input.activeSession.blockingIssueCount > 0 || input.activeSession.issues.length > 0) {
+        return reviewScreenFor(input.activeSession);
+      }
+      const next: GuidedMenuActiveSession = {
+        ...input.activeSession,
+        reviewStatus: "awaiting_final",
+        persistedSimulated: false,
+      };
+      return baseResult({
+        screen: "final_confirm",
+        selection: next.selection,
+        activeSession: next,
+        messages: [buildFinalConfirmFlex(next)],
+      });
+    }
+
+    case "finalize": {
+      if (!input.activeSession) {
+        return baseResult({
+          screen: "error",
+          messages: [buildErrorMessage("no_active_session")],
+          selection: input.selection,
+          activeSession: null,
+          error: "no_active_session",
+        });
+      }
+      if (input.activeSession.blockingIssueCount > 0 || input.activeSession.issues.length > 0) {
+        return reviewScreenFor(input.activeSession);
+      }
+      // Require explicit path through final_confirm (awaiting_final).
+      if (input.activeSession.reviewStatus !== "awaiting_final") {
+        return baseResult({
+          screen: "error",
+          messages: [buildErrorMessage("finalize_requires_confirmation")],
+          selection: input.activeSession.selection,
+          activeSession: input.activeSession,
+          error: "finalize_requires_confirmation",
+        });
+      }
+
       const closeCommand = toPreviewCloseProduceSessionCommand({
-        observedItemCount: input.activeSession.observedItemCount,
+        observedItemCount: input.activeSession.parsedItemCount,
         lineTimestampMs: input.lineTimestampMs,
       });
+      const done: GuidedMenuActiveSession = {
+        ...input.activeSession,
+        reviewStatus: "persisted_sim",
+        persistedSimulated: true,
+        closeBarrierStatus: "matched",
+      };
       return baseResult({
-        screen: "session_closed",
+        screen: "success",
         selection: emptySelection(),
-        activeSession: null,
-        messages: [buildSessionClosedMessage()],
+        activeSession: done,
+        messages: [buildSuccessMessage(done)],
         closeCommand,
       });
     }
 
+    /** Legacy alias: must NOT finalize — routes to final_confirm or blocking review. */
+    case "close_confirm": {
+      if (!input.activeSession) {
+        return baseResult({
+          screen: "error",
+          messages: [buildErrorMessage("no_active_session")],
+          selection: input.selection,
+          activeSession: null,
+          error: "no_active_session",
+        });
+      }
+      if (input.activeSession.closeBarrierStatus === "waiting") {
+        return baseResult({
+          screen: "close_barrier",
+          selection: input.activeSession.selection,
+          activeSession: input.activeSession,
+          messages: [buildCloseBarrierMessage(input.activeSession)],
+        });
+      }
+      if (input.activeSession.blockingIssueCount > 0) {
+        return reviewScreenFor(input.activeSession);
+      }
+      const next: GuidedMenuActiveSession = {
+        ...input.activeSession,
+        reviewStatus: "awaiting_final",
+        persistedSimulated: false,
+      };
+      return baseResult({
+        screen: "final_confirm",
+        selection: next.selection,
+        activeSession: next,
+        messages: [buildFinalConfirmFlex(next)],
+      });
+    }
+
+    case "send_more":
+    case "send_fix":
     case "close_cancel": {
       if (!input.activeSession) {
         return initialGuidedMenuFlow();
       }
+      const resumed: GuidedMenuActiveSession = {
+        ...input.activeSession,
+        closeBarrierStatus: "idle",
+        reviewStatus: input.activeSession.blockingIssueCount > 0 ? "blocking" : "none",
+        persistedSimulated: false,
+      };
       return baseResult({
         screen: "active_session",
+        selection: resumed.selection,
+        activeSession: resumed,
+        messages: [buildActiveSessionOpenedMessage(resumed)],
+      });
+    }
+
+    case "back_review": {
+      if (!input.activeSession) {
+        return initialGuidedMenuFlow();
+      }
+      return baseResult({
+        screen: "session_status",
         selection: input.activeSession.selection,
         activeSession: input.activeSession,
-        messages: [buildActiveSessionStatusMessage(input.activeSession)],
+        messages: [buildSessionStatusMessage(input.activeSession)],
       });
     }
 
@@ -485,11 +680,10 @@ export function reduceGuidedMenuPostback(input: {
           screen: "active_session",
           selection: input.activeSession.selection,
           activeSession: input.activeSession,
-          messages: [buildActiveSessionStatusMessage(input.activeSession)],
+          messages: [buildActiveSessionOpenedMessage(input.activeSession)],
         });
       }
       if (payload.tx && payload.mid && payload.dm === "custom" && !payload.iso) {
-        // From custom date → date select
         const next: GuidedMenuSelection = {
           txCode: payload.tx,
           marketId: payload.mid,
@@ -565,5 +759,19 @@ export function applyCustomDateInPreview(input: {
     selection: input.selection,
     activeSession: null,
     lineTimestampMs: input.lineTimestampMs,
+  });
+}
+
+/** Preview helper: attach a scenario fixture to the active session and show ack. */
+export function applyScenarioInPreview(input: {
+  activeSession: GuidedMenuActiveSession;
+  scenarioId: import("./types").PreviewScenarioId;
+}): GuidedMenuFlowResult {
+  const session = applyScenarioToSession(input.activeSession, input.scenarioId);
+  return baseResult({
+    screen: "ack_compact",
+    selection: session.selection,
+    activeSession: session,
+    messages: [buildCompactAckMessage(session)],
   });
 }

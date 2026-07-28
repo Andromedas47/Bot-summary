@@ -12,8 +12,23 @@ type QueryResult = { data: unknown[] | null; error: { message: string } | null; 
 let tables: Record<string, unknown[]> = {};
 let tableErrors: Record<string, string> = {};
 
+/**
+ * Answer produce_transactions per query rather than per table.
+ *
+ * The empty-state path issues THREE reads against that view — the requested
+ * date, the latest-date probe, and that date's markets — and a table-keyed
+ * fixture cannot tell them apart. Null keeps every existing test on `tables`.
+ */
+let produceByQuery: ((filters: Record<string, unknown>) => QueryResult | null) | null = null;
+
 function chain(table: string): Record<string, unknown> {
+  const filters: Record<string, unknown> = {};
+
   const result = (): QueryResult => {
+    if (table === "produce_transactions" && produceByQuery) {
+      const answer = produceByQuery(filters);
+      if (answer) return answer;
+    }
     const error = tableErrors[table];
     const rows = tables[table] ?? [];
     return {
@@ -25,15 +40,20 @@ function chain(table: string): Record<string, unknown> {
 
   const node: Record<string, unknown> = {};
   const self = () => node;
+  const record = (column: string, value: unknown, op: string) => {
+    filters[`${op}:${column}`] = value;
+    return node;
+  };
   node.select = self;
-  node.eq = self;
   node.in = self;
   node.not = self;
   node.or = self;
   node.gte = self;
   node.is = self;
-  node.lt = self;
+  node.eq = (column: string, value: unknown) => record(column, value, "eq");
+  node.lt = (column: string, value: unknown) => record(column, value, "lt");
   node.order = self;
+  node.limit = () => Promise.resolve(result());
   node.range = () => Promise.resolve(result());
   node.then = (resolve: (value: QueryResult) => unknown, reject: (reason: unknown) => unknown) =>
     Promise.resolve(result()).then(resolve, reject);
@@ -134,6 +154,7 @@ beforeEach(() => {
   pushBehavior = () => ({ status: "delivered" });
   tables = salesDay();
   tableErrors = {};
+  produceByQuery = null;
   process.env.CRON_SECRET = "sales-secret";
   delete process.env.SALES_SUMMARY_LINE_TARGETS;
 });
@@ -399,5 +420,93 @@ describe("daily sales summary cron — impossible dates", () => {
     process.env.SALES_SUMMARY_LINE_TARGETS = "Cgroup1";
     const body = await (await GET(request("?date=2028-02-29"))).json();
     expect(body.businessDate).toBe("2028-02-29");
+  });
+});
+
+describe("daily sales summary cron — empty business date", () => {
+  const REQUESTED = "2026-07-27";
+
+  /** Nothing on the requested date; `latest` is what history holds. */
+  function emptyDayWith(latest: { date: string; markets: string[] } | null) {
+    tables = { ...salesDay(), produce_transactions: [], produce_sessions: [] };
+    produceByQuery = (filters) => {
+      if (filters["lt:transaction_date"] === REQUESTED) {
+        return {
+          data: latest ? [{ transaction_date: latest.date }] : [],
+          error: null,
+          count: latest ? 1 : 0,
+        };
+      }
+      if (latest && filters["eq:transaction_date"] === latest.date) {
+        const rows = latest.markets.map((market_name) => ({ market_name }));
+        return { data: rows, error: null, count: rows.length };
+      }
+      return { data: [], error: null, count: 0 };
+    };
+  }
+
+  test("states the requested date is empty and points at the latest date with sales", async () => {
+    emptyDayWith({ date: "2026-07-26", markets: ["ตลาดกี้", "เฉลิม72 ผลไม้", "ตลาดกี้"] });
+    process.env.SALES_SUMMARY_LINE_TARGETS = "Cgroup1";
+
+    const res = await GET(request(`?date=${REQUESTED}`));
+    const body = await res.json();
+    const text = pushCalls.map((call) => call.text).join("\n\n");
+
+    expect(res.status).toBe(200);
+    expect(text).toContain("ยังไม่พบรายการขายประจำวันที่ 27 กรกฎาคม 2569");
+    expect(text).toContain("ข้อมูลล่าสุดที่มีคือวันที่ 26 กรกฎาคม 2569");
+    expect(text).toContain("พบข้อมูล 2 ตลาด");
+    // The requested date keeps the report, and no prior-date revenue appears.
+    expect(text).toContain("ข้อมูลวันที่ 27 กรกฎาคม 2569");
+    expect(text).not.toContain("บาท");
+    expect(body.businessDate).toBe(REQUESTED);
+    expect(body.latestDataDate).toBe("2026-07-26");
+    expect(body.latestDataMarketCount).toBe(2);
+    expect(body.expectedSalesSatang).toBe(0);
+  });
+
+  test("says no sales exist at all when history is empty", async () => {
+    emptyDayWith(null);
+    process.env.SALES_SUMMARY_LINE_TARGETS = "Cgroup1";
+
+    await GET(request(`?date=${REQUESTED}`));
+    const text = pushCalls.map((call) => call.text).join("\n\n");
+
+    expect(text).toContain("ยังไม่พบรายการขายในระบบ");
+    expect(text).not.toContain("ข้อมูลล่าสุดที่มีคือ");
+  });
+
+  test("a failed latest-date lookup still delivers the empty report", async () => {
+    tables = { ...salesDay(), produce_transactions: [], produce_sessions: [] };
+    produceByQuery = (filters) =>
+      filters["lt:transaction_date"] === REQUESTED
+        ? { data: null, error: { message: "probe exploded" }, count: null }
+        : null;
+    process.env.SALES_SUMMARY_LINE_TARGETS = "Cgroup1";
+
+    const res = await GET(request(`?date=${REQUESTED}`));
+    const text = pushCalls.map((call) => call.text).join("\n\n");
+
+    expect(res.status).toBe(200);
+    expect(text).toContain("ยังไม่พบรายการขายประจำวันที่ 27 กรกฎาคม 2569");
+    expect(text).toContain("ยังไม่พบรายการขายในระบบ");
+  });
+
+  test("a date WITH sales never runs the lookup", async () => {
+    let probed = false;
+    produceByQuery = (filters) => {
+      if (filters["lt:transaction_date"] !== undefined) probed = true;
+      return null;
+    };
+    process.env.SALES_SUMMARY_LINE_TARGETS = "Cgroup1";
+
+    const res = await GET(request(`?date=${DATE}`));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(probed).toBe(false);
+    expect(body.latestDataDate).toBeNull();
+    expect(pushCalls[0].text).toContain("บาท");
   });
 });

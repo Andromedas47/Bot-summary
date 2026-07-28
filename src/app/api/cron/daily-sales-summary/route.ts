@@ -2,8 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { logger } from "@/lib/logger";
 import { pushLineMessage } from "@/lib/line/reply";
-import { loadSalesReport } from "@/lib/sales/load";
-import { buildSalesAutoMessages } from "@/lib/sales/message";
+import { findLatestSalesDataDate, loadSalesReport } from "@/lib/sales/load";
+import { buildSalesAutoMessages, salesAutoNeedsLatestDataHint } from "@/lib/sales/message";
+import type { LatestDataHint } from "@/lib/summary/latest-data-hint";
 import {
   DEFAULT_SALES_REVISION,
   isStrictBusinessDate,
@@ -97,9 +98,11 @@ export async function GET(req: NextRequest) {
     targetCount: targets.length,
   });
 
+  const supabase = createServiceClient();
+
   let report;
   try {
-    report = await loadSalesReport(createServiceClient(), businessDate, { includeQaScopes });
+    report = await loadSalesReport(supabase, businessDate, { includeQaScopes });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error("daily sales summary cron failed - report build error", {
@@ -109,9 +112,27 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: message }, { status: 500 });
   }
 
-  const messages = buildSalesAutoMessages(report);
+  // Only an empty date asks what the latest date with sales was, so a normal
+  // morning pays for nothing extra. The hint is context, never a substitute:
+  // failing the whole delivery because it could not be read would be worse than
+  // sending the empty state without it.
+  let latest: LatestDataHint | null = null;
+  if (salesAutoNeedsLatestDataHint(report)) {
+    try {
+      latest = await findLatestSalesDataDate(supabase, businessDate);
+    } catch (error) {
+      logger.warn("daily sales summary latest-date lookup failed", {
+        businessDate,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  const messages = buildSalesAutoMessages(report, { latest });
   const stats = {
     businessDate,
+    latestDataDate: latest?.date ?? null,
+    latestDataMarketCount: latest?.marketCount ?? null,
     marketCount: report.markets.length,
     productCount: report.products.length,
     blockedCount: report.blocked.length,

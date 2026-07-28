@@ -4,10 +4,10 @@ import { STOCK_CATEGORY_EMOJI } from "@/lib/summary/stock-categories";
 import type { StockCategoryGroup, StockProductTotal, StockSummary } from "@/lib/summary/stock-summary";
 import {
   STOCK_COMPLETE_NOTICE,
-  STOCK_EMPTY_NOTICE,
   STOCK_UNIDENTIFIED_HEADING,
   stockDisplayUnit,
 } from "@/lib/summary/stock-summary-message";
+import { latestDataHintBlock, type LatestDataHint } from "@/lib/summary/latest-data-hint";
 import { chunkBlocks, countCodePoints } from "@/lib/summary/line-chunking";
 
 /**
@@ -36,6 +36,19 @@ export const STOCK_SNAPSHOT_TITLE = "📦 สต๊อกคงเหลือ�
  * presentation only.
  */
 export const STOCK_SNAPSHOT_INCOMPLETE_HEADING = "⚠️ พบรายการเบิกที่ไม่มีข้อมูลชั่งคืน";
+
+/**
+ * The empty state, and why it is worded this way.
+ *
+ * "ไม่พบข้อมูลสำหรับวันที่เลือก" under a "ข้อมูลจาก 0 ตลาด • พบคงเหลือ 0 ตลาด"
+ * header read as a finished calculation that found zero stock. It was not: no
+ * ชั่งคืน had been recorded for that date at all. These two lines say only what
+ * is true — the requested date has nothing YET — and name the date again so the
+ * following context block can never be mistaken for it.
+ */
+export const STOCK_SNAPSHOT_NO_DATA_PREFIX = "ยังไม่พบข้อมูลชั่งคืนประจำวันที่";
+/** Nothing anywhere in history, so there is no earlier date to point at. */
+export const STOCK_SNAPSHOT_NO_HISTORY_NOTICE = "ยังไม่พบข้อมูลชั่งคืนในระบบ";
 
 /**
  * Readability caps, both far below the 4000 code-point LINE hard limit.
@@ -192,19 +205,46 @@ function incompleteBlocks(summary: StockSummary): string[] {
   ];
 }
 
-export function buildStockSnapshotBlocks(summary: StockSummary): string[] {
+/**
+ * True when the business date produced no eligible stock evidence at all — no
+ * sellable remaining, no unresolved-market remaining, and nothing awaiting its
+ * ชั่งคืน. A day with pending withdrawals is NOT empty: it has data, and the
+ * report already says what is missing about it.
+ */
+export function isStockSnapshotEmpty(summary: StockSummary): boolean {
+  return (
+    summary.categories.length === 0
+    && summary.unidentified.length === 0
+    && summary.incomplete.length === 0
+  );
+}
+
+export function buildStockSnapshotBlocks(
+  summary: StockSummary,
+  latest: LatestDataHint | null = null,
+): string[] {
+  const requestedDate = formatThaiDate(summary.businessDate);
+
+  if (isStockSnapshotEmpty(summary)) {
+    // The market-coverage line is deliberately absent: with no source data at
+    // all, "ข้อมูลจาก 0 ตลาด" states a count that was never taken.
+    return [
+      [
+        `${STOCK_SNAPSHOT_TITLE}\nข้อมูลวันที่ ${requestedDate}`,
+        `${STOCK_SNAPSHOT_NO_DATA_PREFIX} ${requestedDate}`,
+        latest ? latestDataHintBlock(latest) : STOCK_SNAPSHOT_NO_HISTORY_NOTICE,
+      ].join("\n\n"),
+    ];
+  }
+
   const coverage = stockSnapshotMarketCoverage(summary);
   const header = [
     STOCK_SNAPSHOT_TITLE,
-    `ข้อมูลวันที่ ${formatThaiDate(summary.businessDate)}`,
+    `ข้อมูลวันที่ ${requestedDate}`,
     `ข้อมูลจาก ${coverage.total} ตลาด • พบคงเหลือ ${coverage.withStock} ตลาด`,
   ].join("\n");
 
   const body = [...summary.categories.flatMap(categoryBlocks), ...unidentifiedBlocks(summary)];
-
-  if (body.length === 0 && summary.incomplete.length === 0) {
-    return [`${header}\n\n${STOCK_EMPTY_NOTICE}`];
-  }
 
   return [header, ...body, ...incompleteBlocks(summary)];
 }
@@ -218,10 +258,10 @@ export function buildStockSnapshotBlocks(summary: StockSummary): string[] {
  */
 export function buildStockSnapshotMessages(
   summary: StockSummary,
-  options: { maxCodePoints?: number } = {},
+  options: { maxCodePoints?: number; latest?: LatestDataHint | null } = {},
 ): string[] {
   return chunkBlocks(
-    buildStockSnapshotBlocks(summary),
+    buildStockSnapshotBlocks(summary, options.latest ?? null),
     options.maxCodePoints ?? SNAPSHOT_MESSAGE_MAX_CODE_POINTS,
   );
 }

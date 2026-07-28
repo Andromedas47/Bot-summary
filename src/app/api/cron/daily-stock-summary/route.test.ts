@@ -13,24 +13,46 @@ let produceResult: QueryResult = { data: [], error: null };
 let sessionResult: QueryResult = { data: [], error: null };
 let messageResult: QueryResult = { data: [], error: null };
 
-function chain(result: () => QueryResult): Record<string, unknown> {
+/**
+ * Answer produce_transactions per query rather than per table.
+ *
+ * The empty-state path issues THREE reads against that view — the requested
+ * date, the latest-date probe, and that date's markets — and a fixture that
+ * cannot tell them apart cannot prove the route asked the right questions.
+ * Null keeps every existing test on the single produceResult fixture.
+ */
+let produceByQuery: ((filters: Record<string, unknown>) => QueryResult | null) | null = null;
+
+function chain(result: () => QueryResult, produceAware = false): Record<string, unknown> {
+  const filters: Record<string, unknown> = {};
+  const answer = () =>
+    (produceAware ? produceByQuery?.(filters) ?? null : null) ?? result();
+
   const node: Record<string, unknown> = {};
   const self = () => node;
   node.select = self;
   node.in = self;
-  node.eq = self;
   node.ilike = self;
   node.order = self;
-  node.range = () => Promise.resolve(result());
+  node.eq = (column: string, value: unknown) => {
+    filters[`eq:${column}`] = value;
+    return node;
+  };
+  node.lt = (column: string, value: unknown) => {
+    filters[`lt:${column}`] = value;
+    return node;
+  };
+  node.limit = () => Promise.resolve(answer());
+  node.range = () => Promise.resolve(answer());
   node.then = (resolve: (v: QueryResult) => unknown, reject: (e: unknown) => unknown) =>
-    Promise.resolve(result()).then(resolve, reject);
+    Promise.resolve(answer()).then(resolve, reject);
   return node;
 }
 
 mock.module("@/lib/supabase/server", () => ({
   createServiceClient: () => ({
     from(table: string) {
-      if (table === "produce_transactions") return chain(() => produceResult);
+      if (table === "produce_transactions") return chain(() => produceResult, true);
       if (table === "produce_sessions") return chain(() => sessionResult);
       if (table === "raw_messages") return chain(() => messageResult);
       throw new Error(`Unexpected table: ${table}`);
@@ -74,6 +96,7 @@ beforeEach(() => {
   produceResult = { data: [], error: null };
   sessionResult = { data: [], error: null };
   messageResult = { data: [], error: null };
+  produceByQuery = null;
   process.env.CRON_SECRET = "stock-secret";
   delete process.env.STOCK_SUMMARY_LINE_TARGETS;
 });
@@ -300,5 +323,82 @@ describe("daily stock summary cron — debug mode", () => {
     expect(body.productCount).toBe(1);
     expect(body.messages[0]).toContain("📦 สต๊อกคงเหลือรวมทุกตลาด");
     expect(pushCalls).toHaveLength(0);
+  });
+});
+
+describe("daily stock summary cron — empty business date", () => {
+  const REQUESTED = "2026-07-27";
+
+  /** Nothing on the requested date; `latest` is what history holds. */
+  function emptyDayWith(latest: { date: string; markets: string[] } | null) {
+    produceByQuery = (filters) => {
+      if (filters["lt:transaction_date"] === REQUESTED) {
+        return { data: latest ? [{ transaction_date: latest.date }] : [], error: null };
+      }
+      if (latest && filters["eq:transaction_date"] === latest.date) {
+        return { data: latest.markets.map((market_name) => ({ market_name })), error: null };
+      }
+      return { data: [], error: null };
+    };
+  }
+
+  test("states the requested date is empty and points at the latest date with data", async () => {
+    emptyDayWith({ date: "2026-07-26", markets: ["ตลาดกี้", "เฉลิม72 ผลไม้", "ตลาดกี้"] });
+    process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
+
+    const res = await GET(request(`?date=${REQUESTED}`));
+    const text = pushCalls.map((call) => call.text).join("\n\n");
+
+    expect(res.status).toBe(200);
+    expect(text).toContain("ยังไม่พบข้อมูลชั่งคืนประจำวันที่ 27 กรกฎาคม 2569");
+    expect(text).toContain("ข้อมูลล่าสุดที่มีคือวันที่ 26 กรกฎาคม 2569");
+    expect(text).toContain("พบข้อมูล 2 ตลาด");
+    // The report is still ABOUT the requested date, and the misleading
+    // completed-calculation header is gone.
+    expect(text).toContain("ข้อมูลวันที่ 27 กรกฎาคม 2569");
+    expect(text).not.toContain("ข้อมูลจาก 0 ตลาด • พบคงเหลือ 0 ตลาด");
+  });
+
+  test("says no ชั่งคืน exists at all when history is empty", async () => {
+    emptyDayWith(null);
+    process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
+
+    await GET(request(`?date=${REQUESTED}`));
+    const text = pushCalls.map((call) => call.text).join("\n\n");
+
+    expect(text).toContain("ยังไม่พบข้อมูลชั่งคืนในระบบ");
+    expect(text).not.toContain("ข้อมูลล่าสุดที่มีคือ");
+  });
+
+  test("a failed latest-date lookup still delivers the empty report", async () => {
+    produceByQuery = (filters) =>
+      filters["lt:transaction_date"] === REQUESTED
+        ? { data: null, error: { message: "probe exploded" } }
+        : { data: [], error: null };
+    process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
+
+    const res = await GET(request(`?date=${REQUESTED}`));
+    const text = pushCalls.map((call) => call.text).join("\n\n");
+
+    // Context is a nicety; the empty state itself is not.
+    expect(res.status).toBe(200);
+    expect(text).toContain("ยังไม่พบข้อมูลชั่งคืนประจำวันที่ 27 กรกฎาคม 2569");
+    expect(text).toContain("ยังไม่พบข้อมูลชั่งคืนในระบบ");
+  });
+
+  test("a date WITH data never runs the lookup", async () => {
+    let probed = false;
+    produceByQuery = (filters) => {
+      if (filters["lt:transaction_date"] !== undefined) probed = true;
+      return null;
+    };
+    produceResult = { data: produceRows(), error: null };
+    process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
+
+    const res = await GET(request("?date=2026-07-25"));
+
+    expect(res.status).toBe(200);
+    expect(probed).toBe(false);
+    expect(pushCalls[0].text).toContain("ข้อมูลจาก 2 ตลาด • พบคงเหลือ 1 ตลาด");
   });
 });

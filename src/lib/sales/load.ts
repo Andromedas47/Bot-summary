@@ -7,6 +7,7 @@ import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
 import { isStrictBusinessDate } from "./cron";
 import { isQaMarketLabel } from "./qa-scopes";
 import { resolveCentralPricesForDate } from "@/lib/white-sheet/load";
+import type { LatestDataHint } from "@/lib/summary/latest-data-hint";
 import type { Database } from "@/types/database";
 import {
   calculateSalesReport,
@@ -187,6 +188,70 @@ export async function fetchSalesProduceRows(
   }
 
   return rows;
+}
+
+/**
+ * The latest business date STRICTLY BEFORE `beforeDate` that has sales
+ * evidence, with the number of markets that produced it.
+ *
+ * Only ever called when the requested date turned out empty, so a normal day
+ * pays nothing for it.
+ *
+ * Eligibility is P1's own, not a second opinion: produce_transactions is the
+ * void-filtered view loadSalesReport reads, with NO transaction-type filter —
+ * exactly as fetchSalesProduceRows does, because W/R/D classification belongs to
+ * the calculator and a server-side type filter would silently drop the legacy
+ * "เสีย" spelling. Slips, settlements, cash, purchases, inventory movements and
+ * P2A snapshots live in other tables and are unreachable from here.
+ *
+ * `.lt` keeps the search strictly backwards, so future-dated rows can never be
+ * offered as "the latest data we have", and the date itself is ONE ordered row —
+ * a MAX in disguise, not a scan of history.
+ *
+ * The market count uses the same normalizedMarketLabel identity and the same QA
+ * exclusion the report applies, so it counts the markets a reader would see.
+ * Rows whose market cannot be resolved have no market to count.
+ */
+export async function findLatestSalesDataDate(
+  supabase: Supabase,
+  beforeDate: string,
+): Promise<LatestDataHint | null> {
+  const { data, error } = await supabase
+    .from("produce_transactions")
+    .select("transaction_date")
+    .lt("transaction_date", beforeDate)
+    .order("transaction_date", { ascending: false })
+    .limit(1);
+  if (error) throw new SalesDataError(`latest sales date query failed: ${error.message}`);
+
+  const date = data?.[0]?.transaction_date ?? null;
+  if (!date) return null;
+
+  // Bounded by construction: one business date, paged like every other read here.
+  const markets = new Set<string>();
+  let offset = 0;
+
+  while (true) {
+    const { data: rows, error: rowsError } = await supabase
+      .from("produce_transactions")
+      .select("market_name")
+      .eq("transaction_date", date)
+      .order("market_name", { ascending: true })
+      .range(offset, offset + PAGE_SIZE - 1);
+    if (rowsError) {
+      throw new SalesDataError(`latest sales market query failed: ${rowsError.message}`);
+    }
+
+    for (const row of rows ?? []) {
+      const label = normalizedMarketLabel(row.market_name);
+      if (label && !isQaMarketLabel(label)) markets.add(label);
+    }
+
+    if (!rows || rows.length < PAGE_SIZE) break;
+    offset += PAGE_SIZE;
+  }
+
+  return { date, marketCount: markets.size };
 }
 
 async function mapRawMessageSources(

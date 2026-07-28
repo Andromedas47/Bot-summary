@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { centralPriceMapKey } from "@/lib/white-sheet/pricing";
+import { LINE_MESSAGE_MAX_CODE_POINTS } from "@/lib/summary/line-chunking";
 import { calculateSalesReport, type SalesSourceRow } from "./calculate";
 import {
+  salesAutoNeedsLatestDataHint,
+  SALES_NO_DATA_PREFIX,
+  SALES_NO_HISTORY_NOTICE,
   buildSalesAutoBlocks,
   buildSalesAutoMessages,
   buildSalesSummaryBlocks,
@@ -294,6 +298,12 @@ describe("P1 empty day must not hide blockers", () => {
     expect(text).toContain("มีชุดข้อมูลที่ยังไม่ปิด/ปิดไม่สำเร็จ 1 ชุด");
   });
 
+  test("auto: no rows and no blockers asks for the latest-data hint", () => {
+    expect(salesAutoNeedsLatestDataHint(report([]))).toBe(true);
+    expect(salesAutoNeedsLatestDataHint(report([], { scopeBlockers: blockers }))).toBe(false);
+    expect(salesAutoNeedsLatestDataHint(report(TRUSTED_ROWS))).toBe(false);
+  });
+
   test("every scope blocker is listed, never summarised away", () => {
     const text = buildSalesAutoBlocks(
       report([], {
@@ -308,6 +318,60 @@ describe("P1 empty day must not hide blockers", () => {
     expect(text).toContain("ยังไม่ปิด/ปิดไม่สำเร็จ 2 ชุด");
     expect(text).toContain("อ่านไม่สำเร็จ 3 ข้อความ");
     expect(text).toContain("ระบุตลาดไม่ได้ 1 ชุด");
+  });
+});
+
+describe("P1 auto empty state", () => {
+  test("names the requested date instead of a vague 'today'", () => {
+    const text = buildSalesAutoBlocks(report([])).join("\n\n");
+
+    expect(text).toContain(SALES_AUTO_TITLE);
+    expect(text).toContain(`${SALES_NO_DATA_PREFIX} 25 กรกฎาคม 2569`);
+    expect(text).not.toContain(SALES_EMPTY_NOTICE);
+  });
+
+  test("shows the latest date with sales as context, never as the day's total", () => {
+    const text = buildSalesAutoBlocks(report([]), { date: "2026-07-24", marketCount: 10 })
+      .join("\n\n");
+
+    expect(text).toContain(`${SALES_NO_DATA_PREFIX} 25 กรกฎาคม 2569`);
+    expect(text).toContain("ข้อมูลล่าสุดที่มีคือวันที่ 24 กรกฎาคม 2569");
+    expect(text).toContain("พบข้อมูล 10 ตลาด");
+    // The report's date stays the requested one and carries no revenue figure
+    // borrowed from the prior day.
+    expect(text).toContain("ข้อมูลวันที่ 25 กรกฎาคม 2569");
+    expect(text).not.toContain("ข้อมูลวันที่ 24 กรกฎาคม 2569");
+    expect(text).not.toContain(SALES_TOTAL_HEADING);
+    expect(text).not.toContain("บาท");
+  });
+
+  test("says so plainly when no sales exist anywhere", () => {
+    const text = buildSalesAutoBlocks(report([]), null).join("\n\n");
+
+    expect(text).toContain(SALES_NO_HISTORY_NOTICE);
+    expect(text).not.toContain("ข้อมูลล่าสุดที่มีคือ");
+  });
+
+  test("omits the market count when the latest date resolved no market", () => {
+    const text = buildSalesAutoBlocks(report([]), { date: "2026-07-24", marketCount: 0 })
+      .join("\n\n");
+
+    expect(text).toContain("ข้อมูลล่าสุดที่มีคือวันที่ 24 กรกฎาคม 2569");
+    expect(text).not.toContain("พบข้อมูล 0 ตลาด");
+  });
+
+  test("a day with sales ignores the hint entirely", () => {
+    expect(buildSalesAutoBlocks(report(TRUSTED_ROWS), { date: "2026-07-24", marketCount: 10 }))
+      .toEqual(buildSalesAutoBlocks(report(TRUSTED_ROWS)));
+  });
+
+  test("the empty state fits in a single LINE message", () => {
+    const messages = buildSalesAutoMessages(report([]), {
+      latest: { date: "2026-07-24", marketCount: 10 },
+    });
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].length).toBeLessThanOrEqual(LINE_MESSAGE_MAX_CODE_POINTS);
   });
 });
 

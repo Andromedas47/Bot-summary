@@ -5,6 +5,7 @@ import {
   chunkBlocks,
   LINE_MESSAGE_MAX_CODE_POINTS,
 } from "@/lib/summary/line-chunking";
+import { latestDataHintBlock, type LatestDataHint } from "@/lib/summary/latest-data-hint";
 import {
   satangToBahtText,
   type SalesBlockReason,
@@ -38,6 +39,18 @@ export const SALES_BLOCKED_HEADING =
   "⛔ สาเหตุที่ยังยืนยันไม่ได้\n(1 รายการอาจพบมากกว่า 1 สาเหตุ)";
 export const SALES_SCOPE_BLOCKER_HEADING = "⚠️ ข้อมูลวันนี้ยังไม่ครบ";
 export const SALES_EMPTY_NOTICE = "ไม่พบรายการขายสำหรับวันนี้";
+/**
+ * The scheduled report's empty state.
+ *
+ * "ไม่พบรายการขายสำหรับวันนี้" was ambiguous at 08:10: it did not say WHICH day
+ * had nothing, and gave no way to tell "nobody sold anything" from "yesterday's
+ * entries have not been made yet". This names the requested date explicitly, and
+ * the latest-data block that follows names its own — so a prior date can never
+ * be read as an answer for the requested one.
+ */
+export const SALES_NO_DATA_PREFIX = "ยังไม่พบรายการขายประจำวันที่";
+/** Nothing anywhere in history, so there is no earlier date to point at. */
+export const SALES_NO_HISTORY_NOTICE = "ยังไม่พบรายการขายในระบบ";
 /**
  * No persisted sales rows AND something is known to be missing. Saying
  * "ไม่พบรายการขาย" here would report a broken day as a quiet day, so this
@@ -288,15 +301,40 @@ export function buildSalesSummaryMessages(
 }
 
 /**
+ * True when the scheduled report has nothing to show AND nothing is known to be
+ * missing — the only case where pointing at the latest date we do have is
+ * honest. With a scope blocker present the day is not empty, it is unproven, and
+ * that keeps its own wording.
+ */
+export function salesAutoNeedsLatestDataHint(report: SalesReport): boolean {
+  return hasNoRows(report) && report.scopeBlockers.length === 0;
+}
+
+/**
  * The scheduled 08:10 report.
  *
  * Same numbers, different shape: the per-identity working is dropped in favour
  * of product and market roll-ups, but every blocked entry is still listed in
  * full. Nothing is ever dropped to fit a message budget — this is a push, so
  * the day gets as many parts as it needs.
+ *
+ * `latest` is the empty state's context block and is used ONLY there — a day
+ * with sales renders exactly as before, whatever is passed.
  */
-export function buildSalesAutoBlocks(report: SalesReport): string[] {
+export function buildSalesAutoBlocks(
+  report: SalesReport,
+  latest: LatestDataHint | null = null,
+): string[] {
   const header = headerBlock(SALES_AUTO_TITLE, report);
+  if (salesAutoNeedsLatestDataHint(report)) {
+    return [
+      [
+        header,
+        `${SALES_NO_DATA_PREFIX} ${formatThaiDate(report.businessDate)}`,
+        latest ? latestDataHintBlock(latest) : SALES_NO_HISTORY_NOTICE,
+      ].join("\n\n"),
+    ];
+  }
   if (hasNoRows(report)) return noRowsBlocks(report, header);
 
   const counts = [
@@ -320,10 +358,10 @@ export function buildSalesAutoBlocks(report: SalesReport): string[] {
 
 export function buildSalesAutoMessages(
   report: SalesReport,
-  options: { maxCodePoints?: number } = {},
+  options: { maxCodePoints?: number; latest?: LatestDataHint | null } = {},
 ): string[] {
   return chunkBlocks(
-    buildSalesAutoBlocks(report),
+    buildSalesAutoBlocks(report, options.latest ?? null),
     options.maxCodePoints ?? LINE_MESSAGE_MAX_CODE_POINTS,
   );
 }

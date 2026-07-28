@@ -3,7 +3,12 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { logger } from "@/lib/logger";
 import { pushLineMessage } from "@/lib/line/reply";
 import { loadStockSummary } from "@/lib/summary/stock-summary-service";
-import { buildStockSnapshotMessages } from "@/lib/summary/stock-snapshot-message";
+import { findLatestStockDataDate } from "@/lib/summary/remaining-fruit-data";
+import type { LatestDataHint } from "@/lib/summary/latest-data-hint";
+import {
+  buildStockSnapshotMessages,
+  isStockSnapshotEmpty,
+} from "@/lib/summary/stock-snapshot-message";
 import {
   parseStockSummaryTargets,
   resolveStockSummaryDate,
@@ -69,9 +74,11 @@ export async function GET(req: NextRequest) {
     targetCount: targets.length,
   });
 
+  const supabase = createServiceClient();
+
   let summary;
   try {
-    summary = await loadStockSummary(createServiceClient(), businessDate);
+    summary = await loadStockSummary(supabase, businessDate);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error("daily stock summary cron failed - summary build error", {
@@ -81,10 +88,26 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: message }, { status: 500 });
   }
 
+  // Only an empty date asks what the latest date with data was, so a normal
+  // morning pays for nothing extra. The hint is context, never a substitute:
+  // failing the whole delivery because it could not be read would be a worse
+  // outcome than sending the empty state without it.
+  let latest: LatestDataHint | null = null;
+  if (isStockSnapshotEmpty(summary)) {
+    try {
+      latest = await findLatestStockDataDate(supabase, businessDate);
+    } catch (error) {
+      logger.warn("daily stock summary latest-date lookup failed", {
+        businessDate,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   // The all-market stock snapshot, grouped by category then unit, with the
   // missing-ชั่งคืน section collapsed to counts. No per-market detail: the
   // morning report has to be readable before the markets run.
-  const messages = buildStockSnapshotMessages(summary);
+  const messages = buildStockSnapshotMessages(summary, { latest });
   const productCount = summary.categories.reduce((n, group) => n + group.products.length, 0);
 
   if (debugMode) {
@@ -105,6 +128,8 @@ export async function GET(req: NextRequest) {
       productCount,
       incompleteCount: summary.incomplete.length,
       isComplete: summary.isComplete,
+      latestDataDate: latest?.date ?? null,
+      latestDataMarketCount: latest?.marketCount ?? null,
       messageCount: messages.length,
       targetCount: targets.length,
       wouldSendLine: targets.length > 0,

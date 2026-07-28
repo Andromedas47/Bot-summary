@@ -4,7 +4,10 @@ import { buildStockSummaryBlocks } from "./stock-summary-message";
 import {
   buildStockSnapshotBlocks,
   buildStockSnapshotMessages,
+  isStockSnapshotEmpty,
   stockSnapshotMarketCoverage,
+  STOCK_SNAPSHOT_NO_DATA_PREFIX,
+  STOCK_SNAPSHOT_NO_HISTORY_NOTICE,
   STOCK_SNAPSHOT_TITLE,
 } from "./stock-snapshot-message";
 import { countCodePoints, LINE_MESSAGE_MAX_CODE_POINTS, OVERFLOW_NOTICE } from "./line-chunking";
@@ -218,7 +221,82 @@ describe("stock snapshot completeness", () => {
   test("reports an empty day explicitly", () => {
     const text = textFor([]);
     expect(text).toContain(STOCK_SNAPSHOT_TITLE);
-    expect(text).toContain("ไม่พบข้อมูลสำหรับวันที่เลือก");
+    expect(text).toContain("ยังไม่พบข้อมูลชั่งคืนประจำวันที่ 25 กรกฎาคม 2569");
+  });
+});
+
+describe("stock snapshot empty state", () => {
+  const empty = () => buildStockSummaryFromRows(DATE, []);
+
+  test("names the requested date and drops the zero-market coverage line", () => {
+    const text = buildStockSnapshotBlocks(empty()).join("\n\n");
+
+    expect(text).toContain(`${STOCK_SNAPSHOT_TITLE}\nข้อมูลวันที่ 25 กรกฎาคม 2569`);
+    expect(text).toContain(`${STOCK_SNAPSHOT_NO_DATA_PREFIX} 25 กรกฎาคม 2569`);
+    // A count that was never taken must not read as a completed zero.
+    expect(text).not.toContain("ข้อมูลจาก 0 ตลาด");
+    expect(text).not.toContain("พบคงเหลือ 0 ตลาด");
+  });
+
+  test("shows the latest date that has data as context, never as the report", () => {
+    const text = buildStockSnapshotBlocks(empty(), {
+      date: "2026-07-24",
+      marketCount: 10,
+    }).join("\n\n");
+
+    expect(text).toContain(`${STOCK_SNAPSHOT_NO_DATA_PREFIX} 25 กรกฎาคม 2569`);
+    expect(text).toContain("ข้อมูลล่าสุดที่มีคือวันที่ 24 กรกฎาคม 2569");
+    expect(text).toContain("พบข้อมูล 10 ตลาด");
+    // The requested date stays the report's date, and no prior-date stock
+    // figure is anywhere in the message.
+    expect(text).toContain("ข้อมูลวันที่ 25 กรกฎาคม 2569");
+    expect(text).not.toContain("ข้อมูลวันที่ 24 กรกฎาคม 2569");
+    expect(text).not.toContain(STOCK_SNAPSHOT_NO_HISTORY_NOTICE);
+  });
+
+  test("says so plainly when no ชั่งคืน exists anywhere", () => {
+    const text = buildStockSnapshotBlocks(empty(), null).join("\n\n");
+
+    expect(text).toContain(STOCK_SNAPSHOT_NO_HISTORY_NOTICE);
+    expect(text).not.toContain("ข้อมูลล่าสุดที่มีคือ");
+  });
+
+  test("omits the market count when the latest date resolved no market", () => {
+    const text = buildStockSnapshotBlocks(empty(), { date: "2026-07-24", marketCount: 0 })
+      .join("\n\n");
+
+    expect(text).toContain("ข้อมูลล่าสุดที่มีคือวันที่ 24 กรกฎาคม 2569");
+    expect(text).not.toContain("พบข้อมูล 0 ตลาด");
+  });
+
+  test("a day with withdrawals is not empty and keeps its existing report", () => {
+    const summary = buildStockSummaryFromRows(DATE, [
+      row({ product_name: "แก้วมังกร", quantity: 9, unit: "โล", transaction_type: TX_WITHDRAW }),
+    ]);
+
+    expect(isStockSnapshotEmpty(summary)).toBe(false);
+    const text = buildStockSnapshotBlocks(summary, { date: "2026-07-24", marketCount: 10 })
+      .join("\n\n");
+    expect(text).toContain("ข้อมูลจาก 1 ตลาด • พบคงเหลือ 0 ตลาด");
+    expect(text).not.toContain("ข้อมูลล่าสุดที่มีคือ");
+  });
+
+  test("a day with stock ignores the hint entirely", () => {
+    const summary = buildStockSummaryFromRows(DATE, [row()]);
+
+    expect(isStockSnapshotEmpty(summary)).toBe(false);
+    expect(buildStockSnapshotBlocks(summary, { date: "2026-07-24", marketCount: 10 })).toEqual(
+      buildStockSnapshotBlocks(summary),
+    );
+  });
+
+  test("the empty state fits in a single LINE message", () => {
+    const messages = buildStockSnapshotMessages(empty(), {
+      latest: { date: "2026-07-24", marketCount: 10 },
+    });
+
+    expect(messages).toHaveLength(1);
+    expect(countCodePoints(messages[0])).toBeLessThanOrEqual(LINE_MESSAGE_MAX_CODE_POINTS);
   });
 });
 

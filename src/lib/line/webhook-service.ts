@@ -54,12 +54,34 @@ import {
 } from "@/lib/slips/slip-session-service";
 import { parseWhiteSheetCloseCommandFromMessage } from "@/lib/line/white-sheet-close-command";
 import { processWhiteSheetCloseCommand } from "@/lib/line/white-sheet-close-service";
+import { isPhysicalInventoryLineGroupAllowed } from "@/lib/physical-inventory/config";
+import {
+  classifyPhysicalInventoryStandaloneIntent,
+  isPhysicalInventoryItemMessage,
+  matchesPhysicalInventoryCloseLine,
+  parsePhysicalInventoryDocument,
+} from "@/lib/physical-inventory";
+import {
+  PhysicalInventoryAfterCloseBoundaryError,
+  PhysicalInventoryAfterCloseError,
+  PhysicalInventoryGenerationConflictError,
+  PhysicalInventorySessionService,
+} from "@/lib/physical-inventory/session-service";
+import { finalizePhysicalInventoryAfterClose } from "@/lib/physical-inventory/finalizer";
 
 type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
 type ReplyLineMessage = (replyToken: string, text: string) => Promise<void>;
 type ReplyLineMessages = (replyToken: string, texts: string[]) => Promise<void>;
 type ScheduleBackgroundTask = (task: () => Promise<void>) => void;
+type PhysicalInventoryFinalizer = (params: {
+  sessionId: string;
+  expectedGeneration: string;
+}) => Promise<unknown>;
+type PhysicalInventorySessionGateway = Pick<
+  PhysicalInventorySessionService,
+  "findOpenSession" | "openSession" | "registerIngest"
+>;
 
 const BATCH_FIRST_IMAGE_REPLY = [
   "รับรูปหลักฐานแล้วครับ",
@@ -113,6 +135,8 @@ interface WebhookServiceDependencies {
   replyMessage?: ReplyLineMessage;
   replyMessages?: ReplyLineMessages;
   scheduleBackgroundTask?: ScheduleBackgroundTask;
+  physicalInventoryFinalizer?: PhysicalInventoryFinalizer;
+  physicalInventoryService?: PhysicalInventorySessionGateway;
 }
 
 export interface WebhookProcessResult {
@@ -128,6 +152,11 @@ export interface WebhookProcessResult {
 
 function bangkokToday(): string {
   return bangkokBusinessDateNow();
+}
+
+function formatPhysicalInventoryBusinessDate(value: string): string {
+  const [year, month, day] = value.split("-");
+  return year && month && day ? `${day}/${month}/${year}` : value;
 }
 
 function hasSessionEnd(text: string): boolean {
@@ -222,6 +251,8 @@ export class WebhookService {
   private readonly replyMessage: ReplyLineMessage;
   private readonly replyMessages: ReplyLineMessages;
   private readonly scheduleBackgroundTask: ScheduleBackgroundTask;
+  private readonly physicalInventoryFinalizer: PhysicalInventoryFinalizer;
+  private readonly physicalInventoryService: PhysicalInventorySessionGateway;
 
   constructor(
     private readonly supabase: Supabase,
@@ -241,11 +272,17 @@ export class WebhookService {
       dependencies.scheduleBackgroundTask
       ?? ((task) => {
         void task().catch((error) => {
-          logger.error("background slip check failed", {
+          logger.error("background webhook task failed", {
             error: error instanceof Error ? error.message : "unknown_error",
           });
         });
       });
+    this.physicalInventoryFinalizer =
+      dependencies.physicalInventoryFinalizer
+      ?? ((params) => finalizePhysicalInventoryAfterClose(this.supabase, params));
+    this.physicalInventoryService =
+      dependencies.physicalInventoryService
+      ?? new PhysicalInventorySessionService(this.supabase);
   }
 
   async processEvents(events: LineEvent[], destination: string): Promise<WebhookProcessResult[]> {
@@ -325,6 +362,21 @@ export class WebhookService {
       if (replyToken) await replyLineMessage(replyToken, "Bot รับข้อความได้แล้ว ✅");
       return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
+
+    // ── 3.1. P2A Physical Inventory (allowlisted LINE groups only) ───────────
+    // This must precede remaining-stock and Produce routing because the
+    // Physical Inventory header intentionally contains overlapping fruit/stock
+    // vocabulary. Outside the explicit group allowlist this is a no-op.
+    const physicalInventoryResult = await this.tryProcessPhysicalInventory(
+      msgEvent,
+      text,
+      message.id,
+      rawMessageId,
+      eventId,
+      event.type,
+      log,
+    );
+    if (physicalInventoryResult !== null) return physicalInventoryResult;
 
     // ── 3.2. White Sheet close command (high-level control; before session appenders)
     // Must take priority over pending produce append, manual-slip amounts, and
@@ -672,6 +724,187 @@ export class WebhookService {
 
     log.debug("no parser matched text message — left unprocessed");
     return { eventId, eventType: event.type, status: "saved", parsed: false };
+  }
+
+  private async tryProcessPhysicalInventory(
+    event: LineMessageEvent,
+    text: string,
+    lineMessageId: string,
+    rawMessageId: string,
+    eventId: string,
+    eventType: string,
+    log: ChildLogger,
+  ): Promise<WebhookProcessResult | null> {
+    if (event.source.type !== "group") return null;
+
+    const sourceId = getSourceId(event.source);
+    if (!isPhysicalInventoryLineGroupAllowed(sourceId)) return null;
+
+    const standaloneIntent = classifyPhysicalInventoryStandaloneIntent(text);
+    const senderLineUserId = getUserId(event.source);
+    if (!senderLineUserId) {
+      if (standaloneIntent === "header") {
+        log.warn("Physical Inventory header ignored — group sender is missing", {
+          sourceId,
+        });
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+      return null;
+    }
+
+    const service = this.physicalInventoryService;
+    const replyToken = event.replyToken;
+
+    if (standaloneIntent === "header") {
+      const parsed = parsePhysicalInventoryDocument(text);
+      try {
+        const opened = await service.openSession({
+          sourceType: "group",
+          sourceId,
+          senderLineUserId,
+          openedLineEventId: eventId,
+          lineTimestampMs: event.timestamp,
+          rawText: text,
+          lineMessageId,
+          rawMessageId,
+          businessDate: parsed.businessDate,
+        });
+        await this.markRawMessageProcessed(rawMessageId, log);
+
+        if (replyToken && opened.opened && !opened.idempotent) {
+          const businessDate = parsed.businessDate ?? opened.session.business_date;
+          const displayDate = businessDate
+            ? formatPhysicalInventoryBusinessDate(businessDate)
+            : null;
+          await this.replyMessage(
+            replyToken,
+            displayDate
+              ? `เริ่มบันทึกสต๊อกผลไม้คงเหลือวันที่ ${displayDate} แล้ว`
+              : "เริ่มรายการแล้ว แต่ไม่พบวันที่ที่ถูกต้อง กรุณาตรวจสอบวันที่ก่อนปิดรายการ",
+          );
+        }
+
+        log.info("Physical Inventory session opened", {
+          sourceId,
+          senderLineUserId,
+          sessionId: opened.session.id,
+          sessionGeneration: opened.session.session_generation,
+          opened: opened.opened,
+          idempotent: opened.idempotent,
+        });
+        return { eventId, eventType, status: "saved", parsed: true };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        log.error("Physical Inventory open failed", { sourceId, error: message });
+        if (replyToken) {
+          await this.replyMessage(
+            replyToken,
+            "เริ่มรายการสต๊อกผลไม้ไม่สำเร็จ กรุณาลองอีกครั้ง",
+          );
+        }
+        return {
+          eventId,
+          eventType,
+          status: "error",
+          parsed: false,
+          error: message,
+        };
+      }
+    }
+
+    let session;
+    try {
+      session = await service.findOpenSession(sourceId, senderLineUserId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log.error("Physical Inventory active-session lookup failed", {
+        sourceId,
+        senderLineUserId,
+        error: message,
+      });
+      return {
+        eventId,
+        eventType,
+        status: "error",
+        parsed: false,
+        error: message,
+      };
+    }
+    if (!session) return null;
+
+    const close = matchesPhysicalInventoryCloseLine(text);
+    const item = !close && isPhysicalInventoryItemMessage(text);
+    if (!close && !item) return null;
+
+    try {
+      const admitted = await service.registerIngest({
+        sessionId: session.id,
+        expectedGeneration: session.session_generation,
+        lineEventId: eventId,
+        lineTimestampMs: event.timestamp,
+        lineMessageId,
+        rawMessageId,
+        kind: close ? "close" : "item",
+        rawText: text,
+      });
+      // Item evidence is fully handled once admitted. The close raw-message
+      // marker is deliberately held until the terminal LINE push is accepted;
+      // that gives the recovery worker a durable delivery checkpoint.
+      if (!close) await this.markRawMessageProcessed(rawMessageId, log);
+
+      if (close) {
+        this.scheduleBackgroundTask(async () => {
+          await this.physicalInventoryFinalizer({
+            sessionId: admitted.session.id,
+            expectedGeneration: admitted.session.session_generation,
+          });
+        });
+      }
+
+      log.info("Physical Inventory event admitted", {
+        sourceId,
+        senderLineUserId,
+        sessionId: admitted.session.id,
+        sessionGeneration: admitted.session.session_generation,
+        kind: close ? "close" : "item",
+        accepted: admitted.accepted,
+        inserted: admitted.inserted,
+        reason: admitted.reason,
+      });
+      return { eventId, eventType, status: "saved", parsed: true };
+    } catch (error) {
+      if (
+        error instanceof PhysicalInventoryAfterCloseBoundaryError
+        || error instanceof PhysicalInventoryAfterCloseError
+        || error instanceof PhysicalInventoryGenerationConflictError
+      ) {
+        await this.markRawMessageProcessed(rawMessageId, log);
+        if (replyToken) {
+          await this.replyMessage(
+            replyToken,
+            error instanceof PhysicalInventoryAfterCloseBoundaryError
+              ? "รายการนี้ส่งหลังคำสั่งจบ จึงไม่ถูกรวมในสต๊อกที่ปิดแล้ว"
+              : "รายการสต๊อกนี้ปิดแล้ว กรุณาเริ่มรายการใหม่",
+          );
+        }
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      log.error("Physical Inventory admission failed", {
+        sourceId,
+        senderLineUserId,
+        sessionId: session.id,
+        error: message,
+      });
+      return {
+        eventId,
+        eventType,
+        status: "error",
+        parsed: false,
+        error: message,
+      };
+    }
   }
 
   // ── Additional produce batch: open (append-only, no direct persist) ──────

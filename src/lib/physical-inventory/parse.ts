@@ -24,6 +24,7 @@ import {
 export {
   classifyPhysicalInventoryStandaloneIntent,
   isPhysicalInventoryHeaderLine,
+  isPhysicalInventoryItemMessage,
   isPhysicalInventorySessionClose,
   matchesPhysicalInventoryCloseLine,
 } from "./classify";

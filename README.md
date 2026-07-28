@@ -98,6 +98,29 @@ User-visible timing:
 - Bare `จบรายการ` is quiet-window best-effort and has no indexed-completeness
   guarantee.
 
+## Physical Inventory deferred finalizer (P2A Slice C)
+
+Physical Inventory routing is enabled only for LINE group IDs in
+`PHYSICAL_INVENTORY_LINE_GROUP_IDS`. The V1 warehouse is always `MAIN`.
+
+The close webhook stores the immutable LINE boundary and returns without waiting
+for finalization. Next.js `after()` keeps a prompt finalization attempt alive
+after the response, while the database enforces the 8-second quiet window,
+30-second admission deadline, generation, revision, and ingest-set hash.
+
+The scheduled recovery workflow calls:
+
+```text
+GET /api/cron/finalize-physical-inventory
+Authorization: Bearer <CRON_SECRET>
+```
+
+This recovery path is why finalization does not depend on the webhook process
+surviving. Terminal LINE pushes use the session generation as
+`X-Line-Retry-Key`; the close raw-message processed marker is updated only after
+LINE accepts the push, so ambiguous delivery retries do not duplicate the
+success or failure message.
+
 Database state remains due when a scheduler request fails, so a later scheduler
 call retries it. Finalization is generation-, sender-, and revision-pinned and
 is idempotent under concurrent calls. Per Release B scope there is no

@@ -1,0 +1,17 @@
+name: finalize-physical-inventory
+
+on:
+  schedule:
+    - cron: "1,6,11,16,21,26,31,36,41,46,51,56 * * * *"
+  workflow_dispatch:
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call Physical Inventory finalizer cron
+        run: |
+          curl -sf --max-time 45 \
+            -X GET \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            https://bot-summary.vercel.app/api/cron/finalize-physical-inventory

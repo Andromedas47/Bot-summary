@@ -20,6 +20,8 @@ import {
   computeItemHash,
   computeSessionHash,
 } from "@/lib/line/session-dedup-service";
+import { buildSeedFromStructuredMetadata } from "@/lib/parsers/weigh-session/seed";
+import type { StructuredPendingSession } from "@/lib/line/produce-session-commands";
 import {
   bangkokTimeFromTimestamp,
   buildWeighSessionValidationReply,
@@ -166,6 +168,13 @@ export async function finalizePendingGeneration(
     closeDeadlineAt: snapshot.close_deadline_at,
     finalizationStartedAt,
   });
+  // Structured path selection is driven only by database-enforced metadata:
+  // buildSeedFromStructuredMetadata returns a seed exclusively for a complete,
+  // contract-version-compatible row (the pending_sessions_structured_* CHECK
+  // constraints guarantee completeness). Anything else — every legacy row, any
+  // future contract version — falls through to the legacy path unchanged.
+  const seed = buildSeedFromStructuredMetadata(snapshot as StructuredPendingSession);
+
   let finalText = snapshot.accumulated_text;
   const reconstructionErrors: string[] = [];
   try {
@@ -174,7 +183,16 @@ export async function finalizePendingGeneration(
       snapshot.session_generation,
       closeTimestamp,
     );
-    if (hasHeaderInLedger(snapshot, ingestRows)) {
+    if (seed) {
+      // A structured session has no text header to find and none to invent.
+      // The ingest ledger for this generation holds exactly the operator item
+      // text that was admitted through the immutable close boundary — the
+      // typed open and the postback close contribute no ingest row at all — and
+      // the close barrier has already proven admission/ingest parity before the
+      // claim, so these rows ARE the admitted set. No ledger-header authority is
+      // consulted and no header is synthesized.
+      finalText = ingestRows.map((row) => row.raw_text).join("\n");
+    } else if (hasHeaderInLedger(snapshot, ingestRows)) {
       finalText = ingestRows.map((row) => row.raw_text).join("\n");
     } else {
       finalText = await service.rebuildForFinalization(snapshot, closeTimestamp);
@@ -188,7 +206,9 @@ export async function finalizePendingGeneration(
   const fallbackTime = bangkokTimeFromTimestamp(
     new Date(snapshot.created_at).getTime(),
   );
-  const parsed = parseWeighSession(finalText, bangkokBusinessDateNow(), fallbackTime);
+  // Seeded parse for structured rows; identical call shape as before for legacy
+  // rows, where seed is null and the default parameter applies.
+  const parsed = parseWeighSession(finalText, bangkokBusinessDateNow(), fallbackTime, seed);
   const isAdditional = parsed.session_kind === "additional";
   const validationErrors = [
     ...reconstructionErrors,

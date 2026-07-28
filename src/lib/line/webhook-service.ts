@@ -24,6 +24,7 @@ import {
   PendingSessionClosedError,
   PendingSessionGenerationConflictError,
 } from "@/lib/line/pending-session-service";
+import type { StructuredPendingSession } from "@/lib/line/produce-session-commands";
 import { DailySummaryService } from "@/lib/line/daily-summary-service";
 import { SessionDedupService } from "@/lib/line/session-dedup-service";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
@@ -499,6 +500,22 @@ export class WebhookService {
         ? parseExpectedItemCount(normalizedText)
         : null;
       const incomingHeader = findProduceSessionHeader(normalizedText);
+
+      // 0049: a structured session was opened by a typed command and its
+      // metadata is immutable. A textual header must not rotate it, and must
+      // not be appended, admitted or ingested — refuse before any of that runs.
+      // Legacy rows have entry_origin NULL and are unaffected.
+      if (
+        incomingHeader
+        && (pending as StructuredPendingSession).entry_origin != null
+      ) {
+        log.warn("text header refused for structured produce session", {
+          sessionKey,
+          sessionGeneration: pending.session_generation,
+        });
+        if (replyToken) await this.replyMessage(replyToken, STALE_PRODUCE_SESSION_REPLY);
+        return { eventId, eventType: event.type, status: "saved", parsed: false };
+      }
 
       if (
         incomingHeader

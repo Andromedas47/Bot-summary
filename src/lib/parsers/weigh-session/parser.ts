@@ -17,6 +17,7 @@ import type {
   SessionKind,
   BaseTransactionType,
 } from "./types";
+import type { WeighSessionSeed } from "./seed";
 
 // Additional-batch header keyword → the base transaction type its items store.
 export const ADDITIONAL_TYPE_MAP: Record<string, BaseTransactionType> = {
@@ -38,23 +39,31 @@ export function parseWeighSession(
   text:         string,
   fallbackDate: string | null = null,
   fallbackTime: string | null = null,
+  seed:         WeighSessionSeed | null = null,
 ): WeighSession {
   const lines = text
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
 
-  let senderName:      string | null = null;
-  let txTime:          string | null = null;
-  let staffName:       string | null = null;
-  let date:            string | null = null;
-  let sessionTitle:    string | null = null;
-  let currentSection                 = "main";
-  let currentTxType: TransactionType = "เบิก";
-  let state: "header" | "items"      = "header";
-  let sessionKind: SessionKind       = "main";
-  let declaredTxType: BaseTransactionType | null = null;
-  let additionalOpener: string | null = null;
+  // A seeded parse receives immutable session metadata from a typed command
+  // instead of inferring it from a header. It starts in the item state, so the
+  // header branch below never runs and no later text line can overwrite the
+  // operator's declared session. With no seed every initial value, and every
+  // branch, is exactly what it was before seeding existed.
+  const seeded = seed !== null;
+
+  let senderName:      string | null = seed?.sender_name ?? null;
+  let txTime:          string | null = seed?.transaction_time ?? null;
+  let staffName:       string | null = seed?.staff_name ?? null;
+  let date:            string | null = seed?.date ?? null;
+  let sessionTitle:    string | null = seed?.session_title ?? null;
+  let currentSection                 = seed?.current_section ?? "main";
+  let currentTxType: TransactionType = seed?.current_transaction_type ?? "เบิก";
+  let state: "header" | "items"      = seeded ? "items" : "header";
+  let sessionKind: SessionKind       = seed?.session_kind ?? "main";
+  let declaredTxType: BaseTransactionType | null = seed?.declared_transaction_type ?? null;
+  let additionalOpener: string | null = seed?.additional_opener ?? null;
 
   const items:       WeighSessionItem[]        = [];
   const parseErrors: string[]                  = [];
@@ -65,8 +74,10 @@ export function parseWeighSession(
     let   content: string;
 
     if (prefixMatch) {
-      // Capture sender and time from first TIME_PREFIX occurrence
-      if (!senderName) {
+      // Capture sender and time from first TIME_PREFIX occurrence. Seeded
+      // sessions keep the typed identity/time: a LINE export prefix on an item
+      // line must not restate who opened the session or when.
+      if (!senderName && !seeded) {
         senderName = prefixMatch[2];
         txTime     = prefixMatch[1]; // "HH:MM" or "HH.MM"
       }

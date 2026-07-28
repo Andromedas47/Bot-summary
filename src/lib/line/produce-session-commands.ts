@@ -9,6 +9,7 @@ import {
   type StructuredSessionMetadata,
   type TransactionTimeSource,
 } from "@/lib/parsers/weigh-session/seed";
+import { ADDITIONAL_TYPE_MAP } from "@/lib/parsers/weigh-session/parser";
 import { RE } from "@/lib/parsers/weigh-session/regex";
 import type { BaseTransactionType, SessionKind } from "@/lib/parsers/weigh-session/types";
 
@@ -41,6 +42,8 @@ export interface OpenProduceSessionCommand {
   /** Both kinds are supported by the service. Which ones a menu chooses to
    *  expose is a UI decision and is deliberately not encoded here. */
   sessionKind: SessionKind;
+  /** Required for both kinds. For "additional" it must equal declaredTransactionType. */
+  initialTransactionType: BaseTransactionType;
   declaredTransactionType: BaseTransactionType | null;
   additionalOpener: string | null;
   businessDate: string;
@@ -155,6 +158,11 @@ export class ProduceSessionCommandService {
     if (!source.sourceId?.trim()) {
       return { ok: false, reason: "invalid_source", detail: "sourceId is required" };
     }
+    // The source must bind to the session key it implies before any read or
+    // write: a mismatched sourceId/groupId/roomId would key traffic under a
+    // session that does not belong to it.
+    const badSource = validateCommandSource(source);
+    if (badSource) return { ok: false, reason: "invalid_source", detail: badSource };
 
     switch (command.kind) {
       case "open":   return this.open(command, source, sessionKey);
@@ -193,6 +201,7 @@ export class ProduceSessionCommandService {
         p_staff_label:               command.staffLabel,
         p_market_label:              command.marketLabel,
         p_session_kind:              command.sessionKind,
+        p_initial_transaction_type:  command.initialTransactionType,
         p_declared_transaction_type: command.declaredTransactionType,
         p_additional_opener:         command.additionalOpener,
         p_expected_session_generation: command.expectedSessionGeneration ?? null,
@@ -236,6 +245,11 @@ export class ProduceSessionCommandService {
     source: ProduceCommandSource,
     sessionKey: string,
   ): Promise<ProduceCommandResult> {
+    // Before any lookup or RPC: a degenerate append must leave both ledgers,
+    // accumulated_text and ingest_revision completely untouched.
+    const invalid = validateAppendCommand(command);
+    if (invalid) return { ok: false, reason: "invalid_command", detail: invalid };
+
     const lookup = await this.pending.lookup(sessionKey);
     const row = lookup.session as StructuredPendingSession | null;
     if (!row) return { ok: false, reason: "not_found" };
@@ -337,6 +351,12 @@ function validateOpenCommand(command: OpenProduceSessionCommand): string | null 
   if (!command.lineEventId?.trim()) return "lineEventId is required";
   if (!(command.lineTimestampMs > 0)) return "lineTimestampMs must be positive";
 
+  // Required for both kinds — a guided main session may be ชั่งคืน or คืนเสีย,
+  // and there is no textual section marker to recover that from later.
+  if (!BASE_TRANSACTION_TYPES.includes(command.initialTransactionType)) {
+    return "initialTransactionType is required and must be a base transaction type";
+  }
+
   if (command.sessionKind === "additional") {
     if (!command.declaredTransactionType) {
       return "an additional session requires declaredTransactionType";
@@ -344,10 +364,71 @@ function validateOpenCommand(command: OpenProduceSessionCommand): string | null 
     if (!command.additionalOpener) {
       return "an additional session requires additionalOpener";
     }
+    if (command.initialTransactionType !== command.declaredTransactionType) {
+      return "an additional session's initialTransactionType must equal declaredTransactionType";
+    }
+    if (ADDITIONAL_TYPE_MAP[command.additionalOpener] !== command.declaredTransactionType) {
+      return `additionalOpener ${command.additionalOpener} does not declare ${command.declaredTransactionType}`;
+    }
   } else {
     if (command.declaredTransactionType || command.additionalOpener) {
       return "a main session must not declare a transaction type or additional opener";
     }
+  }
+  return null;
+}
+
+// Derived from the opener map so the three base types are declared in exactly
+// one place, and so no Thai literal is needed in this module's executable code.
+const BASE_TRANSACTION_TYPES: readonly BaseTransactionType[] =
+  Object.values(ADDITIONAL_TYPE_MAP);
+
+/**
+ * Blank/degenerate append rejection, evaluated before any lookup or RPC.
+ *
+ * append_pending_session writes the admission row and the ingest row in one
+ * statement pair, but only a non-blank raw_text counts towards ingest parity in
+ * check_pending_close_ready. A whitespace-only append therefore produces
+ * admission_count = 1 / ingest_count = 0, which never reaches parity and strands
+ * the session until the hard deadline. Refusing here means no admission row, no
+ * ingest row, no accumulated_text change and no ingest_revision bump.
+ */
+function validateAppendCommand(command: AppendProduceSessionCommand): string | null {
+  if (typeof command.text !== "string" || command.text.trim() === "") {
+    return "append text must contain at least one non-whitespace character";
+  }
+  if (!command.lineEventId?.trim()) return "lineEventId is required";
+  if (!Number.isSafeInteger(command.lineTimestampMs) || command.lineTimestampMs <= 0) {
+    return "lineTimestampMs must be a positive safe integer";
+  }
+  if (command.expectedSessionGeneration !== undefined
+      && command.expectedSessionGeneration !== null
+      && command.expectedSessionGeneration.trim() === "") {
+    return "expectedSessionGeneration must be non-blank when provided";
+  }
+  return null;
+}
+
+/**
+ * The source object must agree with itself before it is trusted to name a
+ * session key. LINE delivers the group/room id and the user id separately; a
+ * caller that passes a group id as sourceId while claiming type "user" would
+ * otherwise mint `dm:<user>` for traffic that belongs to a group key.
+ */
+export function validateCommandSource(source: ProduceCommandSource): string | null {
+  const sourceId = source.sourceId?.trim() ?? "";
+  if (source.type === "group") {
+    if (!source.groupId?.trim()) return "a group source requires groupId";
+    if (sourceId !== source.groupId.trim()) return "group sourceId must equal groupId";
+    return null;
+  }
+  if (source.type === "room") {
+    if (!source.roomId?.trim()) return "a room source requires roomId";
+    if (sourceId !== source.roomId.trim()) return "room sourceId must equal roomId";
+    return null;
+  }
+  if (sourceId !== (source.lineUserId ?? "").trim()) {
+    return "a user source must have sourceId equal to lineUserId";
   }
   return null;
 }

@@ -72,6 +72,7 @@ ALTER TABLE public.pending_sessions
   ADD COLUMN IF NOT EXISTS staff_label               text,
   ADD COLUMN IF NOT EXISTS market_label              text,
   ADD COLUMN IF NOT EXISTS session_kind              text,
+  ADD COLUMN IF NOT EXISTS initial_transaction_type  text,
   ADD COLUMN IF NOT EXISTS declared_transaction_type text,
   ADD COLUMN IF NOT EXISTS additional_opener         text,
   ADD COLUMN IF NOT EXISTS opened_line_event_id      text;
@@ -82,6 +83,10 @@ COMMENT ON COLUMN public.pending_sessions.entry_origin IS
 COMMENT ON COLUMN public.pending_sessions.opened_line_event_id IS
   'Immutable LINE event id of the typed open for the CURRENT generation. Rotation '
   'overwrites it with the rotating event; redelivery of the same id is a no-op.';
+COMMENT ON COLUMN public.pending_sessions.initial_transaction_type IS
+  'The transaction type this session''s items start in. Required for BOTH kinds: a guided '
+  'main session may be ชั่งคืน or คืนเสีย and has no textual section marker to recover that '
+  'from. For an additional batch it must equal declared_transaction_type.';
 COMMENT ON COLUMN public.pending_sessions.transaction_time_source IS
   'operator_declared = the operator stated the time; line_event = derived from the '
   'LINE event timestamp. Seeded into the parser so a structured session never has to '
@@ -109,6 +114,7 @@ ALTER TABLE public.pending_sessions
         AND staff_label               IS NULL
         AND market_label              IS NULL
         AND session_kind              IS NULL
+        AND initial_transaction_type  IS NULL
         AND declared_transaction_type IS NULL
         AND additional_opener         IS NULL
         AND opened_line_event_id      IS NULL
@@ -120,6 +126,7 @@ ALTER TABLE public.pending_sessions
         AND transaction_time          IS NOT NULL
         AND transaction_time_source   IS NOT NULL
         AND session_kind              IS NOT NULL
+        AND initial_transaction_type  IS NOT NULL
         AND btrim(staff_label)           <> ''
         AND btrim(market_label)          <> ''
         AND btrim(opened_line_event_id)  <> ''
@@ -129,8 +136,9 @@ ALTER TABLE public.pending_sessions
   ADD CONSTRAINT pending_sessions_structured_session_kind
     CHECK (session_kind IS NULL OR session_kind IN ('main', 'additional')),
 
-  -- Main carries no declared type/opener; additional must carry both. This is
-  -- the service-level main/additional invariant made non-bypassable.
+  -- Main carries no declared type/opener; additional must carry both, and an
+  -- additional batch's initial type must be the type it declared. This is the
+  -- service-level main/additional invariant made non-bypassable.
   ADD CONSTRAINT pending_sessions_structured_additional_pair
     CHECK (
       session_kind IS NULL
@@ -139,13 +147,22 @@ ALTER TABLE public.pending_sessions
           AND additional_opener IS NULL)
       OR (session_kind = 'additional'
           AND declared_transaction_type IS NOT NULL
-          AND additional_opener IS NOT NULL)
+          AND additional_opener IS NOT NULL
+          AND initial_transaction_type = declared_transaction_type)
     ),
 
   ADD CONSTRAINT pending_sessions_structured_declared_type
     CHECK (
       declared_transaction_type IS NULL
       OR declared_transaction_type IN ('เบิก', 'คืน', 'คืนเสีย')
+    ),
+
+  -- Domain, not a default. A guided main ชั่งคืน / คืนเสีย session is expressed
+  -- ONLY here, so an out-of-domain value must never reach the parser seed.
+  ADD CONSTRAINT pending_sessions_structured_initial_type
+    CHECK (
+      initial_transaction_type IS NULL
+      OR initial_transaction_type IN ('เบิก', 'คืน', 'คืนเสีย')
     ),
 
   -- The opener keyword and the base type it declares must agree, matching
@@ -209,6 +226,7 @@ CREATE OR REPLACE FUNCTION public.open_or_rotate_produce_structured_session(
   p_staff_label              text,
   p_market_label             text,
   p_session_kind             text,
+  p_initial_transaction_type text,
   p_declared_transaction_type text DEFAULT NULL,
   p_additional_opener         text DEFAULT NULL,
   p_expected_session_generation uuid DEFAULT NULL,
@@ -219,11 +237,13 @@ SECURITY DEFINER
 SET search_path = public
 AS $fn$
 DECLARE
-  v_row        public.pending_sessions%ROWTYPE;
-  v_generation uuid := gen_random_uuid();
-  v_user       text;
-  v_event      text;
-  v_now        timestamptz := now();
+  v_row          public.pending_sessions%ROWTYPE;
+  v_generation   uuid := gen_random_uuid();
+  v_user         text;
+  v_event        text;
+  v_source       text;
+  v_expected_key text;
+  v_now          timestamptz := now();
 BEGIN
   -- 1) Validate the typed command before taking any lock. A menu command with
   --    no LINE user identity fails closed: a group/room source is shared by
@@ -267,6 +287,34 @@ BEGIN
     RAISE EXCEPTION
       '0049: a main session must not declare a transaction type or additional opener';
   END IF;
+  IF p_initial_transaction_type IS NULL
+     OR p_initial_transaction_type NOT IN ('เบิก', 'คืน', 'คืนเสีย') THEN
+    RAISE EXCEPTION
+      '0049: initial_transaction_type is required for every structured session';
+  END IF;
+  IF p_session_kind = 'additional'
+     AND p_initial_transaction_type IS DISTINCT FROM p_declared_transaction_type THEN
+    RAISE EXCEPTION
+      '0049: an additional session''s initial_transaction_type must equal declared_transaction_type';
+  END IF;
+
+  -- The caller does not get to name an arbitrary session key. Derive the
+  -- canonical key from the source triple and refuse anything else, so a
+  -- mismatched source_id/user_id pair can never reach another key's row.
+  -- This mirrors getPendingSessionKey in src/lib/line/verify.ts exactly.
+  v_source := btrim(p_source_id);
+  v_expected_key := CASE p_source_type
+    WHEN 'group' THEN 'group:' || v_source || ':user:' || v_user
+    WHEN 'room'  THEN 'room:'  || v_source || ':user:' || v_user
+    ELSE 'dm:' || v_user
+  END;
+  IF p_source_type = 'user' AND v_source IS DISTINCT FROM v_user THEN
+    RAISE EXCEPTION '0049: a user source must have source_id equal to line_user_id';
+  END IF;
+  IF btrim(p_session_key) IS DISTINCT FROM v_expected_key THEN
+    RAISE EXCEPTION
+      '0049: session_key does not match the canonical key for this source';
+  END IF;
 
   -- Serialize concurrent opens for this session key even when no row exists
   -- yet, so two simultaneous typed opens cannot both insert.
@@ -279,23 +327,12 @@ BEGIN
   FOR UPDATE;
 
   IF FOUND THEN
-    -- 3) Idempotent redelivery is checked BEFORE any mutation: LINE retries the
-    --    same webhook event, and a retry must not rotate the generation.
-    IF v_row.opened_line_event_id IS NOT NULL
-       AND v_row.opened_line_event_id = v_event THEN
-      RETURN jsonb_build_object(
-        'outcome',            'idempotent',
-        'rotated',            false,
-        'reason',             'duplicate_open_event',
-        'session_key',        v_row.session_key,
-        'session_generation', v_row.session_generation,
-        'entry_origin',       v_row.entry_origin,
-        'session_kind',       v_row.session_kind,
-        'opened_line_event_id', v_row.opened_line_event_id
-      );
-    END IF;
-
-    IF v_row.source_id IS DISTINCT FROM btrim(p_source_id) THEN
+    -- 3a) Ownership is validated BEFORE the redelivery shortcut. A duplicate
+    --     open_line_event_id carried by the wrong source or the wrong user is
+    --     not a retry of this session's open — answering 'idempotent' there
+    --     would leak the current generation to a caller that does not own the
+    --     row. Both checks are pure reads; nothing has been mutated yet.
+    IF v_row.source_id IS DISTINCT FROM v_source THEN
       RETURN jsonb_build_object(
         'outcome',            'ownership_conflict',
         'rotated',            false,
@@ -313,6 +350,23 @@ BEGIN
         'reason',             'user_mismatch',
         'session_key',        v_row.session_key,
         'session_generation', v_row.session_generation
+      );
+    END IF;
+
+    -- 3b) Idempotent redelivery is still checked BEFORE any mutation: LINE
+    --     retries the same webhook event, and a retry must not rotate the
+    --     generation.
+    IF v_row.opened_line_event_id IS NOT NULL
+       AND v_row.opened_line_event_id = v_event THEN
+      RETURN jsonb_build_object(
+        'outcome',            'idempotent',
+        'rotated',            false,
+        'reason',             'duplicate_open_event',
+        'session_key',        v_row.session_key,
+        'session_generation', v_row.session_generation,
+        'entry_origin',       v_row.entry_origin,
+        'session_kind',       v_row.session_kind,
+        'opened_line_event_id', v_row.opened_line_event_id
       );
     END IF;
 
@@ -336,7 +390,7 @@ BEGIN
     UPDATE public.pending_sessions
     SET
       session_generation        = v_generation,
-      source_id                 = btrim(p_source_id),
+      source_id                 = v_source,
       line_user_id              = v_user,
       accumulated_text          = '',
       latest_reply_token        = NULL,
@@ -366,6 +420,7 @@ BEGIN
       staff_label               = btrim(p_staff_label),
       market_label              = btrim(p_market_label),
       session_kind              = p_session_kind,
+      initial_transaction_type  = p_initial_transaction_type,
       declared_transaction_type = p_declared_transaction_type,
       additional_opener         = p_additional_opener,
       opened_line_event_id      = v_event
@@ -395,9 +450,10 @@ BEGIN
     finalization_error, finalized_produce_session_id,
     entry_origin, command_contract_version, business_date, transaction_time,
     transaction_time_source, staff_label, market_label, session_kind,
-    declared_transaction_type, additional_opener, opened_line_event_id
+    initial_transaction_type, declared_transaction_type, additional_opener,
+    opened_line_event_id
   ) VALUES (
-    p_session_key, btrim(p_source_id), '', NULL, v_user,
+    p_session_key, v_source, '', NULL, v_user,
     v_now, v_now, v_generation,
     NULL, NULL, NULL,
     NULL, NULL, NULL,
@@ -406,7 +462,8 @@ BEGIN
     NULL, NULL,
     p_entry_origin, p_command_contract_version, p_business_date, p_transaction_time,
     p_transaction_time_source, btrim(p_staff_label), btrim(p_market_label), p_session_kind,
-    p_declared_transaction_type, p_additional_opener, v_event
+    p_initial_transaction_type, p_declared_transaction_type, p_additional_opener,
+    v_event
   )
   RETURNING * INTO v_row;
 
@@ -425,7 +482,7 @@ $fn$;
 
 COMMENT ON FUNCTION public.open_or_rotate_produce_structured_session(
   text, text, text, text, text, bigint, integer, date, text, text, text, text,
-  text, text, text, uuid, text
+  text, text, text, text, uuid, text
 ) IS
   'SECURITY DEFINER, pinned search_path. Atomically opens or rotates ONE structured '
   'produce pending session and writes the full typed metadata set. Idempotent on a '
@@ -436,15 +493,15 @@ COMMENT ON FUNCTION public.open_or_rotate_produce_structured_session(
 -- EXECUTE, and PUBLIC's implicit default grant is revoked.
 REVOKE ALL ON FUNCTION public.open_or_rotate_produce_structured_session(
   text, text, text, text, text, bigint, integer, date, text, text, text, text,
-  text, text, text, uuid, text
+  text, text, text, text, uuid, text
 ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.open_or_rotate_produce_structured_session(
   text, text, text, text, text, bigint, integer, date, text, text, text, text,
-  text, text, text, uuid, text
+  text, text, text, text, uuid, text
 ) FROM anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.open_or_rotate_produce_structured_session(
   text, text, text, text, text, bigint, integer, date, text, text, text, text,
-  text, text, text, uuid, text
+  text, text, text, text, uuid, text
 ) TO service_role;
 
 -- ── 4) Structured close (control event) ──────────────────────────────────────
@@ -699,7 +756,7 @@ BEGIN
 
   SELECT p.prosecdef, p.proconfig INTO v_secdef, v_config
     FROM pg_proc p
-   WHERE p.oid = 'public.open_or_rotate_produce_structured_session(text,text,text,text,text,bigint,integer,date,text,text,text,text,text,text,text,uuid,text)'::regprocedure;
+   WHERE p.oid = 'public.open_or_rotate_produce_structured_session(text,text,text,text,text,bigint,integer,date,text,text,text,text,text,text,text,text,uuid,text)'::regprocedure;
   IF NOT v_secdef THEN
     RAISE EXCEPTION '0049: open_or_rotate_produce_structured_session must be SECURITY DEFINER';
   END IF;

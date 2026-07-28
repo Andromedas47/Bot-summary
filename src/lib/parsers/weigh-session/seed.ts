@@ -41,7 +41,14 @@ export interface WeighSessionSeed {
   sender_name: string | null;
   /** Section label the item loop starts in (legacy default is "main"). */
   current_section: string;
-  /** Transaction type items take until a section marker changes it. */
+  /**
+   * Transaction type items take until a section marker changes it.
+   *
+   * Seeded EXCLUSIVELY from initial_transaction_type. A guided main session may
+   * be a ชั่งคืน or คืนเสีย session with no textual section marker anywhere in
+   * its item text, so defaulting to เบิก here would silently persist returns as
+   * withdrawals.
+   */
   current_transaction_type: TransactionType;
 }
 
@@ -57,6 +64,13 @@ export interface StructuredSessionMetadata {
   staff_label: string | null;
   market_label: string | null;
   session_kind: string | null;
+  /**
+   * The transaction type the session's items start in — required for BOTH
+   * kinds. For an additional batch it equals declared_transaction_type; for a
+   * main session it is the type the operator picked when opening, and it is the
+   * only representation a guided ชั่งคืน / คืนเสีย main session has.
+   */
+  initial_transaction_type: string | null;
   declared_transaction_type: string | null;
   additional_opener: string | null;
   opened_line_event_id: string | null;
@@ -75,6 +89,7 @@ export type CompleteStructuredMetadata = StructuredSessionMetadata & {
   staff_label: string;
   market_label: string;
   session_kind: "main" | "additional";
+  initial_transaction_type: BaseTransactionType;
   opened_line_event_id: string;
 };
 
@@ -103,6 +118,9 @@ export function isStructuredSession(
   if (!row.staff_label?.trim()) return false;
   if (!row.market_label?.trim()) return false;
   if (!row.opened_line_event_id?.trim()) return false;
+  // Required for BOTH kinds: a guided main คืน session has no other way to say
+  // what its items are.
+  if (!BASE_TRANSACTION_TYPES.includes(row.initial_transaction_type as string)) return false;
 
   if (row.session_kind === "main") {
     return row.declared_transaction_type == null && row.additional_opener == null;
@@ -110,6 +128,7 @@ export function isStructuredSession(
   if (row.session_kind === "additional") {
     return Boolean(row.declared_transaction_type)
       && BASE_TRANSACTION_TYPES.includes(row.declared_transaction_type as string)
+      && row.declared_transaction_type === row.initial_transaction_type
       && Boolean(row.additional_opener);
   }
   return false;
@@ -144,8 +163,9 @@ export function buildSeedFromStructuredMetadata(
     // invented so nothing downstream mistakes it for observed sender evidence.
     sender_name:               null,
     current_section:           "main",
-    // Additional batches carry exactly one declared type end to end; a main
-    // session starts on the legacy default and moves with section markers.
-    current_transaction_type:  (declared ?? "เบิก") as TransactionType,
+    // Exclusively from initial_transaction_type — never a เบิก default. An
+    // additional batch's initial type is constrained to equal its declared type
+    // by both the CHECK constraint and isStructuredSession above.
+    current_transaction_type:  row.initial_transaction_type as TransactionType,
   };
 }

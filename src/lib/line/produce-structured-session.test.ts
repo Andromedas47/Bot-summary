@@ -3,10 +3,14 @@ import {
   ProduceSessionCommandService,
   containsProduceHeader,
   produceSessionKey,
+  validateCommandSource,
+  type AppendProduceSessionCommand,
   type ProduceCommandSource,
   type ProduceSessionCommand,
   type StructuredPendingSession,
 } from "./produce-session-commands";
+import { buildAdmittedStructuredText } from "./pending-session-finalizer";
+import type { BaseTransactionType } from "@/lib/parsers/weigh-session/types";
 import {
   COMMAND_CONTRACT_VERSION,
   buildSeedFromStructuredMetadata,
@@ -45,6 +49,7 @@ const STRUCTURED_MAIN: StructuredPendingSession = {
   staff_label: "พี่ดำ",
   market_label: "วิหาร",
   session_kind: "main",
+  initial_transaction_type: "เบิก",
   declared_transaction_type: null,
   additional_opener: null,
   opened_line_event_id: "evt-open-1",
@@ -62,6 +67,7 @@ const LEGACY_ROW: StructuredPendingSession = {
   staff_label: null,
   market_label: null,
   session_kind: null,
+  initial_transaction_type: null,
   declared_transaction_type: null,
   additional_opener: null,
   opened_line_event_id: null,
@@ -116,6 +122,7 @@ function run(
 const OPEN_MAIN: ProduceSessionCommand = {
   kind: "open",
   sessionKind: "main",
+  initialTransactionType: "เบิก",
   declaredTransactionType: null,
   additionalOpener: null,
   businessDate: "2026-07-28",
@@ -159,6 +166,7 @@ describe("0049 — structured completeness", () => {
       "staff_label",
       "market_label",
       "session_kind",
+      "initial_transaction_type",
       "opened_line_event_id",
     ];
     for (const field of required) {
@@ -262,6 +270,7 @@ describe("0049 — main and additional invariants", () => {
       {
         ...OPEN_MAIN,
         sessionKind: "additional",
+        initialTransactionType: "เบิก",
         declaredTransactionType: "เบิก",
         additionalOpener: "เบิกเพิ่ม",
       },
@@ -362,6 +371,249 @@ describe("0049 — identity is mandatory", () => {
   });
 });
 
+// ── B1. Guided main sessions of every transaction type ────────────────────────
+
+describe("0049 — guided main initial transaction type", () => {
+  const MAIN_TYPES: BaseTransactionType[] = ["เบิก", "คืน", "คืนเสีย"];
+
+  it("requires initial_transaction_type on every structured row", () => {
+    expect(isStructuredSession({ ...STRUCTURED_MAIN, initial_transaction_type: null }))
+      .toBe(false);
+    expect(isStructuredSession({ ...STRUCTURED_MAIN, initial_transaction_type: "ขาย" }))
+      .toBe(false);
+  });
+
+  it("persists items with the selected type and no textual section marker", () => {
+    for (const type of MAIN_TYPES) {
+      const seed = buildSeedFromStructuredMetadata({
+        ...STRUCTURED_MAIN,
+        initial_transaction_type: type,
+      })!;
+      // Item text only — a guided operator never types "ชั่งคืน" anywhere.
+      const parsed = parseWeighSession("1.แตงโม10บาท\n1โล\n2.ส้ม20บาท\n2โล", null, null, seed);
+      expect(parsed.session_kind).toBe("main");
+      expect(parsed.parse_errors).toEqual([]);
+      expect(parsed.items).toHaveLength(2);
+      for (const item of parsed.items) {
+        expect(item.transaction_type).toBe(type);
+      }
+    }
+  });
+
+  it("never defaults a main structured session to เบิก", () => {
+    const seed = buildSeedFromStructuredMetadata({
+      ...STRUCTURED_MAIN,
+      initial_transaction_type: "คืนเสีย",
+    })!;
+    expect(seed.current_transaction_type).toBe("คืนเสีย");
+    // declared_transaction_type stays NULL for a main session — the initial type
+    // is a separate field and is not derived from it.
+    expect(seed.declared_transaction_type).toBeNull();
+  });
+
+  it("refuses an additional open whose initial type contradicts its declared type", async () => {
+    const { supabase, result } = run(
+      {
+        ...OPEN_MAIN,
+        sessionKind: "additional",
+        initialTransactionType: "คืน",
+        declaredTransactionType: "เบิก",
+        additionalOpener: "เบิกเพิ่ม",
+      },
+      SOURCE,
+      { rpcResults: {} },
+    );
+    expect(await result).toMatchObject({ ok: false, reason: "invalid_command" });
+    expect(supabase.calls).toHaveLength(0);
+  });
+
+  it("refuses an additional row whose opener contradicts its declared type", async () => {
+    const { result } = run(
+      {
+        ...OPEN_MAIN,
+        sessionKind: "additional",
+        initialTransactionType: "เบิก",
+        declaredTransactionType: "เบิก",
+        additionalOpener: "ชั่งคืนเพิ่ม",
+      },
+      SOURCE,
+      { rpcResults: {} },
+    );
+    expect(await result).toMatchObject({ ok: false, reason: "invalid_command" });
+  });
+
+  it("sends initial_transaction_type to the RPC", async () => {
+    const { supabase, result } = run(
+      { ...OPEN_MAIN, initialTransactionType: "คืน" },
+      SOURCE,
+      {
+        rpcResults: {
+          open_or_rotate_produce_structured_session: { outcome: "opened", session_generation: "g" },
+        },
+      },
+    );
+    await result;
+    expect(supabase.calls[0].params.p_initial_transaction_type).toBe("คืน");
+  });
+});
+
+// ── B2. Blank append parity ───────────────────────────────────────────────────
+
+describe("0049 — degenerate appends never reach a ledger", () => {
+  const BLANK_TEXTS = ["", "   ", "\n", "\t\n  \n"];
+
+  it("refuses whitespace-only append before any lookup or RPC", async () => {
+    for (const text of BLANK_TEXTS) {
+      const { supabase, result } = run(
+        { kind: "append", text, lineEventId: "evt-blank", lineTimestampMs: 1_800_000_003_000 },
+        SOURCE,
+        { row: STRUCTURED_MAIN },
+      );
+      expect(await result).toMatchObject({ ok: false, reason: "invalid_command" });
+      // admission_count=1 / ingest_count=0 is impossible: nothing ran at all.
+      expect(supabase.calls).toHaveLength(0);
+      expect(supabase.tableWrites).toHaveLength(0);
+    }
+  });
+
+  it("refuses a blank or non-positive event identity", async () => {
+    const bad: AppendProduceSessionCommand[] = [
+      { kind: "append", text: "1.แตงโม10บาท", lineEventId: "  ", lineTimestampMs: 1 },
+      { kind: "append", text: "1.แตงโม10บาท", lineEventId: "e", lineTimestampMs: 0 },
+      { kind: "append", text: "1.แตงโม10บาท", lineEventId: "e", lineTimestampMs: -1 },
+      { kind: "append", text: "1.แตงโม10บาท", lineEventId: "e", lineTimestampMs: 1.5 },
+      { kind: "append", text: "1.แตงโม10บาท", lineEventId: "e", lineTimestampMs: Number.MAX_SAFE_INTEGER + 2 },
+      { kind: "append", text: "1.แตงโม10บาท", lineEventId: "e", lineTimestampMs: 1, expectedSessionGeneration: "  " },
+    ];
+    for (const command of bad) {
+      const { supabase, result } = run(command, SOURCE, { row: STRUCTURED_MAIN });
+      expect(await result).toMatchObject({ ok: false, reason: "invalid_command" });
+      expect(supabase.calls).toHaveLength(0);
+      expect(supabase.tableWrites).toHaveLength(0);
+    }
+  });
+});
+
+// ── B3. Source / session-key binding ──────────────────────────────────────────
+
+describe("0049 — the source must bind to its session key", () => {
+  it("refuses a group source whose sourceId is not the group id", async () => {
+    const { supabase, result } = run(
+      OPEN_MAIN,
+      { type: "group", sourceId: "C-other", groupId: "C1", lineUserId: "U1" },
+      { rpcResults: {} },
+    );
+    expect(await result).toMatchObject({ ok: false, reason: "invalid_source" });
+    expect(supabase.calls).toHaveLength(0);
+  });
+
+  it("refuses a room source whose sourceId is not the room id", async () => {
+    const { supabase, result } = run(
+      OPEN_MAIN,
+      { type: "room", sourceId: "R-other", roomId: "R1", lineUserId: "U1" },
+      { rpcResults: {} },
+    );
+    expect(await result).toMatchObject({ ok: false, reason: "invalid_source" });
+    expect(supabase.calls).toHaveLength(0);
+  });
+
+  it("refuses a DM source whose sourceId is not the user id", async () => {
+    const { supabase, result } = run(
+      OPEN_MAIN,
+      { type: "user", sourceId: "U-other", lineUserId: "U1" },
+      { rpcResults: {} },
+    );
+    expect(await result).toMatchObject({ ok: false, reason: "invalid_source" });
+    expect(supabase.calls).toHaveLength(0);
+  });
+
+  it("refuses a group or room source that omits its id entirely", () => {
+    expect(validateCommandSource({ type: "group", sourceId: "C1", lineUserId: "U1" }))
+      .not.toBeNull();
+    expect(validateCommandSource({ type: "room", sourceId: "R1", lineUserId: "U1" }))
+      .not.toBeNull();
+  });
+
+  it("accepts the three well-formed source shapes", () => {
+    expect(validateCommandSource({ type: "user", sourceId: "U1", lineUserId: "U1" })).toBeNull();
+    expect(validateCommandSource({ type: "group", sourceId: "C1", groupId: "C1", lineUserId: "U1" }))
+      .toBeNull();
+    expect(validateCommandSource({ type: "room", sourceId: "R1", roomId: "R1", lineUserId: "U1" }))
+      .toBeNull();
+  });
+});
+
+// ── B4. Admitted/ingest set parity in structured finalization ─────────────────
+
+describe("0049 — structured finalization parses only the admitted set", () => {
+  const admission = (id: string, ts: number) => ({ line_event_id: id, line_timestamp_ms: ts });
+  const ingest = (id: string, ts: number, raw_text: string) =>
+    ({ line_event_id: id, line_timestamp_ms: ts, raw_text });
+
+  it("joins the intersected rows in ledger order when the sets agree", () => {
+    const text = buildAdmittedStructuredText(
+      [admission("A", 10), admission("B", 20)],
+      [ingest("A", 10, "1.แตงโม10บาท"), ingest("B", 20, "1โล")],
+    );
+    expect(text).toBe("1.แตงโม10บาท\n1โล");
+  });
+
+  it("fails closed on admission {A,B} / ingest {A,C} and never parses C", () => {
+    let thrown: Error | null = null;
+    try {
+      buildAdmittedStructuredText(
+        [admission("A", 10), admission("B", 20)],
+        [ingest("A", 10, "1.แตงโม10บาท"), ingest("C", 30, "99.ของแปลกปลอม999บาท")],
+      );
+    } catch (error) {
+      thrown = error as Error;
+    }
+    expect(thrown).not.toBeNull();
+    expect(thrown!.message).toContain("C");
+    // The finalizer's structured branch throws before finalText is
+    // reassigned, so the never-admitted text cannot reach the parser.
+    const parsed = parseWeighSession("", null, null,
+      buildSeedFromStructuredMetadata(STRUCTURED_MAIN));
+    expect(parsed.items).toHaveLength(0);
+  });
+
+  it("fails closed on an admission with no ingest row", () => {
+    expect(() => buildAdmittedStructuredText(
+      [admission("A", 10), admission("B", 20)],
+      [ingest("A", 10, "1.แตงโม10บาท")],
+    )).toThrow(/B/);
+  });
+
+  it("fails closed on an ingest row with blank text", () => {
+    expect(() => buildAdmittedStructuredText(
+      [admission("A", 10)],
+      [ingest("A", 10, "   ")],
+    )).toThrow(/no ingest text/);
+  });
+
+  it("fails closed on a duplicate event id in either ledger", () => {
+    expect(() => buildAdmittedStructuredText(
+      [admission("A", 10), admission("A", 10)],
+      [ingest("A", 10, "x")],
+    )).toThrow(/duplicate admission/);
+    expect(() => buildAdmittedStructuredText(
+      [admission("A", 10)],
+      [ingest("A", 10, "x"), ingest("A", 10, "x")],
+    )).toThrow(/duplicate ingest/);
+  });
+
+  it("fails closed when admission and ingest disagree on the event timestamp", () => {
+    expect(() => buildAdmittedStructuredText(
+      [admission("A", 10)],
+      [ingest("A", 11, "x")],
+    )).toThrow(/timestamp conflict/);
+  });
+
+  it("accepts an empty generation without inventing text", () => {
+    expect(buildAdmittedStructuredText([], [])).toBe("");
+  });
+});
+
 // ── 20. No cancel, no hard delete ─────────────────────────────────────────────
 
 describe("0049 — command surface", () => {
@@ -430,6 +682,7 @@ describe("0049 — parser seed", () => {
     const additionalSeed = buildSeedFromStructuredMetadata({
       ...STRUCTURED_MAIN,
       session_kind: "additional",
+      initial_transaction_type: "เบิก",
       declared_transaction_type: "เบิก",
       additional_opener: "เบิกเพิ่ม",
     })!;
@@ -447,6 +700,7 @@ describe("0049 — parser seed", () => {
     const additionalSeed = buildSeedFromStructuredMetadata({
       ...STRUCTURED_MAIN,
       session_kind: "additional",
+      initial_transaction_type: "คืน",
       declared_transaction_type: "คืน",
       additional_opener: "ชั่งคืนเพิ่ม",
     })!;

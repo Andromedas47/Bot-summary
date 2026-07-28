@@ -44,6 +44,7 @@ const STRUCTURED_COLUMNS = [
   "staff_label",
   "market_label",
   "session_kind",
+  "initial_transaction_type",
   "declared_transaction_type",
   "additional_opener",
   "opened_line_event_id",
@@ -107,6 +108,27 @@ describe("0049 schema — completeness is a CHECK, not a convention", () => {
     expect(pair).toContain("session_kind = 'additional'");
     expect(pair).toContain("declared_transaction_type IS NOT NULL");
     expect(pair).toContain("additional_opener IS NOT NULL");
+    // An additional batch's initial type is its declared type, enforced by CHECK.
+    expect(pair).toContain("initial_transaction_type = declared_transaction_type");
+  });
+
+  it("requires initial_transaction_type for both kinds, with no default", () => {
+    const complete = code.slice(
+      code.indexOf("pending_sessions_structured_metadata_complete"),
+      code.indexOf("pending_sessions_structured_session_kind"),
+    );
+    expect(complete).toContain("initial_transaction_type  IS NULL");
+    expect(complete).toContain("initial_transaction_type  IS NOT NULL");
+    expect(code).toContain("CONSTRAINT pending_sessions_structured_initial_type");
+    // A main session must be able to be คืน / คืนเสีย, so the domain is the full
+    // base set and there is no main-only เบิก assumption anywhere in the DDL.
+    const domain = code.slice(
+      code.indexOf("pending_sessions_structured_initial_type"),
+      code.indexOf("pending_sessions_structured_time_source"),
+    );
+    expect(domain).toContain("'เบิก'");
+    expect(domain).toContain("'คืน'");
+    expect(domain).toContain("'คืนเสีย'");
   });
 
   it("constrains every typed domain", () => {
@@ -114,6 +136,7 @@ describe("0049 schema — completeness is a CHECK, not a convention", () => {
       "pending_sessions_entry_origin_domain",
       "pending_sessions_structured_session_kind",
       "pending_sessions_structured_declared_type",
+      "pending_sessions_structured_initial_type",
       "pending_sessions_structured_additional_opener",
       "pending_sessions_structured_time_source",
       "pending_sessions_structured_transaction_time_format",
@@ -152,6 +175,38 @@ describe("0049 RPC — atomic open or rotate", () => {
     expect(ownership).toBeLessThan(update);
     expect(generation).toBeLessThan(update);
     expect(body).toContain("p_expected_session_generation");
+  });
+
+  it("validates source and user ownership BEFORE the redelivery shortcut", () => {
+    // A duplicate open event presented by the wrong source or user is not a
+    // retry of this session and must not be answered with its generation.
+    const sourceCheck = body.indexOf("'source_mismatch'");
+    const userCheck = body.indexOf("'user_mismatch'");
+    const idempotent = body.indexOf("'duplicate_open_event'");
+    expect(sourceCheck).toBeGreaterThan(-1);
+    expect(userCheck).toBeGreaterThan(-1);
+    expect(sourceCheck).toBeLessThan(idempotent);
+    expect(userCheck).toBeLessThan(idempotent);
+  });
+
+  it("derives the canonical session key and refuses any other", () => {
+    // Same construction as getPendingSessionKey in verify.ts.
+    expect(body).toContain("'group:' || v_source || ':user:' || v_user");
+    expect(body).toContain("'room:'  || v_source || ':user:' || v_user");
+    expect(body).toContain("'dm:' || v_user");
+    expect(body).toContain("session_key does not match the canonical key for this source");
+    expect(body).toContain("a user source must have source_id equal to line_user_id");
+    // Derivation happens before the lock, so a mismatched key never even reads.
+    expect(body.indexOf("v_expected_key :="))
+      .toBeLessThan(body.indexOf("pg_advisory_xact_lock"));
+  });
+
+  it("requires initial_transaction_type and pairs it with the declared type", () => {
+    expect(body).toContain("initial_transaction_type is required for every structured session");
+    expect(body).toContain("p_initial_transaction_type IS DISTINCT FROM p_declared_transaction_type");
+    // Written on both the rotate and the first-open path.
+    expect(body).toContain("initial_transaction_type  = p_initial_transaction_type");
+    expect(body).toContain("p_initial_transaction_type, p_declared_transaction_type");
   });
 
   it("fails closed without a line user id", () => {
@@ -397,17 +452,52 @@ describe("0049 — structured finalization path", () => {
     expect(source).toContain("if (seed) {");
   });
 
-  it("consumes only admitted ingest text through the close boundary", async () => {
+  it("consumes only the admitted set through the close boundary", async () => {
     const source = await Bun.file(finalizerPath).text();
     const seedBranch = source.slice(
       source.indexOf("if (seed) {"),
       source.indexOf("} else if (hasHeaderInLedger("),
     );
-    expect(seedBranch).toContain("ingestRows.map((row) => row.raw_text).join");
+    // Both ledgers are loaded and intersected — not the ingest ledger alone.
+    expect(seedBranch).toContain("service.loadAdmissionRows(");
+    expect(seedBranch).toContain("buildAdmittedStructuredText(admissionRows, ingestRows)");
     // No header authority, no reconstruction, no synthesis in the seeded branch.
     expect(seedBranch).not.toContain("hasHeaderInLedger");
     expect(seedBranch).not.toContain("rebuildForFinalization");
     expect(source).toContain("loadIngestRows");
+  });
+
+  it("fails closed rather than parsing an unadmitted or mismatched row", async () => {
+    const source = await Bun.file(finalizerPath).text();
+    const helper = source.slice(
+      source.indexOf("export function buildAdmittedStructuredText("),
+      source.indexOf("// Day context for the addition reply"),
+    );
+    for (const guard of [
+      "was never admitted",
+      "has no matching ingest row",
+      "timestamp conflict",
+      "duplicate admission event",
+      "duplicate ingest event",
+      "has no ingest text",
+    ]) {
+      expect(helper).toContain(guard);
+    }
+    // It throws; the caller's catch records a reconstruction error and leaves
+    // finalText at the structured row's empty accumulated_text.
+    expect(helper).toMatch(/throw new Error/);
+    expect(source).toContain("reconstructionErrors.push(");
+  });
+
+  it("changes nothing about the legacy admitted-set handling", async () => {
+    const source = await Bun.file(finalizerPath).text();
+    const legacyBranch = source.slice(
+      source.indexOf("} else if (hasHeaderInLedger("),
+      source.indexOf("} catch (error) {"),
+    );
+    expect(legacyBranch).toContain("ingestRows.map((row) => row.raw_text).join");
+    expect(legacyBranch).not.toContain("buildAdmittedStructuredText");
+    expect(legacyBranch).not.toContain("loadAdmissionRows");
   });
 
   it("seeds the parser instead of reconstructing a header", async () => {
@@ -425,6 +515,46 @@ describe("0049 — structured finalization path", () => {
     const source = await Bun.file(finalizerPath).text();
     expect(source).toContain("} else if (hasHeaderInLedger(snapshot, ingestRows)) {");
     expect(source).toContain("finalText = await service.rebuildForFinalization(snapshot, closeTimestamp);");
+  });
+});
+
+// ── B2/B3. Command-service guards run before any I/O ──────────────────────────
+
+describe("0049 — command guards precede every read and write", () => {
+  const commandsPath = new URL("./produce-session-commands.ts", import.meta.url);
+
+  it("validates the append command before the lookup and the RPC", async () => {
+    const source = await Bun.file(commandsPath).text();
+    const append = source.slice(source.indexOf("private async append("));
+    const guard = append.indexOf("validateAppendCommand(command)");
+    const lookup = append.indexOf("this.pending.lookup(");
+    const rpc = append.indexOf("this.pending.append(");
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(lookup);
+    expect(guard).toBeLessThan(rpc);
+  });
+
+  it("validates the source binding before dispatching any command", async () => {
+    const source = await Bun.file(commandsPath).text();
+    const execute = source.slice(
+      source.indexOf("async execute("),
+      source.indexOf("private async open("),
+    );
+    expect(execute).toContain("validateCommandSource(source)");
+    expect(execute.indexOf("validateCommandSource(source)"))
+      .toBeLessThan(execute.indexOf("switch (command.kind)"));
+  });
+
+  it("rejects blank text, blank ids and non-integer timestamps", async () => {
+    const source = await Bun.file(commandsPath).text();
+    const validator = source.slice(
+      source.indexOf("function validateAppendCommand("),
+      source.indexOf("export function validateCommandSource("),
+    );
+    expect(validator).toContain('command.text.trim() === ""');
+    expect(validator).toContain("Number.isSafeInteger(command.lineTimestampMs)");
+    expect(validator).toContain("command.lineEventId?.trim()");
+    expect(validator).toContain("expectedSessionGeneration");
   });
 });
 

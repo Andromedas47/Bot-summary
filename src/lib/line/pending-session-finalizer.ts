@@ -92,6 +92,61 @@ function hasHeaderInLedger(session: PendingSession, rows: Array<{ raw_text: stri
     }));
 }
 
+/**
+ * Structured-only: the admitted item text, joined in ledger order.
+ *
+ * check_pending_close_ready proves admission_count = ingest_count, which is NOT
+ * the same as proving the two ledgers describe the same events: admission {A,B}
+ * with ingest {A,C} has equal counts, and joining every ingest row would parse C
+ * — an event that was never admitted — while silently dropping admitted B.
+ * Structured finalization therefore compares the exact generation-scoped
+ * line_event_id sets and fails closed on any asymmetry, duplicate id, blank
+ * ingest text, or admission/ingest timestamp disagreement.
+ *
+ * Throws rather than degrading: the caller records the message as a
+ * reconstruction error, leaves finalText at the structured row's empty
+ * accumulated_text, and the session fails validation instead of persisting
+ * unadmitted items.
+ */
+export function buildAdmittedStructuredText(
+  admissionRows: Array<{ line_event_id: string; line_timestamp_ms: number }>,
+  ingestRows: Array<{ line_event_id: string; line_timestamp_ms: number; raw_text: string }>,
+): string {
+  const admitted = new Map<string, number>();
+  for (const row of admissionRows) {
+    if (admitted.has(row.line_event_id)) {
+      throw new Error(`duplicate admission event ${row.line_event_id} in structured generation`);
+    }
+    admitted.set(row.line_event_id, row.line_timestamp_ms);
+  }
+
+  const seenIngest = new Set<string>();
+  for (const row of ingestRows) {
+    if (seenIngest.has(row.line_event_id)) {
+      throw new Error(`duplicate ingest event ${row.line_event_id} in structured generation`);
+    }
+    seenIngest.add(row.line_event_id);
+
+    if (!admitted.has(row.line_event_id)) {
+      throw new Error(`ingest event ${row.line_event_id} was never admitted`);
+    }
+    if (admitted.get(row.line_event_id) !== row.line_timestamp_ms) {
+      throw new Error(`admission/ingest timestamp conflict for event ${row.line_event_id}`);
+    }
+    if (row.raw_text == null || row.raw_text.trim() === "") {
+      throw new Error(`admitted event ${row.line_event_id} has no ingest text`);
+    }
+  }
+
+  for (const lineEventId of admitted.keys()) {
+    if (!seenIngest.has(lineEventId)) {
+      throw new Error(`admitted event ${lineEventId} has no matching ingest row`);
+    }
+  }
+
+  return ingestRows.map((row) => row.raw_text).join("\n");
+}
+
 // Day context for the addition reply: cumulative total for the exact
 // business date + staff + market + declared base transaction type (all
 // session kinds, each item exactly once), plus whether a main batch exists.
@@ -185,13 +240,16 @@ export async function finalizePendingGeneration(
     );
     if (seed) {
       // A structured session has no text header to find and none to invent.
-      // The ingest ledger for this generation holds exactly the operator item
-      // text that was admitted through the immutable close boundary — the
-      // typed open and the postback close contribute no ingest row at all — and
-      // the close barrier has already proven admission/ingest parity before the
-      // claim, so these rows ARE the admitted set. No ledger-header authority is
+      // Only the rows present in BOTH generation-scoped ledgers through the
+      // immutable close boundary are parsed — count parity from the close
+      // barrier is not treated as set identity. No ledger-header authority is
       // consulted and no header is synthesized.
-      finalText = ingestRows.map((row) => row.raw_text).join("\n");
+      const admissionRows = await service.loadAdmissionRows(
+        snapshot.session_key,
+        snapshot.session_generation,
+        closeTimestamp,
+      );
+      finalText = buildAdmittedStructuredText(admissionRows, ingestRows);
     } else if (hasHeaderInLedger(snapshot, ingestRows)) {
       finalText = ingestRows.map((row) => row.raw_text).join("\n");
     } else {

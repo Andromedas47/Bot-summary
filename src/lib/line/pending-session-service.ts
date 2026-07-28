@@ -400,6 +400,27 @@ export class PendingSessionService {
     return (data ?? []) as Array<{ line_event_id: string; line_timestamp_ms: number; raw_text: string }>;
   }
 
+  // Generation-scoped admission ledger through the immutable close boundary,
+  // the counterpart of loadIngestRows. Structured finalization compares the two
+  // event-id sets exactly; equal counts are not evidence of the same set.
+  async loadAdmissionRows(
+    sessionKey:        string,
+    sessionGeneration: string,
+    closeTimestampMs:  number,
+  ): Promise<Array<{ line_event_id: string; line_timestamp_ms: number }>> {
+    const { data, error } = await this.supabase
+      .from("pending_session_admission")
+      .select("line_event_id, line_timestamp_ms")
+      .eq("session_key", sessionKey)
+      .eq("session_generation", sessionGeneration)
+      .lte("line_timestamp_ms", closeTimestampMs)
+      .order("line_timestamp_ms", { ascending: true })
+      .order("line_event_id", { ascending: true });
+
+    if (error) throw new Error(`pending session admission load failed: ${error.message}`);
+    return (data ?? []) as Array<{ line_event_id: string; line_timestamp_ms: number }>;
+  }
+
   // Conditional update: only clears the claim if close_finalize_started_at still matches
   // the value set by our specific claim call, preventing a concurrent retry-close from
   // being inadvertently released.

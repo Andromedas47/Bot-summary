@@ -178,12 +178,53 @@ describe.skipIf(!pgAvailable)("P2A migration 0047 PostgreSQL hardening", () => {
       );
       expect(boot.code, `bootstrap failed:\n${boot.stderr}\n${boot.stdout}`).toBe(0);
 
+      const pgcryptoSchema = await psqlScalar(
+        psqlPath,
+        dbName,
+        `SELECT n.nspname
+           FROM pg_extension AS e
+           JOIN pg_namespace AS n ON n.oid = e.extnamespace
+          WHERE e.extname = 'pgcrypto'`,
+      );
+      const extensionsDigestExists = await psqlScalar(
+        psqlPath,
+        dbName,
+        `SELECT (to_regprocedure('extensions.digest(text,text)') IS NOT NULL)::text`,
+      );
+      const publicDigestAbsent = await psqlScalar(
+        psqlPath,
+        dbName,
+        `SELECT (to_regprocedure('public.digest(text,text)') IS NULL)::text`,
+      );
+      expect(pgcryptoSchema).toBe("extensions");
+      expect(extensionsDigestExists).toBe("true");
+      expect(publicDigestAbsent).toBe("true");
+
       const mig = await runPsql(
         psqlPath,
         ["-v", "ON_ERROR_STOP=1", "-d", dbName, "-f", MIGRATION],
         { database: dbName },
       );
       expect(mig.code, `migration 0047 failed:\n${mig.stderr}\n${mig.stdout}`).toBe(0);
+      expect(
+        await psqlScalar(
+          psqlPath,
+          dbName,
+          `SELECT public.physical_inventory_compute_ingest_set_hash(
+             '00000000-0000-4000-8000-000000000001'::uuid
+           )`,
+        ),
+      ).toBe("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+      expect(
+        await psqlScalar(
+          psqlPath,
+          dbName,
+          `SELECT (
+             to_regprocedure('extensions.digest(text,text)') IS NOT NULL
+             AND to_regprocedure('public.digest(text,text)') IS NULL
+           )::text`,
+        ),
+      ).toBe("true");
 
       const hard = await runPsql(
         psqlPath,

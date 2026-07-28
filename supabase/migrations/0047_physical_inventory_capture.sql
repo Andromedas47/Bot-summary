@@ -33,7 +33,10 @@
 --   Why DEFINER: so service_role can be denied direct INSERT/UPDATE/DELETE on
 --   evidence tables while open/admit/finalize still mutate atomically.
 
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+-- WITH SCHEMA applies only when pgcrypto is absent; IF NOT EXISTS does not
+-- relocate an extension that is already installed.
+CREATE SCHEMA IF NOT EXISTS extensions;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
 
 -- Fixed Production barrier (matches Produce 0032). Not caller-tunable.
 -- Quiet: 8 seconds. Hard deadline: 30 seconds.
@@ -402,7 +405,7 @@ STABLE
 SET search_path = public
 AS $$
   SELECT encode(
-    digest(
+    extensions.digest(
       coalesce(
         (
           SELECT string_agg(
@@ -899,7 +902,7 @@ BEGIN
     'status', s.status,
     'ingest_revision', s.ingest_revision,
     'ingest_set_hash', encode(
-      digest(
+      extensions.digest(
         coalesce(
           (
             SELECT string_agg(

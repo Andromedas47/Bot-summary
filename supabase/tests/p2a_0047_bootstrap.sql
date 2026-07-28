@@ -1,7 +1,33 @@
 -- Disposable-DB bootstrap for P2A migration 0047 hardening.
 -- Does NOT touch Production. Run against an empty local database only.
 
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE SCHEMA IF NOT EXISTS extensions;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
+
+DO $$
+DECLARE
+  v_pgcrypto_schema text;
+BEGIN
+  SELECT n.nspname
+    INTO v_pgcrypto_schema
+    FROM pg_extension AS e
+    JOIN pg_namespace AS n ON n.oid = e.extnamespace
+   WHERE e.extname = 'pgcrypto';
+
+  IF v_pgcrypto_schema IS DISTINCT FROM 'extensions' THEN
+    RAISE EXCEPTION 'pgcrypto must be installed in extensions, found %',
+      coalesce(v_pgcrypto_schema, '<missing>');
+  END IF;
+
+  IF to_regprocedure('extensions.digest(text,text)') IS NULL THEN
+    RAISE EXCEPTION 'extensions.digest(text,text) must exist';
+  END IF;
+
+  IF to_regprocedure('public.digest(text,text)') IS NOT NULL THEN
+    RAISE EXCEPTION 'public.digest(text,text) must be absent';
+  END IF;
+END
+$$;
 
 DO $$
 BEGIN

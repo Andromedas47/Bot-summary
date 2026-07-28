@@ -24,7 +24,6 @@ import {
 export {
   classifyPhysicalInventoryStandaloneIntent,
   isPhysicalInventoryHeaderLine,
-  isPhysicalInventoryItemMessage,
   isPhysicalInventorySessionClose,
   matchesPhysicalInventoryCloseLine,
 } from "./classify";
@@ -385,6 +384,27 @@ export function parsePhysicalInventoryDocument(text: string): PhysicalInventoryP
     errors,
     warnings,
   };
+}
+
+/**
+ * Narrow session-gated routing predicate for a standalone Physical Inventory
+ * item message. The actual parser must recognize at least one accepted
+ * observation. Selling-price text belongs to Produce, never P2A.
+ */
+export function isRecognizedPhysicalInventoryItemBlock(text: string): boolean {
+  if (/บาท/u.test(text.normalize("NFC"))) return false;
+
+  const parsed = parsePhysicalInventoryDocument(text);
+  const hasAcceptedObservation = parsed.items.some(
+    (item) =>
+      item.resolutionStatus === "ACCEPTED_NORMALIZED"
+      || item.resolutionStatus === "ACCEPTED_RAW",
+  );
+  const hasUnrecognizedLine = parsed.warnings.some(
+    (warning) => warning.code === "unrecognized_line",
+  );
+
+  return hasAcceptedObservation && !hasUnrecognizedLine;
 }
 
 /** Accepted observations only (RESOLVED + RAW). */

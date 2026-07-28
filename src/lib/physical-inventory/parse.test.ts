@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   acceptedPhysicalInventoryItems,
   classifyPhysicalInventoryStandaloneIntent,
+  isRecognizedPhysicalInventoryItemBlock,
   isPhysicalInventorySessionClose,
   matchesPhysicalInventoryCloseLine,
   parsePhysicalInventoryDocument,
@@ -339,5 +340,24 @@ describe("known unit alias spelling only (no conversion)", () => {
     expect(item.rawUnit).toBe("ขีด");
     expect(item.normalizedUnit).toBe("ขีด");
     expect(item.resolutionStatus).toBe("ACCEPTED_NORMALIZED");
+  });
+});
+
+describe("session-gated Physical Inventory item routing", () => {
+  test("accepts a parser-recognized stock observation", () => {
+    expect(
+      isRecognizedPhysicalInventoryItemBlock("1แตงโม\n45.ลูก"),
+    ).toBe(true);
+  });
+
+  test("rejects Produce selling-price text even when the parser can tokenize it", () => {
+    expect(
+      isRecognizedPhysicalInventoryItemBlock("1.มังคุด80บาท\n3.9.โล"),
+    ).toBe(false);
+  });
+
+  test("rejects a compact manual-slip amount and ordinary numeric chat", () => {
+    expect(isRecognizedPhysicalInventoryItemBlock("1.90")).toBe(false);
+    expect(isRecognizedPhysicalInventoryItemBlock("123")).toBe(false);
   });
 });

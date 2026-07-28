@@ -57,7 +57,7 @@ import { processWhiteSheetCloseCommand } from "@/lib/line/white-sheet-close-serv
 import { isPhysicalInventoryLineGroupAllowed } from "@/lib/physical-inventory/config";
 import {
   classifyPhysicalInventoryStandaloneIntent,
-  isPhysicalInventoryItemMessage,
+  isRecognizedPhysicalInventoryItemBlock,
   matchesPhysicalInventoryCloseLine,
   parsePhysicalInventoryDocument,
 } from "@/lib/physical-inventory";
@@ -68,6 +68,10 @@ import {
   PhysicalInventorySessionService,
 } from "@/lib/physical-inventory/session-service";
 import { finalizePhysicalInventoryAfterClose } from "@/lib/physical-inventory/finalizer";
+import {
+  DefaultDataEntrySessionOwnershipResolver,
+  type DataEntrySessionOwnershipResolver,
+} from "@/lib/line/data-entry-session-ownership";
 
 type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
@@ -137,6 +141,7 @@ interface WebhookServiceDependencies {
   scheduleBackgroundTask?: ScheduleBackgroundTask;
   physicalInventoryFinalizer?: PhysicalInventoryFinalizer;
   physicalInventoryService?: PhysicalInventorySessionGateway;
+  dataEntrySessionOwnershipResolver?: DataEntrySessionOwnershipResolver;
 }
 
 export interface WebhookProcessResult {
@@ -253,6 +258,7 @@ export class WebhookService {
   private readonly scheduleBackgroundTask: ScheduleBackgroundTask;
   private readonly physicalInventoryFinalizer: PhysicalInventoryFinalizer;
   private readonly physicalInventoryService: PhysicalInventorySessionGateway;
+  private readonly dataEntrySessionOwnershipResolver: DataEntrySessionOwnershipResolver;
 
   constructor(
     private readonly supabase: Supabase,
@@ -277,12 +283,18 @@ export class WebhookService {
           });
         });
       });
-    this.physicalInventoryFinalizer =
-      dependencies.physicalInventoryFinalizer
-      ?? ((params) => finalizePhysicalInventoryAfterClose(this.supabase, params));
     this.physicalInventoryService =
       dependencies.physicalInventoryService
       ?? new PhysicalInventorySessionService(this.supabase);
+    this.dataEntrySessionOwnershipResolver =
+      dependencies.dataEntrySessionOwnershipResolver
+      ?? new DefaultDataEntrySessionOwnershipResolver(
+        this.supabase,
+        this.physicalInventoryService,
+      );
+    this.physicalInventoryFinalizer =
+      dependencies.physicalInventoryFinalizer
+      ?? ((params) => finalizePhysicalInventoryAfterClose(this.supabase, params));
   }
 
   async processEvents(events: LineEvent[], destination: string): Promise<WebhookProcessResult[]> {
@@ -752,6 +764,61 @@ export class WebhookService {
       return null;
     }
 
+    let ownership;
+    try {
+      ownership = await this.dataEntrySessionOwnershipResolver.resolve({
+        source: event.source,
+        sourceId,
+        senderLineUserId,
+      });
+    } catch (error) {
+      log.error("interactive data-entry ownership lookup failed", {
+        sourceId,
+        senderLineUserId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      // Fail closed for P2A while preserving the established legacy router.
+      return null;
+    }
+
+    if (ownership.hasOverlap) {
+      log.warn("interactive data-entry session overlap detected", {
+        sourceId,
+        senderLineUserId,
+        legacyKinds: ownership.legacyKinds,
+        physicalInventorySessionId: ownership.physicalInventorySession?.id,
+        legacyProduceSessionId: ownership.legacyProduceSession?.id ?? null,
+        legacyManualSlipSessionId: ownership.legacyManualSlipSession?.id ?? null,
+      });
+    }
+
+    const incomingLegacyHeader =
+      findProduceSessionHeader(normalizeText(text)) !== null
+      || RE.MANUAL_SLIP_OPEN.test(text);
+    if (
+      incomingLegacyHeader
+      && ownership.physicalInventorySession
+      && !ownership.hasLegacySession
+    ) {
+      await this.markRawMessageProcessed(rawMessageId, log);
+      if (event.replyToken) {
+        await this.replyMessage(
+          event.replyToken,
+          "มีรายการสต๊อกผลไม้กำลังเปิดอยู่ กรุณาปิดรายการสต๊อกก่อนเริ่มรายการอื่น",
+        );
+      }
+      log.info("legacy data-entry session open blocked by Physical Inventory owner", {
+        sourceId,
+        senderLineUserId,
+        physicalInventorySessionId: ownership.physicalInventorySession.id,
+      });
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+
+    // Existing legacy ownership always wins, including defensive overlap.
+    // Returning null preserves the established legacy router unchanged.
+    if (ownership.hasLegacySession) return null;
+
     const service = this.physicalInventoryService;
     const replyToken = event.replyToken;
 
@@ -812,28 +879,11 @@ export class WebhookService {
       }
     }
 
-    let session;
-    try {
-      session = await service.findOpenSession(sourceId, senderLineUserId);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      log.error("Physical Inventory active-session lookup failed", {
-        sourceId,
-        senderLineUserId,
-        error: message,
-      });
-      return {
-        eventId,
-        eventType,
-        status: "error",
-        parsed: false,
-        error: message,
-      };
-    }
+    const session = ownership.physicalInventorySession;
     if (!session) return null;
 
     const close = matchesPhysicalInventoryCloseLine(text);
-    const item = !close && isPhysicalInventoryItemMessage(text);
+    const item = !close && isRecognizedPhysicalInventoryItemBlock(text);
     if (!close && !item) return null;
 
     try {

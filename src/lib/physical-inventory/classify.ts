@@ -56,16 +56,3 @@ export function classifyPhysicalInventoryStandaloneIntent(
   if (lines.some((l) => isPhysicalInventoryHeaderLine(l))) return "header";
   return "none";
 }
-
-/**
- * Session-gated item admission. Physical Stock observations are staff-numbered
- * product or quantity/unit lines, so every non-empty line starts with a number.
- * This deliberately stays narrower than "any chat while a session is open".
- */
-export function isPhysicalInventoryItemMessage(text: string): boolean {
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => nfcTrim(line))
-    .filter(Boolean);
-  return lines.length > 0 && lines.every((line) => /^-?\d/u.test(line));
-}

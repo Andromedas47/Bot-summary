@@ -11,18 +11,28 @@ import type { PhysicalInventorySessionRow } from "@/lib/physical-inventory";
 const AUTHORIZED_GROUP = "C1d96954d298d99f65912a5f1e96edffc";
 
 type Row = Record<string, unknown>;
+const P2A_FORBIDDEN_WRITE_TABLES = new Set([
+  "produce_sessions",
+  "produce_items",
+  "produce_transactions",
+  "inventory_movements",
+]);
 
 function makeSupabaseDouble() {
   const rows: Record<string, Row[]> = {
     raw_messages: [],
     parse_errors: [],
     pending_sessions: [],
+    manual_slip_sessions: [],
+    manual_slip_entries: [],
   };
+  const legacyAppends: Array<{ sessionKey: string; text: string }> = [];
   let sequence = 0;
 
   function query(table: string) {
     let inserted: Row | null = null;
     let update: Row | null = null;
+    let includeExactCount = false;
     const filters: Array<[string, unknown]> = [];
     const api: Record<string, unknown> = {};
 
@@ -32,10 +42,17 @@ function makeSupabaseDouble() {
       if (update) {
         for (const row of selected()) Object.assign(row, update);
       }
-      return { data: inserted ? [inserted] : selected(), error: null };
+      return {
+        data: inserted ? [inserted] : selected(),
+        error: null,
+        count: includeExactCount ? selected().length : null,
+      };
     };
 
     api.insert = (value: Row) => {
+      if (P2A_FORBIDDEN_WRITE_TABLES.has(table)) {
+        throw new Error(`forbidden P2A write to ${table}`);
+      }
       if (table === "raw_messages") {
         const duplicate = rows.raw_messages!.some(
           (row) => row.line_event_id === value.line_event_id,
@@ -62,15 +79,40 @@ function makeSupabaseDouble() {
       return api;
     };
     api.update = (value: Row) => {
+      if (P2A_FORBIDDEN_WRITE_TABLES.has(table)) {
+        throw new Error(`forbidden P2A write to ${table}`);
+      }
       update = value;
       return api;
     };
-    api.select = () => api;
+    api.select = (_columns?: string, options?: { count?: string }) => {
+      includeExactCount = options?.count === "exact";
+      return api;
+    };
     api.eq = (column: string, value: unknown) => {
       filters.push([column, value]);
       return api;
     };
     api.in = () => api;
+    api.gte = () => api;
+    api.gt = () => api;
+    api.lte = () => api;
+    api.lt = () => api;
+    api.neq = () => api;
+    api.not = () => api;
+    api.is = () => api;
+    api.or = () => api;
+    api.order = () => api;
+    api.limit = () => api;
+    api.range = () => api;
+    api.upsert = (value: Row | Row[]) => {
+      if (P2A_FORBIDDEN_WRITE_TABLES.has(table)) {
+        throw new Error(`forbidden P2A write to ${table}`);
+      }
+      const values = Array.isArray(value) ? value : [value];
+      (rows[table] ??= []).push(...values);
+      return api;
+    };
     api.maybeSingle = async () => ({ data: selected()[0] ?? null, error: null });
     api.single = async () => ({
       data: inserted ?? selected()[0] ?? null,
@@ -82,18 +124,38 @@ function makeSupabaseDouble() {
 
   return {
     from(table: string) {
-      if (
-        table === "produce_sessions"
-        || table === "produce_items"
-        || table === "inventory_movements"
-      ) {
-        throw new Error(`forbidden P2A access to ${table}`);
-      }
       return query(table);
+    },
+    async rpc(name: string, args: Record<string, unknown>) {
+      if (name === "append_pending_session") {
+        const sessionKey = String(args.p_session_key);
+        const session = rows.pending_sessions!.find(
+          (row) => row.session_key === sessionKey,
+        );
+        if (!session) {
+          return {
+            data: { accepted: false, reason: "not_found", session: null },
+            error: null,
+          };
+        }
+        const text = String(args.p_new_text);
+        legacyAppends.push({ sessionKey, text });
+        session.accumulated_text = `${String(session.accumulated_text)}\n${text}`;
+        session.updated_at = new Date().toISOString();
+        return {
+          data: { accepted: true, reason: "appended", session },
+          error: null,
+        };
+      }
+      throw new Error(`unexpected base RPC ${name}`);
+    },
+    _seed(table: string, row: Row) {
+      (rows[table] ??= []).push(row);
     },
     _rows(table: string) {
       return rows[table] ?? [];
     },
+    _legacyAppends: legacyAppends,
   };
 }
 
@@ -337,7 +399,7 @@ function withPhysicalInventoryRpc(
           };
         }
       }
-      throw new Error(`unexpected RPC ${name}`);
+      return base.rpc(name, args);
     },
   };
 }
@@ -374,6 +436,56 @@ function textEvent(
   };
 }
 
+function seedLegacyProduceSession(
+  db: ReturnType<typeof makeSupabaseDouble>,
+  header: string,
+  senderId = "U-sender-1",
+): void {
+  const now = new Date().toISOString();
+  db._seed("pending_sessions", {
+    id: `legacy-${senderId}`,
+    session_key: `group:${AUTHORIZED_GROUP}:user:${senderId}`,
+    source_id: AUTHORIZED_GROUP,
+    accumulated_text: header,
+    latest_reply_token: null,
+    line_user_id: senderId,
+    created_at: now,
+    updated_at: now,
+    session_generation: `40000000-0000-4000-8000-${senderId.padEnd(12, "0").slice(0, 12)}`,
+    close_event_timestamp_ms: null,
+    close_requested_at: null,
+    close_line_event_id: null,
+    close_finalize_started_at: null,
+    terminalized: false,
+    next_attempt_at: null,
+    close_deadline_at: null,
+    close_session_generation: null,
+    expected_item_count: null,
+    ingest_revision: 1,
+    finalization_started_at: null,
+    finalized_at: null,
+    finalization_status: "pending",
+    finalization_error: null,
+    finalized_produce_session_id: null,
+  });
+}
+
+function seedManualSlipSession(
+  db: ReturnType<typeof makeSupabaseDouble>,
+  senderId = "U-sender-1",
+): void {
+  db._seed("manual_slip_sessions", {
+    id: "manual-session-1",
+    source_id: AUTHORIZED_GROUP,
+    business_date: "2026-07-28",
+    market_key: "market-1",
+    market_label: "ตลาด 1",
+    status: "open",
+    opened_by_line_user_id: senderId,
+    opened_line_message_id: "manual-open-1",
+  });
+}
+
 function service() {
   const db = makeSupabaseDouble();
   const gateway = makePhysicalInventoryGateway();
@@ -384,6 +496,9 @@ function service() {
     physicalInventoryService: gateway,
     replyMessage: async (_token, text) => {
       replies.push(text);
+    },
+    replyMessages: async (_token, texts) => {
+      replies.push(...texts);
     },
     scheduleBackgroundTask: (task) => scheduled.push(task),
     physicalInventoryFinalizer: async ({ sessionId }) => {
@@ -442,12 +557,177 @@ describe("P2A Slice C webhook routing", () => {
 
   test("unauthorized group remains outside P2A", async () => {
     const ctx = service();
-    const [result] = await ctx.webhook.processEvents([
+    const results = await ctx.webhook.processEvents([
       textEvent("สตอกผลไม้คงเหลือ\n28/7/69", { groupId: "C-other" }),
+      textEvent("1แตงโม\n45.ลูก", { groupId: "C-other" }),
+      textEvent("จบ", { groupId: "C-other" }),
+    ], "destination");
+
+    expect(results.every((result) => result.parsed !== true)).toBe(true);
+    expect(ctx.gateway._sessions).toHaveLength(0);
+    expect(ctx.gateway._ingests).toHaveLength(0);
+  });
+
+  for (const legacy of [
+    {
+      label: "withdrawal",
+      header: "กี้-ตลาดหนึ่ง เบิก 28/7/2569",
+      item: "1.มังคุด80บาท\n3.9.โล",
+    },
+    {
+      label: "good return",
+      header: "กี้-ตลาดหนึ่ง คืน 28/7/2569",
+      item: "1.มังคุด\n3.9.โล",
+    },
+    {
+      label: "damaged return",
+      header: "กี้-ตลาดหนึ่ง คืนเสีย 28/7/2569",
+      item: "1.มังคุด\n3.9.โล",
+    },
+  ]) {
+    test(`active ${legacy.label} owns its numeric item during defensive overlap`, async () => {
+      const ctx = service();
+      await ctx.webhook.processEvents([
+        textEvent("สตอกผลไม้คงเหลือ\n28/7/69"),
+      ], "destination");
+      seedLegacyProduceSession(ctx.db, legacy.header);
+
+      await ctx.webhook.processEvents([
+        textEvent(legacy.item),
+      ], "destination");
+
+      expect(
+        ctx.gateway._ingests.filter((row) => row.kind === "item"),
+      ).toHaveLength(0);
+      expect(ctx.db._legacyAppends.map((row) => row.text)).toEqual([legacy.item]);
+      expect(ctx.gateway._sessions[0]?.status).toBe("open");
+    });
+  }
+
+  test("active manual slip owns compact numeric amounts during defensive overlap", async () => {
+    const ctx = service();
+    await ctx.webhook.processEvents([
+      textEvent("สตอกผลไม้คงเหลือ\n28/7/69"),
+    ], "destination");
+    seedManualSlipSession(ctx.db);
+
+    await ctx.webhook.processEvents([
+      textEvent("1.90"),
+    ], "destination");
+
+    expect(
+      ctx.gateway._ingests.filter((row) => row.kind === "item"),
+    ).toHaveLength(0);
+    expect(ctx.db._rows("manual_slip_entries")).toHaveLength(1);
+    expect(ctx.db._rows("manual_slip_entries")[0]?.amount).toBe(90);
+  });
+
+  test("active legacy session prevents a P2A header from opening", async () => {
+    const ctx = service();
+    seedLegacyProduceSession(
+      ctx.db,
+      "กี้-ตลาดหนึ่ง เบิก 28/7/2569",
+    );
+
+    await ctx.webhook.processEvents([
+      textEvent("สตอกผลไม้คงเหลือ\n28/7/69"),
+    ], "destination");
+
+    expect(ctx.gateway._sessions).toHaveLength(0);
+    expect(ctx.gateway._ingests).toHaveLength(0);
+    expect(ctx.db._legacyAppends.at(-1)?.text).toContain("สตอกผลไม้คงเหลือ");
+  });
+
+  test("active P2A blocks a new legacy header with one clear reply", async () => {
+    const ctx = service();
+    await ctx.webhook.processEvents([
+      textEvent("สตอกผลไม้คงเหลือ\n28/7/69"),
+    ], "destination");
+    const legacyHeader = textEvent("กี้-ตลาดหนึ่ง เบิก 28/7/2569", {
+      eventId: "blocked-legacy-header",
+    });
+
+    await ctx.webhook.processEvents([legacyHeader], "destination");
+    await ctx.webhook.processEvents([
+      { ...legacyHeader, deliveryContext: { isRedelivery: true } },
+    ], "destination");
+
+    expect(ctx.gateway._sessions).toHaveLength(1);
+    expect(ctx.db._rows("pending_sessions")).toHaveLength(0);
+    expect(ctx.replies.filter((reply) =>
+      reply.includes("กรุณาปิดรายการสต๊อกก่อนเริ่มรายการอื่น")
+    )).toHaveLength(1);
+  });
+
+  test("legacy owner keeps bare close away from an overlapping P2A session", async () => {
+    const ctx = service();
+    await ctx.webhook.processEvents([
+      textEvent("สตอกผลไม้คงเหลือ\n28/7/69"),
+    ], "destination");
+    seedLegacyProduceSession(
+      ctx.db,
+      "กี้-ตลาดหนึ่ง เบิก 28/7/2569",
+    );
+
+    await ctx.webhook.processEvents([textEvent("จบ")], "destination");
+
+    expect(
+      ctx.gateway._ingests.filter((row) => row.kind === "close"),
+    ).toHaveLength(0);
+    expect(ctx.db._legacyAppends.at(-1)?.text).toBe("จบ");
+    expect(ctx.gateway._sessions[0]?.status).toBe("open");
+    expect(ctx.gateway._sessions[0]?.close_event_timestamp_ms).toBeNull();
+  });
+
+  test("P2A-only session admits a parser-recognized stock item", async () => {
+    const ctx = service();
+    await ctx.webhook.processEvents([
+      textEvent("สตอกผลไม้คงเหลือ\n28/7/69"),
+      textEvent("1แตงโม\n45.ลูก"),
+    ], "destination");
+
+    expect(
+      ctx.gateway._ingests.filter((row) => row.kind === "item"),
+    ).toHaveLength(1);
+  });
+
+  test("P2A-only session does not admit a Produce-priced item", async () => {
+    const ctx = service();
+    await ctx.webhook.processEvents([
+      textEvent("สตอกผลไม้คงเหลือ\n28/7/69"),
+      textEvent("1.มังคุด80บาท\n3.9.โล"),
+    ], "destination");
+
+    expect(
+      ctx.gateway._ingests.filter((row) => row.kind === "item"),
+    ).toHaveLength(0);
+  });
+
+  test("numeric normal chat with no active session remains outside P2A", async () => {
+    const ctx = service();
+    const [result] = await ctx.webhook.processEvents([
+      textEvent("123"),
     ], "destination");
 
     expect(result?.parsed).toBe(false);
     expect(ctx.gateway._sessions).toHaveLength(0);
+    expect(ctx.gateway._ingests).toHaveLength(0);
+  });
+
+  test("stock and sales summary commands bypass an active P2A session", async () => {
+    const ctx = service();
+    await ctx.webhook.processEvents([
+      textEvent("สตอกผลไม้คงเหลือ\n28/7/69"),
+    ], "destination");
+    const before = ctx.gateway._ingests.length;
+
+    const results = await ctx.webhook.processEvents([
+      textEvent("สรุปคงเหลือ 28/07/2569"),
+      textEvent("สรุปยอดขาย 28/07/2569"),
+    ], "destination");
+
+    expect(results.every((result) => result.status === "saved")).toBe(true);
+    expect(ctx.gateway._ingests).toHaveLength(before);
   });
 
   test("header redelivery and concurrent identical headers create one session", async () => {

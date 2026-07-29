@@ -37,7 +37,7 @@ export function buildSlice2EvidenceMessages(): Slice2EvidenceBundle {
   const tWithdraw = fixedEvidenceToken(1);
   const tReturn = fixedEvidenceToken(2);
   const tDamaged = fixedEvidenceToken(3);
-  const tKee = fixedEvidenceToken(4);
+  const tMarket = fixedEvidenceToken(4);
   const tBackRoot = fixedEvidenceToken(5);
   const tCancel = fixedEvidenceToken(6);
   const tToday = fixedEvidenceToken(7);
@@ -59,8 +59,8 @@ export function buildSlice2EvidenceMessages(): Slice2EvidenceBundle {
       buildMarketSelectMessage({
         transactionType: "withdraw",
         sellerLabel: "พี่ดำ",
-        markets: [{ code: "kee", label: "ตลาดกี้" }],
-        marketTokens: new Map([["kee", tKee]]),
+        markets: [{ code: "wat_thung_lanna", label: "วัดทุ่งลานนา" }],
+        marketTokens: new Map([["wat_thung_lanna", tMarket]]),
         backToken: tBackRoot,
         cancelToken: tCancel,
       }),
@@ -69,7 +69,7 @@ export function buildSlice2EvidenceMessages(): Slice2EvidenceBundle {
       buildDateSelectMessage({
         transactionType: "withdraw",
         sellerLabel: "พี่ดำ",
-        marketLabel: "ตลาดกี้",
+        marketLabel: "วัดทุ่งลานนา",
         todayToken: tToday,
         yesterdayToken: tYesterday,
         backToken: tBackMarket,
@@ -80,7 +80,7 @@ export function buildSlice2EvidenceMessages(): Slice2EvidenceBundle {
       buildConfirmPreviewMessage({
         transactionType: "withdraw",
         sellerLabel: "พี่ดำ",
-        marketLabel: "ตลาดกี้",
+        marketLabel: "วัดทุ่งลานนา",
         dateThaiShort: "29/07/2569",
         confirmToken: tConfirm,
         backToken: tBackDate,

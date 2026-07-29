@@ -197,9 +197,13 @@ export class GuidedMenuFakeDatabase {
     this.sellerMarkets.push(row);
     this.tables.line_guided_menu_seller_markets = [...this.sellerMarkets];
   }
-  /** Convenience: seed the three default active markets used by Slice 1 migration. */
+  /** Convenience: seed reviewed active markets used by Guided Menu tests. */
   seedDefaultMarkets(): void {
-    this.seedMarket({ market_code: "kee", label: "ตลาดกี้", active: true });
+    this.seedMarket({
+      market_code: "wat_thung_lanna",
+      label: "วัดทุ่งลานนา",
+      active: true,
+    });
     this.seedMarket({
       market_code: "seven_front",
       label: "หน้าเซเวน",

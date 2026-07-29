@@ -1,5 +1,5 @@
 -- 0055: Guided Menu seller + seller-market catalog (Slice 2.5).
--- No Produce/session writes. Existing 0051 markets are reused unchanged.
+-- No Produce/session writes. Only explicitly reviewed catalog rows are seeded.
 
 DO $$
 BEGIN
@@ -22,6 +22,32 @@ CREATE TABLE public.line_guided_menu_sellers (
     CHECK (btrim(label) <> '')
 );
 
+CREATE TABLE public.line_guided_menu_seller_aliases (
+  alias_label text PRIMARY KEY,
+  seller_code text NOT NULL,
+  active      boolean NOT NULL DEFAULT true,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT line_guided_menu_seller_aliases_label_nonblank
+    CHECK (btrim(alias_label) <> ''),
+  CONSTRAINT line_guided_menu_seller_aliases_seller_fk
+    FOREIGN KEY (seller_code)
+    REFERENCES public.line_guided_menu_sellers (seller_code)
+);
+
+CREATE TABLE public.line_guided_menu_market_aliases (
+  alias_label text PRIMARY KEY,
+  market_code text NOT NULL,
+  active      boolean NOT NULL DEFAULT true,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT line_guided_menu_market_aliases_label_nonblank
+    CHECK (btrim(alias_label) <> ''),
+  CONSTRAINT line_guided_menu_market_aliases_market_fk
+    FOREIGN KEY (market_code)
+    REFERENCES public.line_guided_menu_markets (market_code)
+);
+
 CREATE TABLE public.line_guided_menu_seller_markets (
   seller_code text NOT NULL,
   market_code text NOT NULL,
@@ -40,10 +66,16 @@ CREATE TABLE public.line_guided_menu_seller_markets (
 
 COMMENT ON TABLE public.line_guided_menu_sellers IS
   'Authoritative seller catalog for Guided Menu seller selection.';
+COMMENT ON TABLE public.line_guided_menu_seller_aliases IS
+  'Reviewed historical seller labels mapped to canonical sellers.';
+COMMENT ON TABLE public.line_guided_menu_market_aliases IS
+  'Reviewed historical market labels mapped to canonical markets.';
 COMMENT ON TABLE public.line_guided_menu_seller_markets IS
   'Authoritative allowed seller-market assignments for Guided Menu.';
 
 ALTER TABLE public.line_guided_menu_sellers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.line_guided_menu_seller_aliases ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.line_guided_menu_market_aliases ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.line_guided_menu_seller_markets ENABLE ROW LEVEL SECURITY;
 
 REVOKE ALL ON TABLE public.line_guided_menu_sellers FROM PUBLIC;
@@ -51,14 +83,186 @@ REVOKE ALL ON TABLE public.line_guided_menu_sellers FROM anon, authenticated;
 REVOKE ALL ON TABLE public.line_guided_menu_sellers FROM service_role;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.line_guided_menu_sellers TO service_role;
 
+REVOKE ALL ON TABLE public.line_guided_menu_seller_aliases FROM PUBLIC;
+REVOKE ALL ON TABLE public.line_guided_menu_seller_aliases FROM anon, authenticated;
+REVOKE ALL ON TABLE public.line_guided_menu_seller_aliases FROM service_role;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.line_guided_menu_seller_aliases TO service_role;
+
+REVOKE ALL ON TABLE public.line_guided_menu_market_aliases FROM PUBLIC;
+REVOKE ALL ON TABLE public.line_guided_menu_market_aliases FROM anon, authenticated;
+REVOKE ALL ON TABLE public.line_guided_menu_market_aliases FROM service_role;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.line_guided_menu_market_aliases TO service_role;
+
 REVOKE ALL ON TABLE public.line_guided_menu_seller_markets FROM PUBLIC;
 REVOKE ALL ON TABLE public.line_guided_menu_seller_markets FROM anon, authenticated;
 REVOKE ALL ON TABLE public.line_guided_menu_seller_markets FROM service_role;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.line_guided_menu_seller_markets TO service_role;
 
--- Seller rows are deliberately omitted pending the business confirmations in
--- docs/guided-menu-slice-2.5-catalog-review.md. Never seed historical text
--- without explicit review.
+-- 0051's ตลาดกี้ row was based on malformed history, not a genuine market.
+DELETE FROM public.line_guided_menu_markets
+WHERE market_code = 'kee';
+
+-- Deterministic reviewed catalog. Conflict updates are guarded so rerunning
+-- the seed DML is a no-op when values already match.
+INSERT INTO public.line_guided_menu_markets
+  (market_code, label, active)
+VALUES
+  ('ratchaphruek', 'ราชพฤกษ์', true),
+  ('chaloem_72', 'เฉลิมฯ72', true),
+  ('wat_thung_lanna', 'วัดทุ่งลานนา', true),
+  ('paseo_vegetable', 'พาซิโอ้ผัก', true),
+  ('wat_taklam', 'วัดตะกล่ำ', true),
+  ('paseo_fruit', 'พาซิโอ้ผลไม้', true),
+  ('wihan', 'วิหาร', true),
+  ('paseo_durian', 'พาซิโอ้ทุเรียน', true),
+  ('liap_duan', 'เลียบด่วน', true),
+  ('sap_phun', 'ทรัพย์พัน', true),
+  ('seven_front', 'หน้าเซเวน', true),
+  ('rot_re', 'รถเร่', true)
+ON CONFLICT (market_code) DO UPDATE
+SET label = EXCLUDED.label,
+    active = EXCLUDED.active,
+    updated_at = now()
+WHERE (line_guided_menu_markets.label, line_guided_menu_markets.active)
+  IS DISTINCT FROM (EXCLUDED.label, EXCLUDED.active);
+
+INSERT INTO public.line_guided_menu_sellers
+  (seller_code, label, active, sort_order)
+VALUES
+  ('ki', 'กี้', true, 10),
+  ('ohm', 'โอม', true, 20),
+  ('jiew', 'จิ๋ว', true, 30),
+  ('noi', 'น้อย', true, 40),
+  ('tan', 'แทน', true, 50),
+  ('tom', 'ต้อม', true, 60),
+  ('wut', 'วุฒิ', true, 70),
+  ('kwan', 'ขวัญ', true, 80),
+  ('mint', 'มิ้น', true, 90),
+  ('phi_dam', 'พี่ดำ', true, 100),
+  ('pla', 'ปลา', true, 110),
+  ('toey', 'เต้ย', true, 120),
+  ('nu_lek', 'หนูเล็ก', true, 130),
+  ('ja', 'จ๋า', true, 140),
+  ('pa_lee', 'ป้าลี', true, 150),
+  ('nang', 'นาง', true, 160)
+ON CONFLICT (seller_code) DO UPDATE
+SET label = EXCLUDED.label,
+    active = EXCLUDED.active,
+    sort_order = EXCLUDED.sort_order,
+    updated_at = now()
+WHERE (
+  line_guided_menu_sellers.label,
+  line_guided_menu_sellers.active,
+  line_guided_menu_sellers.sort_order
+) IS DISTINCT FROM (
+  EXCLUDED.label,
+  EXCLUDED.active,
+  EXCLUDED.sort_order
+);
+
+INSERT INTO public.line_guided_menu_seller_aliases
+  (alias_label, seller_code, active)
+VALUES
+  ('กี่', 'ki', true),
+  ('โอ', 'ohm', true),
+  ('ดำ', 'phi_dam', true)
+ON CONFLICT (alias_label) DO UPDATE
+SET seller_code = EXCLUDED.seller_code,
+    active = EXCLUDED.active,
+    updated_at = now()
+WHERE (
+  line_guided_menu_seller_aliases.seller_code,
+  line_guided_menu_seller_aliases.active
+) IS DISTINCT FROM (
+  EXCLUDED.seller_code,
+  EXCLUDED.active
+);
+
+INSERT INTO public.line_guided_menu_market_aliases
+  (alias_label, market_code, active)
+VALUES
+  ('ตลาด72', 'chaloem_72', true),
+  ('เฉลิม72', 'chaloem_72', true),
+  ('พาชิโอ้ทุเรียน', 'paseo_durian', true),
+  ('พาสิโอ้ทุเรียน', 'paseo_durian', true),
+  ('พาชิโอ้ ทุเรียน', 'paseo_durian', true),
+  ('พาชิโอ้ผลไม้', 'paseo_fruit', true),
+  ('พาชิโอ้ ผลไม้', 'paseo_fruit', true),
+  ('ตลาดพาซิโอ้ผลไม้', 'paseo_fruit', true),
+  ('พาสิโอ้ผลไม้', 'paseo_fruit', true),
+  ('พาชิโอ้ผัก', 'paseo_vegetable', true),
+  ('พาสิโอ้ผัก', 'paseo_vegetable', true),
+  ('ตลาดราชพฤก', 'ratchaphruek', true),
+  ('ตลาดราชพฤกษ์', 'ratchaphruek', true),
+  ('ราชพฤก', 'ratchaphruek', true),
+  ('เลียบทางด่วน', 'liap_duan', true),
+  ('วัดตะกลํ่า', 'wat_taklam', true),
+  ('ตลาดทุ่งลานนา', 'wat_thung_lanna', true),
+  ('ตลาดวัดทุ่งลานนา', 'wat_thung_lanna', true),
+  ('ทุ่งลานนา', 'wat_thung_lanna', true),
+  ('หน้าเซเว่น', 'seven_front', true),
+  ('ทรัพย์พัน2', 'sap_phun', true)
+ON CONFLICT (alias_label) DO UPDATE
+SET market_code = EXCLUDED.market_code,
+    active = EXCLUDED.active,
+    updated_at = now()
+WHERE (
+  line_guided_menu_market_aliases.market_code,
+  line_guided_menu_market_aliases.active
+) IS DISTINCT FROM (
+  EXCLUDED.market_code,
+  EXCLUDED.active
+);
+
+INSERT INTO public.line_guided_menu_seller_markets
+  (seller_code, market_code, active, sort_order)
+VALUES
+  ('ki', 'wat_thung_lanna', true, 10),
+  ('ki', 'wat_taklam', true, 20),
+  ('ki', 'wihan', true, 30),
+  ('ohm', 'paseo_fruit', true, 10),
+  ('ohm', 'paseo_vegetable', true, 20),
+  ('jiew', 'rot_re', true, 10),
+  ('noi', 'wat_taklam', true, 10),
+  ('noi', 'sap_phun', true, 20),
+  ('noi', 'liap_duan', true, 30),
+  ('noi', 'seven_front', true, 40),
+  ('tan', 'wihan', true, 10),
+  ('tan', 'liap_duan', true, 20),
+  ('tan', 'paseo_durian', true, 30),
+  ('tom', 'paseo_vegetable', true, 10),
+  ('tom', 'paseo_durian', true, 20),
+  ('tom', 'paseo_fruit', true, 30),
+  ('wut', 'ratchaphruek', true, 10),
+  ('wut', 'wat_taklam', true, 20),
+  ('kwan', 'chaloem_72', true, 10),
+  ('mint', 'chaloem_72', true, 10),
+  ('phi_dam', 'chaloem_72', true, 10),
+  ('phi_dam', 'paseo_fruit', true, 20),
+  ('phi_dam', 'ratchaphruek', true, 30),
+  ('phi_dam', 'wihan', true, 40),
+  ('phi_dam', 'wat_thung_lanna', true, 50),
+  ('phi_dam', 'liap_duan', true, 60),
+  ('phi_dam', 'sap_phun', true, 70),
+  ('pla', 'ratchaphruek', true, 10),
+  ('toey', 'chaloem_72', true, 10),
+  ('toey', 'wihan', true, 20),
+  ('toey', 'wat_thung_lanna', true, 30),
+  ('nu_lek', 'seven_front', true, 10),
+  ('nu_lek', 'paseo_fruit', true, 20),
+  ('pa_lee', 'paseo_fruit', true, 10),
+  ('pa_lee', 'paseo_vegetable', true, 20)
+ON CONFLICT (seller_code, market_code) DO UPDATE
+SET active = EXCLUDED.active,
+    sort_order = EXCLUDED.sort_order,
+    updated_at = now()
+WHERE (
+  line_guided_menu_seller_markets.active,
+  line_guided_menu_seller_markets.sort_order
+) IS DISTINCT FROM (
+  EXCLUDED.active,
+  EXCLUDED.sort_order
+);
 
 ALTER TABLE public.line_menu_states
   DROP CONSTRAINT line_menu_states_action_type_allowed;

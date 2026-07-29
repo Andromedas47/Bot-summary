@@ -109,11 +109,11 @@ describe("0051 Slice 2 — LINE label and Flex byte limits", () => {
       transactionType: "withdraw",
       sellerLabel: "Seller A",
       markets: [
-        { code: "kee", label: "ตลาดกี้" },
+        { code: "wat_thung_lanna", label: "วัดทุ่งลานนา" },
         { code: "seven_front", label: "หน้าเซเวน" },
       ],
       marketTokens: new Map([
-        ["kee", fixedEvidenceToken(12)],
+        ["wat_thung_lanna", fixedEvidenceToken(12)],
         ["seven_front", fixedEvidenceToken(13)],
       ]),
       backToken: fixedEvidenceToken(14),

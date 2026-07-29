@@ -46,7 +46,11 @@ function seededHandler(db: GuidedMenuFakeDatabase): GuidedMenuUxHandler {
     staff_label: "พี่ดำ",
     active: true,
   });
-  db.seedMarket({ market_code: "kee", label: "ตลาดกี้", active: true });
+  db.seedMarket({
+    market_code: "wat_thung_lanna",
+    label: "วัดทุ่งลานนา",
+    active: true,
+  });
   db.seedSeller({
     seller_code: "seller_a",
     label: "พี่ดำ",
@@ -55,7 +59,7 @@ function seededHandler(db: GuidedMenuFakeDatabase): GuidedMenuUxHandler {
   });
   db.seedSellerMarket({
     seller_code: "seller_a",
-    market_code: "kee",
+    market_code: "wat_thung_lanna",
     active: true,
     sort_order: 1,
   });
@@ -74,7 +78,11 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
 
   it("refuses unmapped and inactive operators without display-name fallback", async () => {
     const db = new GuidedMenuFakeDatabase();
-    db.seedMarket({ market_code: "kee", label: "ตลาดกี้", active: true });
+    db.seedMarket({
+      market_code: "wat_thung_lanna",
+      label: "วัดทุ่งลานนา",
+      active: true,
+    });
     const handler = new GuidedMenuUxHandler(db.asClient());
 
     const unmapped = await handler.openMenu({ identity: IDENTITY });
@@ -100,7 +108,11 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
       staff_label: "พี่ดำ",
       active: true,
     });
-    db.seedMarket({ market_code: "kee", label: "ตลาดกี้", active: true });
+    db.seedMarket({
+      market_code: "wat_thung_lanna",
+      label: "วัดทุ่งลานนา",
+      active: true,
+    });
     db.seedMarket({
       market_code: "seven_front",
       label: "หน้าเซเวน",
@@ -114,8 +126,8 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     const svc = new GuidedMenuStateService(db.asClient());
     const active = await svc.listActiveMarkets();
     expect(active.map((m) => m.marketCode).sort()).toEqual([
-      "kee",
       "seven_front",
+      "wat_thung_lanna",
     ]);
     expect(active.every((m) => m.active)).toBe(true);
     expect(toMarketOption(active[0]!).code).toBe(active[0]!.marketCode);
@@ -204,7 +216,7 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
       expect(parseMenuToken(action.data).ok).toBe(true);
       expect(action.data.length).toBeLessThanOrEqual(64);
       expect(action.data).not.toContain("เบิก");
-      expect(action.data).not.toContain("kee");
+      expect(action.data).not.toContain("wat_thung_lanna");
       expect(action.data).not.toContain("withdraw");
     }
     assertGuidedMenuMessageLimits(opened.messages);
@@ -240,14 +252,14 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     });
     expect(market.screen).toBe("market");
     const marketTokens = collectPostbackData(market.messages);
-    const keeToken = marketTokens.find((t) => {
+    const marketToken = marketTokens.find((t) => {
       const row = db.stateByWire(t);
-      return row?.payload.market_code === "kee";
+      return row?.payload.market_code === "wat_thung_lanna";
     });
-    expect(keeToken).toBeTruthy();
+    expect(marketToken).toBeTruthy();
 
     const date = await handler.handlePostback({
-      wireToken: keeToken!,
+      wireToken: marketToken!,
       lineEventId: "evt-mkt",
       identity: IDENTITY,
       lineTimestampMs: TS,
@@ -273,13 +285,13 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     expect(json).toContain("กำลังจะเปิดรายการ");
     expect(json).toContain("ประเภท: เบิก");
     expect(json).toContain("คนขาย: พี่ดำ");
-    expect(json).toContain("ตลาด: ตลาดกี้");
+    expect(json).toContain("ตลาด: วัดทุ่งลานนา");
     expect(json).toContain(`วันที่: ${formatThaiDateShort("2026-07-29")}`);
     expect(json).toContain("ยืนยัน");
     expect(confirm.result).toMatchObject({
       transaction_type: "withdraw",
       seller_code: "seller_a",
-      market_code: "kee",
+      market_code: "wat_thung_lanna",
       date_mode: "today",
     });
     expect(confirm.result).not.toHaveProperty("market_label");
@@ -342,13 +354,17 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
       identity: IDENTITY,
       lineTimestampMs: TS,
     });
-    const keeToken = collectPostbackData(marketScreen.messages).find((t) => {
+    const marketToken = collectPostbackData(marketScreen.messages).find((t) => {
       const row = db.stateByWire(t);
-      return row?.payload.market_code === "kee";
+      return row?.payload.market_code === "wat_thung_lanna";
     });
-    db.seedMarket({ market_code: "kee", label: "ตลาดกี้", active: false });
+    db.seedMarket({
+      market_code: "wat_thung_lanna",
+      label: "วัดทุ่งลานนา",
+      active: false,
+    });
     const refused = await handler.handlePostback({
-      wireToken: keeToken!,
+      wireToken: marketToken!,
       lineEventId: "evt-mkt-ina",
       identity: IDENTITY,
       lineTimestampMs: TS,

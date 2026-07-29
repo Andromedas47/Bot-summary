@@ -78,9 +78,9 @@
               "height": "sm",
               "action": {
                 "type": "postback",
-                "label": "ตลาดกี้",
+                "label": "วัดทุ่งลานนา",
                 "data": "gpm1:BAQEBAQEBAQEBAQEBAQEBA",
-                "displayText": "ตลาดกี้"
+                "displayText": "วัดทุ่งลานนา"
               }
             },
             {
@@ -147,7 +147,7 @@
             },
             {
               "type": "text",
-              "text": "ตลาด: ตลาดกี้",
+              "text": "ตลาด: วัดทุ่งลานนา",
               "size": "sm",
               "color": "#334155",
               "wrap": true
@@ -246,7 +246,7 @@
             },
             {
               "type": "text",
-              "text": "ตลาด: ตลาดกี้",
+              "text": "ตลาด: วัดทุ่งลานนา",
               "size": "sm",
               "color": "#334155",
               "wrap": true

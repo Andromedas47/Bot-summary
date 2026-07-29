@@ -2,22 +2,21 @@
 
 Discovery date: 2026-07-29 (Asia/Bangkok)
 
-Status: **blocked for business confirmation; migration 0055 remains unseeded.**
+Status: **approved business decisions encoded in migration 0055; ready for code
+review.**
 
 ## Source and screening
 
-The proposal below comes from read-only queries against Production project
-`apjjsqibavjaitcedavn`.
+This review combines the approved business decisions dated 2026-07-29 with
+read-only discovery from Production project `apjjsqibavjaitcedavn`:
 
-- `produce_sessions`: `staff_name`, `session_title`, and `session_date`
-- `pending_sessions`: `staff_label`, `market_label`, and `business_date`
+- `produce_sessions.staff_name`, `session_title`, and `session_date`
+- `pending_sessions.staff_label`, `market_label`, and `business_date`
 
-`pending_sessions` has 35 rows but no non-blank seller or market labels, so it
-provides no catalog evidence.
-
-The `produce_sessions` screening excluded voided rows, future dates, blank
-seller/market values, test or synthetic labels, transaction-derived titles,
-and inverted seller/market rows. The first-pass classification was:
+No Production writes were performed. `pending_sessions` had 35 rows but no
+non-blank seller or market labels. Production screening excluded voided,
+future-dated, blank, test/synthetic, transaction-derived, malformed, and
+seller/market-inverted rows.
 
 | Classification | Sessions | Latest date |
 |---|---:|---|
@@ -29,165 +28,171 @@ and inverted seller/market rows. The first-pass classification was:
 | Transaction-derived title | 3 | 2026-06-25 |
 | Voided | 1 | 2026-07-25 |
 
-Counts below are conservative: only exact labels and the high-confidence
-historical aliases listed here were combined. An entry in this review is not
-approval to seed it.
+Counts below are historical evidence, not a rule that permits new catalog rows.
+Only explicitly reviewed rows are seeded.
 
-## Proposed canonical sellers
+## Reviewed active sellers
 
-| Proposed code | Display label | Accepted sessions | Latest genuine date |
+| Code | Display label | Genuine sessions | Latest genuine date |
 |---|---|---:|---|
-| `tom` | ต้อม | 195 | 2026-07-26 |
 | `ki` | กี้ | 187 | 2026-07-26 |
-| `noi` | น้อย | 182 | 2026-07-26 |
-| `pla` | ปลา | 156 | 2026-07-22 |
-| `dam` | ดำ | 118 | 2026-07-25 |
-| `toey` | เต้ย | 106 | 2026-07-21 |
 | `ohm` | โอม | 73 | 2026-07-26 |
-| `nu_lek` | หนูเล็ก | 25 | 2026-06-21 |
-| `mint` | มิ้น | 22 | 2026-07-24 |
-| `pa_lee` | ป้าลี | 21 | 2026-06-07 |
-| `tan` | แทน | 18 | 2026-07-26 |
 | `jiew` | จิ๋ว | 15 | 2026-07-26 |
+| `noi` | น้อย | 182 | 2026-07-26 |
+| `tan` | แทน | 18 | 2026-07-26 |
+| `tom` | ต้อม | 195 | 2026-07-26 |
 | `wut` | วุฒิ | 8 | 2026-07-26 |
 | `kwan` | ขวัญ | 6 | 2026-07-26 |
+| `mint` | มิ้น | 22 | 2026-07-24 |
+| `phi_dam` | พี่ดำ | 118 | 2026-07-25 |
+| `pla` | ปลา | 156 | 2026-07-22 |
+| `toey` | เต้ย | 106 | 2026-07-21 |
+| `nu_lek` | หนูเล็ก | 25 | 2026-06-21 |
+| `ja` | จ๋า | 4 | 2026-07-17 |
+| `pa_lee` | ป้าลี | 21 | 2026-06-07 |
+| `nang` | นาง | 0 direct reliable pairs | — |
 
-## Proposed canonical markets
+`จ๋า` is approved as a seller, but its four genuine rows use ambiguous bare
+`พาสิโอ้`; no assignment is inferred. `นาง` is approved as a seller, but the
+observed row is inverted and does not support an assignment.
 
-Three rows already exist in Production's authoritative market catalog:
-`kee`, `seven_front`, and `wat_taklam`.
+## Reviewed active markets
 
-| Proposed code | Display label | Source status | Accepted sessions | Latest genuine date |
-|---|---|---|---:|---|
-| `ratchaphruek` | ราชพฤกษ์ | Proposed | 179 | 2026-07-26 |
-| `chaloem_72` | เฉลิมฯ72 | Proposed | 155 | 2026-07-26 |
-| `wat_thung_lanna` | วัดทุ่งลานนา | Proposed | 153 | 2026-07-25 |
-| `paseo_vegetable` | พาซิโอ้ผัก | Proposed | 148 | 2026-07-26 |
-| `wat_taklam` | วัดตะกล่ำ | Existing | 147 | 2026-07-26 |
-| `paseo_fruit` | พาซิโอ้ผลไม้ | Proposed | 115 | 2026-07-26 |
-| `wihan` | วิหาร | Proposed | 52 | 2026-07-26 |
-| `paseo_durian` | พาซิโอ้ทุเรียน | Proposed | 50 | 2026-07-26 |
-| `liap_duan` | เลียบด่วน | Proposed | 40 | 2026-07-25 |
-| `sap_phun` | ทรัพย์พัน | Proposed, confirmation required | 34 | 2026-07-24 |
-| `seven_front` | หน้าเซเวน | Existing | 26 | 2026-06-21 |
-| `sap_phun_2` | ทรัพย์พัน2 | Proposed, confirmation required | 16 | 2026-07-26 |
-| `rot_re` | รถเร่ | Proposed | 15 | 2026-07-26 |
-| `kee` | ตลาดกี้ | Existing | 2 | 2026-06-28 |
+| Code | Display label | Genuine sessions | Latest genuine date |
+|---|---|---:|---|
+| `ratchaphruek` | ราชพฤกษ์ | 179 | 2026-07-26 |
+| `chaloem_72` | เฉลิมฯ72 | 155 | 2026-07-26 |
+| `wat_thung_lanna` | วัดทุ่งลานนา | 153 | 2026-07-25 |
+| `paseo_vegetable` | พาซิโอ้ผัก | 148 | 2026-07-26 |
+| `wat_taklam` | วัดตะกล่ำ | 147 | 2026-07-26 |
+| `paseo_fruit` | พาซิโอ้ผลไม้ | 115 | 2026-07-26 |
+| `wihan` | วิหาร | 52 | 2026-07-26 |
+| `paseo_durian` | พาซิโอ้ทุเรียน | 50 | 2026-07-26 |
+| `liap_duan` | เลียบด่วน | 40 | 2026-07-25 |
+| `sap_phun` | ทรัพย์พัน | 50 | 2026-07-26 |
+| `seven_front` | หน้าเซเวน | 26 | 2026-06-21 |
+| `rot_re` | รถเร่ | 15 | 2026-07-26 |
 
-## Proposed seller-market assignments
+The three Pasio categories are distinct markets. `ทรัพย์พัน2` evidence is
+included in the `ทรัพย์พัน` total because it is an approved alias.
+`ตลาดกี้` is not a market and migration 0055 removes the malformed 0051 row.
+
+## Reviewed active seller-market assignments
+
+A seller may have multiple simultaneous active markets. This supports the
+normal workflow where one seller works different markets at different times
+of day.
 
 | Seller | Market | Sessions | Latest genuine date |
 |---|---|---:|---|
 | กี้ | วัดทุ่งลานนา | 142 | 2026-07-25 |
-| ต้อม | พาซิโอ้ผัก | 137 | 2026-07-26 |
-| น้อย | วัดตะกล่ำ | 107 | 2026-07-16 |
-| เต้ย | เฉลิมฯ72 | 79 | 2026-07-15 |
-| โอม | พาซิโอ้ผลไม้ | 72 | 2026-07-26 |
-| ดำ | เฉลิมฯ72 | 48 | 2026-07-16 |
-| ต้อม | พาซิโอ้ทุเรียน | 48 | 2026-07-26 |
 | กี้ | วัดตะกล่ำ | 38 | 2026-07-26 |
-| น้อย | ทรัพย์พัน | 34 | 2026-07-24 |
-| เต้ย | วิหาร | 26 | 2026-07-21 |
-| น้อย | เลียบด่วน | 24 | 2026-06-08 |
-| มิ้น | เฉลิมฯ72 | 22 | 2026-07-24 |
-| หนูเล็ก | หน้าเซเวน | 22 | 2026-06-21 |
-| ดำ | พาซิโอ้ผลไม้ | 19 | 2026-07-21 |
-| ดำ | ราชพฤกษ์ | 17 | 2026-07-25 |
+| กี้ | วิหาร | 5 | 2026-06-08 |
+| โอม | พาซิโอ้ผลไม้ | 72 | 2026-07-26 |
+| โอม | พาซิโอ้ผัก | 1 | 2026-07-02 |
 | จิ๋ว | รถเร่ | 15 | 2026-07-26 |
-| น้อย | ทรัพย์พัน2 | 13 | 2026-07-26 |
-| ดำ | วิหาร | 12 | 2026-07-15 |
-| ป้าลี | พาซิโอ้ผลไม้ | 11 | 2026-06-07 |
-| ต้อม | พาซิโอ้ผลไม้ | 10 | 2026-06-15 |
-| ดำ | วัดทุ่งลานนา | 10 | 2026-06-29 |
-| ป้าลี | พาซิโอ้ผัก | 10 | 2026-06-02 |
-| ดำ | เลียบด่วน | 9 | 2026-07-25 |
+| น้อย | วัดตะกล่ำ | 107 | 2026-07-16 |
+| น้อย | ทรัพย์พัน | 47 | 2026-07-26 |
+| น้อย | เลียบด่วน | 24 | 2026-06-08 |
+| น้อย | หน้าเซเวน | 4 | 2026-06-06 |
 | แทน | วิหาร | 9 | 2026-07-26 |
 | แทน | เลียบด่วน | 7 | 2026-07-20 |
-| ขวัญ | เฉลิมฯ72 | 6 | 2026-07-26 |
-| วุฒิ | ราชพฤกษ์ | 6 | 2026-07-26 |
-| กี้ | วิหาร | 5 | 2026-06-08 |
-| น้อย | หน้าเซเวน | 4 | 2026-06-06 |
-| ดำ | ทรัพย์พัน2 | 3 | 2026-07-13 |
-| หนูเล็ก | พาซิโอ้ผลไม้ | 3 | 2026-06-01 |
-| กี้ | ตลาดกี้ | 2 | 2026-06-28 |
 | แทน | พาซิโอ้ทุเรียน | 2 | 2026-07-17 |
+| ต้อม | พาซิโอ้ผัก | 137 | 2026-07-26 |
+| ต้อม | พาซิโอ้ทุเรียน | 48 | 2026-07-26 |
+| ต้อม | พาซิโอ้ผลไม้ | 10 | 2026-06-15 |
+| วุฒิ | ราชพฤกษ์ | 6 | 2026-07-26 |
 | วุฒิ | วัดตะกล่ำ | 2 | 2026-07-22 |
-| โอม | พาซิโอ้ผัก | 1 | 2026-07-02 |
+| ขวัญ | เฉลิมฯ72 | 6 | 2026-07-26 |
+| มิ้น | เฉลิมฯ72 | 22 | 2026-07-24 |
+| พี่ดำ | เฉลิมฯ72 | 48 | 2026-07-16 |
+| พี่ดำ | พาซิโอ้ผลไม้ | 19 | 2026-07-21 |
+| พี่ดำ | ราชพฤกษ์ | 17 | 2026-07-25 |
+| พี่ดำ | วิหาร | 12 | 2026-07-15 |
+| พี่ดำ | วัดทุ่งลานนา | 10 | 2026-06-29 |
+| พี่ดำ | เลียบด่วน | 9 | 2026-07-25 |
+| พี่ดำ | ทรัพย์พัน | 3 | 2026-07-13 |
+| ปลา | ราชพฤกษ์ | 156 | 2026-07-22 |
+| เต้ย | เฉลิมฯ72 | 79 | 2026-07-15 |
+| เต้ย | วิหาร | 26 | 2026-07-21 |
 | เต้ย | วัดทุ่งลานนา | 1 | 2026-06-25 |
+| หนูเล็ก | หน้าเซเวน | 22 | 2026-06-21 |
+| หนูเล็ก | พาซิโอ้ผลไม้ | 3 | 2026-06-01 |
+| ป้าลี | พาซิโอ้ผลไม้ | 11 | 2026-06-07 |
+| ป้าลี | พาซิโอ้ผัก | 10 | 2026-06-02 |
 
-Low-count and stale assignments are evidence only. They must not be activated
-without a business rule for recency and whether a seller may retain multiple
-markets.
+The corrected historical use case is
+`กี้ -> วัดทุ่งลานนา -> เบิก -> 25/07/2569`. No assignment is created from
+the malformed `ตลาดกี้` history.
 
-## High-confidence historical aliases
+## Reviewed historical aliases
 
-| Type | Historical label | Proposed canonical label | Sessions | Latest date |
-|---|---|---|---:|---|
-| Seller | พี่ดำ | ดำ | 81 | 2026-07-23 |
-| Seller | พี่ต้อม | ต้อม | 13 | 2026-07-26 |
-| Seller | พี่เต้ย | เต้ย | 58 | 2026-06-22 |
-| Seller | พี่ปลา | ปลา | 88 | 2026-07-11 |
-| Market | ตลาด72 | เฉลิมฯ72 | 22 | 2026-07-09 |
-| Market | เฉลิม72 | เฉลิมฯ72 | 5 | 2026-07-23 |
-| Market | พาชิโอ้ทุเรียน | พาซิโอ้ทุเรียน | 5 | 2026-07-26 |
-| Market | พาสิโอ้ทุเรียน | พาซิโอ้ทุเรียน | 5 | 2026-07-24 |
-| Market | พาชิโอ้ ทุเรียน | พาซิโอ้ทุเรียน | 2 | 2026-07-17 |
-| Market | พาชิโอ้ผลไม้ | พาซิโอ้ผลไม้ | 32 | 2026-07-26 |
-| Market | พาชิโอ้ ผลไม้ | พาซิโอ้ผลไม้ | 8 | 2026-07-21 |
-| Market | ตลาดพาซิโอ้ผลไม้ | พาซิโอ้ผลไม้ | 1 | 2026-06-25 |
-| Market | พาสิโอ้ผลไม้ | พาซิโอ้ผลไม้ | 1 | 2026-07-06 |
-| Market | พาชิโอ้ผัก | พาซิโอ้ผัก | 9 | 2026-07-26 |
-| Market | พาสิโอ้ผัก | พาซิโอ้ผัก | 9 | 2026-07-24 |
-| Market | ตลาดราชพฤก | ราชพฤกษ์ | 26 | 2026-07-19 |
-| Market | ตลาดราชพฤกษ์ | ราชพฤกษ์ | 11 | 2026-07-22 |
-| Market | ราชพฤก | ราชพฤกษ์ | 3 | 2026-07-10 |
-| Market | เลียบทางด่วน | เลียบด่วน | 24 | 2026-06-08 |
-| Market | วัดตะกลํ่า | วัดตะกล่ำ | 27 | 2026-07-07 |
-| Market | ตลาดทุ่งลานนา | วัดทุ่งลานนา | 22 | 2026-07-16 |
-| Market | ตลาดวัดทุ่งลานนา | วัดทุ่งลานนา | 2 | 2026-07-05 |
-| Market | ทุ่งลานนา | วัดทุ่งลานนา | 1 | 2026-07-09 |
-| Market | หน้าเซเว่น | หน้าเซเวน | 4 | 2026-06-06 |
+Seller aliases:
 
-## Ambiguous or rejected rows
+| Historical label | Canonical seller | Evidence |
+|---|---|---|
+| กี่ | กี้ | Approved business correction; 1 session, latest 2026-05-30 |
+| โอ | โอม | Approved business correction; 16 sessions, latest 2026-06-13 |
+| ดำ | พี่ดำ | Approved display identity; 37 sessions, latest 2026-07-25 |
+
+Market aliases with an explicit market identity:
+
+| Historical label | Canonical market | Sessions | Latest genuine date |
+|---|---|---:|---|
+| ตลาด72 | เฉลิมฯ72 | 22 | 2026-07-09 |
+| เฉลิม72 | เฉลิมฯ72 | 5 | 2026-07-23 |
+| พาชิโอ้ทุเรียน | พาซิโอ้ทุเรียน | 5 | 2026-07-26 |
+| พาสิโอ้ทุเรียน | พาซิโอ้ทุเรียน | 5 | 2026-07-24 |
+| พาชิโอ้ ทุเรียน | พาซิโอ้ทุเรียน | 2 | 2026-07-17 |
+| พาชิโอ้ผลไม้ | พาซิโอ้ผลไม้ | 32 | 2026-07-26 |
+| พาชิโอ้ ผลไม้ | พาซิโอ้ผลไม้ | 8 | 2026-07-21 |
+| ตลาดพาซิโอ้ผลไม้ | พาซิโอ้ผลไม้ | 1 | 2026-06-25 |
+| พาสิโอ้ผลไม้ | พาซิโอ้ผลไม้ | 1 | 2026-07-06 |
+| พาชิโอ้ผัก | พาซิโอ้ผัก | 9 | 2026-07-26 |
+| พาสิโอ้ผัก | พาซิโอ้ผัก | 9 | 2026-07-24 |
+| ตลาดราชพฤก | ราชพฤกษ์ | 26 | 2026-07-19 |
+| ตลาดราชพฤกษ์ | ราชพฤกษ์ | 11 | 2026-07-22 |
+| ราชพฤก | ราชพฤกษ์ | 3 | 2026-07-10 |
+| เลียบทางด่วน | เลียบด่วน | 24 | 2026-06-08 |
+| วัดตะกลํ่า | วัดตะกล่ำ | 27 | 2026-07-07 |
+| ตลาดทุ่งลานนา | วัดทุ่งลานนา | 22 | 2026-07-16 |
+| ตลาดวัดทุ่งลานนา | วัดทุ่งลานนา | 2 | 2026-07-05 |
+| ทุ่งลานนา | วัดทุ่งลานนา | 1 | 2026-07-09 |
+| หน้าเซเว่น | หน้าเซเวน | 4 | 2026-06-06 |
+| ทรัพย์พัน2 | ทรัพย์พัน | 16 | 2026-07-26 |
+
+## Ambiguous, rejected, or pending rows
 
 | Row or group | Sessions / latest | Decision and reason |
 |---|---|---|
-| `กี่` / วัดทุ่งลานนา | 1 / 2026-05-30 | Rejected as an uncertain alias of กี้. |
-| `โอ` / พาซิโอ้ผลไม้ | 16 / 2026-06-13 | Rejected as an uncertain alias of โอม. |
-| `จ๋า` / พาสิโอ้ | 4 / 2026-07-17 | Seller may be genuine, but the market is generic and assignment is unclear. |
-| `ป้าลีนาง` / ตลาดใหม่ | 1 / 2026-07-07 | Possible merged seller labels; identity is unclear. |
-| `ต้อม` / พาสิโอ้ | 42 / 2026-07-22 | Generic market cannot be assigned safely to fruit, vegetable, or durian. |
-| `โอม` / พาสิโอ้ | 1 / 2026-07-07 | Generic market cannot be assigned safely. |
-| `มิ้น` / ทุเรียน | 1 / 2026-07-23 | Category-only market label is not a confirmed market identity. |
-| `ต้อม` / ผัก | 1 / 2026-07-03 | Category-only market label is not a confirmed market identity. |
-| `ดำ` / วิหารหลวงปุ่โต | 5 / 2026-07-11 | Could be an alias or a separate market. |
-| `น้อย` / ทรัพย์เจริญ | 3 / 2026-07-04 | Could be an alias or a separate market. |
-| `กี้` / วัดตะกร่ำ | 3 / 2026-06-15 | Likely typo, but not safe to normalize without confirmation. |
-| `กี้` / วัดวานนา | 1 / 2026-06-28 | Likely typo, but target market is uncertain. |
-| `กี้` / `2วัดทุ่งลานนา` | 1 / 2026-06-14 | Prefix meaning is unclear. |
-| `ปลา` / ราชพฤษก | 1 / 2026-06-28 | Likely typo, but not seeded automatically. |
-| `ดำ` / พาขิโอ้ผลไม้ | 1 / 2026-07-09 | Likely typo, but not seeded automatically. |
-| `เสือ` rows | 7 / 2026-07-25 | Six are explicit tests; one title embeds another seller, market, and transaction date. |
+| ป้าลีนาง / ตลาดใหม่ | 1 / 2026-07-07 | Rejected concatenation of separate sellers ป้าลี and นาง. |
+| จ๋า / พาสิโอ้ | 4 / 2026-07-17 | Seller approved; bare market cannot identify a Pasio category. |
+| ต้อม / พาสิโอ้ | 42 / 2026-07-22 | Bare misspelling is ambiguous across three categories. |
+| โอม / พาสิโอ้ | 1 / 2026-07-07 | Bare misspelling is ambiguous across three categories. |
+| Bare ผัก / ผลไม้ / ทุเรียน | 3 observed groups | Not seeded globally because surrounding context is insufficient. |
+| ดำ / วิหารหลวงปู่โต | 5 / 2026-07-11 | Market identity unconfirmed; unseeded. |
+| น้อย / ทรัพย์เจริญ | 3 / 2026-07-04 | Likely market, but official identity unconfirmed; pending and unseeded. |
+| กี้ / ตลาดกี้ | 2 / 2026-06-28 | Malformed history; excluded and removed from the catalog. |
+| กี้ / วัดตะกร่ำ | 3 / 2026-06-15 | Likely typo; target not confirmed. |
+| กี้ / วัดวานนา | 1 / 2026-06-28 | Likely typo; target not confirmed. |
+| กี้ / 2วัดทุ่งลานนา | 1 / 2026-06-14 | Prefix meaning unclear. |
+| ปลา / ราชพฤษก | 1 / 2026-06-28 | Likely typo; not automatically normalized. |
+| ดำ / พาขิโอ้ผลไม้ | 1 / 2026-07-09 | Likely typo; not automatically normalized. |
+| เสือ rows | 7 / 2026-07-25 | Six explicit tests; one title embeds another seller and transaction data. |
 | Blank seller or market | 102 / 2026-07-01 | Cannot form an assignment. |
-| Future-dated rows | 11 / 2056-12-31 | Excluded from genuine historical evidence. |
-| Inverted seller/market rows | 6 / 2026-07-08 | Examples include วัดทุ่งลานนา/กี้, ทรัพย์พัน/ดำ, and พาซิโอ้ผลไม้/โอม. |
-| Transaction-derived titles | 3 / 2026-06-25 | Titles contain weighing/transaction text rather than a market identity. |
+| Future-dated rows | 11 / 2056-12-31 | Excluded from genuine evidence. |
+| Inverted seller/market rows | 6 / 2026-07-08 | Seller and market positions are reversed; no inference made. |
+| Transaction-derived titles | 3 / 2026-06-25 | Title is transaction text, not a market identity. |
 
-`ทรัพย์พัน` and `ทรัพย์พัน2` are kept separate in the proposal because the
-data does not prove whether they are distinct markets or aliases.
+## Future admin-managed seller catalog
 
-## Human confirmations required before seeding
+The current Guided Menu reads only reviewed active seller, market, and
+seller-market rows. It never creates a seller from arbitrary LINE text.
 
-1. Approve the canonical seller list and whether honorifics (`พี่`, `ป้า`) are
-   display-label content or historical aliases.
-2. Approve the official market spellings/codes, especially the three
-   พาซิโอ้ categories and whether `ทรัพย์พัน` and `ทรัพย์พัน2` are distinct.
-3. Decide whether generic `พาสิโอ้`, `ผัก`, and `ทุเรียน` rows map to a
-   canonical market or remain rejected.
-4. Confirm or reject the uncertain identities/aliases `กี่`, `โอ`, `จ๋า`,
-   `ป้าลีนาง`, `วิหารหลวงปุ่โต`, and `ทรัพย์เจริญ`.
-5. Define which seller-market assignments are currently active, including a
-   recency/minimum-evidence rule and the unusual กี้ → ตลาดกี้ assignment.
-
-Until those decisions are recorded, migration 0055 must create schema only and
-must not seed seller or seller-market rows.
+A later admin flow should be restricted to an authorized operator and commit
+these fields together: `seller_code`, display label, reviewed aliases, active
+status, and active seller-market assignments. It should enforce the existing
+code/label constraints and foreign keys, require assignments to active reviewed
+markets, and record who approved each change. Deactivation should preserve
+history. This migration intentionally adds no speculative admin UI or public
+write policy.

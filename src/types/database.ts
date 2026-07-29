@@ -1326,6 +1326,112 @@ export interface Database {
         };
         Relationships: [];
       };
+      purchase_receipts: {
+        Row: {
+          id:                     string;
+          // Document identity. NOT a delivery event id.
+          document_namespace:     string;
+          document_key:           string;
+          status:                 "draft" | "confirmed" | "void";
+          contract_version:       string;
+          business_date:          string;
+          purchase_time:          string | null;
+          supplier_key:           string | null;
+          supplier_raw:           string | null;
+          supplier_ref:           string | null;
+          reference_text:         string | null;
+          intended_warehouse_code: "MAIN";
+          // bigint: carried as lossless strings, never JS numbers.
+          freight_satang:         string;
+          handling_satang:        string;
+          discount_satang:        string;
+          vat_kind:               "NONE" | "AMOUNT";
+          vat_satang:             string | null;
+          vat_included_in_item_prices: boolean | null;
+          vat_recoverable:        boolean | null;
+          item_count:             number;
+          source_type:            LineSourceType | null;
+          source_id:              string | null;
+          sender_line_user_id:    string | null;
+          source_line_event_id:   string | null;
+          source_raw_message_id:  string | null;
+          source_evidence:        Json;
+          review_flags:           Json;
+          draft_revision:         string;
+          confirmation_key:       string | null;
+          confirmation_payload:   Json | null;
+          confirmation_contract_version: string | null;
+          confirmation_canonical_form:   string | null;
+          confirmation_hash_algorithm:   string | null;
+          confirmation_hash:      string | null;
+          confirmed_at:           string | null;
+          confirmed_by:           string | null;
+          supersedes_receipt_id:    string | null;
+          superseded_by_receipt_id: string | null;
+          posting_locked_at:      string | null;
+          posting_locked_by:      string | null;
+          voided_at:              string | null;
+          voided_by:              string | null;
+          void_reason:            string | null;
+          created_at:             string;
+          updated_at:             string;
+        };
+        // Mutation is RPC-only: service_role holds SELECT and nothing else.
+        Insert: never;
+        Update: never;
+        Relationships: [];
+      };
+      purchase_receipt_items: {
+        Row: {
+          id:                 string;
+          receipt_id:         string;
+          item_ordinal:       number;
+          // bigint, unbounded in the source document: lossless string.
+          item_number:        string | null;
+          product_key:        string;
+          raw_product_text:   string;
+          product_identity_status: "RESOLVED" | "UNRESOLVED";
+          // numeric(18,6) / numeric(18,4) arrive as strings: never a JS number.
+          quantity:           string;
+          unit_key:           string;
+          raw_unit:           string;
+          unit_identity_status: "RESOLVED" | "UNRESOLVED";
+          unit_cost:          string | null;
+          price_unit_text:    string | null;
+          price_unit_status:  "NOT_APPLICABLE" | "RESOLVED" | "UNRESOLVED";
+          // Exact numeric (the Slice A envelope exceeds bigint): lossless string.
+          line_amount_satang: string | null;
+          source_evidence:    Json;
+          created_at:         string;
+        };
+        Insert: never;
+        Update: never;
+        Relationships: [];
+      };
+      purchase_receipt_lifecycle_events: {
+        Row: {
+          // bigint identity: lossless string.
+          id:         string;
+          receipt_id: string;
+          event:      "drafted" | "confirmed" | "voided" | "superseded" | "posting_locked";
+          actor:      string | null;
+          detail:     Json;
+          created_at: string;
+        };
+        Insert: never;
+        Update: never;
+        Relationships: [];
+      };
+      purchase_receipt_document_namespaces: {
+        Row: {
+          namespace:   string;
+          description: string;
+          created_at:  string;
+        };
+        Insert: never;
+        Update: never;
+        Relationships: [];
+      };
     };
     Views: {
       produce_transactions: {
@@ -1578,6 +1684,75 @@ export interface Database {
         Args: { p_session_id: string };
         Returns: string;
       };
+      upsert_purchase_receipt_draft: {
+        Args: {
+          p_document_namespace:   string;
+          p_document_key:         string;
+          p_contract_version:     string;
+          p_business_date:        string;
+          p_items:                Json;
+          p_purchase_time?:       string | null;
+          p_supplier_key?:        string | null;
+          p_supplier_raw?:        string | null;
+          p_supplier_ref?:        string | null;
+          p_reference_text?:      string | null;
+          // bigint arguments are sent as lossless strings.
+          p_freight_satang?:      string;
+          p_handling_satang?:     string;
+          p_discount_satang?:     string;
+          p_vat_kind?:            "NONE" | "AMOUNT";
+          p_vat_satang?:          string | null;
+          p_vat_included_in_item_prices?: boolean | null;
+          p_vat_recoverable?:     boolean | null;
+          p_source_type?:         LineSourceType | null;
+          p_source_id?:           string | null;
+          p_sender_line_user_id?: string | null;
+          p_source_line_event_id?: string | null;
+          p_source_raw_message_id?: string | null;
+          p_source_evidence?:     Json;
+          p_review_flags?:        Json;
+          p_supersedes_receipt_id?: string | null;
+          p_actor?:               string | null;
+        };
+        Returns: Json;
+      };
+      confirm_purchase_receipt: {
+        Args: {
+          p_receipt_id:              string;
+          p_confirmation_key:        string;
+          p_expected_draft_revision?: string | null;
+          p_actor?:                  string | null;
+        };
+        Returns: Json;
+      };
+      void_purchase_receipt: {
+        Args: {
+          p_receipt_id: string;
+          p_reason:     string;
+          p_actor?:     string | null;
+        };
+        Returns: Json;
+      };
+      lock_purchase_receipt_for_posting: {
+        Args: { p_receipt_id: string; p_locked_by: string };
+        Returns: Json;
+      };
+      get_purchase_receipt_confirmation: {
+        Args: { p_receipt_id: string };
+        Returns: Json;
+      };
+      purchase_receipt_build_confirmation_payload: {
+        Args: { p_receipt_id: string };
+        Returns: Json;
+      };
+      purchase_receipt_canonical_json: {
+        Args: { p_value: Json };
+        Returns: string;
+      };
+      purchase_receipt_normalize_document_key: {
+        Args: { p_key: string };
+        Returns: string;
+      };
     };
     CompositeTypes: { [_ in never]: never };
     Enums: {
@@ -1607,3 +1782,7 @@ export type DigitalWhiteSheetCashEntryRow  = Database["public"]["Tables"]["digit
 export type PhysicalInventorySessionRow    = Database["public"]["Tables"]["physical_inventory_sessions"]["Row"];
 export type PhysicalInventorySnapshotRow   = Database["public"]["Tables"]["physical_inventory_snapshots"]["Row"];
 export type PhysicalInventoryItemRow       = Database["public"]["Tables"]["physical_inventory_items"]["Row"];
+export type PurchaseReceiptRow             = Database["public"]["Tables"]["purchase_receipts"]["Row"];
+export type PurchaseReceiptItemRow         = Database["public"]["Tables"]["purchase_receipt_items"]["Row"];
+export type PurchaseReceiptLifecycleEventRow = Database["public"]["Tables"]["purchase_receipt_lifecycle_events"]["Row"];
+export type PurchaseReceiptDocumentNamespaceRow = Database["public"]["Tables"]["purchase_receipt_document_namespaces"]["Row"];

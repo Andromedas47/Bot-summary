@@ -17,12 +17,21 @@ function logLineTextMetrics(
   return texts.map((text, index) => ({ index, ...measureLineText(text) }));
 }
 
-export async function replyLineMessages(replyToken: string, texts: string[]): Promise<void> {
-  const messages = texts.map((text) => ({ type: "text" as const, text }));
+/** Outbound LINE Messaging API message objects (text / flex / template / …). */
+export type LineApiMessage = Record<string, unknown> & { type: string };
+
+async function postLineReply(
+  replyToken: string,
+  messages: LineApiMessage[],
+  textMetrics?: string[],
+): Promise<void> {
   logger.info("LINE reply sending", {
     operation: "reply",
     messageCount: messages.length,
-    messages: logLineTextMetrics("reply", texts),
+    messageTypes: messages.map((m) => m.type),
+    ...(textMetrics
+      ? { messages: logLineTextMetrics("reply", textMetrics) }
+      : {}),
   });
 
   let res: Response;
@@ -40,7 +49,9 @@ export async function replyLineMessages(replyToken: string, texts: string[]): Pr
       operation: "reply",
       category: "network_error",
       messageCount: messages.length,
-      messages: logLineTextMetrics("reply", texts),
+      ...(textMetrics
+        ? { messages: logLineTextMetrics("reply", textMetrics) }
+        : {}),
     });
     throw new Error("LINE reply network error");
   }
@@ -53,14 +64,35 @@ export async function replyLineMessages(replyToken: string, texts: string[]): Pr
       category: lineHttpErrorCategory(res.status),
       responseBody,
       messageCount: messages.length,
-      messages: logLineTextMetrics("reply", texts),
+      ...(textMetrics
+        ? { messages: logLineTextMetrics("reply", textMetrics) }
+        : {}),
     });
     throw new Error(`LINE reply HTTP ${res.status}`);
   }
 }
 
+export async function replyLineMessages(replyToken: string, texts: string[]): Promise<void> {
+  const messages = texts.map((text) => ({ type: "text" as const, text }));
+  await postLineReply(replyToken, messages, texts);
+}
+
 export async function replyLineMessage(replyToken: string, text: string): Promise<void> {
   await replyLineMessages(replyToken, [text]);
+}
+
+/**
+ * Reply with typed LINE API message objects (Flex / template / text).
+ * Webhook Guided Menu uses this exclusively — never push.
+ */
+export async function replyLineApiMessages(
+  replyToken: string,
+  messages: LineApiMessage[],
+): Promise<void> {
+  if (messages.length < 1 || messages.length > 5) {
+    throw new Error(`LINE reply allows 1–5 messages, got ${messages.length}`);
+  }
+  await postLineReply(replyToken, messages);
 }
 
 export type PushResult = { status: "delivered" | "already_accepted" };

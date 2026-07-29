@@ -1,0 +1,418 @@
+/**
+ * In-memory double for Guided Menu Slice 2 unit/webhook tests.
+ * Mirrors corrected Slice 1 create/consume/record RPC semantics.
+ */
+
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { hashMenuTokenWire } from "./menu-token";
+import {
+  MUTATING_MENU_ACTIONS,
+  type MenuActionType,
+  type MenuPayload,
+} from "./menu-state-types";
+
+type OperatorRow = {
+  line_user_id: string;
+  staff_label: string;
+  active: boolean;
+};
+
+type MarketRow = {
+  market_code: string;
+  label: string;
+  active: boolean;
+};
+
+type MenuStateRow = {
+  token_hash: string;
+  action_type: MenuActionType;
+  line_user_id: string;
+  source_type: string;
+  source_id: string;
+  session_key: string | null;
+  payload: MenuPayload;
+  created_at: string;
+  expires_at: string;
+  consumed_at: string | null;
+  consumed_line_event_id: string | null;
+  result: Record<string, unknown> | null;
+};
+
+type Row = Record<string, unknown>;
+
+const NAV_TTL_MS = 30 * 60 * 1000;
+const MUT_TTL_MS = 10 * 60 * 1000;
+
+function ttlMs(action: MenuActionType): number {
+  return MUTATING_MENU_ACTIONS.has(action) ? MUT_TTL_MS : NAV_TTL_MS;
+}
+
+function payloadLooksValid(
+  action: MenuActionType,
+  payload: MenuPayload,
+  markets: MarketRow[],
+): boolean {
+  const keys = Object.keys(payload).sort();
+  if ("staff_label" in payload || "market_label" in payload || "step" in payload) {
+    return false;
+  }
+  const active = (code: string | undefined) =>
+    !!code &&
+    markets.some((m) => m.market_code === code && m.active === true);
+
+  switch (action) {
+    case "menu_root":
+      if (keys.length === 0) return true;
+      return keys.length === 1 && keys[0] === "intent" && payload.intent === "cancel";
+    case "choose_transaction_type":
+      return (
+        keys.length === 1 &&
+        keys[0] === "transaction_type" &&
+        ["withdraw", "return", "damaged_return"].includes(
+          String(payload.transaction_type),
+        )
+      );
+    case "choose_market":
+      return (
+        keys.length === 2 &&
+        keys[0] === "market_code" &&
+        keys[1] === "transaction_type" &&
+        ["withdraw", "return", "damaged_return"].includes(
+          String(payload.transaction_type),
+        ) &&
+        active(payload.market_code)
+      );
+    case "choose_date":
+    case "confirm_open": {
+      const mode = payload.date_mode;
+      if (!["withdraw", "return", "damaged_return"].includes(
+        String(payload.transaction_type),
+      )) {
+        return false;
+      }
+      if (!active(payload.market_code)) return false;
+      if (mode === "today" || mode === "yesterday") {
+        return (
+          keys.length === 3 &&
+          keys[0] === "date_mode" &&
+          keys[1] === "market_code" &&
+          keys[2] === "transaction_type"
+        );
+      }
+      if (mode === "iso") {
+        return (
+          keys.length === 4 &&
+          keys.includes("iso_date") &&
+          typeof payload.iso_date === "string"
+        );
+      }
+      return false;
+    }
+    case "view_status":
+    case "request_close":
+    case "confirm_finalize":
+      return keys.length === 0;
+    default:
+      return false;
+  }
+}
+
+export class GuidedMenuFakeDatabase {
+  operators: OperatorRow[] = [];
+  markets: MarketRow[] = [];
+  states: MenuStateRow[] = [];
+  wireByHash = new Map<string, string>();
+
+  openProduceCalls = 0;
+  appendCalls = 0;
+  admitCalls = 0;
+  ingestCalls = 0;
+  closeRpcCalls = 0;
+  pushCalls = 0;
+
+  tables: Record<string, Row[]> = {
+    raw_messages: [],
+    pending_sessions: [],
+    pending_session_admission: [],
+    pending_session_ingest: [],
+    line_operator_identities: [],
+    line_menu_states: [],
+    line_guided_menu_markets: [],
+  };
+
+  seedOperator(row: OperatorRow): void {
+    this.operators = this.operators.filter((o) => o.line_user_id !== row.line_user_id);
+    this.operators.push(row);
+    this.tables.line_operator_identities = [...this.operators];
+  }
+
+  seedMarket(row: MarketRow): void {
+    this.markets = this.markets.filter((m) => m.market_code !== row.market_code);
+    this.markets.push(row);
+    this.tables.line_guided_menu_markets = [...this.markets];
+  }
+
+  /** Convenience: seed the three default active markets used by Slice 1 migration. */
+  seedDefaultMarkets(): void {
+    this.seedMarket({ market_code: "kee", label: "ตลาดกี้", active: true });
+    this.seedMarket({
+      market_code: "seven_front",
+      label: "หน้าเซเวน",
+      active: true,
+    });
+    this.seedMarket({
+      market_code: "wat_taklam",
+      label: "วัดตะกล่ำ",
+      active: true,
+    });
+  }
+
+  stateByWire(wire: string): MenuStateRow | undefined {
+    const hash = hashMenuTokenWire(wire);
+    if (!hash) return undefined;
+    return this.states.find((s) => s.token_hash === hash);
+  }
+
+  rememberWire(wire: string): void {
+    const hash = hashMenuTokenWire(wire);
+    if (hash) this.wireByHash.set(hash, wire);
+  }
+
+  asClient(): SupabaseClient {
+    return this as unknown as SupabaseClient;
+  }
+
+  from = (table: string) => {
+    return {
+      insert: (payload: Row | Row[]) => {
+        const rows = Array.isArray(payload) ? payload : [payload];
+        if (table === "raw_messages") {
+          const row: Row = {
+            id: `raw-${this.tables.raw_messages.length + 1}`,
+            ...rows[0],
+          };
+          if (
+            this.tables.raw_messages.some(
+              (r) => r.line_event_id === row.line_event_id,
+            )
+          ) {
+            return {
+              select: () => ({
+                single: async () => ({
+                  data: null,
+                  error: { code: "23505", message: "duplicate" },
+                }),
+              }),
+            };
+          }
+          this.tables.raw_messages.push(row);
+          return {
+            select: () => ({
+              single: async () => ({ data: row, error: null }),
+            }),
+          };
+        }
+        this.tables[table] = [...(this.tables[table] ?? []), ...rows];
+        return {
+          select: () => ({
+            single: async () => ({ data: rows[0], error: null }),
+          }),
+        };
+      },
+      select: (cols?: string) => {
+        void cols;
+        const eqChain = (column: string, value: unknown) => {
+          const filterRows = (): Row[] => {
+            if (table === "line_operator_identities") {
+              return this.operators.filter(
+                (o) => (o as Row)[column] === value,
+              ) as unknown as Row[];
+            }
+            if (table === "line_guided_menu_markets") {
+              return this.markets.filter(
+                (m) => (m as Row)[column] === value,
+              ) as unknown as Row[];
+            }
+            return (this.tables[table] ?? []).filter((r) => r[column] === value);
+          };
+          return {
+            maybeSingle: async () => {
+              const data = filterRows()[0] ?? null;
+              return { data, error: null };
+            },
+            single: async () => {
+              const data = filterRows()[0] ?? null;
+              return { data, error: null };
+            },
+            limit: () => ({
+              maybeSingle: async () => {
+                const data = filterRows()[0] ?? null;
+                return { data, error: null };
+              },
+            }),
+            order: async (col: string) => {
+              void col;
+              const data = filterRows().slice().sort((a, b) =>
+                String(a.market_code ?? "").localeCompare(
+                  String(b.market_code ?? ""),
+                ),
+              );
+              return { data, error: null };
+            },
+            eq: (column2: string, value2: unknown) =>
+              eqChain(column2, value2),
+          };
+        };
+        return {
+          eq: eqChain,
+        };
+      },
+      update: (patch: Row) => ({
+        eq: async (column: string, value: unknown) => {
+          this.tables[table] = (this.tables[table] ?? []).map((r) =>
+            r[column] === value ? { ...r, ...patch } : r,
+          );
+          return { data: null, error: null };
+        },
+      }),
+    };
+  };
+
+  rpc = async (name: string, args: Row) => {
+    if (name === "open_produce_structured_session") {
+      this.openProduceCalls += 1;
+      throw new Error("Slice 2 must not open produce sessions");
+    }
+    if (name === "append_pending_session") {
+      this.appendCalls += 1;
+      throw new Error("Slice 2 must not append pending sessions");
+    }
+    if (name === "admit_pending_session_event") {
+      this.admitCalls += 1;
+      throw new Error("Slice 2 must not admit");
+    }
+    if (name === "register_pending_session_ingest") {
+      this.ingestCalls += 1;
+      throw new Error("Slice 2 must not ingest");
+    }
+    if (
+      name.includes("close") ||
+      (name.includes("confirm") && name !== "record_line_menu_state_result")
+    ) {
+      this.closeRpcCalls += 1;
+    }
+
+    if (name === "create_line_menu_state") {
+      return { data: this.create(args), error: null };
+    }
+    if (name === "consume_line_menu_state") {
+      return { data: this.consume(args), error: null };
+    }
+    if (name === "record_line_menu_state_result") {
+      return { data: this.record(args), error: null };
+    }
+    throw new Error(`Unexpected RPC: ${name}`);
+  };
+
+  private create(args: Row): Record<string, unknown> {
+    const hash = String(args.p_token_hash ?? "");
+    if (!/^[0-9a-f]{64}$/.test(hash)) {
+      return { status: "invalid_or_expired" };
+    }
+    const action = String(args.p_action_type) as MenuActionType;
+    const payload = (args.p_payload ?? {}) as MenuPayload;
+    if (!payloadLooksValid(action, payload, this.markets)) {
+      return { status: "invalid_or_expired" };
+    }
+    const now = Date.now();
+    const createdAt = new Date(now).toISOString();
+    const expiresAt = new Date(now + ttlMs(action)).toISOString();
+    const state: MenuStateRow = {
+      token_hash: hash,
+      action_type: action,
+      line_user_id: String(args.p_line_user_id),
+      source_type: String(args.p_source_type),
+      source_id: String(args.p_source_id),
+      session_key:
+        args.p_session_key === undefined || args.p_session_key === null
+          ? null
+          : String(args.p_session_key),
+      payload,
+      created_at: createdAt,
+      expires_at: expiresAt,
+      consumed_at: null,
+      consumed_line_event_id: null,
+      result: null,
+    };
+    this.states.push(state);
+    this.tables.line_menu_states = [...this.states] as unknown as Row[];
+    return {
+      status: "created",
+      action_type: action,
+      created_at: createdAt,
+      expires_at: expiresAt,
+    };
+  }
+
+  private consume(args: Row): Record<string, unknown> {
+    const hash = String(args.p_token_hash);
+    const eventId = String(args.p_line_event_id);
+    const row = this.states.find((s) => s.token_hash === hash);
+    if (!row) return { status: "invalid_or_expired" };
+    if (new Date(row.expires_at).getTime() <= Date.now()) {
+      return { status: "invalid_or_expired" };
+    }
+    if (
+      row.line_user_id !== args.p_line_user_id ||
+      row.source_type !== args.p_source_type ||
+      row.source_id !== args.p_source_id ||
+      (row.session_key ?? null) !== (args.p_session_key ?? null)
+    ) {
+      return { status: "invalid_or_expired" };
+    }
+    if (row.consumed_at) {
+      if (row.consumed_line_event_id === eventId) {
+        return {
+          status: "replay",
+          action_type: row.action_type,
+          payload: row.payload,
+          result: row.result,
+        };
+      }
+      // Different-event already_consumed: redact action/payload/result.
+      return { status: "already_consumed" };
+    }
+    row.consumed_at = new Date().toISOString();
+    row.consumed_line_event_id = eventId;
+    return {
+      status: "consumed",
+      action_type: row.action_type,
+      payload: row.payload,
+    };
+  }
+
+  private record(args: Row): Record<string, unknown> {
+    const hash = String(args.p_token_hash);
+    const eventId = String(args.p_consumed_line_event_id);
+    const row = this.states.find((s) => s.token_hash === hash);
+    if (
+      !row ||
+      row.consumed_line_event_id !== eventId ||
+      row.line_user_id !== args.p_line_user_id ||
+      row.source_type !== args.p_source_type ||
+      row.source_id !== args.p_source_id ||
+      (row.session_key ?? null) !== (args.p_session_key ?? null)
+    ) {
+      return { status: "invalid_or_expired" };
+    }
+    const incoming = args.p_result as Record<string, unknown>;
+    if (row.result) {
+      if (JSON.stringify(row.result) === JSON.stringify(incoming)) {
+        return { status: "replay", result: row.result };
+      }
+      return { status: "result_conflict", result: row.result };
+    }
+    row.result = incoming;
+    return { status: "recorded", result: row.result };
+  }
+}

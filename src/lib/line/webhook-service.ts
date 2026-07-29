@@ -4,13 +4,28 @@ import type {
   LineImageMessage,
   LineMessageEvent,
   LineMessage,
+  LinePostbackEvent,
   LineTextMessage,
 } from "@/lib/line/types";
 import type { Database, LineMessageType } from "@/types/database";
 import { getSourceId, getUserId, getPendingSessionKey } from "@/lib/line/verify";
 import { parserRegistry } from "@/lib/parsers/registry";
 import { logger } from "@/lib/logger";
-import { replyLineMessage, replyLineMessages, buildWeighSessionSummary } from "@/lib/line/reply";
+import {
+  replyLineMessage,
+  replyLineMessages,
+  replyLineApiMessages,
+  buildWeighSessionSummary,
+  type LineApiMessage,
+} from "@/lib/line/reply";
+import {
+  GuidedMenuUxHandler,
+  buildGuidedMenuIdentity,
+  buildInvalidMenuMessage,
+  isExactGuidedMenuTrigger,
+  isGuidedMenuPostbackCandidate,
+  isGuidedMenuPostbackData,
+} from "@/lib/line/guided-menu";
 import {
   parseWeighSession,
   parseBuddhistDate,
@@ -78,6 +93,10 @@ type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
 type ReplyLineMessage = (replyToken: string, text: string) => Promise<void>;
 type ReplyLineMessages = (replyToken: string, texts: string[]) => Promise<void>;
+type ReplyLineApiMessages = (
+  replyToken: string,
+  messages: LineApiMessage[],
+) => Promise<void>;
 type ScheduleBackgroundTask = (task: () => Promise<void>) => void;
 type PhysicalInventoryFinalizer = (params: {
   sessionId: string;
@@ -143,6 +162,8 @@ interface WebhookServiceDependencies {
   slipSessionService?: SlipSessionIngestor;
   replyMessage?: ReplyLineMessage;
   replyMessages?: ReplyLineMessages;
+  replyApiMessages?: ReplyLineApiMessages;
+  guidedMenuHandler?: GuidedMenuUxHandler;
   scheduleBackgroundTask?: ScheduleBackgroundTask;
   physicalInventoryFinalizer?: PhysicalInventoryFinalizer;
   physicalInventoryService?: PhysicalInventorySessionGateway;
@@ -260,6 +281,8 @@ export class WebhookService {
   private readonly slipSessionService: SlipSessionIngestor;
   private readonly replyMessage: ReplyLineMessage;
   private readonly replyMessages: ReplyLineMessages;
+  private readonly replyApiMessages: ReplyLineApiMessages;
+  private readonly guidedMenuHandler: GuidedMenuUxHandler;
   private readonly scheduleBackgroundTask: ScheduleBackgroundTask;
   private readonly physicalInventoryFinalizer: PhysicalInventoryFinalizer;
   private readonly physicalInventoryService: PhysicalInventorySessionGateway;
@@ -279,6 +302,9 @@ export class WebhookService {
       dependencies.slipSessionService ?? new SlipSessionService(supabase);
     this.replyMessage = dependencies.replyMessage ?? replyLineMessage;
     this.replyMessages = dependencies.replyMessages ?? replyLineMessages;
+    this.replyApiMessages = dependencies.replyApiMessages ?? replyLineApiMessages;
+    this.guidedMenuHandler =
+      dependencies.guidedMenuHandler ?? new GuidedMenuUxHandler(supabase);
     this.scheduleBackgroundTask =
       dependencies.scheduleBackgroundTask
       ?? ((task) => {
@@ -342,7 +368,16 @@ export class WebhookService {
 
     log.debug("raw message saved", { rawMessageId });
 
-    // ── 2. Only process text messages ─────────────────────────────────────────
+    // ── 2. Guided Menu postback (opaque gpm1 tokens) ──────────────────────────
+    if (event.type === "postback") {
+      return this.processGuidedMenuPostback(
+        event as LinePostbackEvent,
+        eventId,
+        log,
+      );
+    }
+
+    // ── 3. Only process text messages ─────────────────────────────────────────
     if (event.type !== "message") {
       log.debug("non-message event — no parsing needed");
       return { eventId, eventType: event.type, status: "saved" };
@@ -378,6 +413,11 @@ export class WebhookService {
     if (text.trim().toLowerCase() === "test") {
       if (replyToken) await replyLineMessage(replyToken, "Bot รับข้อความได้แล้ว ✅");
       return { eventId, eventType: event.type, status: "saved", parsed: false };
+    }
+
+    // ── 3.0. Guided Menu exact trigger "เมนู" ────────────────────────────────
+    if (isExactGuidedMenuTrigger(text)) {
+      return this.processGuidedMenuOpen(msgEvent, eventId, log);
     }
 
     // ── 3.1. P2A Physical Inventory (allowlisted LINE groups only) ───────────
@@ -1932,6 +1972,103 @@ export class WebhookService {
 
       return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
     }
+  }
+
+  // ── Guided Menu Slice 2 ───────────────────────────────────────────────────
+  private async processGuidedMenuOpen(
+    event: LineMessageEvent,
+    eventId: string,
+    log: ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const replyToken = event.replyToken;
+    const identity = buildGuidedMenuIdentity({
+      lineUserId: getUserId(event.source),
+      sourceType: event.source.type,
+      sourceId: getSourceId(event.source),
+      sessionKey: getPendingSessionKey(event.source),
+    });
+
+    if (!identity) {
+      log.info("guided menu open refused — missing identity binding");
+      if (replyToken) {
+        await this.replyApiMessages(replyToken, [
+          buildInvalidMenuMessage() as LineApiMessage,
+        ]);
+      }
+      return { eventId, eventType: event.type, status: "saved", parsed: false };
+    }
+
+    const outcome = await this.guidedMenuHandler.openMenu({ identity });
+    if (replyToken) {
+      await this.replyApiMessages(
+        replyToken,
+        outcome.messages as LineApiMessage[],
+      );
+    }
+    log.info("guided menu opened", { screen: outcome.screen });
+    return { eventId, eventType: event.type, status: "saved", parsed: false };
+  }
+
+  private async processGuidedMenuPostback(
+    event: LinePostbackEvent,
+    eventId: string,
+    log: ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const data = event.postback?.data ?? "";
+    const replyToken = event.replyToken;
+
+    // Unrelated postbacks: persist raw event only; leave available to other routers.
+    if (!isGuidedMenuPostbackCandidate(data)) {
+      log.debug("non-guided-menu postback — ignored after raw persist");
+      return { eventId, eventType: event.type, status: "saved" };
+    }
+
+    // Malformed gpm1-looking data fails closed (still after normal raw persist).
+    if (!isGuidedMenuPostbackData(data)) {
+      log.info("malformed guided-menu postback — invalid reply");
+      if (replyToken) {
+        await this.replyApiMessages(replyToken, [
+          buildInvalidMenuMessage() as LineApiMessage,
+        ]);
+      }
+      return { eventId, eventType: event.type, status: "saved" };
+    }
+
+    const identity = buildGuidedMenuIdentity({
+      lineUserId: getUserId(event.source),
+      sourceType: event.source.type,
+      sourceId: getSourceId(event.source),
+      sessionKey: getPendingSessionKey(event.source),
+    });
+
+    if (!identity) {
+      log.info("guided menu postback refused — missing identity binding");
+      if (replyToken) {
+        await this.replyApiMessages(replyToken, [
+          buildInvalidMenuMessage() as LineApiMessage,
+        ]);
+      }
+      return { eventId, eventType: event.type, status: "saved" };
+    }
+
+    const outcome = await this.guidedMenuHandler.handlePostback({
+      wireToken: data,
+      lineEventId: eventId,
+      identity,
+      lineTimestampMs: event.timestamp,
+    });
+
+    if (replyToken) {
+      await this.replyApiMessages(
+        replyToken,
+        outcome.messages as LineApiMessage[],
+      );
+    }
+    log.info("guided menu postback handled", {
+      screen: outcome.screen,
+      confirmPlaceholder: outcome.confirmPlaceholder ?? false,
+    });
+    return { eventId, eventType: event.type, status: "saved" };
   }
 
   // ── DB helpers ────────────────────────────────────────────────────────────

@@ -1326,6 +1326,85 @@ export interface Database {
         };
         Relationships: [];
       };
+      purchase_receipts: {
+        Row: {
+          id:                     string;
+          draft_key:              string;
+          status:                 "draft" | "confirmed" | "void";
+          contract_version:       string;
+          business_date:          string;
+          purchase_time:          string | null;
+          supplier_key:           string | null;
+          supplier_raw:           string | null;
+          supplier_ref:           string | null;
+          reference_text:         string | null;
+          intended_warehouse_code: "MAIN";
+          freight_satang:         number;
+          handling_satang:        number;
+          discount_satang:        number;
+          vat_kind:               "NONE" | "AMOUNT";
+          vat_satang:             number | null;
+          vat_included_in_item_prices: boolean | null;
+          vat_recoverable:        boolean | null;
+          item_count:             number;
+          source_type:            LineSourceType | null;
+          source_id:              string | null;
+          sender_line_user_id:    string | null;
+          source_line_event_id:   string | null;
+          source_raw_message_id:  string | null;
+          source_evidence:        Json;
+          review_flags:           Json;
+          draft_revision:         number;
+          confirmation_key:       string | null;
+          confirmation_hash:      string | null;
+          confirmed_at:           string | null;
+          confirmed_by:           string | null;
+          voided_at:              string | null;
+          voided_by:              string | null;
+          void_reason:            string | null;
+          created_at:             string;
+          updated_at:             string;
+        };
+        // Mutation is RPC-only: service_role holds SELECT and nothing else.
+        Insert: never;
+        Update: never;
+        Relationships: [];
+      };
+      purchase_receipt_items: {
+        Row: {
+          id:                 string;
+          receipt_id:         string;
+          item_ordinal:       number;
+          item_number:        number | null;
+          product_key:        string;
+          raw_product_text:   string;
+          // numeric(18,6) / numeric(18,4) arrive as strings: never a JS number.
+          quantity:           string;
+          unit_key:           string;
+          raw_unit:           string;
+          unit_cost:          string | null;
+          price_unit_text:    string | null;
+          line_amount_satang: number | null;
+          source_evidence:    Json;
+          created_at:         string;
+        };
+        Insert: never;
+        Update: never;
+        Relationships: [];
+      };
+      purchase_receipt_lifecycle_events: {
+        Row: {
+          id:         string;
+          receipt_id: string;
+          event:      "drafted" | "confirmed" | "voided";
+          actor:      string | null;
+          detail:     Json;
+          created_at: string;
+        };
+        Insert: never;
+        Update: never;
+        Relationships: [];
+      };
     };
     Views: {
       produce_transactions: {
@@ -1578,6 +1657,64 @@ export interface Database {
         Args: { p_session_id: string };
         Returns: string;
       };
+      upsert_purchase_receipt_draft: {
+        Args: {
+          p_draft_key:            string;
+          p_contract_version:     string;
+          p_business_date:        string;
+          p_items:                Json;
+          p_purchase_time?:       string | null;
+          p_supplier_key?:        string | null;
+          p_supplier_raw?:        string | null;
+          p_supplier_ref?:        string | null;
+          p_reference_text?:      string | null;
+          p_freight_satang?:      string | number;
+          p_handling_satang?:     string | number;
+          p_discount_satang?:     string | number;
+          p_vat_kind?:            "NONE" | "AMOUNT";
+          p_vat_satang?:          string | number | null;
+          p_vat_included_in_item_prices?: boolean | null;
+          p_vat_recoverable?:     boolean | null;
+          p_source_type?:         LineSourceType | null;
+          p_source_id?:           string | null;
+          p_sender_line_user_id?: string | null;
+          p_source_line_event_id?: string | null;
+          p_source_raw_message_id?: string | null;
+          p_source_evidence?:     Json;
+          p_review_flags?:        Json;
+          p_actor?:               string | null;
+        };
+        Returns: Json;
+      };
+      confirm_purchase_receipt: {
+        Args: {
+          p_receipt_id:              string;
+          p_confirmation_key:        string;
+          p_expected_draft_revision?: number | null;
+          p_actor?:                  string | null;
+        };
+        Returns: Json;
+      };
+      void_purchase_receipt: {
+        Args: {
+          p_receipt_id: string;
+          p_reason:     string;
+          p_actor?:     string | null;
+        };
+        Returns: Json;
+      };
+      get_purchase_receipt_confirmation: {
+        Args: { p_receipt_id: string };
+        Returns: Json;
+      };
+      purchase_receipt_confirmation_payload: {
+        Args: { p_receipt_id: string };
+        Returns: Json;
+      };
+      purchase_receipt_confirmation_hash: {
+        Args: { p_receipt_id: string };
+        Returns: string;
+      };
     };
     CompositeTypes: { [_ in never]: never };
     Enums: {
@@ -1607,3 +1744,6 @@ export type DigitalWhiteSheetCashEntryRow  = Database["public"]["Tables"]["digit
 export type PhysicalInventorySessionRow    = Database["public"]["Tables"]["physical_inventory_sessions"]["Row"];
 export type PhysicalInventorySnapshotRow   = Database["public"]["Tables"]["physical_inventory_snapshots"]["Row"];
 export type PhysicalInventoryItemRow       = Database["public"]["Tables"]["physical_inventory_items"]["Row"];
+export type PurchaseReceiptRow             = Database["public"]["Tables"]["purchase_receipts"]["Row"];
+export type PurchaseReceiptItemRow         = Database["public"]["Tables"]["purchase_receipt_items"]["Row"];
+export type PurchaseReceiptLifecycleEventRow = Database["public"]["Tables"]["purchase_receipt_lifecycle_events"]["Row"];

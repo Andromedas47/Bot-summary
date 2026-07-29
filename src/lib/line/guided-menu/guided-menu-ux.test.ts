@@ -47,6 +47,18 @@ function seededHandler(db: GuidedMenuFakeDatabase): GuidedMenuUxHandler {
     active: true,
   });
   db.seedMarket({ market_code: "kee", label: "ตลาดกี้", active: true });
+  db.seedSeller({
+    seller_code: "seller_a",
+    label: "พี่ดำ",
+    active: true,
+    sort_order: 1,
+  });
+  db.seedSellerMarket({
+    seller_code: "seller_a",
+    market_code: "kee",
+    active: true,
+    sort_order: 1,
+  });
   return new GuidedMenuUxHandler(db.asClient());
 }
 
@@ -109,7 +121,7 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     expect(toMarketOption(active[0]!).code).toBe(active[0]!.marketCode);
   });
 
-  it("fails closed when no active markets", async () => {
+  it("fails closed when no active sellers", async () => {
     const db = new GuidedMenuFakeDatabase();
     db.seedOperator({
       line_user_id: IDENTITY.lineUserId,
@@ -120,17 +132,56 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     const opened = await handler.openMenu({ identity: IDENTITY });
     const msg = opened.messages[0];
     if (msg.type !== "template") throw new Error("template");
-    const market = await handler.handlePostback({
+    const seller = await handler.handlePostback({
       wireToken: msg.template.actions[0]!.data,
-      lineEventId: "evt-no-mkt",
+      lineEventId: "evt-no-seller",
       identity: IDENTITY,
       lineTimestampMs: TS,
     });
-    expect(market.screen).toBe("no_markets");
-    expect(market.messages[0]).toEqual({
+    expect(seller.screen).toBe("no_sellers");
+    expect(seller.messages[0]).toEqual({
       type: "text",
-      text: GUIDED_MENU_COPY.noActiveMarkets,
+      text: GUIDED_MENU_COPY.noActiveSellers,
     });
+  });
+
+  it("fails closed when an active seller has no active market assignment", async () => {
+    const db = new GuidedMenuFakeDatabase();
+    db.seedOperator({
+      line_user_id: IDENTITY.lineUserId,
+      staff_label: "พี่ดำ",
+      active: true,
+    });
+    db.seedSeller({
+      seller_code: "seller_a",
+      label: "พี่ดำ",
+      active: true,
+      sort_order: 1,
+    });
+    const handler = new GuidedMenuUxHandler(db.asClient());
+    const opened = await handler.openMenu({ identity: IDENTITY });
+    const msg = opened.messages[0];
+    if (msg.type !== "template") throw new Error("template");
+    const seller = await handler.handlePostback({
+      wireToken: msg.template.actions[0]!.data,
+      lineEventId: "evt-no-assignment-tx",
+      identity: IDENTITY,
+      lineTimestampMs: TS,
+    });
+    const sellerToken = collectPostbackData(seller.messages).find(
+      (token) => db.stateByWire(token)?.payload.seller_code === "seller_a",
+    );
+    const market = await handler.handlePostback({
+      wireToken: sellerToken!,
+      lineEventId: "evt-no-assignment-seller",
+      identity: IDENTITY,
+      lineTimestampMs: TS,
+    });
+
+    expect(market.screen).toBe("no_seller_markets");
+    expect(market.messages).toEqual([
+      { type: "text", text: GUIDED_MENU_COPY.noActiveSellerMarkets },
+    ]);
   });
 
   it("mapped operator gets transaction-type buttons with opaque gpm1 tokens", async () => {
@@ -159,7 +210,7 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     assertGuidedMenuMessageLimits(opened.messages);
   });
 
-  it("walks tx → market → date → confirm → field-safe no-write placeholder", async () => {
+  it("walks tx → seller → market → date → confirm → field-safe no-write placeholder", async () => {
     const db = new GuidedMenuFakeDatabase();
     const handler = seededHandler(db);
 
@@ -168,9 +219,22 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     if (txMsg.type !== "template") throw new Error("expected template");
     const withdrawToken = txMsg.template.actions[0]!.data;
 
-    const market = await handler.handlePostback({
+    const seller = await handler.handlePostback({
       wireToken: withdrawToken,
       lineEventId: "evt-tx",
+      identity: IDENTITY,
+      lineTimestampMs: TS,
+    });
+    expect(seller.screen).toBe("seller");
+    const sellerToken = collectPostbackData(seller.messages).find((t) => {
+      const row = db.stateByWire(t);
+      return row?.payload.seller_code === "seller_a";
+    });
+    expect(sellerToken).toBeTruthy();
+
+    const market = await handler.handlePostback({
+      wireToken: sellerToken!,
+      lineEventId: "evt-seller",
       identity: IDENTITY,
       lineTimestampMs: TS,
     });
@@ -208,15 +272,18 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     const json = JSON.stringify(flex);
     expect(json).toContain("กำลังจะเปิดรายการ");
     expect(json).toContain("ประเภท: เบิก");
+    expect(json).toContain("คนขาย: พี่ดำ");
     expect(json).toContain("ตลาด: ตลาดกี้");
     expect(json).toContain(`วันที่: ${formatThaiDateShort("2026-07-29")}`);
     expect(json).toContain("ยืนยัน");
     expect(confirm.result).toMatchObject({
       transaction_type: "withdraw",
+      seller_code: "seller_a",
       market_code: "kee",
       date_mode: "today",
     });
     expect(confirm.result).not.toHaveProperty("market_label");
+    expect(confirm.result).not.toHaveProperty("seller_label");
     expect(confirm.result).not.toHaveProperty("transaction_label");
 
     const confirmToken = collectPostbackData(confirm.messages).find((t) => {
@@ -265,7 +332,17 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
       identity: IDENTITY,
       lineTimestampMs: TS,
     });
-    const keeToken = collectPostbackData(market.messages).find((t) => {
+    const sellerToken = collectPostbackData(market.messages).find((t) => {
+      const row = db.stateByWire(t);
+      return row?.payload.seller_code === "seller_a";
+    });
+    const marketScreen = await handler.handlePostback({
+      wireToken: sellerToken!,
+      lineEventId: "evt-seller-ina",
+      identity: IDENTITY,
+      lineTimestampMs: TS,
+    });
+    const keeToken = collectPostbackData(marketScreen.messages).find((t) => {
       const row = db.stateByWire(t);
       return row?.payload.market_code === "kee";
     });
@@ -389,7 +466,7 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
       identity: IDENTITY,
       lineTimestampMs: TS,
     });
-    expect(ok.screen).toBe("market");
+    expect(ok.screen).toBe("seller");
 
     const conflict = await handler.handlePostback({
       wireToken: token,

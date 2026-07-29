@@ -22,6 +22,8 @@ import {
   type CreateMenuStateInput,
   type CreateMenuStateOutcome,
   type GuidedMenuMarket,
+  type GuidedMenuSeller,
+  type GuidedMenuSellerMarket,
   type MenuActionType,
   type MenuPayload,
   type MenuPayloadByAction,
@@ -33,6 +35,7 @@ import {
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MARKET_CODE_RE = /^[a-z0-9_]{1,32}$/;
+const SELLER_CODE_RE = MARKET_CODE_RE;
 
 function nonblank(value: string | null | undefined, label: string): string {
   const v = (value ?? "").trim();
@@ -41,7 +44,11 @@ function nonblank(value: string | null | undefined, label: string): string {
 }
 
 function assertNeverTrustedLabels(payload: Record<string, unknown>): void {
-  if ("staff_label" in payload || "market_label" in payload) {
+  if (
+    "staff_label" in payload ||
+    "seller_label" in payload ||
+    "market_label" in payload
+  ) {
     throw new Error("menu payload must not carry trusted display labels");
   }
 }
@@ -107,11 +114,37 @@ export function validateMenuPayloadForAction<A extends MenuActionType>(
         transaction_type: raw.transaction_type,
       } as MenuPayloadByAction[A];
     }
+    case "choose_seller": {
+      if (!keysEqual(keys, ["seller_code", "transaction_type"])) {
+        throw new Error("invalid choose_seller payload keys");
+      }
+      const sellerCode = String(raw.seller_code ?? "").trim();
+      if (!SELLER_CODE_RE.test(sellerCode)) {
+        throw new Error("invalid seller_code");
+      }
+      if (
+        !(MENU_TRANSACTION_TYPE_CODES as readonly string[]).includes(
+          String(raw.transaction_type),
+        )
+      ) {
+        throw new Error("invalid transaction_type code");
+      }
+      return {
+        transaction_type: raw.transaction_type,
+        seller_code: sellerCode,
+      } as MenuPayloadByAction[A];
+    }
     case "choose_market": {
-      if (!keysEqual(keys, ["market_code", "transaction_type"])) {
+      if (
+        !keysEqual(keys, ["market_code", "seller_code", "transaction_type"])
+      ) {
         throw new Error("invalid choose_market payload keys");
       }
+      const sellerCode = String(raw.seller_code ?? "").trim();
       const marketCode = String(raw.market_code ?? "").trim();
+      if (!SELLER_CODE_RE.test(sellerCode)) {
+        throw new Error("invalid seller_code");
+      }
       if (!MARKET_CODE_RE.test(marketCode)) {
         throw new Error("invalid market_code");
       }
@@ -124,12 +157,14 @@ export function validateMenuPayloadForAction<A extends MenuActionType>(
       }
       return {
         transaction_type: raw.transaction_type,
+        seller_code: sellerCode,
         market_code: marketCode,
       } as MenuPayloadByAction[A];
     }
     case "choose_date":
     case "confirm_open": {
       const tx = String(raw.transaction_type ?? "");
+      const sellerCode = String(raw.seller_code ?? "").trim();
       const marketCode = String(raw.market_code ?? "").trim();
       const dateMode = String(raw.date_mode ?? "");
       if (
@@ -137,17 +172,26 @@ export function validateMenuPayloadForAction<A extends MenuActionType>(
       ) {
         throw new Error("invalid transaction_type code");
       }
+      if (!SELLER_CODE_RE.test(sellerCode)) {
+        throw new Error("invalid seller_code");
+      }
       if (!MARKET_CODE_RE.test(marketCode)) {
         throw new Error("invalid market_code");
       }
       if (dateMode === "today" || dateMode === "yesterday") {
         if (
-          !keysEqual(keys, ["date_mode", "market_code", "transaction_type"])
+          !keysEqual(keys, [
+            "date_mode",
+            "market_code",
+            "seller_code",
+            "transaction_type",
+          ])
         ) {
           throw new Error(`invalid ${actionType} payload keys`);
         }
         return {
           transaction_type: tx,
+          seller_code: sellerCode,
           market_code: marketCode,
           date_mode: dateMode,
         } as MenuPayloadByAction[A];
@@ -158,6 +202,7 @@ export function validateMenuPayloadForAction<A extends MenuActionType>(
             "date_mode",
             "iso_date",
             "market_code",
+            "seller_code",
             "transaction_type",
           ])
         ) {
@@ -169,6 +214,7 @@ export function validateMenuPayloadForAction<A extends MenuActionType>(
         }
         return {
           transaction_type: tx,
+          seller_code: sellerCode,
           market_code: marketCode,
           date_mode: "iso",
           iso_date: iso,
@@ -218,6 +264,13 @@ export function validateMenuPayload(payload: MenuPayload): MenuPayload {
     }
     out.transaction_type = payload.transaction_type;
   }
+  if (payload.seller_code !== undefined) {
+    const code = payload.seller_code.trim();
+    if (!SELLER_CODE_RE.test(code)) {
+      throw new Error("invalid seller_code");
+    }
+    out.seller_code = code;
+  }
   if (payload.market_code !== undefined) {
     const code = payload.market_code.trim();
     if (!MARKET_CODE_RE.test(code)) {
@@ -239,7 +292,7 @@ export function validateMenuPayload(payload: MenuPayload): MenuPayload {
   }
   for (const key of Object.keys(payload as Record<string, unknown>)) {
     if (
-      !["intent", "transaction_type", "market_code", "date_mode", "iso_date"].includes(
+      !["intent", "transaction_type", "seller_code", "market_code", "date_mode", "iso_date"].includes(
         key,
       )
     ) {
@@ -308,6 +361,81 @@ export class GuidedMenuStateService {
       active: true,
     };
     return { status: "mapped", identity };
+  }
+
+  /** Active seller catalog, ordered for the LINE menu. */
+  async listActiveSellers(): Promise<GuidedMenuSeller[]> {
+    const { data, error } = await this.supabase
+      .from("line_guided_menu_sellers")
+      .select("seller_code, label, active, sort_order")
+      .eq("active", true)
+      .order("sort_order");
+
+    if (error) {
+      throw new Error(`seller catalog lookup failed: ${error.message}`);
+    }
+    return (data ?? [])
+      .map((row) => ({
+        sellerCode: String(row.seller_code),
+        label: String(row.label),
+        active: row.active === true,
+        sortOrder: Number(row.sort_order),
+      }))
+      .filter((seller) => seller.active && seller.label.trim())
+      .sort(
+        (a, b) =>
+          a.sortOrder - b.sortOrder || a.label.localeCompare(b.label, "th"),
+      );
+  }
+
+  /** Re-read active seller, active assignments, and active markets together. */
+  async loadActiveSellerMarkets(sellerCode: string): Promise<{
+    seller: GuidedMenuSeller | null;
+    markets: GuidedMenuSellerMarket[];
+  }> {
+    const code = nonblank(sellerCode, "sellerCode");
+    const seller = (await this.listActiveSellers()).find(
+      (row) => row.sellerCode === code,
+    );
+    if (!seller) return { seller: null, markets: [] };
+
+    const { data, error } = await this.supabase
+      .from("line_guided_menu_seller_markets")
+      .select("seller_code, market_code, active, sort_order")
+      .eq("seller_code", code)
+      .eq("active", true)
+      .order("sort_order");
+    if (error) {
+      throw new Error(`seller-market lookup failed: ${error.message}`);
+    }
+
+    const marketByCode = new Map(
+      (await this.listActiveMarkets()).map((market) => [
+        market.marketCode,
+        market,
+      ]),
+    );
+    const markets = (data ?? [])
+      .filter((row) => row.active === true && row.seller_code === code)
+      .flatMap((row) => {
+        const market = marketByCode.get(String(row.market_code));
+        return market
+          ? [{
+              sellerCode: code,
+              sellerLabel: seller.label,
+              marketCode: market.marketCode,
+              marketLabel: market.label,
+              sortOrder: Number(row.sort_order),
+            }]
+          : [];
+      })
+      .sort(
+        (a, b) =>
+          a.sortOrder - b.sortOrder ||
+          a.marketLabel.localeCompare(b.marketLabel, "th"),
+      );
+
+    return { seller, markets };
   }
 
   /** Load trusted market allowlist from DB (authoritative source). */

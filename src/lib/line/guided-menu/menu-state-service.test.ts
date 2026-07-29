@@ -102,15 +102,31 @@ describe("0051 action-specific payload validation", () => {
     ).toThrow(/keys/);
 
     expect(
+      validateMenuPayloadForAction("choose_seller", {
+        transaction_type: "return",
+        seller_code: "seller_a",
+      }),
+    ).toEqual({
+      transaction_type: "return",
+      seller_code: "seller_a",
+    });
+
+    expect(
       validateMenuPayloadForAction("choose_market", {
         transaction_type: "return",
+        seller_code: "seller_a",
         market_code: "kee",
       }),
-    ).toEqual({ transaction_type: "return", market_code: "kee" });
+    ).toEqual({
+      transaction_type: "return",
+      seller_code: "seller_a",
+      market_code: "kee",
+    });
 
     expect(
       validateMenuPayloadForAction("choose_date", {
         transaction_type: "withdraw",
+        seller_code: "seller_a",
         market_code: "kee",
         date_mode: "today",
       }),
@@ -119,6 +135,7 @@ describe("0051 action-specific payload validation", () => {
     expect(
       validateMenuPayloadForAction("confirm_open", {
         transaction_type: "withdraw",
+        seller_code: "seller_a",
         market_code: "kee",
         date_mode: "iso",
         iso_date: "2026-07-29",
@@ -128,6 +145,7 @@ describe("0051 action-specific payload validation", () => {
     expect(() =>
       validateMenuPayloadForAction("confirm_open", {
         transaction_type: "withdraw",
+        seller_code: "seller_a",
         market_code: "kee",
         date_mode: "iso",
         iso_date: "2026-13-99",

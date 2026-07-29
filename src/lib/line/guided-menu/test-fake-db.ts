@@ -23,6 +23,20 @@ type MarketRow = {
   active: boolean;
 };
 
+type SellerRow = {
+  seller_code: string;
+  label: string;
+  active: boolean;
+  sort_order: number;
+};
+
+type SellerMarketRow = {
+  seller_code: string;
+  market_code: string;
+  active: boolean;
+  sort_order: number;
+};
+
 type MenuStateRow = {
   token_hash: string;
   action_type: MenuActionType;
@@ -50,59 +64,68 @@ function ttlMs(action: MenuActionType): number {
 function payloadLooksValid(
   action: MenuActionType,
   payload: MenuPayload,
+  sellers: SellerRow[],
   markets: MarketRow[],
+  assignments: SellerMarketRow[],
 ): boolean {
   const keys = Object.keys(payload).sort();
-  if ("staff_label" in payload || "market_label" in payload || "step" in payload) {
+  if (
+    "staff_label" in payload ||
+    "seller_label" in payload ||
+    "market_label" in payload ||
+    "step" in payload
+  ) {
     return false;
   }
-  const active = (code: string | undefined) =>
-    !!code &&
-    markets.some((m) => m.market_code === code && m.active === true);
+  const validTx = ["withdraw", "return", "damaged_return"].includes(
+    String(payload.transaction_type),
+  );
+  const activeSeller = (code: string | undefined) =>
+    !!code && sellers.some((row) => row.seller_code === code && row.active);
+  const activeMarket = (code: string | undefined) =>
+    !!code && markets.some((row) => row.market_code === code && row.active);
+  const activeAssignment = (seller: string | undefined, market: string | undefined) =>
+    !!seller &&
+    !!market &&
+    assignments.some(
+      (row) =>
+        row.seller_code === seller &&
+        row.market_code === market &&
+        row.active,
+    );
+  const validSelection = () =>
+    validTx &&
+    activeSeller(payload.seller_code) &&
+    activeMarket(payload.market_code) &&
+    activeAssignment(payload.seller_code, payload.market_code);
 
   switch (action) {
     case "menu_root":
       if (keys.length === 0) return true;
       return keys.length === 1 && keys[0] === "intent" && payload.intent === "cancel";
     case "choose_transaction_type":
+      return keys.length === 1 && keys[0] === "transaction_type" && validTx;
+    case "choose_seller":
       return (
-        keys.length === 1 &&
-        keys[0] === "transaction_type" &&
-        ["withdraw", "return", "damaged_return"].includes(
-          String(payload.transaction_type),
-        )
+        keys.join(",") === "seller_code,transaction_type" &&
+        validTx &&
+        activeSeller(payload.seller_code)
       );
     case "choose_market":
       return (
-        keys.length === 2 &&
-        keys[0] === "market_code" &&
-        keys[1] === "transaction_type" &&
-        ["withdraw", "return", "damaged_return"].includes(
-          String(payload.transaction_type),
-        ) &&
-        active(payload.market_code)
+        keys.join(",") === "market_code,seller_code,transaction_type" &&
+        validSelection()
       );
     case "choose_date":
     case "confirm_open": {
-      const mode = payload.date_mode;
-      if (!["withdraw", "return", "damaged_return"].includes(
-        String(payload.transaction_type),
-      )) {
-        return false;
+      if (!validSelection()) return false;
+      if (payload.date_mode === "today" || payload.date_mode === "yesterday") {
+        return keys.join(",") === "date_mode,market_code,seller_code,transaction_type";
       }
-      if (!active(payload.market_code)) return false;
-      if (mode === "today" || mode === "yesterday") {
+      if (payload.date_mode === "iso") {
         return (
-          keys.length === 3 &&
-          keys[0] === "date_mode" &&
-          keys[1] === "market_code" &&
-          keys[2] === "transaction_type"
-        );
-      }
-      if (mode === "iso") {
-        return (
-          keys.length === 4 &&
-          keys.includes("iso_date") &&
+          keys.join(",") ===
+            "date_mode,iso_date,market_code,seller_code,transaction_type" &&
           typeof payload.iso_date === "string"
         );
       }
@@ -120,6 +143,8 @@ function payloadLooksValid(
 export class GuidedMenuFakeDatabase {
   operators: OperatorRow[] = [];
   markets: MarketRow[] = [];
+  sellers: SellerRow[] = [];
+  sellerMarkets: SellerMarketRow[] = [];
   states: MenuStateRow[] = [];
   wireByHash = new Map<string, string>();
 
@@ -138,6 +163,8 @@ export class GuidedMenuFakeDatabase {
     line_operator_identities: [],
     line_menu_states: [],
     line_guided_menu_markets: [],
+    line_guided_menu_sellers: [],
+    line_guided_menu_seller_markets: [],
   };
 
   seedOperator(row: OperatorRow): void {
@@ -152,6 +179,24 @@ export class GuidedMenuFakeDatabase {
     this.tables.line_guided_menu_markets = [...this.markets];
   }
 
+
+  seedSeller(row: SellerRow): void {
+    this.sellers = this.sellers.filter(
+      (seller) => seller.seller_code !== row.seller_code,
+    );
+    this.sellers.push(row);
+    this.tables.line_guided_menu_sellers = [...this.sellers];
+  }
+
+  seedSellerMarket(row: SellerMarketRow): void {
+    this.sellerMarkets = this.sellerMarkets.filter(
+      (assignment) =>
+        assignment.seller_code !== row.seller_code ||
+        assignment.market_code !== row.market_code,
+    );
+    this.sellerMarkets.push(row);
+    this.tables.line_guided_menu_seller_markets = [...this.sellerMarkets];
+  }
   /** Convenience: seed the three default active markets used by Slice 1 migration. */
   seedDefaultMarkets(): void {
     this.seedMarket({ market_code: "kee", label: "ตลาดกี้", active: true });
@@ -321,7 +366,15 @@ export class GuidedMenuFakeDatabase {
     }
     const action = String(args.p_action_type) as MenuActionType;
     const payload = (args.p_payload ?? {}) as MenuPayload;
-    if (!payloadLooksValid(action, payload, this.markets)) {
+    if (
+      !payloadLooksValid(
+        action,
+        payload,
+        this.sellers,
+        this.markets,
+        this.sellerMarkets,
+      )
+    ) {
       return { status: "invalid_or_expired" };
     }
     const now = Date.now();

@@ -107,6 +107,18 @@ function seedMappedKee(db: GuidedMenuFakeDatabase, lineUserId = "U-op-1"): void 
     active: true,
   });
   db.seedMarket({ market_code: "kee", label: "ตลาดกี้", active: true });
+  db.seedSeller({
+    seller_code: "seller_a",
+    label: "พี่ดำ",
+    active: true,
+    sort_order: 1,
+  });
+  db.seedSellerMarket({
+    seller_code: "seller_a",
+    market_code: "kee",
+    active: true,
+    sort_order: 1,
+  });
 }
 
 function makeService(db: GuidedMenuFakeDatabase, replies: LineApiMessage[][]) {
@@ -207,7 +219,15 @@ describe("0051 Slice 2 — webhook Guided Menu", () => {
     expect(db.tables.raw_messages[1]!.line_event_id).toBe("pb-walk-tx");
     expect(db.tables.raw_messages[1]!.event_type).toBe("postback");
 
-    const marketTokens = collectPostbackData(replies[1]);
+    const sellerTokens = collectPostbackData(replies[1]);
+    const seller = sellerTokens.find(
+      (t) => db.stateByWire(t)?.payload.seller_code === "seller_a",
+    )!;
+    await service.processEvents([
+      postbackEvent(seller, { webhookEventId: "pb-walk-seller" }),
+    ], "dest");
+
+    const marketTokens = collectPostbackData(replies[2]);
     const kee = marketTokens.find(
       (t) => db.stateByWire(t)?.payload.market_code === "kee",
     )!;
@@ -215,35 +235,36 @@ describe("0051 Slice 2 — webhook Guided Menu", () => {
     await service.processEvents([
       postbackEvent(kee, { webhookEventId: "pb-walk-mkt" }),
     ], "dest");
-    const today = collectPostbackData(replies[2]).find(
+    const today = collectPostbackData(replies[3]).find(
       (t) => db.stateByWire(t)?.payload.date_mode === "today",
     )!;
 
     await service.processEvents([
       postbackEvent(today, { webhookEventId: "pb-walk-date" }),
     ], "dest");
-    expect(JSON.stringify(replies[3])).toContain("กำลังจะเปิดรายการ");
-    expect(JSON.stringify(replies[3])).toContain("ตลาดกี้");
+    expect(JSON.stringify(replies[4])).toContain("กำลังจะเปิดรายการ");
+    expect(JSON.stringify(replies[4])).toContain("พี่ดำ");
+    expect(JSON.stringify(replies[4])).toContain("ตลาดกี้");
 
-    const confirmTok = collectPostbackData(replies[3]).find(
+    const confirmTok = collectPostbackData(replies[4]).find(
       (t) => db.stateByWire(t)?.action_type === "confirm_open",
     )!;
     await service.processEvents([
       postbackEvent(confirmTok, { webhookEventId: "pb-walk-confirm" }),
     ], "dest");
-    expect(replies[4]).toEqual([
+    expect(replies[5]).toEqual([
       { type: "text", text: GUIDED_MENU_COPY.confirmPlaceholder },
     ]);
     expect(GUIDED_MENU_COPY.confirmPlaceholder).toContain("ยังไม่ได้เปิดรายการ");
     expect(GUIDED_MENU_COPY.confirmPlaceholder).not.toMatch(/Slice\s*3A/i);
 
     // Exactly one raw row per genuine inbound event; no synthetic extras.
-    expect(db.tables.raw_messages).toHaveLength(5);
+    expect(db.tables.raw_messages).toHaveLength(6);
     assertNoBusinessSideEffects(db);
     expect(counts().pushCalls).toBe(0);
     expect(counts().multicastCalls).toBe(0);
     // One replyApiMessages call per handled Guided Menu event.
-    expect(replies).toHaveLength(5);
+    expect(replies).toHaveLength(6);
   });
 
   it("wrong-user postback yields generic invalid reply", async () => {
@@ -297,7 +318,7 @@ describe("0051 Slice 2 — webhook Guided Menu", () => {
       },
       lineTimestampMs: TS,
     });
-    expect(replay.screen).toBe("market");
+    expect(replay.screen).toBe("seller");
     expect(JSON.stringify(replay.messages)).toBe(JSON.stringify(replies[1]));
   });
 

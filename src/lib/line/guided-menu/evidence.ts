@@ -58,6 +58,7 @@ export function buildSlice2EvidenceMessages(): Slice2EvidenceBundle {
     market: [
       buildMarketSelectMessage({
         transactionType: "withdraw",
+        sellerLabel: "พี่ดำ",
         markets: [{ code: "kee", label: "ตลาดกี้" }],
         marketTokens: new Map([["kee", tKee]]),
         backToken: tBackRoot,
@@ -67,6 +68,7 @@ export function buildSlice2EvidenceMessages(): Slice2EvidenceBundle {
     date: [
       buildDateSelectMessage({
         transactionType: "withdraw",
+        sellerLabel: "พี่ดำ",
         marketLabel: "ตลาดกี้",
         todayToken: tToday,
         yesterdayToken: tYesterday,
@@ -77,6 +79,7 @@ export function buildSlice2EvidenceMessages(): Slice2EvidenceBundle {
     confirm: [
       buildConfirmPreviewMessage({
         transactionType: "withdraw",
+        sellerLabel: "พี่ดำ",
         marketLabel: "ตลาดกี้",
         dateThaiShort: "29/07/2569",
         confirmToken: tConfirm,

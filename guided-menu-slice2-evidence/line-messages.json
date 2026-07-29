@@ -56,6 +56,13 @@
               "size": "sm",
               "color": "#334155",
               "wrap": true
+            },
+            {
+              "type": "text",
+              "text": "คนขาย: พี่ดำ",
+              "size": "sm",
+              "color": "#334155",
+              "wrap": true
             }
           ]
         },
@@ -127,6 +134,13 @@
             {
               "type": "text",
               "text": "ประเภท: เบิก",
+              "size": "sm",
+              "color": "#334155",
+              "wrap": true
+            },
+            {
+              "type": "text",
+              "text": "คนขาย: พี่ดำ",
               "size": "sm",
               "color": "#334155",
               "wrap": true
@@ -219,6 +233,13 @@
             {
               "type": "text",
               "text": "ประเภท: เบิก",
+              "size": "sm",
+              "color": "#334155",
+              "wrap": true
+            },
+            {
+              "type": "text",
+              "text": "คนขาย: พี่ดำ",
               "size": "sm",
               "color": "#334155",
               "wrap": true

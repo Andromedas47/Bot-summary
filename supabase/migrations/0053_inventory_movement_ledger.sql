@@ -140,6 +140,22 @@
 -- block would open a subtransaction and could swallow a failure, leaving one
 -- half of that pair committed. Failures here must propagate.
 --
+-- lock_purchase_receipt_for_posting() is NOT trusted to establish ownership.
+-- 0052 treats ANY pre-existing lock as an idempotent replay and never inspects
+-- posting_locked_by, so it reports success for a lock held by a different
+-- writer. The adapter therefore brackets the call:
+--   * BEFORE inserting anything on the fresh path, it rejects a receipt that
+--     already carries any lock — foreign owner, orphan p2c lock with no
+--     movement behind it, or a half-written lock. An orphan is never adopted or
+--     repaired; a fresh post writes the movement and its lock together or not
+--     at all.
+--   * AFTER calling the helper, it re-reads the receipt row and asserts
+--     posting_locked_at IS NOT NULL AND posting_locked_by = 'p2c-inventory-ledger'.
+--     The helper's return value proves nothing; only the row does.
+-- Both checks raise, so the movement and lines roll back with them. Neither
+-- applies to the replay path, where an existing movement with an exact source
+-- binding and its own p2c lock still returns replayed = true.
+--
 -- Document void is NOT performed here. Once the posting lock is set, 0052's
 -- void_purchase_receipt() refuses a standalone void, which is the intended
 -- barrier. The future atomic "document void + ledger reversal" adapter is
@@ -822,6 +838,50 @@ BEGIN
       USING ERRCODE = 'unique_violation';
   END IF;
 
+  -- Fresh post: the receipt must NOT already carry a posting lock.
+  --
+  -- lock_purchase_receipt_for_posting() treats ANY existing lock as an
+  -- idempotent replay and never validates posting_locked_by. Calling it under a
+  -- foreign lock therefore SUCCEEDS silently, and the movement would commit
+  -- while the caller is told the post failed — committed stock sitting under a
+  -- lock this ledger does not own. Both lookups above came back empty, so no
+  -- movement exists for this receipt and any lock present here belongs to
+  -- someone else's bookkeeping. Stop before a single row is written.
+  --
+  -- An orphan p2c lock is NOT repaired or adopted. A fresh posting writes the
+  -- movement and its lock together in one transaction or not at all; reusing an
+  -- orphan would recreate exactly the broken pair the lock exists to prevent,
+  -- and would erase the operational evidence that it happened.
+  IF v_receipt.posting_locked_at IS NOT NULL OR v_receipt.posting_locked_by IS NOT NULL THEN
+    -- Half-written lock. 0052 has a CHECK making this unreachable through
+    -- supported writes; if it is ever observed, the invariant is already gone
+    -- and posting stock on top of it would only bury the evidence.
+    IF v_receipt.posting_locked_at IS NULL OR v_receipt.posting_locked_by IS NULL THEN
+      RAISE EXCEPTION
+        'posting lock conflict: purchase receipt % carries a malformed posting lock '
+        '(locked_at=%, locked_by=%) — refusing to post over a half-written lock',
+        p_receipt_id,
+        coalesce(v_receipt.posting_locked_at::text, '<null>'),
+        coalesce(v_receipt.posting_locked_by, '<null>')
+        USING ERRCODE = 'internal_error';
+    END IF;
+
+    IF v_receipt.posting_locked_by = 'p2c-inventory-ledger' THEN
+      RAISE EXCEPTION
+        'posting lock conflict: purchase receipt % holds an orphan p2c-inventory-ledger '
+        'posting lock taken at % with no movement behind it — refusing to adopt it; '
+        'a fresh posting writes the movement and its lock together',
+        p_receipt_id, v_receipt.posting_locked_at
+        USING ERRCODE = 'internal_error';
+    END IF;
+
+    RAISE EXCEPTION
+      'posting lock conflict: purchase receipt % is locked for posting by % since % — '
+      'refusing to post inventory under a lock this ledger does not own',
+      p_receipt_id, v_receipt.posting_locked_by, v_receipt.posting_locked_at
+      USING ERRCODE = 'internal_error';
+  END IF;
+
   -- 5. Blocking blockers must be resolved in P2B before stock moves.
   IF coalesce((v_payload ->> 'has_blocking_blockers')::boolean, true) THEN
     RAISE EXCEPTION
@@ -1021,7 +1081,23 @@ BEGIN
   --     movement and the lock disappear together.
   PERFORM public.lock_purchase_receipt_for_posting(p_receipt_id, 'p2c-inventory-ledger');
 
+  -- Re-read and ASSERT ownership. The helper returns a success shape for a lock
+  -- it did not take, so its return value proves nothing — only the row does.
+  -- Raising here (rather than returning) rolls the ENTIRE transaction back, the
+  -- movement and its lines included, which is the whole point of doing the post
+  -- and the lock in one transaction with no EXCEPTION block to swallow it.
   SELECT * INTO v_receipt FROM public.purchase_receipts WHERE id = p_receipt_id;
+
+  IF v_receipt.posting_locked_at IS NULL
+     OR v_receipt.posting_locked_by IS DISTINCT FROM 'p2c-inventory-ledger'
+  THEN
+    RAISE EXCEPTION
+      'posting lock not established: purchase receipt % reads back as locked by % '
+      'after lock_purchase_receipt_for_posting(p2c-inventory-ledger) — rolling back '
+      'the movement rather than committing stock without its lock',
+      p_receipt_id, coalesce(v_receipt.posting_locked_by, '<unlocked>')
+      USING ERRCODE = 'internal_error';
+  END IF;
 
   -- 14.
   RETURN jsonb_build_object(

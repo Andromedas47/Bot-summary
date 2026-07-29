@@ -6,8 +6,8 @@ First visible checkpoint delivered: a confirmed, unblocked P2B purchase receipt
 posts **exactly once** into the MAIN warehouse and increases the stock balance.
 
 **Migration checksum (SHA-256, canonical LF):**
-`b33d2475217aac1181138b871d89b6516eb2afcc0bb5874e4ba65f861271e8dc`
-(`supabase/migrations/0053_inventory_movement_ledger.sql`, 1282 lines)
+`3390666864f5d4ccfcba832cef335fd8102e191b9192a9f481ca5551ab972a09`
+(`supabase/migrations/0053_inventory_movement_ledger.sql`, 1358 lines)
 
 ---
 
@@ -222,16 +222,63 @@ than at statement time. Nothing persists either way.
 6. Verify `has_blocking_blockers = false`, `posts_inventory_movement = false`,
    `intended_warehouse_code = 'MAIN'`, and that declared `item_count` matches the
    actual array.
+6b. Reject a receipt that **already carries any posting lock**. See
+   *The posting lock is owned, not merely present* below.
 7. Per item: `receipt_item_id` and `item_ordinal` present, product and unit
    identity `RESOLVED`, non-blank keys, quantity `> 0`.
 8. Insert one movement header, then one positive MAIN line per item.
 9. `lock_purchase_receipt_for_posting(receipt_id, 'p2c-inventory-ledger')` — in
    **this same transaction**.
+10. Re-read the receipt row and **assert** the lock is now ours.
 
 The function has **no `EXCEPTION` block on purpose**: a `BEGIN … EXCEPTION` block
 would open a subtransaction and could swallow a failure, leaving one half of the
 movement/lock pair committed. Failures must propagate, so the pair is genuinely
 all-or-nothing.
+
+### The posting lock is owned, not merely present
+
+`lock_purchase_receipt_for_posting()` (0052) treats **any** pre-existing lock as
+an idempotent replay and **never inspects `posting_locked_by`**. It therefore
+returns a success shape for a lock held by a completely different writer. Taken
+at face value, a fresh post would insert its movement and lines, call the helper,
+see "success", and **commit stock sitting under a foreign lock** — while the
+TypeScript layer, which does check ownership, reports failure to the caller after
+that commit had already happened.
+
+The adapter does not trust the helper. It brackets it:
+
+**Before** any insert on the fresh path — after both the dedupe-key lookup and
+the source-identity lookup have come back empty, so no movement exists for this
+receipt — the receipt must carry **no lock at all**. Three cases, each named
+distinctly:
+
+| Observed | Result |
+|---|---|
+| `posting_locked_by` is another writer | `posting lock conflict: … locked for posting by <owner>` |
+| `posting_locked_by = 'p2c-inventory-ledger'`, no movement behind it | `posting lock conflict: … orphan p2c-inventory-ledger posting lock` |
+| exactly one of the two columns non-null | `posting lock conflict: … malformed posting lock` |
+
+An orphan lock is **never repaired, cleared or adopted**. A fresh posting writes
+the movement and its lock together in one transaction or not at all; silently
+posting on top of an orphan would recreate the very broken pair the lock exists
+to prevent, and would destroy the operational evidence that it happened. The
+orphan stays visible for a human to resolve.
+
+The half-written case is unreachable through supported writes — 0052 has a
+`purchase_receipts_posting_lock_paired` CHECK — but if that invariant is ever
+lost, posting stock on top of the wreckage would only bury it.
+
+**After** the helper returns, the receipt row is re-read and asserted:
+`posting_locked_at IS NOT NULL AND posting_locked_by = 'p2c-inventory-ledger'`.
+The helper's return value proves nothing about ownership; only the row does.
+Failing this raises `posting lock not established: …`, which — with no
+`EXCEPTION` block to absorb it — rolls back the movement and its lines rather
+than committing stock without its lock.
+
+Neither guard touches the **replay** path. An existing movement whose full source
+binding matches the frozen contract, over a lock already owned by
+`p2c-inventory-ledger`, is the healthy state and still returns `replayed = true`.
 
 `void_purchase_receipt()` refuses a standalone void once the lock is held. 0053
 does **not** clear, bypass or weaken that barrier.
@@ -318,17 +365,35 @@ rather than being flattened into a business case.
 
 ## Tests
 
-- `src/lib/inventory-ledger/ledger-service.test.ts` — 47 unit tests (marshalling,
+- `src/lib/inventory-ledger/ledger-service.test.ts` — 51 unit tests (marshalling,
   error mapping, fail-closed response handling, posting-lock enforcement).
-- `src/lib/inventory-ledger/migration-0053.pg.test.ts` — 72 tests against a real
+- `src/lib/inventory-ledger/migration-0053.pg.test.ts` — 80 tests against a real
   disposable **PostgreSQL 17** database.
 
-Concurrency tests use a deterministic advisory-lock barrier (poll `pg_locks`
-until the blocking session's lock is visible), never a sleep whose length the
-assertion depends on.
+Concurrency tests use a **controller-released barrier**, never a sleep whose
+length the assertion depends on:
 
-Two cases use **fault injection** — replacing the P2B posting-lock RPC and the
-P2B confirmation getter — to reach guards that a well-behaved P2B cannot trigger.
+1. the blocking session runs its mutating statement, publishes a transaction-scoped
+   advisory lock, then parks in a poll loop waiting for a release row. Under READ
+   COMMITTED each iteration takes a fresh snapshot, so the controller's committed
+   row becomes visible inside the still-open transaction.
+2. the controller polls `pg_locks` until that advisory lock is visible — proof the
+   mutation ran and its transaction is open.
+3. the competing session starts, tagged with a marker comment.
+4. the controller polls `pg_stat_activity` **joined to ungranted `pg_locks`** until
+   that marker is genuinely waiting on a lock. Overlap is now an observed fact, not
+   an assumed one.
+5. only then is the blocker released, and the outcome asserted.
+
+The different-receipts case inverts step 4: the competing session must **not**
+block, so it is run to completion and the blocker is verified still open
+afterwards.
+
+Several cases use **fault injection** — replacing the P2B posting-lock RPC (with
+a no-op helper, and with one that locks under the wrong owner) or the P2B
+confirmation getter, and dropping 0052's posting-lock CHECK to reach the
+half-written-lock branch — because these are states a well-behaved P2B cannot
+produce.
 The injection runs inside a transaction that is **rolled back**; PostgreSQL DDL is
 transactional, so the real function is restored by the database itself rather than
 by a manual restore step that could fail and leak a fake into later tests.

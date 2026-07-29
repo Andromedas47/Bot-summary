@@ -154,9 +154,14 @@ export function mapInventoryRpcError(message: string): Error {
     return new InventoryAppendOnlyViolationError(text);
   }
 
-  // A movement observed without its posting lock, or a header disagreeing with
-  // its own lines: both mean the all-or-nothing pair was broken.
-  if (/posting lock mismatch|declares \d+ lines but has|all-or-nothing/iu.test(text)) {
+  // A movement observed without its posting lock, a header disagreeing with its
+  // own lines, a fresh post blocked by a lock this ledger does not own, or a
+  // lock that did not read back as ours after 0052's helper claimed success —
+  // all mean the movement/lock pair is not the all-or-nothing unit it must be.
+  if (
+    /posting lock mismatch|posting lock conflict|posting lock not established|declares \d+ lines but has|all-or-nothing/iu
+      .test(text)
+  ) {
     return new InventoryPostingAtomicityError(text);
   }
 

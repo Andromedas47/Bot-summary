@@ -304,6 +304,26 @@ describe("mapInventoryRpcError", () => {
       InventoryDuplicateSourceError,
     ],
     ["posting lock mismatch: movement 9 exists for purchase receipt 1", InventoryPostingAtomicityError],
+    [
+      "posting lock conflict: purchase receipt 1 is locked for posting by some-other-writer "
+        + "since 2026-07-29 — refusing to post inventory under a lock this ledger does not own",
+      InventoryPostingAtomicityError,
+    ],
+    [
+      "posting lock conflict: purchase receipt 1 holds an orphan p2c-inventory-ledger posting "
+        + "lock taken at 2026-07-29 with no movement behind it — refusing to adopt it",
+      InventoryPostingAtomicityError,
+    ],
+    [
+      "posting lock conflict: purchase receipt 1 carries a malformed posting lock "
+        + "(locked_at=2026-07-29, locked_by=<null>)",
+      InventoryPostingAtomicityError,
+    ],
+    [
+      "posting lock not established: purchase receipt 1 reads back as locked by not-p2c "
+        + "after lock_purchase_receipt_for_posting(p2c-inventory-ledger)",
+      InventoryPostingAtomicityError,
+    ],
     ["movement 9 is sealed at 2 lines but now has 3", InventoryAppendOnlyViolationError],
     ["purchase receipt 1 has no frozen confirmation hash", InventoryContractViolationError],
     ["purchase receipt 1 item 2 quantity 1.1234567 is not a plain decimal", InventorySourceBlockedError],

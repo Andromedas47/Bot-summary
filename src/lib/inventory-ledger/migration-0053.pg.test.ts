@@ -331,6 +331,121 @@ describe.skipIf(!pgAvailable)("P2C migration 0053 PostgreSQL", () => {
     expect(r.stderr).not.toMatch(/PROBE_FAIL/u);
   }
 
+  /**
+   * Runs a posting attempt inside a ROLLED-BACK transaction after `setup`, and
+   * asserts it fails with `needle` leaving no movement and no line behind.
+   *
+   * Separate from expectInjectedRejection because these cases deliberately leave
+   * a posting lock in place: the assertion is that the lock is untouched, not
+   * that it is absent. `lockOwner` is the SQL literal the lock must still read
+   * as afterwards ('NULL' for none).
+   */
+  async function expectPostRejectedInTx(opts: {
+    rid: string;
+    setup: string;
+    needle: string;
+    lockOwner: string;
+  }): Promise<void> {
+    const r = await collect(
+      startScript(`
+        BEGIN;
+        ${opts.setup}
+        DO $probe$
+        DECLARE n integer; v_owner text;
+        BEGIN
+          BEGIN
+            PERFORM public.post_purchase_receipt_inventory_movement('${opts.rid}');
+            RAISE EXCEPTION 'PROBE_FAIL: the post was accepted';
+          EXCEPTION WHEN OTHERS THEN
+            IF position('PROBE_FAIL' IN SQLERRM) > 0 THEN RAISE; END IF;
+            IF position(${opts.needle} IN SQLERRM) = 0 THEN
+              RAISE EXCEPTION 'PROBE_FAIL: wrong error %', SQLERRM;
+            END IF;
+          END;
+          SELECT count(*) INTO n FROM public.inventory_movements
+            WHERE source_document_id = '${opts.rid}';
+          IF n <> 0 THEN RAISE EXCEPTION 'PROBE_FAIL: % movements survived', n; END IF;
+          SELECT count(*) INTO n FROM public.inventory_movement_lines l
+            JOIN public.inventory_movements m ON m.id = l.movement_id
+           WHERE m.source_document_id = '${opts.rid}';
+          IF n <> 0 THEN RAISE EXCEPTION 'PROBE_FAIL: % lines survived', n; END IF;
+          SELECT posting_locked_by INTO v_owner FROM public.purchase_receipts
+           WHERE id = '${opts.rid}';
+          IF v_owner IS DISTINCT FROM ${opts.lockOwner} THEN
+            RAISE EXCEPTION 'PROBE_FAIL: lock owner is now %', coalesce(v_owner, '<null>');
+          END IF;
+          RAISE NOTICE 'PROBE_OK';
+        END $probe$;
+        ROLLBACK;`),
+    );
+    expect(r.code, `probe errored: ${r.stderr}`).toBe(0);
+    expect(r.stderr, `probe did not reach PROBE_OK: ${r.stderr}`).toMatch(/PROBE_OK/u);
+    expect(r.stderr).not.toMatch(/PROBE_FAIL/u);
+  }
+
+  /**
+   * Controller-released barrier.
+   *
+   * The blocking session parks in a poll loop until the controller inserts its
+   * release row, instead of running out a fixed pg_sleep. Under READ COMMITTED
+   * each iteration takes a fresh snapshot, so the committed release row becomes
+   * visible inside the still-open transaction. Overlap is then a fact the test
+   * established, not a duration it hoped was long enough.
+   */
+  async function ensureBarrierTable(): Promise<void> {
+    await sql(`CREATE TABLE IF NOT EXISTS public.test_barrier_release (k text PRIMARY KEY)`);
+  }
+
+  function waitForReleaseSql(name: string): string {
+    return `DO $hold$
+      BEGIN
+        LOOP
+          EXIT WHEN EXISTS (SELECT 1 FROM public.test_barrier_release WHERE k = '${name}');
+          PERFORM pg_sleep(0.05);
+        END LOOP;
+      END $hold$;`;
+  }
+
+  async function release(name: string): Promise<void> {
+    await sql(`INSERT INTO public.test_barrier_release (k) VALUES ('${name}')
+                 ON CONFLICT DO NOTHING`);
+  }
+
+  /**
+   * Blocks until a session running `marker` is genuinely waiting on a lock —
+   * proven by pg_stat_activity reporting a Lock wait AND pg_locks carrying an
+   * ungranted entry for that backend. Sleep duration is never the evidence.
+   */
+  async function waitForBlockedOnLock(marker: string, timeoutMs = 20_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const blocked = await sql(
+        `SELECT count(DISTINCT a.pid) FROM pg_stat_activity a
+           JOIN pg_locks l ON l.pid = a.pid AND NOT l.granted
+          WHERE a.datname = current_database()
+            AND a.wait_event_type = 'Lock'
+            AND a.query LIKE '%${marker}%'
+            AND a.query NOT LIKE '%pg_stat_activity%'`,
+      );
+      if (Number(blocked) > 0) return;
+      if (Date.now() > deadline) {
+        throw new Error(`session ${marker} never blocked on a lock within ${timeoutMs}ms`);
+      }
+      await Bun.sleep(25);
+    }
+  }
+
+  /** True while a session running `marker` is still connected. */
+  async function sessionRunning(marker: string): Promise<boolean> {
+    const n = await sql(
+      `SELECT count(*) FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND query LIKE '%${marker}%'
+          AND query NOT LIKE '%pg_stat_activity%'`,
+    );
+    return Number(n) > 0;
+  }
+
   afterAll(async () => {
     if (!pgAvailable || !dbCreated) return;
     await runPsql(psqlPath, [
@@ -1525,24 +1640,239 @@ describe.skipIf(!pgAvailable)("P2C migration 0053 PostgreSQL", () => {
     ).toMatch(/cannot insert into view|no INSERT rule|cannot change/iu);
   });
 
+  // ── The P2B posting lock is owned, not merely present ────────────────────
+  //
+  // lock_purchase_receipt_for_posting() reports an idempotent replay for ANY
+  // pre-existing lock and never inspects posting_locked_by. Left unguarded, a
+  // fresh post under someone else's lock would COMMIT stock while the caller
+  // was told it failed. The adapter brackets that helper on both sides.
+
+  describe("a fresh post refuses to run under a posting lock it does not own", () => {
+    test("foreign-owner lock: post fails, nothing is written, the lock is untouched", async () => {
+      const rid = await makeConfirmed("doc-lock-foreign", [itemJson("lockfruit-foreign", "3")]);
+      await sql(`SELECT public.lock_purchase_receipt_for_posting('${rid}','some-other-writer')`);
+      const lockedAt = await sql(
+        `SELECT posting_locked_at FROM public.purchase_receipts WHERE id='${rid}'`,
+      );
+
+      const err = await sqlFails(
+        `SELECT public.post_purchase_receipt_inventory_movement('${rid}')`,
+      );
+      expect(err).toMatch(/posting lock conflict/iu);
+      expect(err).toMatch(/locked for posting by some-other-writer/iu);
+      expect(err).toMatch(/does not own/iu);
+
+      expect(
+        await sql(`SELECT count(*) FROM public.inventory_movements
+                     WHERE source_document_id='${rid}'`),
+        "a foreign lock must stop the post before any movement header is written",
+      ).toBe("0");
+      expect(
+        await sql(`SELECT count(*) FROM public.inventory_movement_lines l
+                     JOIN public.inventory_movements m ON m.id=l.movement_id
+                    WHERE m.source_document_id='${rid}'`),
+      ).toBe("0");
+      expect(await balanceOf("lockfruit-foreign")).toBe("NONE");
+
+      // The other writer's lock is left exactly as it was found.
+      expect(
+        await sql(`SELECT posting_locked_by FROM public.purchase_receipts WHERE id='${rid}'`),
+      ).toBe("some-other-writer");
+      expect(
+        await sql(`SELECT posting_locked_at FROM public.purchase_receipts WHERE id='${rid}'`),
+      ).toBe(lockedAt);
+    });
+
+    test("orphan p2c lock with no movement: post fails and the lock is NOT repaired", async () => {
+      const rid = await makeConfirmed("doc-lock-orphan", [itemJson("lockfruit-orphan", "4")]);
+      await sql(`SELECT public.lock_purchase_receipt_for_posting('${rid}','p2c-inventory-ledger')`);
+      const lockedAt = await sql(
+        `SELECT posting_locked_at FROM public.purchase_receipts WHERE id='${rid}'`,
+      );
+
+      const err = await sqlFails(
+        `SELECT public.post_purchase_receipt_inventory_movement('${rid}')`,
+      );
+      expect(err).toMatch(/posting lock conflict/iu);
+      expect(err).toMatch(/orphan p2c-inventory-ledger/iu);
+      expect(err).toMatch(/refusing to adopt it/iu);
+
+      expect(
+        await sql(`SELECT count(*) FROM public.inventory_movements
+                     WHERE source_document_id='${rid}'`),
+        "an orphan lock must never be adopted by a fresh posting",
+      ).toBe("0");
+      expect(await balanceOf("lockfruit-orphan")).toBe("NONE");
+
+      // Still visible for operational repair — the RPC does not clear it, and
+      // does not quietly post on top of it either.
+      expect(
+        await sql(`SELECT posting_locked_by FROM public.purchase_receipts WHERE id='${rid}'`),
+      ).toBe("p2c-inventory-ledger");
+      expect(
+        await sql(`SELECT posting_locked_at FROM public.purchase_receipts WHERE id='${rid}'`),
+      ).toBe(lockedAt);
+    });
+
+    // 0052's purchase_receipts_posting_lock_paired CHECK makes a half-written
+    // lock unreachable through supported writes, so the constraint is dropped
+    // inside a rolled-back transaction to reach the branch at all. If the
+    // invariant is ever lost for real, the adapter must still refuse.
+    test("malformed lock (locked_at set, locked_by null) fails before any write", async () => {
+      const rid = await makeConfirmed("doc-lock-half-at", [itemJson("durian", "1")]);
+      await expectPostRejectedInTx({
+        rid,
+        setup: `ALTER TABLE public.purchase_receipts
+                  DROP CONSTRAINT purchase_receipts_posting_lock_paired;
+                UPDATE public.purchase_receipts
+                   SET posting_locked_at = now(), posting_locked_by = NULL
+                 WHERE id = '${rid}';`,
+        needle: `'malformed posting lock'`,
+        lockOwner: "NULL",
+      });
+    });
+
+    test("malformed lock (locked_by set, locked_at null) fails before any write", async () => {
+      const rid = await makeConfirmed("doc-lock-half-by", [itemJson("durian", "2")]);
+      await expectPostRejectedInTx({
+        rid,
+        setup: `ALTER TABLE public.purchase_receipts
+                  DROP CONSTRAINT purchase_receipts_posting_lock_paired;
+                UPDATE public.purchase_receipts
+                   SET posting_locked_at = NULL, posting_locked_by = 'half-written'
+                 WHERE id = '${rid}';`,
+        needle: `'malformed posting lock'`,
+        lockOwner: `'half-written'`,
+      });
+    });
+  });
+
+  describe("the posting lock is asserted after the helper returns", () => {
+    test("a helper that returns success without locking rolls the movement back", async () => {
+      const rid = await makeConfirmed("doc-lock-noop-helper", [itemJson("longan", "6")]);
+
+      // The real helper's contract is exactly what cannot be trusted: it returns
+      // a success shape for a lock it did not take. Here it takes none at all.
+      await expectPostRejectedInTx({
+        rid,
+        setup: `
+          CREATE OR REPLACE FUNCTION public.lock_purchase_receipt_for_posting(
+            p_receipt_id uuid, p_locked_by text
+          ) RETURNS jsonb LANGUAGE sql
+          SET search_path = public, extensions, pg_temp AS $noop$
+            SELECT jsonb_build_object('receipt_id', p_receipt_id::text, 'replayed', true)
+          $noop$;`,
+        needle: `'posting lock not established'`,
+        lockOwner: "NULL",
+      });
+    });
+
+    test("a helper that locks under the WRONG owner rolls the movement back", async () => {
+      const rid = await makeConfirmed("doc-lock-wrong-owner", [itemJson("longan", "7")]);
+      await expectPostRejectedInTx({
+        rid,
+        setup: `
+          CREATE OR REPLACE FUNCTION public.lock_purchase_receipt_for_posting(
+            p_receipt_id uuid, p_locked_by text
+          ) RETURNS jsonb LANGUAGE sql
+          SET search_path = public, extensions, pg_temp AS $wrong$
+            WITH u AS (
+              UPDATE public.purchase_receipts
+                 SET posting_locked_at = now(), posting_locked_by = 'not-p2c'
+               WHERE id = p_receipt_id RETURNING id)
+            SELECT jsonb_build_object('receipt_id', (SELECT id::text FROM u),
+                                      'replayed', false)
+          $wrong$;`,
+        needle: `'posting lock not established'`,
+        // NULL, not 'not-p2c'. The probe catches the failure in a subtransaction,
+        // which unwinds the fake helper's own lock write along with the movement.
+        // That IS the property under test: a post that raises on a wrong-owner
+        // lock leaves neither the stock nor the bad lock behind.
+        lockOwner: "NULL",
+      });
+    });
+  });
+
+  describe("valid posting behaviour is unchanged by the lock guards", () => {
+    test("a fresh post commits the movement, its lines and the p2c lock together", async () => {
+      const rid = await makeConfirmed("doc-lock-fresh-ok", [
+        itemJson("rambutan", "8"),
+        itemJson("santol", "2"),
+      ]);
+      const posted = JSON.parse(
+        await sql(`SELECT public.post_purchase_receipt_inventory_movement('${rid}','fresh')`),
+      );
+
+      expect(posted.replayed).toBe(false);
+      expect(posted.line_count).toBe(2);
+      expect(posted.posting_locked_by).toBe("p2c-inventory-ledger");
+      expect(posted.posting_locked_at).not.toBeNull();
+
+      expect(
+        await sql(`SELECT count(*) FROM public.inventory_movement_lines
+                    WHERE movement_id='${posted.movement_id}'`),
+      ).toBe("2");
+      expect(
+        await sql(`SELECT posting_locked_by FROM public.purchase_receipts WHERE id='${rid}'`),
+      ).toBe("p2c-inventory-ledger");
+      expect(await balanceOf("rambutan")).toBe("8.000000");
+    });
+
+    test("a replay over an exact movement and an owned p2c lock still returns replayed", async () => {
+      const rid = await makeConfirmed("doc-lock-replay-ok", [itemJson("mangosteen", "5")]);
+      const first = JSON.parse(
+        await sql(`SELECT public.post_purchase_receipt_inventory_movement('${rid}')`),
+      );
+      const second = JSON.parse(
+        await sql(`SELECT public.post_purchase_receipt_inventory_movement('${rid}')`),
+      );
+
+      // The fresh-path lock rejection must NOT reach the replay path, where the
+      // p2c lock being present is precisely the healthy state.
+      expect(second.replayed).toBe(true);
+      expect(second.movement_id).toBe(first.movement_id);
+      expect(second.posting_locked_by).toBe("p2c-inventory-ledger");
+
+      expect(
+        await sql(`SELECT count(*) FROM public.inventory_movements
+                     WHERE source_document_id='${rid}'`),
+      ).toBe("1");
+      expect(
+        await sql(`SELECT count(*) FROM public.inventory_movement_lines
+                    WHERE movement_id='${first.movement_id}'`),
+      ).toBe("1");
+      expect(await balanceOf("mangosteen")).toBe("5.000000");
+    });
+  });
+
   // ── Concurrency (deterministic barriers, no sleep-dependent assertions) ──
 
   test("concurrent posting of ONE receipt creates exactly one movement", async () => {
+    await ensureBarrierTable();
     const rid = await makeConfirmed("doc-conc-same", [itemJson("melon", "5")]);
     const key = 918_053_001;
+    const gate = "conc-same";
+    const marker = "MARK_CONC_SAME";
 
-    // A posts, then parks holding a transaction-scoped advisory lock.
+    // A posts, publishes a "I am mid-transaction" advisory lock, then parks
+    // until the controller releases it. No fixed sleep decides the window.
     const a = startScript(
       `BEGIN;
        SELECT public.post_purchase_receipt_inventory_movement('${rid}','A');
        SELECT pg_advisory_xact_lock(${key});
-       SELECT pg_sleep(2);
+       ${waitForReleaseSql(gate)}
        COMMIT;`,
     );
     await waitForAdvisoryLock(key);
 
-    // B now contends for the same receipt row and must serialize behind A.
-    const b = startScript(`SELECT public.post_purchase_receipt_inventory_movement('${rid}','B');`);
+    // B contends for the same receipt row. Overlap is PROVEN by observing B
+    // actually waiting on a lock, not inferred from how long A slept.
+    const b = startScript(
+      `/* ${marker} */ SELECT public.post_purchase_receipt_inventory_movement('${rid}','B');`,
+    );
+    await waitForBlockedOnLock(marker);
+
+    await release(gate);
 
     const [ra, rb] = await Promise.all([collect(a), collect(b)]);
     expect(ra.code, `session A failed: ${ra.stderr}`).toBe(0);
@@ -1553,28 +1883,45 @@ describe.skipIf(!pgAvailable)("P2C migration 0053 PostgreSQL", () => {
       "exactly one movement must exist for a concurrently posted receipt",
     ).toBe("1");
     expect(await balanceOf("melon")).toBe("5.000000");
-    // One of the two sessions necessarily replayed.
-    expect(`${ra.stdout}${rb.stdout}`).toMatch(/"replayed": true/u);
+    // B was blocked behind A, so B is necessarily the replay.
+    expect(rb.stdout).toMatch(/"replayed": true/u);
+    expect(ra.stdout).toMatch(/"replayed": false/u);
   }, 60_000);
 
   test("concurrent posting of DIFFERENT receipts both succeed", async () => {
+    await ensureBarrierTable();
     const ridA = await makeConfirmed("doc-conc-a", [itemJson("guava", "1")]);
     const ridB = await makeConfirmed("doc-conc-b", [itemJson("guava", "2")]);
     const key = 918_053_002;
+    const gate = "conc-diff";
+    const marker = "MARK_CONC_DIFF";
 
     const a = startScript(
       `BEGIN;
        SELECT public.post_purchase_receipt_inventory_movement('${ridA}','A');
        SELECT pg_advisory_xact_lock(${key});
-       SELECT pg_sleep(2);
+       ${waitForReleaseSql(gate)}
        COMMIT;`,
     );
     await waitForAdvisoryLock(key);
-    const b = startScript(`SELECT public.post_purchase_receipt_inventory_movement('${ridB}','B');`);
 
-    const [ra, rb] = await Promise.all([collect(a), collect(b)]);
-    expect(ra.code, `session A failed: ${ra.stderr}`).toBe(0);
+    // Different receipt, different row: B must NOT block. It running to
+    // completion while A is provably still open is the assertion — no sleep is
+    // consulted, and A is only released afterwards.
+    const b = startScript(
+      `/* ${marker} */ SELECT public.post_purchase_receipt_inventory_movement('${ridB}','B');`,
+    );
+    const rb = await collect(b);
     expect(rb.code, `session B failed: ${rb.stderr}`).toBe(0);
+    expect(
+      await sql(`SELECT count(*) FROM pg_locks
+                   WHERE locktype='advisory' AND classid=0 AND objid=${key} AND granted`),
+      "session A must still be mid-transaction when B finished",
+    ).not.toBe("0");
+
+    await release(gate);
+    const ra = await collect(a);
+    expect(ra.code, `session A failed: ${ra.stderr}`).toBe(0);
 
     expect(await sql(`SELECT count(*) FROM public.inventory_movements
                         WHERE source_document_id IN ('${ridA}','${ridB}')`)).toBe("2");
@@ -1582,23 +1929,34 @@ describe.skipIf(!pgAvailable)("P2C migration 0053 PostgreSQL", () => {
   }, 60_000);
 
   test("concurrent reversal of ONE movement creates exactly one reversal", async () => {
+    await ensureBarrierTable();
     const rid = await makeConfirmed("doc-conc-rev", [itemJson("plum", "9")]);
     const posted = JSON.parse(
       await sql(`SELECT public.post_purchase_receipt_inventory_movement('${rid}')`),
     );
     const key = 918_053_003;
+    const gate = "conc-rev";
+    const marker = "MARK_CONC_REV";
 
     const a = startScript(
       `BEGIN;
        SELECT public.reverse_inventory_movement('${posted.movement_id}','rev-conc-a','a','A');
        SELECT pg_advisory_xact_lock(${key});
-       SELECT pg_sleep(2);
+       ${waitForReleaseSql(gate)}
        COMMIT;`,
     );
     await waitForAdvisoryLock(key);
+
     const b = startScript(
-      `SELECT public.reverse_inventory_movement('${posted.movement_id}','rev-conc-b','b','B');`,
+      `/* ${marker} */ SELECT public.reverse_inventory_movement('${posted.movement_id}','rev-conc-b','b','B');`,
     );
+    await waitForBlockedOnLock(marker);
+    expect(
+      await sessionRunning(marker),
+      "the losing reversal must still be waiting, not already finished",
+    ).toBe(true);
+
+    await release(gate);
 
     const [ra, rb] = await Promise.all([collect(a), collect(b)]);
     expect(ra.code, `session A failed: ${ra.stderr}`).toBe(0);

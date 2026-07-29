@@ -20,6 +20,13 @@ $$;
 
 GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
 
+-- Reproduce Production pg_default_acl behavior: new tables inherit broad
+-- service_role privileges (including DELETE/TRUNCATE/REFERENCES/TRIGGER).
+-- Migration 0051 must revoke these before granting SIU only.
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLES
+  TO service_role;
+
 -- Minimal pending_sessions stub so 0051 precondition passes.
 CREATE TABLE IF NOT EXISTS public.pending_sessions (
   session_key text PRIMARY KEY

@@ -23,8 +23,8 @@ function lfByteCount(text: string): number {
 
 /** Canonical committed LF blob — updated when 0051 is edited in place (unapplied). */
 const CANONICAL_LF_SHA256 =
-  "4820056ec94360fc84a694e7a60c9a281ef500a1301b5867689a589e741d4da8";
-const CANONICAL_LF_BYTES = 28598;
+  "7a39709d2af3ff7d4a17a55dd2c8fa21340eafb4d7aa0082667baa5f14fd4a38";
+const CANONICAL_LF_BYTES = 29629;
 
 describe("0051 migration — schema contract", () => {
   it("creates foundation tables including trusted markets", () => {
@@ -47,6 +47,15 @@ describe("0051 migration — schema contract", () => {
     );
     expect(code).not.toMatch(/CREATE POLICY/i);
     expect(code).toContain(
+      "REVOKE ALL ON TABLE public.line_operator_identities FROM service_role",
+    );
+    expect(code).toContain(
+      "REVOKE ALL ON TABLE public.line_guided_menu_markets FROM service_role",
+    );
+    expect(code).toContain(
+      "REVOKE ALL ON TABLE public.line_menu_states FROM service_role",
+    );
+    expect(code).toContain(
       "GRANT SELECT, INSERT, UPDATE ON TABLE public.line_operator_identities TO service_role",
     );
     expect(code).toContain(
@@ -56,6 +65,7 @@ describe("0051 migration — schema contract", () => {
       /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public\.line_menu_states/,
     );
     expect(code).toContain("FROM anon, authenticated");
+    expect(code).not.toMatch(/ALTER DEFAULT PRIVILEGES/i);
   });
 
   it("adds create/consume/record RPCs as SECURITY INVOKER with search_path", () => {

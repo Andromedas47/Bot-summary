@@ -336,55 +336,62 @@ BEGIN
   PERFORM pg_temp.p50_assert(v_row.finalize_confirmed_at IS NULL, '9c: no release');
   PERFORM pg_temp.p50_assert(v_row.finalize_hold_until IS NOT NULL, '9c: hold remains');
 
-  -- ── 11. Crash/retry after confirmation remains exactly-once (no Produce yet;
-  --     second try_finalize after terminalized is skipped). Use a fresh session.
-  v_result := pg_temp.p50_open('dm:U-once','U-once','evt-open-once');
+  -- ── 11. Crash setup: confirm succeeds, process dies before finalization ────
+  -- Finalization is intentionally NOT invoked here. A fresh connection in
+  -- produce_0050_crash_recovery.sql recovers exactly once.
+  v_result := pg_temp.p50_open('dm:U-crash','U-crash','evt-open-crash');
   v_gen := (v_result->>'session_generation')::uuid;
   PERFORM public.close_produce_structured_session(
-    'dm:U-once','U-once','evt-close-once', 1800000030000, v_gen, NULL
+    'dm:U-crash','U-crash','evt-close-crash', 1800000030000, v_gen, NULL
   );
   PERFORM pg_temp.p50_admit_ingest(
-    'dm:U-once', v_gen, 'once-1', 1800000029000, '1.มะม่วง10บาท'
+    'dm:U-crash', v_gen, 'crash-1', 1800000029000, '1.มะม่วง10บาท'
   );
   v_result := public.confirm_produce_structured_finalization(
-    'dm:U-once','U-once','evt-confirm-once', v_gen
+    'dm:U-crash','U-crash','evt-confirm-crash', v_gen
   );
-  PERFORM pg_temp.p50_assert(v_result->>'reason' = 'confirmed', '11: confirmed');
-  SELECT ingest_revision INTO v_rev FROM public.pending_sessions WHERE session_key='dm:U-once';
-  -- Fail-closed via empty items (parser blocking) — no Produce rows.
+  PERFORM pg_temp.p50_assert(v_result->>'reason' = 'confirmed', '11: confirmed before crash');
+  SELECT * INTO v_row FROM public.pending_sessions WHERE session_key='dm:U-crash';
+  PERFORM pg_temp.p50_assert(v_row.finalize_hold_until IS NULL, '11: hold cleared');
+  PERFORM pg_temp.p50_assert(v_row.finalize_confirmed_at IS NOT NULL, '11: confirmed_at set');
+  PERFORM pg_temp.p50_assert(v_row.next_attempt_at <= now(), '11: next_attempt due');
+  PERFORM pg_temp.p50_assert(v_row.terminalized IS FALSE, '11: not terminalized');
+  SELECT count(*) INTO v_count FROM public.produce_sessions
+   WHERE ingest_idempotency_key = 'dm:U-crash:' || v_gen::text;
+  PERFORM pg_temp.p50_assert(v_count = 0, '11: no Produce before recovery');
+
+  -- ── 13. Parser blocking errors remain fail-closed after confirmation ───────
+  v_result := pg_temp.p50_open('dm:U-parse','U-parse','evt-open-parse');
+  v_gen := (v_result->>'session_generation')::uuid;
+  PERFORM public.close_produce_structured_session(
+    'dm:U-parse','U-parse','evt-close-parse', 1800000035000, v_gen, NULL
+  );
+  PERFORM pg_temp.p50_admit_ingest(
+    'dm:U-parse', v_gen, 'parse-1', 1800000034000, '1.มะม่วง10บาท'
+  );
+  v_result := public.confirm_produce_structured_finalization(
+    'dm:U-parse','U-parse','evt-confirm-parse', v_gen
+  );
+  PERFORM pg_temp.p50_assert(v_result->>'reason' = 'confirmed', '13: confirmed');
+  SELECT ingest_revision INTO v_rev FROM public.pending_sessions WHERE session_key='dm:U-parse';
   v_fin := public.try_finalize_pending_generation(
-    'dm:U-once', v_gen, 'U-once', v_rev,
-    'hash-once', '1.มะม่วง10บาท',
+    'dm:U-parse', v_gen, 'U-parse', v_rev,
+    'hash-parse', '1.มะม่วง10บาท',
     jsonb_build_object(
       'raw_message_id', '00000000-0000-4000-8000-000000000011',
       'staff_name', 'พี่ดำ', 'session_kind', 'main',
       'validation_errors', '[]'::jsonb,
-      'ingest_idempotency_key', 'dm:U-once:' || v_gen::text,
+      'ingest_idempotency_key', 'dm:U-parse:' || v_gen::text,
       'ingest_source', 'line_webhook'
     ),
     '[]'::jsonb
   );
   PERFORM pg_temp.p50_assert(v_fin->>'status' = 'failed_closed', '13: parser fail closed after confirm');
   SELECT count(*) INTO v_count FROM public.produce_sessions
-   WHERE ingest_idempotency_key = 'dm:U-once:' || v_gen::text;
+   WHERE ingest_idempotency_key = 'dm:U-parse:' || v_gen::text;
   PERFORM pg_temp.p50_assert(v_count = 0, '13: no Produce on validation fail');
-  v_fin2 := public.try_finalize_pending_generation(
-    'dm:U-once', v_gen, 'U-once', v_rev,
-    'hash-once', '1.มะม่วง10บาท',
-    jsonb_build_object(
-      'raw_message_id', '00000000-0000-4000-8000-000000000011',
-      'staff_name', 'พี่ดำ', 'session_kind', 'main',
-      'validation_errors', '[]'::jsonb,
-      'ingest_idempotency_key', 'dm:U-once:' || v_gen::text,
-      'ingest_source', 'line_webhook'
-    ),
-    '[]'::jsonb
-  );
-  PERFORM pg_temp.p50_assert(v_fin2->>'reason' = 'already_terminalized', '11: retry after terminal');
 
-  -- ── 12. Concurrent confirm + sweeper serialize via FOR UPDATE (sequential
-  --     proof: confirm then try_finalize sees confirmed state; reverse order
-  --     while held returns awaiting_confirmation without Produce).
+  -- ── 12. Sequential hold wait (real multi-connection race is in harness) ───
   v_result := pg_temp.p50_open('dm:U-race','U-race','evt-open-race');
   v_gen := (v_result->>'session_generation')::uuid;
   PERFORM public.close_produce_structured_session(

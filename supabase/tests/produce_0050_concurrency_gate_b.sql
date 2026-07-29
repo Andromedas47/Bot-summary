@@ -1,0 +1,16 @@
+-- Monitor holds advisory gate B until harness writes unlock_gate_b.
+SELECT pg_advisory_lock(9100502);
+SELECT 'gate_b_held' AS status;
+
+DO $wait$
+BEGIN
+  WHILE NOT EXISTS (
+    SELECT 1 FROM public.p50_sync WHERE k = 'unlock_gate_b'
+  ) LOOP
+    PERFORM pg_sleep(0.05);
+  END LOOP;
+END
+$wait$;
+
+SELECT pg_advisory_unlock(9100502);
+SELECT 'gate_b_released' AS status;

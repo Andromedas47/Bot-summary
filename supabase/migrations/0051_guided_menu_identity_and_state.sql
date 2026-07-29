@@ -49,6 +49,7 @@ ALTER TABLE public.line_operator_identities ENABLE ROW LEVEL SECURITY;
 
 REVOKE ALL ON TABLE public.line_operator_identities FROM PUBLIC;
 REVOKE ALL ON TABLE public.line_operator_identities FROM anon, authenticated;
+REVOKE ALL ON TABLE public.line_operator_identities FROM service_role;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.line_operator_identities TO service_role;
 
 -- ── 2) line_guided_menu_markets (authoritative market allowlist) ─────────────
@@ -72,6 +73,7 @@ ALTER TABLE public.line_guided_menu_markets ENABLE ROW LEVEL SECURITY;
 
 REVOKE ALL ON TABLE public.line_guided_menu_markets FROM PUBLIC;
 REVOKE ALL ON TABLE public.line_guided_menu_markets FROM anon, authenticated;
+REVOKE ALL ON TABLE public.line_guided_menu_markets FROM service_role;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.line_guided_menu_markets TO service_role;
 
 -- Reference seed (configuration, not Production operator identities).
@@ -335,6 +337,7 @@ ALTER TABLE public.line_menu_states ENABLE ROW LEVEL SECURITY;
 
 REVOKE ALL ON TABLE public.line_menu_states FROM PUBLIC;
 REVOKE ALL ON TABLE public.line_menu_states FROM anon, authenticated;
+REVOKE ALL ON TABLE public.line_menu_states FROM service_role;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.line_menu_states TO service_role;
 
 -- Force DB-authoritative created_at / expires_at / payload / session_key rules
@@ -826,8 +829,17 @@ BEGIN
   IF has_table_privilege('service_role', 'public.line_menu_states', 'DELETE')
      OR has_table_privilege('service_role', 'public.line_operator_identities', 'DELETE')
      OR has_table_privilege('service_role', 'public.line_guided_menu_markets', 'DELETE')
+     OR has_table_privilege('service_role', 'public.line_menu_states', 'TRUNCATE')
+     OR has_table_privilege('service_role', 'public.line_operator_identities', 'TRUNCATE')
+     OR has_table_privilege('service_role', 'public.line_guided_menu_markets', 'TRUNCATE')
+     OR has_table_privilege('service_role', 'public.line_menu_states', 'REFERENCES')
+     OR has_table_privilege('service_role', 'public.line_operator_identities', 'REFERENCES')
+     OR has_table_privilege('service_role', 'public.line_guided_menu_markets', 'REFERENCES')
+     OR has_table_privilege('service_role', 'public.line_menu_states', 'TRIGGER')
+     OR has_table_privilege('service_role', 'public.line_operator_identities', 'TRIGGER')
+     OR has_table_privilege('service_role', 'public.line_guided_menu_markets', 'TRIGGER')
   THEN
-    RAISE EXCEPTION '0051: DELETE grants must not be present on menu tables';
+    RAISE EXCEPTION '0051: service_role must not have DELETE/TRUNCATE/REFERENCES/TRIGGER on menu tables';
   END IF;
 
   SELECT count(*) INTO v_count

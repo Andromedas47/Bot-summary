@@ -367,7 +367,7 @@ rather than being flattened into a business case.
 
 - `src/lib/inventory-ledger/ledger-service.test.ts` — 51 unit tests (marshalling,
   error mapping, fail-closed response handling, posting-lock enforcement).
-- `src/lib/inventory-ledger/migration-0053.pg.test.ts` — 80 tests against a real
+- `src/lib/inventory-ledger/migration-0053.pg.test.ts` — 82 tests against a real
   disposable **PostgreSQL 17** database.
 
 Concurrency tests use a **controller-released barrier**, never a sleep whose
@@ -386,8 +386,33 @@ length the assertion depends on:
 5. only then is the blocker released, and the outcome asserted.
 
 The different-receipts case inverts step 4: the competing session must **not**
-block, so it is run to completion and the blocker is verified still open
-afterwards.
+block, so it is run to completion (bounded) and the blocker is verified still
+open afterwards.
+
+**Cleanup is unconditional.** All of this is owned by a `withGate()` scope rather
+than written inline, because a controller that throws between "park A" and
+"release A" — a failed assertion, a wait that timed out — would otherwise leave A
+parked and its `psql` child alive until Bun's outer timeout, holding a row lock
+that poisons every test after it. `withGate()` therefore runs in a `finally`
+path and:
+
+1. releases the gate first, so a parked child can exit on its own;
+2. collects every child it started with a bounded wait, terminating any that
+   overran and then waiting for the kill;
+3. terminates any leftover backend as a backstop;
+4. drops the barrier row;
+5. verifies nothing leaked — no session for its markers, no advisory lock on its
+   key, no ungranted lock, no barrier row;
+6. re-throws the **original** failure. Cleanup findings are only raised when the
+   body itself succeeded, so a real assertion failure is never masked by a
+   secondary cleanup error.
+
+Two tests exercise those paths directly rather than trusting them: one drives an
+unexpected block, throws, and asserts the original error survives *and* that A
+exited because the gate was released rather than because cleanup had to kill it;
+the other starts a child that ignores the gate entirely and asserts cleanup
+terminated it and left no session, lock or row behind. Correctness here does not
+depend on the suite-level `DROP DATABASE`.
 
 Several cases use **fault injection** — replacing the P2B posting-lock RPC (with
 a no-op helper, and with one that locks under the wrong owner) or the P2B

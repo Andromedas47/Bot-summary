@@ -7,11 +7,15 @@
  *   so a migration that merely GRANTs without REVOKEing first inherits
  *   INSERT/UPDATE/DELETE it never intended. Applying the broad grant BEFORE 0053
  *   is what makes the privilege assertions meaningful rather than vacuous.
- * - Concurrency cases use SEPARATE connections plus a DETERMINISTIC barrier: the
- *   blocking session takes an advisory lock immediately after its mutating
- *   statement, and the test polls pg_locks until that lock is visible before
- *   starting the racing session. Nothing depends on a sleep being "long enough";
- *   the asserted outcome (exactly one movement) holds regardless of interleaving.
+ * - Concurrency cases use SEPARATE connections plus a DETERMINISTIC, controller-
+ *   released barrier owned by withGate(). The blocker takes an advisory lock
+ *   right after its mutating statement and then parks until the controller
+ *   commits a release row; the controller waits on pg_locks / pg_stat_activity
+ *   for observed facts, never on a sleep being "long enough". Every wait is
+ *   bounded and cleanup is unconditional: withGate() releases the gate, collects
+ *   or kills each child it started, drops the barrier row and verifies no
+ *   session, lock or row leaked — then re-throws the ORIGINAL failure. Two tests
+ *   exercise those cleanup paths directly.
  * - Two cases use fault injection: the P2B posting-lock RPC and the P2B
  *   confirmation getter are temporarily replaced, then restored from the
  *   definition captured beforehand. Both prove a guard fires that cannot be
@@ -133,26 +137,6 @@ describe.skipIf(!pgAvailable)("P2C migration 0053 PostgreSQL", () => {
   /** Runs a multi-statement script on ONE connection, in the background. */
   function startScript(script: string) {
     return spawnPsql(psqlPath, ["-v", "ON_ERROR_STOP=1", "-d", dbName, "-c", script], dbName);
-  }
-
-  /**
-   * Deterministic barrier: block until `key` is visible as a held advisory lock.
-   * The racing session takes it immediately AFTER its mutating statement, so
-   * seeing it proves that statement executed and its transaction is still open.
-   */
-  async function waitForAdvisoryLock(key: number, timeoutMs = 20_000): Promise<void> {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      const held = await sql(
-        `SELECT count(*) FROM pg_locks
-          WHERE locktype = 'advisory' AND classid = 0 AND objid = ${key} AND granted`,
-      );
-      if (Number(held) > 0) return;
-      if (Date.now() > deadline) {
-        throw new Error(`advisory lock ${key} never appeared within ${timeoutMs}ms`);
-      }
-      await Bun.sleep(25);
-    }
   }
 
   const LEDGER_TABLES = [
@@ -383,67 +367,282 @@ describe.skipIf(!pgAvailable)("P2C migration 0053 PostgreSQL", () => {
     expect(r.stderr).not.toMatch(/PROBE_FAIL/u);
   }
 
-  /**
-   * Controller-released barrier.
-   *
-   * The blocking session parks in a poll loop until the controller inserts its
-   * release row, instead of running out a fixed pg_sleep. Under READ COMMITTED
-   * each iteration takes a fresh snapshot, so the committed release row becomes
-   * visible inside the still-open transaction. Overlap is then a fact the test
-   * established, not a duration it hoped was long enough.
-   */
+  // ── Controller-released barrier with unconditional cleanup ───────────────
+  //
+  // The blocking session parks in a poll loop until the controller commits its
+  // release row, instead of running out a fixed pg_sleep. Under READ COMMITTED
+  // each iteration takes a fresh snapshot, so the committed row becomes visible
+  // inside the still-open transaction. Overlap is a fact the test establishes,
+  // not a duration it hoped was long enough.
+  //
+  // Every wait is BOUNDED and every release runs in a finally path. A controller
+  // that throws mid-scenario — a failed assertion, a wait that timed out — would
+  // otherwise leave the parked session and its psql child alive until Bun's outer
+  // timeout, poisoning every later test in this file with a held row lock. So
+  // withGate() owns the whole lifecycle: it releases the gate, collects or kills
+  // every child it started, drops the barrier row, and verifies nothing leaked —
+  // and it re-throws the ORIGINAL failure rather than masking it with whatever
+  // the cleanup found.
+
+  const CHILD_EXIT_MS = 20_000;
+  const CHILD_KILL_MS = 5_000;
+  const WAIT_MS = 20_000;
+  const TIMED_OUT = Symbol("timed-out");
+
+  /** Bounded wait. Never leaves a timer behind to hold the loop open. */
+  function within<T>(p: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<typeof TIMED_OUT>((resolve) => {
+      timer = setTimeout(() => resolve(TIMED_OUT), ms);
+    });
+    return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+  }
+
+  type Child = {
+    name: string;
+    marker: string;
+    proc: ReturnType<typeof spawnPsql>;
+    /** Started once at spawn: the streams must not be read twice. */
+    result: Promise<PsqlResult>;
+  };
+
+  type GateReport = { terminated: string[]; leaked: string[] };
+
+  type GateScope = {
+    /** SQL the blocking session runs to park until the controller releases it. */
+    hold: string;
+    start(name: string, script: string): Child;
+    /** Bounded: the child's backend is connected and visible. */
+    started(child: Child): Promise<void>;
+    /** Bounded: the blocker ran its mutation and its transaction is open. */
+    parked(child: Child): Promise<void>;
+    /** Bounded: the child is genuinely waiting on a lock. */
+    blocked(child: Child): Promise<void>;
+    /** Bounded; throws a clear harness failure if the child overran. */
+    exits(child: Child, ms?: number): Promise<PsqlResult>;
+    /** Bounded; returns null instead of throwing when the child overran. */
+    exitedWithin(child: Child, ms: number): Promise<PsqlResult | null>;
+    release(): Promise<void>;
+  };
+
   async function ensureBarrierTable(): Promise<void> {
     await sql(`CREATE TABLE IF NOT EXISTS public.test_barrier_release (k text PRIMARY KEY)`);
   }
 
-  function waitForReleaseSql(name: string): string {
-    return `DO $hold$
-      BEGIN
-        LOOP
-          EXIT WHEN EXISTS (SELECT 1 FROM public.test_barrier_release WHERE k = '${name}');
-          PERFORM pg_sleep(0.05);
-        END LOOP;
-      END $hold$;`;
+  /** Backends running `marker`, excluding the controller's own probe queries. */
+  function markerPredicate(marker: string, alias = ""): string {
+    const q = alias ? `${alias}.` : "";
+    return `${q}datname = current_database()
+              AND ${q}pid <> pg_backend_pid()
+              AND ${q}query LIKE '%${marker}%'
+              AND ${q}query NOT LIKE '%pg_stat_activity%'`;
   }
 
-  async function release(name: string): Promise<void> {
-    await sql(`INSERT INTO public.test_barrier_release (k) VALUES ('${name}')
-                 ON CONFLICT DO NOTHING`);
-  }
-
-  /**
-   * Blocks until a session running `marker` is genuinely waiting on a lock —
-   * proven by pg_stat_activity reporting a Lock wait AND pg_locks carrying an
-   * ungranted entry for that backend. Sleep duration is never the evidence.
-   */
-  async function waitForBlockedOnLock(marker: string, timeoutMs = 20_000): Promise<void> {
+  async function pollUntil(
+    label: string,
+    query: string,
+    timeoutMs: number,
+  ): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const blocked = await sql(
-        `SELECT count(DISTINCT a.pid) FROM pg_stat_activity a
-           JOIN pg_locks l ON l.pid = a.pid AND NOT l.granted
-          WHERE a.datname = current_database()
-            AND a.wait_event_type = 'Lock'
-            AND a.query LIKE '%${marker}%'
-            AND a.query NOT LIKE '%pg_stat_activity%'`,
-      );
-      if (Number(blocked) > 0) return;
-      if (Date.now() > deadline) {
-        throw new Error(`session ${marker} never blocked on a lock within ${timeoutMs}ms`);
-      }
+      if (Number(await sql(query)) > 0) return;
+      if (Date.now() > deadline) throw new Error(`harness: ${label} within ${timeoutMs}ms`);
       await Bun.sleep(25);
     }
   }
 
-  /** True while a session running `marker` is still connected. */
-  async function sessionRunning(marker: string): Promise<boolean> {
-    const n = await sql(
-      `SELECT count(*) FROM pg_stat_activity
-        WHERE datname = current_database()
-          AND query LIKE '%${marker}%'
-          AND query NOT LIKE '%pg_stat_activity%'`,
-    );
-    return Number(n) > 0;
+  /**
+   * Runs a concurrency scenario with a controller-released gate.
+   *
+   * Cleanup is unconditional and runs in a finally path. Returns what cleanup
+   * had to do, so a test can deliberately exercise the termination path; for
+   * every ordinary scenario a child needing termination, or any leaked session,
+   * lock or barrier row, is itself a failure.
+   */
+  async function withGate(
+    name: string,
+    key: number,
+    body: (gate: GateScope) => Promise<void>,
+    opts: {
+      allowTermination?: boolean;
+      /**
+       * Receives the cleanup report even when the body threw and the original
+       * error is about to be re-thrown — the only way a test can assert on what
+       * cleanup had to do along a failure path.
+       */
+      onCleanup?: (report: GateReport) => void;
+    } = {},
+  ): Promise<GateReport> {
+    await ensureBarrierTable();
+    await sql(`DELETE FROM public.test_barrier_release WHERE k = '${name}'`);
+
+    const children: Child[] = [];
+    const report: GateReport = { terminated: [], leaked: [] };
+    let released = false;
+
+    async function release(): Promise<void> {
+      if (released) return;
+      released = true;
+      await sql(`INSERT INTO public.test_barrier_release (k) VALUES ('${name}')
+                   ON CONFLICT DO NOTHING`);
+    }
+
+    const scope: GateScope = {
+      hold: `DO $hold$
+        BEGIN
+          LOOP
+            EXIT WHEN EXISTS (SELECT 1 FROM public.test_barrier_release WHERE k = '${name}');
+            PERFORM pg_sleep(0.05);
+          END LOOP;
+        END $hold$;`,
+      release,
+      start(childName, script) {
+        const marker = `MARK_${name}_${childName}`.toUpperCase().replace(/[^A-Z0-9_]/gu, "_");
+        const proc = startScript(`/* ${marker} */ ${script}`);
+        const child: Child = { name: childName, marker, proc, result: collect(proc) };
+        children.push(child);
+        return child;
+      },
+      async started(child) {
+        await pollUntil(
+          `child ${child.name} never connected`,
+          `SELECT count(*) FROM pg_stat_activity WHERE ${markerPredicate(child.marker)}`,
+          WAIT_MS,
+        );
+      },
+      async parked(child) {
+        await scope.started(child);
+        await pollUntil(
+          `child ${child.name} never took advisory lock ${key}`,
+          `SELECT count(*) FROM pg_locks
+            WHERE locktype = 'advisory' AND classid = 0 AND objid = ${key} AND granted`,
+          WAIT_MS,
+        );
+      },
+      async blocked(child) {
+        // A Lock wait AND an ungranted pg_locks row for that same backend. Two
+        // independent views of the same fact; neither is a sleep.
+        await pollUntil(
+          `child ${child.name} never blocked on a lock`,
+          `SELECT count(DISTINCT a.pid) FROM pg_stat_activity a
+             JOIN pg_locks l ON l.pid = a.pid AND NOT l.granted
+            WHERE a.wait_event_type = 'Lock' AND ${markerPredicate(child.marker, "a")}`,
+          WAIT_MS,
+        );
+      },
+      async exits(child, ms = CHILD_EXIT_MS) {
+        const r = await within(child.result, ms);
+        if (r === TIMED_OUT) {
+          throw new Error(`harness: child ${child.name} did not exit within ${ms}ms`);
+        }
+        return r;
+      },
+      async exitedWithin(child, ms) {
+        const r = await within(child.result, ms);
+        return r === TIMED_OUT ? null : r;
+      },
+    };
+
+    let bodyError: unknown;
+    try {
+      await body(scope);
+    } catch (err) {
+      bodyError = err;
+    }
+
+    // ── Cleanup: always runs, whatever the body did ─────────────────────────
+    const cleanupProblems: string[] = [];
+    const note = (what: string, err: unknown) =>
+      cleanupProblems.push(`${what}: ${err instanceof Error ? err.message : String(err)}`);
+
+    // 1. Release first — a parked child cannot exit until this lands.
+    try {
+      await release();
+    } catch (err) {
+      note("gate release failed", err);
+    }
+
+    // 2. Collect every child; terminate any that overran, then wait for the kill.
+    for (const child of children) {
+      try {
+        let r = await within(child.result, CHILD_EXIT_MS);
+        if (r === TIMED_OUT) {
+          child.proc.kill();
+          r = await within(child.result, CHILD_KILL_MS);
+          report.terminated.push(child.name);
+          if (r === TIMED_OUT) cleanupProblems.push(`child ${child.name} survived termination`);
+        }
+      } catch (err) {
+        note(`collecting child ${child.name}`, err);
+      }
+    }
+
+    // 3. Backstop: a killed psql can leave its backend finishing a statement.
+    for (const child of children) {
+      try {
+        await sql(
+          `SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity
+            WHERE ${markerPredicate(child.marker)}`,
+        );
+        await pollUntil(
+          `backend for ${child.name} still present after cleanup`,
+          `SELECT CASE WHEN count(*) = 0 THEN 1 ELSE 0 END
+             FROM pg_stat_activity WHERE ${markerPredicate(child.marker)}`,
+          CHILD_KILL_MS,
+        );
+      } catch (err) {
+        report.leaked.push(`session ${child.name}`);
+        note(`terminating leftover backend for ${child.name}`, err);
+      }
+    }
+
+    // 4. Drop controller state and verify nothing is left holding anything.
+    try {
+      await sql(`DELETE FROM public.test_barrier_release WHERE k = '${name}'`);
+      const rows = await sql(
+        `SELECT count(*) FROM public.test_barrier_release WHERE k = '${name}'`,
+      );
+      if (Number(rows) !== 0) report.leaked.push("barrier row");
+
+      const advisory = await sql(
+        `SELECT count(*) FROM pg_locks
+          WHERE locktype = 'advisory' AND classid = 0 AND objid = ${key}`,
+      );
+      if (Number(advisory) !== 0) report.leaked.push(`advisory lock ${key}`);
+
+      const ungranted = await sql(
+        `SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+          WHERE NOT l.granted AND a.datname = current_database()
+            AND a.pid <> pg_backend_pid()`,
+      );
+      if (Number(ungranted) !== 0) report.leaked.push(`${ungranted} ungranted lock(s)`);
+    } catch (err) {
+      note("verifying cleanup", err);
+    }
+
+    // 5. The original failure wins. Cleanup findings are reported only when the
+    //    body itself succeeded, so a real assertion failure is never masked by a
+    //    secondary cleanup error.
+    opts.onCleanup?.(report);
+
+    if (bodyError) {
+      if (cleanupProblems.length || report.leaked.length) {
+        console.warn(
+          `gate "${name}" cleanup after failure: ${[...cleanupProblems, ...report.leaked].join("; ")}`,
+        );
+      }
+      throw bodyError;
+    }
+
+    const unexpected = [
+      ...cleanupProblems,
+      ...report.leaked.map((l) => `leaked ${l}`),
+      ...(opts.allowTermination ? [] : report.terminated.map((c) => `child ${c} had to be terminated`)),
+    ];
+    if (unexpected.length) {
+      throw new Error(`harness: gate "${name}" cleanup failed — ${unexpected.join("; ")}`);
+    }
+    return report;
   }
 
   afterAll(async () => {
@@ -1848,126 +2047,257 @@ describe.skipIf(!pgAvailable)("P2C migration 0053 PostgreSQL", () => {
   // ── Concurrency (deterministic barriers, no sleep-dependent assertions) ──
 
   test("concurrent posting of ONE receipt creates exactly one movement", async () => {
-    await ensureBarrierTable();
     const rid = await makeConfirmed("doc-conc-same", [itemJson("melon", "5")]);
-    const key = 918_053_001;
-    const gate = "conc-same";
-    const marker = "MARK_CONC_SAME";
 
-    // A posts, publishes a "I am mid-transaction" advisory lock, then parks
-    // until the controller releases it. No fixed sleep decides the window.
-    const a = startScript(
-      `BEGIN;
-       SELECT public.post_purchase_receipt_inventory_movement('${rid}','A');
-       SELECT pg_advisory_xact_lock(${key});
-       ${waitForReleaseSql(gate)}
-       COMMIT;`,
-    );
-    await waitForAdvisoryLock(key);
+    await withGate("conc-same", 918_053_001, async (gate) => {
+      // A posts, publishes an "I am mid-transaction" advisory lock, then parks
+      // until the controller releases it. No fixed sleep decides the window.
+      const a = gate.start("a", `
+        BEGIN;
+        SELECT public.post_purchase_receipt_inventory_movement('${rid}','A');
+        SELECT pg_advisory_xact_lock(918053001);
+        ${gate.hold}
+        COMMIT;`);
+      await gate.parked(a);
 
-    // B contends for the same receipt row. Overlap is PROVEN by observing B
-    // actually waiting on a lock, not inferred from how long A slept.
-    const b = startScript(
-      `/* ${marker} */ SELECT public.post_purchase_receipt_inventory_movement('${rid}','B');`,
-    );
-    await waitForBlockedOnLock(marker);
+      // B contends for the same receipt row. Overlap is PROVEN by observing B
+      // actually waiting on a lock, not inferred from how long A slept.
+      const b = gate.start("b", `
+        SELECT public.post_purchase_receipt_inventory_movement('${rid}','B');`);
+      await gate.blocked(b);
 
-    await release(gate);
+      await gate.release();
+      const ra = await gate.exits(a);
+      const rb = await gate.exits(b);
 
-    const [ra, rb] = await Promise.all([collect(a), collect(b)]);
-    expect(ra.code, `session A failed: ${ra.stderr}`).toBe(0);
-    expect(rb.code, `session B failed: ${rb.stderr}`).toBe(0);
+      expect(ra.code, `session A failed: ${ra.stderr}`).toBe(0);
+      expect(rb.code, `session B failed: ${rb.stderr}`).toBe(0);
 
-    expect(
-      await sql(`SELECT count(*) FROM public.inventory_movements WHERE source_document_id='${rid}'`),
-      "exactly one movement must exist for a concurrently posted receipt",
-    ).toBe("1");
-    expect(await balanceOf("melon")).toBe("5.000000");
-    // B was blocked behind A, so B is necessarily the replay.
-    expect(rb.stdout).toMatch(/"replayed": true/u);
-    expect(ra.stdout).toMatch(/"replayed": false/u);
-  }, 60_000);
+      expect(
+        await sql(`SELECT count(*) FROM public.inventory_movements
+                     WHERE source_document_id='${rid}'`),
+        "exactly one movement must exist for a concurrently posted receipt",
+      ).toBe("1");
+      expect(await balanceOf("melon")).toBe("5.000000");
+      // B was blocked behind A, so B is necessarily the replay.
+      expect(rb.stdout).toMatch(/"replayed": true/u);
+      expect(ra.stdout).toMatch(/"replayed": false/u);
+    });
+  }, 90_000);
 
   test("concurrent posting of DIFFERENT receipts both succeed", async () => {
-    await ensureBarrierTable();
     const ridA = await makeConfirmed("doc-conc-a", [itemJson("guava", "1")]);
     const ridB = await makeConfirmed("doc-conc-b", [itemJson("guava", "2")]);
-    const key = 918_053_002;
-    const gate = "conc-diff";
-    const marker = "MARK_CONC_DIFF";
 
-    const a = startScript(
-      `BEGIN;
-       SELECT public.post_purchase_receipt_inventory_movement('${ridA}','A');
-       SELECT pg_advisory_xact_lock(${key});
-       ${waitForReleaseSql(gate)}
-       COMMIT;`,
-    );
-    await waitForAdvisoryLock(key);
+    await withGate("conc-diff", 918_053_002, async (gate) => {
+      const a = gate.start("a", `
+        BEGIN;
+        SELECT public.post_purchase_receipt_inventory_movement('${ridA}','A');
+        SELECT pg_advisory_xact_lock(918053002);
+        ${gate.hold}
+        COMMIT;`);
+      await gate.parked(a);
 
-    // Different receipt, different row: B must NOT block. It running to
-    // completion while A is provably still open is the assertion — no sleep is
-    // consulted, and A is only released afterwards.
-    const b = startScript(
-      `/* ${marker} */ SELECT public.post_purchase_receipt_inventory_movement('${ridB}','B');`,
-    );
-    const rb = await collect(b);
-    expect(rb.code, `session B failed: ${rb.stderr}`).toBe(0);
-    expect(
-      await sql(`SELECT count(*) FROM pg_locks
-                   WHERE locktype='advisory' AND classid=0 AND objid=${key} AND granted`),
-      "session A must still be mid-transaction when B finished",
-    ).not.toBe("0");
+      // Different receipt, different row: B must NOT block. B running to
+      // completion while A is provably still parked is the assertion. If B
+      // blocks instead, the bounded wait returns null and the failure is
+      // raised here — cleanup in withGate still releases A and reaps both.
+      const b = gate.start("b", `
+        SELECT public.post_purchase_receipt_inventory_movement('${ridB}','B');`);
+      const rb = await gate.exitedWithin(b, CHILD_EXIT_MS);
+      expect(
+        rb,
+        "B posts a DIFFERENT receipt and must not block behind A",
+      ).not.toBeNull();
+      expect(rb!.code, `session B failed: ${rb!.stderr}`).toBe(0);
 
-    await release(gate);
-    const ra = await collect(a);
-    expect(ra.code, `session A failed: ${ra.stderr}`).toBe(0);
+      expect(
+        await sql(`SELECT count(*) FROM pg_locks
+                     WHERE locktype='advisory' AND classid=0 AND objid=918053002 AND granted`),
+        "session A must still be mid-transaction when B finished",
+      ).not.toBe("0");
 
-    expect(await sql(`SELECT count(*) FROM public.inventory_movements
-                        WHERE source_document_id IN ('${ridA}','${ridB}')`)).toBe("2");
-    expect(await balanceOf("guava")).toBe("3.000000");
-  }, 60_000);
+      await gate.release();
+      const ra = await gate.exits(a);
+      expect(ra.code, `session A failed: ${ra.stderr}`).toBe(0);
+
+      expect(await sql(`SELECT count(*) FROM public.inventory_movements
+                          WHERE source_document_id IN ('${ridA}','${ridB}')`)).toBe("2");
+      expect(await balanceOf("guava")).toBe("3.000000");
+    });
+  }, 90_000);
 
   test("concurrent reversal of ONE movement creates exactly one reversal", async () => {
-    await ensureBarrierTable();
     const rid = await makeConfirmed("doc-conc-rev", [itemJson("plum", "9")]);
     const posted = JSON.parse(
       await sql(`SELECT public.post_purchase_receipt_inventory_movement('${rid}')`),
     );
-    const key = 918_053_003;
-    const gate = "conc-rev";
-    const marker = "MARK_CONC_REV";
 
-    const a = startScript(
-      `BEGIN;
-       SELECT public.reverse_inventory_movement('${posted.movement_id}','rev-conc-a','a','A');
-       SELECT pg_advisory_xact_lock(${key});
-       ${waitForReleaseSql(gate)}
-       COMMIT;`,
-    );
-    await waitForAdvisoryLock(key);
+    await withGate("conc-rev", 918_053_003, async (gate) => {
+      const a = gate.start("a", `
+        BEGIN;
+        SELECT public.reverse_inventory_movement('${posted.movement_id}','rev-conc-a','a','A');
+        SELECT pg_advisory_xact_lock(918053003);
+        ${gate.hold}
+        COMMIT;`);
+      await gate.parked(a);
 
-    const b = startScript(
-      `/* ${marker} */ SELECT public.reverse_inventory_movement('${posted.movement_id}','rev-conc-b','b','B');`,
-    );
-    await waitForBlockedOnLock(marker);
-    expect(
-      await sessionRunning(marker),
-      "the losing reversal must still be waiting, not already finished",
-    ).toBe(true);
+      const b = gate.start("b", `
+        SELECT public.reverse_inventory_movement('${posted.movement_id}','rev-conc-b','b','B');`);
+      await gate.blocked(b);
+      // Still waiting, not already finished: proven by the child not having exited.
+      expect(
+        await gate.exitedWithin(b, 250),
+        "the losing reversal must still be waiting, not already finished",
+      ).toBeNull();
 
-    await release(gate);
+      await gate.release();
+      const ra = await gate.exits(a);
+      const rb = await gate.exits(b);
 
-    const [ra, rb] = await Promise.all([collect(a), collect(b)]);
-    expect(ra.code, `session A failed: ${ra.stderr}`).toBe(0);
-    // B used a different key against an already-reversed movement: fail closed.
-    expect(rb.code, "the losing reversal must fail, not silently double-reverse").not.toBe(0);
-    expect(rb.stderr).toMatch(/already reversed/iu);
+      expect(ra.code, `session A failed: ${ra.stderr}`).toBe(0);
+      // B used a different key against an already-reversed movement: fail closed.
+      expect(rb.code, "the losing reversal must fail, not silently double-reverse").not.toBe(0);
+      expect(rb.stderr).toMatch(/already reversed/iu);
 
-    expect(
-      await sql(`SELECT count(*) FROM public.inventory_movements
-                   WHERE reversal_of_movement_id='${posted.movement_id}'`),
-    ).toBe("1");
-    expect(await balanceOf("plum")).toBe("0.000000");
-  }, 60_000);
+      expect(
+        await sql(`SELECT count(*) FROM public.inventory_movements
+                     WHERE reversal_of_movement_id='${posted.movement_id}'`),
+      ).toBe("1");
+      expect(await balanceOf("plum")).toBe("0.000000");
+    });
+  }, 90_000);
+
+  // ── The harness's own failure paths ──────────────────────────────────────
+  //
+  // These do not test 0053. They test that a controller which dies mid-scenario
+  // cannot leave a parked session, a live psql child, a held lock or a barrier
+  // row behind — because if it could, one failing concurrency test would cascade
+  // into every test that ran after it. Correctness here must not depend on the
+  // suite-level DROP DATABASE.
+
+  describe("the concurrency harness cleans up on its own failure paths", () => {
+    test("an unexpected block releases A, reaps B, and rethrows the ORIGINAL failure", async () => {
+      const rid = await makeConfirmed("doc-gate-cleanup", [itemJson("gate-fruit", "1")]);
+      const key = 918_053_101;
+      let observed: unknown;
+      let cleanup: GateReport | undefined;
+      const started = Date.now();
+
+      // B contends for the SAME receipt, so it blocks. The body then treats a
+      // block as unexpected — the exact shape of the different-receipt case
+      // going wrong — and throws while A is still parked and B still stuck.
+      // Note the body never calls gate.release(): only the finally path can.
+      try {
+        await withGate(
+          "gate-cleanup",
+          key,
+          async (gate) => {
+            const a = gate.start("a", `
+              BEGIN;
+              SELECT public.post_purchase_receipt_inventory_movement('${rid}','A');
+              SELECT pg_advisory_xact_lock(${key});
+              ${gate.hold}
+              COMMIT;`);
+            await gate.parked(a);
+
+            const b = gate.start("b", `
+              SELECT public.post_purchase_receipt_inventory_movement('${rid}','B');`);
+            await gate.blocked(b);
+
+            const rb = await gate.exitedWithin(b, 500);
+            if (rb === null) throw new Error("ORIGINAL_FAILURE: B blocked unexpectedly");
+          },
+          { onCleanup: (r) => { cleanup = r; } },
+        );
+      } catch (err) {
+        observed = err;
+      }
+
+      // 6. The original assertion failure survives cleanup unmasked.
+      expect(observed, "the body's failure must not be replaced by a cleanup error")
+        .toBeInstanceOf(Error);
+      expect((observed as Error).message).toBe("ORIGINAL_FAILURE: B blocked unexpectedly");
+
+      // The gate was released in the FINALLY path, so A unparked and exited on
+      // its own. Without that release A would only have gone away when the
+      // bounded collect gave up and killed it — which is exactly what this
+      // asserts did not happen. (Killing is a fallback, never the design.)
+      expect(cleanup, "cleanup must report even when the body threw").toBeDefined();
+      expect(
+        cleanup!.terminated,
+        "A must exit because the gate was released, not because cleanup killed it",
+      ).toEqual([]);
+      expect(cleanup!.leaked).toEqual([]);
+      expect(
+        Date.now() - started,
+        "cleanup must not have waited out the child-exit timeout",
+      ).toBeLessThan(CHILD_EXIT_MS);
+
+      // A was released and both children were reaped, despite the throw.
+      expect(
+        await sql(`SELECT count(*) FROM pg_stat_activity
+                    WHERE datname = current_database() AND pid <> pg_backend_pid()
+                      AND query LIKE '%MARK_GATE_CLEANUP%'
+                      AND query NOT LIKE '%pg_stat_activity%'`),
+        "no child session may survive the gate",
+      ).toBe("0");
+      expect(
+        await sql(`SELECT count(*) FROM pg_locks
+                    WHERE locktype='advisory' AND classid=0 AND objid=${key}`),
+        "the advisory lock must be gone",
+      ).toBe("0");
+      expect(
+        await sql(`SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+                    WHERE NOT l.granted AND a.datname = current_database()
+                      AND a.pid <> pg_backend_pid()`),
+        "no ungranted lock may remain",
+      ).toBe("0");
+      expect(
+        await sql(`SELECT count(*) FROM public.test_barrier_release WHERE k='gate-cleanup'`),
+        "the barrier row must be dropped",
+      ).toBe("0");
+
+      // And the database is still usable: A committed, so the receipt posted once.
+      expect(
+        await sql(`SELECT count(*) FROM public.inventory_movements
+                     WHERE source_document_id='${rid}'`),
+      ).toBe("1");
+    }, 90_000);
+
+    test("a child that will not exit on its own is terminated by cleanup", async () => {
+      const key = 918_053_102;
+
+      // This child ignores the gate entirely and would outlive the scenario.
+      // Cleanup must kill it rather than wait for Bun's outer timeout.
+      const report = await withGate(
+        "gate-kill",
+        key,
+        async (gate) => {
+          const stuck = gate.start("stuck", `SELECT pg_sleep(600);`);
+          await gate.started(stuck);
+          expect(
+            await gate.exitedWithin(stuck, 250),
+            "the stuck child must still be running when the body ends",
+          ).toBeNull();
+        },
+        { allowTermination: true },
+      );
+
+      expect(report.terminated, "cleanup must have terminated the stuck child")
+        .toEqual(["stuck"]);
+      expect(report.leaked, "termination must not leave anything behind").toEqual([]);
+
+      expect(
+        await sql(`SELECT count(*) FROM pg_stat_activity
+                    WHERE datname = current_database() AND pid <> pg_backend_pid()
+                      AND query LIKE '%MARK_GATE_KILL%'
+                      AND query NOT LIKE '%pg_stat_activity%'`),
+        "the terminated child must leave no backend behind",
+      ).toBe("0");
+      expect(
+        await sql(`SELECT count(*) FROM public.test_barrier_release WHERE k='gate-kill'`),
+      ).toBe("0");
+    }, 90_000);
+  });
 });

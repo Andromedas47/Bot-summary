@@ -29,6 +29,13 @@ import {
   GuidedSessionCaptureService,
   type GuidedCaptureRefusal,
 } from "./session-capture";
+import {
+  GuidedJourneyService,
+  buildSlipHeaderTemplate,
+  buildWhiteSheetTemplate,
+  thaiDateFromIso,
+  type GuidedJourneyContext,
+} from "./journey";
 import { buildWeighSessionSummary } from "@/lib/line/reply";
 import {
   assertGuidedMenuMessageLimits,
@@ -36,6 +43,8 @@ import {
   buildCancelledMessage,
   buildCapturedItemsMessages,
   buildConfirmPreviewMessage,
+  buildSlipInstructionMessages,
+  buildWhiteSheetTemplateMessages,
   buildFinalizeConfirmedMessage,
   buildFinalizeNotReadyMessage,
   buildMenuDismissedSessionOpenMessage,
@@ -148,6 +157,7 @@ export class GuidedMenuUxHandler {
   private readonly state: GuidedMenuStateService;
   private readonly opener: GuidedSessionOpener;
   private readonly capture: GuidedSessionCaptureService;
+  private readonly journey: GuidedJourneyService;
 
   constructor(
     supabase: SupabaseClient,
@@ -155,12 +165,14 @@ export class GuidedMenuUxHandler {
       stateService?: GuidedMenuStateService;
       sessionOpener?: GuidedSessionOpener;
       captureService?: GuidedSessionCaptureService;
+      journeyService?: GuidedJourneyService;
     } = {},
   ) {
     this.state = options.stateService ?? new GuidedMenuStateService(supabase);
     this.opener = options.sessionOpener ?? new GuidedSessionOpener(supabase);
     this.capture =
       options.captureService ?? new GuidedSessionCaptureService(supabase);
+    this.journey = options.journeyService ?? new GuidedJourneyService(supabase);
   }
 
   async openMenu(input: {
@@ -542,7 +554,9 @@ export class GuidedMenuUxHandler {
         });
       }
       buttons.push({
-        label: "ปิดเมนู",
+        // Never "ยกเลิกรายการ": this dismisses the guided controls and leaves
+        // the produce session open. There is no cancel-open-session contract.
+        label: "ออกจากเมนู",
         actionType: "menu_root",
         payload: { intent: "cancel" },
         wireToken: await create({
@@ -570,15 +584,64 @@ export class GuidedMenuUxHandler {
     return resultEnvelope("invalid", [buildInvalidMenuMessage()], { reason });
   }
 
+  /**
+   * Slices 3B/3C/3D — one journey-status action, rendered for wherever the
+   * operator actually is.
+   *
+   * The stage is re-derived server-side from authoritative state on every
+   * press (GuidedJourneyService), never carried in the token, so a button
+   * minted at an earlier stage always renders the CURRENT stage. This action
+   * is read-only, which is why sharing one action type across stages is safe.
+   */
   private async viewStatus(
     identity: GuidedMenuIdentity,
+  ): Promise<GuidedMenuUxResult> {
+    let journey;
+    try {
+      journey = await this.journey.resolve(identity);
+    } catch {
+      return resultEnvelope("no_open_session", [buildNoOpenSessionMessage()], {
+        reason: "lookup_failed",
+      });
+    }
+    if (journey.stage === "idle") {
+      // Identity failures disclose nothing; everything else is "no round yet",
+      // but the specific reason is kept in the recorded result for operators
+      // support and for the replay envelope.
+      const opaque =
+        journey.reason === "ownership_conflict" ||
+        journey.reason === "session_key_mismatch" ||
+        journey.reason === "missing_session_key";
+      return opaque
+        ? resultEnvelope("invalid", [buildInvalidMenuMessage()], {
+            reason: journey.reason,
+          })
+        : resultEnvelope("no_open_session", [buildNoOpenSessionMessage()], {
+            reason: journey.reason,
+          });
+    }
+
+    if (journey.stage === "capture" || journey.stage === "awaiting_confirm") {
+      return this.renderCaptureStatus(identity, journey.stage);
+    }
+    if (journey.stage === "white_sheet") {
+      return this.renderWhiteSheetStage(identity, journey.context);
+    }
+    // 3C ends at the slip handoff; 3D adds the reconciliation rendering.
+    return this.renderSlipStage(identity, journey.context);
+  }
+
+  private async renderCaptureStatus(
+    identity: GuidedMenuIdentity,
+    stage: "capture" | "awaiting_confirm",
   ): Promise<GuidedMenuUxResult> {
     const snapshot = await this.capture.snapshot(identity);
     if (snapshot.status !== "ok") return this.refusalEnvelope(snapshot.reason);
 
+    const closeRequested = stage === "awaiting_confirm";
     const quickReply = await this.buildSessionActions(identity, {
-      close: !snapshot.closeRequested,
-      confirm: snapshot.closeRequested,
+      close: !closeRequested,
+      confirm: closeRequested,
     });
     const summary =
       snapshot.parsed.items.length > 0
@@ -595,9 +658,98 @@ export class GuidedMenuUxHandler {
       {
         item_count: snapshot.parsed.items.length,
         parse_error_count: snapshot.parsed.parse_errors.length,
-        close_requested: snapshot.closeRequested,
+        close_requested: closeRequested,
       },
     );
+  }
+
+  /** Slice 3C — hand the operator a ready-to-edit White Sheet closing command. */
+  private async renderWhiteSheetStage(
+    identity: GuidedMenuIdentity,
+    context: GuidedJourneyContext,
+  ): Promise<GuidedMenuUxResult> {
+    const template = buildWhiteSheetTemplate(context);
+    const dateThaiShort = thaiDateFromIso(context.businessDate);
+    if (!template || !dateThaiShort) {
+      return resultEnvelope("invalid", [buildInvalidMenuMessage()], {
+        reason: "invalid_business_date",
+      });
+    }
+    const quickReply = await this.buildJourneyActions(identity, "ดูสถานะ");
+    return resultEnvelope(
+      "white_sheet_template",
+      buildWhiteSheetTemplateMessages({
+        template,
+        sellerLabel: context.sellerLabel,
+        marketLabel: context.marketLabel,
+        dateThaiShort,
+        quickReply,
+      }),
+      {
+        stage: "white_sheet",
+        market_label_normalized: context.marketLabelNormalized,
+        business_date: context.businessDate,
+      },
+    );
+  }
+
+  /** Slice 3D — hand the operator the existing slip batch header. */
+  private async renderSlipStage(
+    identity: GuidedMenuIdentity,
+    context: GuidedJourneyContext,
+  ): Promise<GuidedMenuUxResult> {
+    const header = buildSlipHeaderTemplate(context);
+    const dateThaiShort = thaiDateFromIso(context.businessDate);
+    if (!header || !dateThaiShort) {
+      return resultEnvelope("invalid", [buildInvalidMenuMessage()], {
+        reason: "invalid_business_date",
+      });
+    }
+    const quickReply = await this.buildJourneyActions(identity, "ตรวจยอด");
+    return resultEnvelope(
+      "slip_instructions",
+      buildSlipInstructionMessages({
+        header,
+        sellerLabel: context.sellerLabel,
+        marketLabel: context.marketLabel,
+        dateThaiShort,
+        quickReply,
+      }),
+      { stage: "slips", business_date: context.businessDate },
+    );
+  }
+
+  /**
+   * The journey-stage quick reply: one read-only status refresh plus the exit.
+   * Closing the round is a text command (`ปิดรอบ`), deliberately not a shared
+   * mutating token — see docs/guided-operations-end-to-end.md §2.5.
+   */
+  private async buildJourneyActions(
+    identity: GuidedMenuIdentity,
+    statusLabel: string,
+  ): Promise<LineQuickReply | undefined> {
+    try {
+      const create = this.createTokenFn(identity);
+      return bindQuickReply([
+        {
+          label: statusLabel,
+          actionType: "view_status",
+          payload: {},
+          wireToken: await create({ actionType: "view_status", payload: {} }),
+        },
+        {
+          label: "ออกจากเมนู",
+          actionType: "menu_root",
+          payload: { intent: "cancel" },
+          wireToken: await create({
+            actionType: "menu_root",
+            payload: { intent: "cancel" },
+          }),
+        },
+      ]);
+    } catch {
+      return undefined;
+    }
   }
 
   private async requestClose(input: {
@@ -672,6 +824,11 @@ export class GuidedMenuUxHandler {
       );
     }
 
+    // 3C handoff: the next stage is one button away — no command to remember.
+    const quickReply = await this.buildJourneyActions(
+      input.identity,
+      "กรอกใบขาว",
+    );
     return resultEnvelope(
       "session_finalize_confirmed",
       buildFinalizeConfirmedMessage({
@@ -680,6 +837,7 @@ export class GuidedMenuUxHandler {
             ? buildWeighSessionSummary(outcome.parsed)
             : GUIDED_MENU_COPY.noCapturedItems,
         maxMessages: LINE_REPLY_MESSAGE_MAX,
+        quickReply,
       }),
       {
         confirm_reason: outcome.reason,

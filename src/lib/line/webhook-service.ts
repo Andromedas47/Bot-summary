@@ -19,12 +19,16 @@ import {
   type LineApiMessage,
 } from "@/lib/line/reply";
 import {
+  GuidedJourneyService,
   GuidedMenuUxHandler,
   buildGuidedMenuIdentity,
   buildInvalidMenuMessage,
+  buildSlipHandoffMessages,
+  guardGuidedWhiteSheetSubmission,
   isExactGuidedMenuTrigger,
   isGuidedMenuPostbackCandidate,
   isGuidedMenuPostbackData,
+  LINE_REPLY_MESSAGE_MAX,
 } from "@/lib/line/guided-menu";
 import {
   parseWeighSession,
@@ -164,6 +168,7 @@ interface WebhookServiceDependencies {
   replyMessages?: ReplyLineMessages;
   replyApiMessages?: ReplyLineApiMessages;
   guidedMenuHandler?: GuidedMenuUxHandler;
+  guidedJourneyService?: GuidedJourneyService;
   scheduleBackgroundTask?: ScheduleBackgroundTask;
   physicalInventoryFinalizer?: PhysicalInventoryFinalizer;
   physicalInventoryService?: PhysicalInventorySessionGateway;
@@ -283,6 +288,7 @@ export class WebhookService {
   private readonly replyMessages: ReplyLineMessages;
   private readonly replyApiMessages: ReplyLineApiMessages;
   private readonly guidedMenuHandler: GuidedMenuUxHandler;
+  private readonly guidedJourney: GuidedJourneyService;
   private readonly scheduleBackgroundTask: ScheduleBackgroundTask;
   private readonly physicalInventoryFinalizer: PhysicalInventoryFinalizer;
   private readonly physicalInventoryService: PhysicalInventorySessionGateway;
@@ -305,6 +311,8 @@ export class WebhookService {
     this.replyApiMessages = dependencies.replyApiMessages ?? replyLineApiMessages;
     this.guidedMenuHandler =
       dependencies.guidedMenuHandler ?? new GuidedMenuUxHandler(supabase);
+    this.guidedJourney =
+      dependencies.guidedJourneyService ?? new GuidedJourneyService(supabase);
     this.scheduleBackgroundTask =
       dependencies.scheduleBackgroundTask
       ?? ((task) => {
@@ -1312,12 +1320,43 @@ export class WebhookService {
       businessDate: parseResult.command.businessDate,
     });
 
+    // 3C: a guided operator's sheet must land on the round they opened. With no
+    // guided round the verdict is not_guided and the legacy path is unchanged.
+    const identity = buildGuidedMenuIdentity({
+      lineUserId: getUserId(event.source),
+      sourceType: event.source.type,
+      sourceId,
+      sessionKey: getPendingSessionKey(event.source),
+    });
+    let guidedContext = null;
+    if (identity) {
+      const guard = await guardGuidedWhiteSheetSubmission({
+        journey: this.guidedJourney,
+        identity,
+        command: parseResult.command,
+      });
+      if (guard.verdict === "refused") {
+        log.info("white sheet close refused — journey mismatch", { sourceId });
+        if (replyToken) await this.replyMessage(replyToken, guard.message);
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+      if (guard.verdict === "allowed") guidedContext = guard.context;
+    }
+
     try {
       const outcome = await processWhiteSheetCloseCommand(this.supabase, {
         sourceId,
         command: parseResult.command,
       });
-      if (replyToken) await this.replyMessages(replyToken, outcome.replyMessages);
+      // 3C → 3D handoff, only when the sheet actually persisted.
+      const handoff =
+        guidedContext && outcome.persisted
+          ? buildSlipHandoffMessages(guidedContext)
+          : null;
+      const messages = handoff
+        ? [...outcome.replyMessages, ...handoff].slice(0, LINE_REPLY_MESSAGE_MAX)
+        : outcome.replyMessages;
+      if (replyToken) await this.replyMessages(replyToken, messages);
       return { eventId, eventType, status: "saved", parsed: true };
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);

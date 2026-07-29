@@ -9,3 +9,5 @@ export * from "./ux-handler";
 export * from "./evidence";
 export * from "./session-opener";
 export * from "./session-capture";
+export * from "./journey";
+export * from "./journey-bridge";

@@ -107,6 +107,35 @@ export const GUIDED_MENU_COPY = {
   ].join("\n"),
   /** 3B → 3C handoff. */
   nextStepWhiteSheet: "ขั้นต่อไป: กรอกใบขาว",
+  /** 3C: how to use the white-sheet template. */
+  whiteSheetInstructions: [
+    "กรอกใบขาว",
+    "คัดลอกข้อความด้านล่าง แก้เฉพาะตัวเลข แล้วส่งกลับมา",
+    "บรรทัดไหนไม่มีค่าใช้จ่าย ใส่ 0 ไว้",
+  ].join("\n"),
+  /** 3C: shown when the sheet is already submitted. */
+  whiteSheetAlreadySubmitted: "ใบขาวของรอบนี้บันทึกไว้แล้ว",
+  /** 3C: FINALIZED sheets are never overwritten from LINE. */
+  whiteSheetFinalized: [
+    "ใบขาวของรอบนี้ถูกยืนยันแล้ว (FINALIZED)",
+    "ไม่สามารถแก้ไขผ่านไลน์ได้ หากต้องการแก้ กรุณาติดต่อผู้ดูแล",
+  ].join("\n"),
+  /** 3C → 3D handoff. */
+  nextStepSlips: "ขั้นต่อไป: ส่งสลิป",
+  /** 3D: how to open the transfer-slip batch. */
+  slipInstructions: [
+    "ส่งสลิปเงินโอน",
+    "ส่งข้อความด้านล่างก่อน แล้วส่งรูปสลิปตามได้เลย",
+    'เมื่อส่งครบ พิมพ์ "จบสลิป"',
+    'ถ้ามีสลิปที่ระบบอ่านไม่ได้ ใช้ "สลิปมือ" ตามวิธีเดิม',
+  ].join("\n"),
+  /** 3D: the round-close text command the bot tells the operator to send. */
+  roundCloseCommand: "ปิดรอบ",
+  /** 3D: nothing to close yet. */
+  roundCloseNoJourney: [
+    "ยังไม่มีรอบที่พร้อมปิด",
+    "กรุณาพิมพ์ เมนู เพื่อเริ่มรายการใหม่",
+  ].join("\n"),
   txPrompt: "เลือกรายการที่ต้องการบันทึก",
   marketPrompt: "เลือกตลาด",
   sellerPrompt: "เลือกคนขาย",
@@ -132,6 +161,9 @@ export type GuidedMenuScreen =
   | "session_action_conflict"
   | "session_menu_dismissed"
   | "no_open_session"
+  | "white_sheet_template"
+  | "slip_instructions"
+  | "round_status"
   | "unmapped"
   | "no_sellers"
   | "seller_unavailable"

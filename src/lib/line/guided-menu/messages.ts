@@ -466,6 +466,117 @@ export function buildFinalizeConfirmedMessage(input: {
   });
 }
 
+/**
+ * Slice 3C — the White Sheet template, sent as its own message so the operator
+ * can long-press-copy it without dragging the instructions along.
+ */
+export function buildWhiteSheetTemplateMessages(input: {
+  template: string;
+  sellerLabel: string;
+  marketLabel: string;
+  dateThaiShort: string;
+  quickReply?: LineQuickReply;
+  note?: string;
+}): LineTextMessage[] {
+  const header = [
+    GUIDED_MENU_COPY.whiteSheetInstructions,
+    "",
+    `คนขาย: ${input.sellerLabel}`,
+    `ตลาด: ${input.marketLabel}`,
+    `วันที่: ${input.dateThaiShort}`,
+    ...(input.note ? ["", input.note] : []),
+  ].join("\n");
+  return [
+    { type: "text", text: header },
+    {
+      type: "text",
+      text: input.template,
+      ...(input.quickReply ? { quickReply: input.quickReply } : {}),
+    },
+  ];
+}
+
+/** Slice 3D — slip-stage instructions plus the ready-to-send batch header. */
+export function buildSlipInstructionMessages(input: {
+  header: string;
+  sellerLabel: string;
+  marketLabel: string;
+  dateThaiShort: string;
+  quickReply?: LineQuickReply;
+}): LineTextMessage[] {
+  return [
+    {
+      type: "text",
+      text: [
+        GUIDED_MENU_COPY.slipInstructions,
+        "",
+        `คนขาย: ${input.sellerLabel}`,
+        `ตลาด: ${input.marketLabel}`,
+        `วันที่: ${input.dateThaiShort}`,
+      ].join("\n"),
+    },
+    {
+      type: "text",
+      text: input.header,
+      ...(input.quickReply ? { quickReply: input.quickReply } : {}),
+    },
+  ];
+}
+
+function formatBaht(value: number | null): string {
+  if (value === null) return "—";
+  return `${value.toLocaleString("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  })} บาท`;
+}
+
+/**
+ * Slice 3D — the reconciliation view. Renders exactly what the authoritative
+ * loaders reported; a missing settlement shows "—", never a guessed zero.
+ */
+export function buildRoundStatusMessage(input: {
+  sellerLabel: string;
+  marketLabel: string;
+  dateThaiShort: string;
+  totals: {
+    checkedSlipTotal: number;
+    submittedTransferTotal: number | null;
+    difference: number | null;
+  };
+  slipCounts: ReadonlyArray<[string, number]>;
+  blockerLines: readonly string[];
+  closed: boolean;
+  quickReply?: LineQuickReply;
+}): LineTextMessage {
+  const lines: string[] = [];
+  lines.push(input.closed ? "ปิดรอบเรียบร้อย ✅" : "ตรวจยอดรอบขาย");
+  lines.push("");
+  lines.push(`คนขาย: ${input.sellerLabel}`);
+  lines.push(`ตลาด: ${input.marketLabel}`);
+  lines.push(`วันที่: ${input.dateThaiShort}`);
+  lines.push(`ยอดส่งตามใบขาว: ${formatBaht(input.totals.submittedTransferTotal)}`);
+  lines.push(`ยอดสลิปที่ตรวจแล้ว: ${formatBaht(input.totals.checkedSlipTotal)}`);
+  lines.push(`ผลต่าง: ${formatBaht(input.totals.difference)}`);
+
+  if (input.slipCounts.length > 0) {
+    lines.push("");
+    lines.push("สลิป:");
+    for (const [label, count] of input.slipCounts) {
+      lines.push(`- ${label}: ${count}`);
+    }
+  }
+
+  if (input.blockerLines.length > 0) {
+    lines.push("");
+    lines.push("ยังปิดรอบไม่ได้ เพราะ:");
+    for (const line of input.blockerLines) lines.push(`- ${line}`);
+  }
+
+  const message: LineTextMessage = { type: "text", text: lines.join("\n") };
+  return input.quickReply ? { ...message, quickReply: input.quickReply } : message;
+}
+
 export function buildSessionAlreadyOpenMessage(): LineTextMessage {
   return buildPlainTextMessage(GUIDED_MENU_COPY.sessionAlreadyOpen);
 }

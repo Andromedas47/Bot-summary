@@ -168,7 +168,7 @@ describe("Slice 3B — the open round carries its own next actions", () => {
     expect(quickReplyLabels(opened.messages[0])).toEqual([
       "ดูรายการ",
       "จบรายการ",
-      "ปิดเมนู",
+      "ออกจากเมนู",
     ]);
     const text = (opened.messages[0] as { text: string }).text;
     expect(text).toContain(GUIDED_MENU_COPY.sendItemsHint);
@@ -313,7 +313,7 @@ describe("Slice 3B — จบรายการ sets the close barrier", () => {
     expect(quickReplyLabels(last)).toEqual([
       "ดูรายการ",
       "ยืนยันจบรายการ",
-      "ปิดเมนู",
+      "ออกจากเมนู",
     ]);
     expect((last as { text: string }).text).toContain(
       GUIDED_MENU_COPY.closeRequested,

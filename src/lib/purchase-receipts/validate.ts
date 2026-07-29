@@ -25,7 +25,10 @@ import {
   type PurchaseConfirmationSource,
   type PurchaseConfirmationTotals,
   type PurchaseReceiptConfirmation,
+  type PurchaseReceiptDraftResult,
+  type PurchaseReceiptPostingLockResult,
   type PurchaseReceiptStatus,
+  type PurchaseReceiptVoidResult,
 } from "./types";
 
 /** A response that did not match the expected contract. Always fail closed. */
@@ -49,6 +52,7 @@ const SHA256_HEX_RE = /^[0-9a-f]{64}$/u;
 /** Optional sign, digits, optional single fractional part. No exponent, no NaN. */
 const DECIMAL_RE = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/u;
 const INTEGER_RE = /^-?(?:0|[1-9][0-9]*)$/u;
+const NONNEGATIVE_INTEGER_RE = /^(?:0|[1-9][0-9]*)$/u;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/u;
 const TIME_RE = /^\d{2}:\d{2}$/u;
 
@@ -109,6 +113,19 @@ export function requireNullableBoolean(
   if (value === null) return null;
   if (typeof value !== "boolean") {
     fail(`${path}.${key}`, `expected a boolean or null, got ${describe(value)}`);
+  }
+  return value;
+}
+
+/** Requires a present boolean. Absent, null and truthy strings all fail. */
+export function requireBoolean(
+  source: Record<string, unknown>,
+  key: string,
+  path: string,
+): boolean {
+  const value = source[key];
+  if (typeof value !== "boolean") {
+    fail(`${path}.${key}`, `expected a boolean, got ${describe(value)}`);
   }
   return value;
 }
@@ -177,6 +194,15 @@ export function requireIntegerString(
   return requirePattern(source, key, INTEGER_RE, path, "an integer string");
 }
 
+/** Lossless integer string that may not be negative (revisions, counters). */
+export function requireNonNegativeIntegerString(
+  source: Record<string, unknown>,
+  key: string,
+  path: string,
+): string {
+  return requirePattern(source, key, NONNEGATIVE_INTEGER_RE, path, "a non-negative integer string");
+}
+
 export function requireNullableIntegerString(
   source: Record<string, unknown>,
   key: string,
@@ -194,7 +220,7 @@ export function requireNullableDecimalString(
   return requireNullablePattern(source, key, DECIMAL_RE, path, "a decimal string");
 }
 
-function requireEnum<T extends string>(
+export function requireEnum<T extends string>(
   source: Record<string, unknown>,
   key: string,
   allowed: readonly T[],
@@ -345,6 +371,57 @@ function parseSource(raw: unknown): PurchaseConfirmationSource {
       source, "source_raw_message_id", UUID_RE, path, "a UUID",
     ),
     source_evidence: requireObject(source.source_evidence, `${path}.source_evidence`),
+  };
+}
+
+/**
+ * Validates an `upsert_purchase_receipt_draft` response.
+ *
+ * The identity fields are the ones the caller will key retries and corrections
+ * on, so a missing one must fail here rather than travel onward as "" — an empty
+ * namespace/key would look like a legitimate document identity to every later
+ * reader.
+ */
+export function parseDraftResponse(raw: unknown): PurchaseReceiptDraftResult {
+  const path = "saveDraft";
+  const row = requireObject(raw, path);
+  return {
+    receiptId: requireUuid(row, "receipt_id", path),
+    documentNamespace: requireString(row, "document_namespace", path),
+    documentKey: requireString(row, "document_key", path),
+    status: requireEnum(row, "status", RECEIPT_STATUSES, path),
+    draftRevision: requireNonNegativeIntegerString(row, "draft_revision", path),
+    itemCount: requireSmallInt(row, "item_count", path, PURCHASE_RECEIPT_MAX_ITEMS),
+  };
+}
+
+/** Validates a `lock_purchase_receipt_for_posting` response. */
+export function parsePostingLockResponse(raw: unknown): PurchaseReceiptPostingLockResult {
+  const path = "lockForPosting";
+  const row = requireObject(raw, path);
+  return {
+    receiptId: requireUuid(row, "receipt_id", path),
+    replayed: requireBoolean(row, "replayed", path),
+  };
+}
+
+/**
+ * Validates a `void_purchase_receipt` response.
+ *
+ * Both RPC branches — fresh void and idempotent replay — return status 'void',
+ * so anything else means the response did not come from a completed void.
+ */
+export function parseVoidResponse(raw: unknown): PurchaseReceiptVoidResult {
+  const path = "void";
+  const row = requireObject(raw, path);
+  const status = requireEnum(row, "status", RECEIPT_STATUSES, path);
+  if (status !== "void") {
+    fail(`${path}.status`, `expected the receipt to be void, got ${JSON.stringify(status)}`);
+  }
+  return {
+    receiptId: requireUuid(row, "receipt_id", path),
+    status,
+    replayed: requireBoolean(row, "replayed", path),
   };
 }
 

@@ -438,6 +438,81 @@ describe("getConfirmation, void, and posting lock", () => {
   });
 });
 
+/**
+ * The service must reach the validators — a parser that is never called protects
+ * nothing. Each case is a response that a coercing implementation would have
+ * accepted as "", "null" or "undefined".
+ */
+describe("service-level fail-closed handling of mutation responses", () => {
+  const violates = (
+    fn: string,
+    data: unknown,
+    call: (service: PurchaseReceiptService) => Promise<unknown>,
+  ) => {
+    const { client } = makeStub({ [fn]: { data } });
+    return expect(call(new PurchaseReceiptService(client)))
+      .rejects.toBeInstanceOf(PurchaseContractViolationError);
+  };
+
+  const draft = (service: PurchaseReceiptService) => service.saveDraft(BASE_DRAFT);
+  const lock = (service: PurchaseReceiptService) =>
+    service.lockForPosting({ receiptId: RECEIPT_ID, lockedBy: "p2c" });
+  const voidIt = (service: PurchaseReceiptService) =>
+    service.void({ receiptId: RECEIPT_ID, reason: "duplicate" });
+
+  const DRAFT_FN = "upsert_purchase_receipt_draft";
+  const LOCK_FN = "lock_purchase_receipt_for_posting";
+  const VOID_FN = "void_purchase_receipt";
+  const draftData = DRAFT_OK.upsert_purchase_receipt_draft.data;
+
+  test("saveDraft rejects a missing document namespace instead of returning \"\"", async () => {
+    const data: Record<string, unknown> = { ...draftData };
+    delete data.document_namespace;
+    await violates(DRAFT_FN, data, draft);
+  });
+
+  test("saveDraft rejects a null document key instead of returning \"null\"", async () => {
+    await violates(DRAFT_FN, { ...draftData, document_key: null }, draft);
+  });
+
+  test("saveDraft rejects a non-UUID receipt id", async () => {
+    await violates(DRAFT_FN, { ...draftData, receipt_id: "receipt-1" }, draft);
+  });
+
+  test("saveDraft rejects item_count outside 0..500", async () => {
+    await violates(DRAFT_FN, { ...draftData, item_count: -1 }, draft);
+    await violates(DRAFT_FN, { ...draftData, item_count: 501 }, draft);
+  });
+
+  test("lockForPosting rejects a missing receipt id instead of returning \"undefined\"", async () => {
+    await violates(LOCK_FN, { replayed: false }, lock);
+  });
+
+  test("lockForPosting rejects a non-UUID receipt id", async () => {
+    await violates(LOCK_FN, { receipt_id: "undefined", replayed: false }, lock);
+  });
+
+  test("lockForPosting rejects a non-boolean replayed", async () => {
+    await violates(LOCK_FN, { receipt_id: RECEIPT_ID, replayed: "false" }, lock);
+  });
+
+  test("void rejects a missing receipt id instead of returning \"undefined\"", async () => {
+    await violates(VOID_FN, { status: "void", replayed: false }, voidIt);
+  });
+
+  test("void rejects a non-UUID receipt id", async () => {
+    await violates(VOID_FN, { receipt_id: "null", status: "void", replayed: false }, voidIt);
+  });
+
+  test("void rejects a status the RPC contract cannot produce", async () => {
+    await violates(VOID_FN, { receipt_id: RECEIPT_ID, status: "confirmed", replayed: false }, voidIt);
+  });
+
+  test("void rejects a non-boolean replayed", async () => {
+    await violates(VOID_FN, { receipt_id: RECEIPT_ID, status: "void", replayed: 1 }, voidIt);
+  });
+});
+
 describe("mapPurchaseRpcError", () => {
   test("maps a missing receipt", () => {
     expect(mapPurchaseRpcError("purchase receipt r not found")).toBeInstanceOf(

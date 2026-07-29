@@ -11,6 +11,9 @@ import {
   PurchaseContractViolationError,
   parseConfirmationPayload,
   parseConfirmationResponse,
+  parseDraftResponse,
+  parsePostingLockResponse,
+  parseVoidResponse,
 } from "./validate";
 
 const RECEIPT_ID = "11111111-1111-4111-8111-111111111111";
@@ -376,5 +379,220 @@ describe("cross-field consistency", () => {
     const bad = validResponse();
     delete (bad as Record<string, unknown>).replayed;
     expect(() => parseConfirmationResponse(bad)).toThrow(/replayed/u);
+  });
+});
+
+/**
+ * The mutation RPCs return small envelopes, and the temptation is to trust them
+ * because they are small. These cases exist because `String(row.receipt_id)` on
+ * an absent field yields the literal "undefined" — a plausible-looking id that
+ * would key retries, corrections and P2C lookups against nothing.
+ */
+function validDraftResponse(overrides: Record<string, unknown> = {}) {
+  return {
+    receipt_id: RECEIPT_ID,
+    document_namespace: "line-text",
+    document_key: "DOC 1",
+    status: "draft",
+    draft_revision: "3",
+    item_count: 2,
+    ...overrides,
+  };
+}
+
+describe("parseDraftResponse", () => {
+  test("accepts a well-formed response", () => {
+    expect(parseDraftResponse(validDraftResponse())).toEqual({
+      receiptId: RECEIPT_ID,
+      documentNamespace: "line-text",
+      documentKey: "DOC 1",
+      status: "draft",
+      draftRevision: "3",
+      itemCount: 2,
+    });
+  });
+
+  test("rejects a non-object response", () => {
+    expect(() => parseDraftResponse(null)).toThrow(PurchaseContractViolationError);
+    expect(() => parseDraftResponse("ok")).toThrow(/expected an object/u);
+  });
+
+  for (const key of [
+    "receipt_id",
+    "document_namespace",
+    "document_key",
+    "status",
+    "draft_revision",
+    "item_count",
+  ]) {
+    test(`rejects a missing ${key}`, () => {
+      const bad = validDraftResponse();
+      delete (bad as Record<string, unknown>)[key];
+      expect(() => parseDraftResponse(bad)).toThrow(PurchaseContractViolationError);
+    });
+
+    test(`rejects a null ${key}`, () => {
+      expect(() => parseDraftResponse(validDraftResponse({ [key]: null })))
+        .toThrow(PurchaseContractViolationError);
+    });
+  }
+
+  test('rejects the literal string "undefined" rather than accepting it', () => {
+    expect(() => parseDraftResponse(validDraftResponse({ receipt_id: "undefined" })))
+      .toThrow(/expected a UUID/u);
+    expect(() => parseDraftResponse(validDraftResponse({ draft_revision: "undefined" })))
+      .toThrow(/non-negative integer string/u);
+  });
+
+  test('rejects an empty namespace or key rather than accepting ""', () => {
+    expect(() => parseDraftResponse(validDraftResponse({ document_namespace: "" })))
+      .toThrow(/non-empty string/u);
+    expect(() => parseDraftResponse(validDraftResponse({ document_key: "" })))
+      .toThrow(/non-empty string/u);
+  });
+
+  test("rejects a malformed receipt UUID", () => {
+    expect(() => parseDraftResponse(validDraftResponse({ receipt_id: "11111111-1111-4111-8111" })))
+      .toThrow(/expected a UUID/u);
+  });
+
+  test("rejects a status outside the receipt lifecycle", () => {
+    expect(() => parseDraftResponse(validDraftResponse({ status: "DRAFT" })))
+      .toThrow(/draft\|confirmed\|void/u);
+  });
+
+  test("rejects a negative or non-lossless draft revision", () => {
+    expect(() => parseDraftResponse(validDraftResponse({ draft_revision: "-1" })))
+      .toThrow(/non-negative integer string/u);
+    expect(() => parseDraftResponse(validDraftResponse({ draft_revision: 3 })))
+      .toThrow(/expected a string/u);
+  });
+
+  test("rejects item_count below zero", () => {
+    expect(() => parseDraftResponse(validDraftResponse({ item_count: -1 })))
+      .toThrow(/integer in \[0, 500\]/u);
+  });
+
+  test("rejects item_count above the documented 500-line limit", () => {
+    expect(() => parseDraftResponse(validDraftResponse({ item_count: 501 })))
+      .toThrow(/integer in \[0, 500\]/u);
+  });
+
+  test("accepts item_count at both bounds", () => {
+    expect(parseDraftResponse(validDraftResponse({ item_count: 0 })).itemCount).toBe(0);
+    expect(parseDraftResponse(validDraftResponse({ item_count: 500 })).itemCount).toBe(500);
+  });
+
+  test("rejects a non-integer item_count", () => {
+    expect(() => parseDraftResponse(validDraftResponse({ item_count: 2.5 })))
+      .toThrow(/integer in \[0, 500\]/u);
+    expect(() => parseDraftResponse(validDraftResponse({ item_count: "2" })))
+      .toThrow(/integer in \[0, 500\]/u);
+  });
+});
+
+describe("parsePostingLockResponse", () => {
+  test("accepts a well-formed response", () => {
+    expect(parsePostingLockResponse({ receipt_id: RECEIPT_ID, replayed: false }))
+      .toEqual({ receiptId: RECEIPT_ID, replayed: false });
+  });
+
+  test("rejects a non-object response", () => {
+    expect(() => parsePostingLockResponse(undefined)).toThrow(/expected an object/u);
+  });
+
+  test("rejects a missing receipt_id instead of stringifying it", () => {
+    expect(() => parsePostingLockResponse({ replayed: true })).toThrow(/expected a string/u);
+  });
+
+  test("rejects a null receipt_id", () => {
+    expect(() => parsePostingLockResponse({ receipt_id: null, replayed: true }))
+      .toThrow(/expected a string/u);
+  });
+
+  test('rejects the literal string "undefined" as a receipt id', () => {
+    expect(() => parsePostingLockResponse({ receipt_id: "undefined", replayed: true }))
+      .toThrow(/expected a UUID/u);
+  });
+
+  test("rejects a malformed receipt UUID", () => {
+    expect(() => parsePostingLockResponse({ receipt_id: "not-a-uuid", replayed: true }))
+      .toThrow(/expected a UUID/u);
+  });
+
+  test("rejects a missing replayed flag", () => {
+    expect(() => parsePostingLockResponse({ receipt_id: RECEIPT_ID }))
+      .toThrow(/expected a boolean/u);
+  });
+
+  test("rejects a truthy non-boolean replayed", () => {
+    expect(() => parsePostingLockResponse({ receipt_id: RECEIPT_ID, replayed: "true" }))
+      .toThrow(/expected a boolean/u);
+    expect(() => parsePostingLockResponse({ receipt_id: RECEIPT_ID, replayed: 1 }))
+      .toThrow(/expected a boolean/u);
+    expect(() => parsePostingLockResponse({ receipt_id: RECEIPT_ID, replayed: null }))
+      .toThrow(/expected a boolean/u);
+  });
+});
+
+describe("parseVoidResponse", () => {
+  const validVoid = (overrides: Record<string, unknown> = {}) => ({
+    receipt_id: RECEIPT_ID,
+    status: "void",
+    replayed: false,
+    ...overrides,
+  });
+
+  test("accepts a well-formed response", () => {
+    expect(parseVoidResponse(validVoid({ replayed: true })))
+      .toEqual({ receiptId: RECEIPT_ID, status: "void", replayed: true });
+  });
+
+  test("rejects a non-object response", () => {
+    expect(() => parseVoidResponse([])).toThrow(/expected an object/u);
+  });
+
+  for (const key of ["receipt_id", "status", "replayed"]) {
+    test(`rejects a missing ${key}`, () => {
+      const bad = validVoid();
+      delete (bad as Record<string, unknown>)[key];
+      expect(() => parseVoidResponse(bad)).toThrow(PurchaseContractViolationError);
+    });
+
+    test(`rejects a null ${key}`, () => {
+      expect(() => parseVoidResponse(validVoid({ [key]: null })))
+        .toThrow(PurchaseContractViolationError);
+    });
+  }
+
+  test('rejects the literal string "undefined" as a receipt id', () => {
+    expect(() => parseVoidResponse(validVoid({ receipt_id: "undefined" })))
+      .toThrow(/expected a UUID/u);
+  });
+
+  test("rejects a malformed receipt UUID", () => {
+    expect(() => parseVoidResponse(validVoid({ receipt_id: "11111111111141118111111111111111" })))
+      .toThrow(/expected a UUID/u);
+  });
+
+  test("rejects a status outside the receipt lifecycle", () => {
+    expect(() => parseVoidResponse(validVoid({ status: "cancelled" })))
+      .toThrow(/draft\|confirmed\|void/u);
+  });
+
+  // Both RPC branches void the receipt, so any other lifecycle state means the
+  // void did not happen — accepting it would report success for a live document.
+  test("rejects a legal status that is not void", () => {
+    expect(() => parseVoidResponse(validVoid({ status: "confirmed" })))
+      .toThrow(/expected the receipt to be void/u);
+    expect(() => parseVoidResponse(validVoid({ status: "draft" })))
+      .toThrow(/expected the receipt to be void/u);
+  });
+
+  test("rejects a non-boolean replayed", () => {
+    expect(() => parseVoidResponse(validVoid({ replayed: "false" })))
+      .toThrow(/expected a boolean/u);
+    expect(() => parseVoidResponse(validVoid({ replayed: 0 })))
+      .toThrow(/expected a boolean/u);
   });
 });

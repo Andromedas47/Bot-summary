@@ -19,14 +19,20 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/types/database";
-import { PurchaseContractViolationError, isPlainObject, parseConfirmationResponse } from "./validate";
+import {
+  PurchaseContractViolationError,
+  isPlainObject,
+  parseConfirmationResponse,
+  parseDraftResponse,
+  parsePostingLockResponse,
+  parseVoidResponse,
+} from "./validate";
 import {
   PURCHASE_RECEIPT_MAX_ITEMS,
   type PurchaseReceiptConfirmation,
   type PurchaseReceiptDraftInput,
   type PurchaseReceiptDraftResult,
   type PurchaseReceiptPostingLockResult,
-  type PurchaseReceiptStatus,
   type PurchaseReceiptVoidResult,
 } from "./types";
 
@@ -132,19 +138,6 @@ function requireRpcObject(value: unknown, context: string): Record<string, unkno
   return value;
 }
 
-const INTEGER_STRING = /^(?:0|[1-9][0-9]*)$/u;
-const RECEIPT_STATUSES: readonly PurchaseReceiptStatus[] = ["draft", "confirmed", "void"];
-
-function requireStatus(value: unknown, context: string): PurchaseReceiptStatus {
-  if (typeof value !== "string" || !RECEIPT_STATUSES.includes(value as PurchaseReceiptStatus)) {
-    throw new PurchaseContractViolationError(
-      `expected a receipt status, got ${JSON.stringify(value)}`,
-      context,
-    );
-  }
-  return value as PurchaseReceiptStatus;
-}
-
 export class PurchaseReceiptService {
   constructor(private readonly supabase: Supabase) {}
 
@@ -211,35 +204,7 @@ export class PurchaseReceiptService {
     });
 
     if (error) throw mapPurchaseRpcError(error.message ?? "");
-    const row = requireRpcObject(data, "saveDraft");
-
-    const draftRevision = row.draft_revision;
-    if (typeof draftRevision !== "string" || !INTEGER_STRING.test(draftRevision)) {
-      throw new PurchaseContractViolationError(
-        `expected a lossless integer string, got ${JSON.stringify(draftRevision)}`,
-        "saveDraft.draft_revision",
-      );
-    }
-    const itemCount = row.item_count;
-    if (typeof itemCount !== "number" || !Number.isInteger(itemCount)) {
-      throw new PurchaseContractViolationError(
-        `expected an integer, got ${JSON.stringify(itemCount)}`,
-        "saveDraft.item_count",
-      );
-    }
-    const receiptId = row.receipt_id;
-    if (typeof receiptId !== "string" || receiptId.length === 0) {
-      throw new PurchaseContractViolationError("expected a receipt id", "saveDraft.receipt_id");
-    }
-
-    return {
-      receiptId,
-      documentNamespace: String(row.document_namespace ?? ""),
-      documentKey: String(row.document_key ?? ""),
-      status: requireStatus(row.status, "saveDraft.status"),
-      draftRevision,
-      itemCount,
-    };
+    return parseDraftResponse(data);
   }
 
   /**
@@ -298,11 +263,7 @@ export class PurchaseReceiptService {
     });
 
     if (error) throw mapPurchaseRpcError(error.message ?? "");
-    const row = requireRpcObject(data, "lockForPosting");
-    if (typeof row.replayed !== "boolean") {
-      throw new PurchaseContractViolationError("expected a boolean", "lockForPosting.replayed");
-    }
-    return { receiptId: String(row.receipt_id), replayed: row.replayed };
+    return parsePostingLockResponse(data);
   }
 
   /** Voids a receipt. Idempotent; refused while a posting lock is held. */
@@ -318,14 +279,6 @@ export class PurchaseReceiptService {
     });
 
     if (error) throw mapPurchaseRpcError(error.message ?? "");
-    const row = requireRpcObject(data, "void");
-    if (typeof row.replayed !== "boolean") {
-      throw new PurchaseContractViolationError("expected a boolean", "void.replayed");
-    }
-    return {
-      receiptId: String(row.receipt_id),
-      status: requireStatus(row.status, "void.status"),
-      replayed: row.replayed,
-    };
+    return parseVoidResponse(data);
   }
 }

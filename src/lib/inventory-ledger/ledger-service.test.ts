@@ -122,6 +122,60 @@ describe("InventoryLedgerService.postPurchaseReceipt", () => {
     ).rejects.toBeInstanceOf(InventoryContractViolationError);
   });
 
+  describe("the posting lock is required on every accepted result", () => {
+    // A movement and its P2B lock are written in one transaction. A response
+    // describing a posting WITHOUT its lock describes a broken pair, and must
+    // never be handed back as success.
+    const rejected: ReadonlyArray<[string, Record<string, unknown>]> = [
+      ["null posting_locked_at", { posting_locked_at: null }],
+      ["absent posting_locked_at", { posting_locked_at: undefined }],
+      ["blank posting_locked_at", { posting_locked_at: "" }],
+      ["malformed posting_locked_at", { posting_locked_at: "not-a-timestamp" }],
+      ["null posting_locked_by", { posting_locked_by: null }],
+      ["wrong posting_locked_by", { posting_locked_by: "someone-else" }],
+      ["blank posting_locked_by", { posting_locked_by: "" }],
+      // Both halves missing on a replay is the exact atomicity failure the
+      // database-side replay guard also refuses.
+      ["replay with no lock at all", { replayed: true, posting_locked_at: null, posting_locked_by: null }],
+    ];
+
+    for (const [label, override] of rejected) {
+      test(`rejects ${label}`, async () => {
+        const { client } = makeStub({
+          post_purchase_receipt_inventory_movement: { data: { ...POSTING_OK, ...override } },
+        });
+        await expect(
+          new InventoryLedgerService(client).postPurchaseReceipt({ receiptId: RECEIPT_ID }),
+        ).rejects.toBeInstanceOf(InventoryContractViolationError);
+      });
+    }
+
+    test("accepts a valid fresh posting", async () => {
+      const { client } = makeStub({
+        post_purchase_receipt_inventory_movement: { data: POSTING_OK },
+      });
+      const result = await new InventoryLedgerService(client).postPurchaseReceipt({
+        receiptId: RECEIPT_ID,
+      });
+      expect(result.replayed).toBe(false);
+      expect(result.postingLockedBy).toBe("p2c-inventory-ledger");
+      expect(result.postingLockedAt).toBe("2026-07-29T09:00:00+00:00");
+    });
+
+    test("accepts a valid replay", async () => {
+      const { client } = makeStub({
+        post_purchase_receipt_inventory_movement: {
+          data: { ...POSTING_OK, replayed: true },
+        },
+      });
+      const result = await new InventoryLedgerService(client).postPurchaseReceipt({
+        receiptId: RECEIPT_ID,
+      });
+      expect(result.replayed).toBe(true);
+      expect(result.postingLockedBy).toBe("p2c-inventory-ledger");
+    });
+  });
+
   test("an RPC error maps to a typed error", async () => {
     const { client } = makeStub({
       post_purchase_receipt_inventory_movement: {
@@ -244,6 +298,23 @@ describe("mapInventoryRpcError", () => {
     ["purchase receipt 1 item 2 has UNRESOLVED unit identity", InventoryUnresolvedIdentityError],
     ["purchase receipt 1 already posted as movement 9", InventoryDuplicateSourceError],
     ["reversal key r is already in use by a different movement", InventoryDuplicateSourceError],
+    ["replay source mismatch: dedupe key k is held by movement 9", InventoryDuplicateSourceError],
+    [
+      'duplicate key value violates unique constraint "inventory_movement_lines_source_item_uidx"',
+      InventoryDuplicateSourceError,
+    ],
+    ["posting lock mismatch: movement 9 exists for purchase receipt 1", InventoryPostingAtomicityError],
+    ["movement 9 is sealed at 2 lines but now has 3", InventoryAppendOnlyViolationError],
+    ["purchase receipt 1 has no frozen confirmation hash", InventoryContractViolationError],
+    ["purchase receipt 1 item 2 quantity 1.1234567 is not a plain decimal", InventorySourceBlockedError],
+    [
+      "purchase receipt 1 item 2 quantity 1e6 exceeds the numeric(18,6) envelope",
+      InventorySourceBlockedError,
+    ],
+    [
+      "purchase receipt 1 item 2 quantity 9 would not be stored exactly",
+      InventorySourceBlockedError,
+    ],
     ["movement 1 is already reversed by 2 under a different reversal key", InventoryAlreadyReversedError],
     ["movement 1 is itself a reversal and cannot be reversed", InventoryInvalidLifecycleError],
     ["inventory_movements is append-only and immutable (attempted DELETE)", InventoryAppendOnlyViolationError],

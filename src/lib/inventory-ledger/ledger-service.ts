@@ -126,7 +126,12 @@ export function mapInventoryRpcError(message: string): Error {
     return new InventoryInvalidLifecycleError(text);
   }
 
-  if (/already posted as movement|already in use by a different movement/iu.test(text)) {
+  // A dedupe key pointing at something other than this receipt's frozen content,
+  // or a duplicated source line inside one movement. Never a retryable case.
+  if (
+    /already posted as movement|already in use by a different movement|replay source mismatch|inventory_movement_lines_source_item_uidx|inventory_movements_source_posting_uidx/iu
+      .test(text)
+  ) {
     return new InventoryDuplicateSourceError(text);
   }
 
@@ -135,7 +140,7 @@ export function mapInventoryRpcError(message: string): Error {
   }
 
   if (
-    /has blocking blockers|posts_inventory_movement=true|targets destination|non-positive quantity|has no items to post/iu
+    /has blocking blockers|posts_inventory_movement=true|targets destination|non-positive quantity|has no items to post|has no quantity|not a plain decimal|exceeds the numeric\(18,6\) envelope|would not be stored exactly/iu
       .test(text)
   ) {
     return new InventorySourceBlockedError(text);
@@ -145,16 +150,18 @@ export function mapInventoryRpcError(message: string): Error {
     return new InventoryInvalidLifecycleError(text);
   }
 
-  if (/append-only and immutable|lines may only be written/iu.test(text)) {
+  if (/append-only and immutable|is sealed at \d+ lines/iu.test(text)) {
     return new InventoryAppendOnlyViolationError(text);
   }
 
-  if (/declares \d+ lines but has|all-or-nothing/iu.test(text)) {
+  // A movement observed without its posting lock, or a header disagreeing with
+  // its own lines: both mean the all-or-nothing pair was broken.
+  if (/posting lock mismatch|declares \d+ lines but has|all-or-nothing/iu.test(text)) {
     return new InventoryPostingAtomicityError(text);
   }
 
   if (
-    /malformed confirmation payload|malformed items array|no p2c_dedupe_key|declares item_count|no business_date/iu
+    /malformed confirmation payload|malformed items array|no p2c_dedupe_key|declares item_count|no business_date|no frozen confirmation hash/iu
       .test(text)
   ) {
     return new InventoryContractViolationError(text, "rpc");

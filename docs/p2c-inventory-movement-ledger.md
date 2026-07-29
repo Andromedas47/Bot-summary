@@ -5,8 +5,9 @@ The authoritative append-only **quantity** record for stock.
 First visible checkpoint delivered: a confirmed, unblocked P2B purchase receipt
 posts **exactly once** into the MAIN warehouse and increases the stock balance.
 
-**Migration checksum (SHA-256):** `4c9d09c6f2ba1fa26995b874173613c04e86b90b1c75f9d14e775739d4ba3f79`
-(`supabase/migrations/0053_inventory_movement_ledger.sql`, 1105 lines)
+**Migration checksum (SHA-256, canonical LF):**
+`b33d2475217aac1181138b871d89b6516eb2afcc0bb5874e4ba65f861271e8dc`
+(`supabase/migrations/0053_inventory_movement_ledger.sql`, 1282 lines)
 
 ---
 
@@ -86,6 +87,54 @@ Two protections doing two different jobs:
 |---|---|
 | `UNIQUE (dedupe_key)` | **Replay protection.** Re-posting identical frozen content returns the original movement, `replayed=true`, and writes nothing. |
 | `inventory_movements_source_posting_uidx` (partial, `WHERE reversal_of_movement_id IS NULL`) | **Source-identity protection.** A source document gets at most one posting movement ever, so a *different* payload/hash for an already-posted receipt fails closed instead of double-counting stock. Reversals are excluded because they legitimately share their original's source. |
+| `inventory_movement_lines_source_item_uidx` (partial, `WHERE source_line_id IS NOT NULL`) | **One ledger line per source item, per movement.** A frozen payload repeating a `receipt_item_id` under two ordinals would otherwise post that item twice under a single valid dedupe key. Scoped to `(movement_id, source_line_id)` so a reversal can legitimately reuse the same source lines. |
+
+### A dedupe key match is necessary but not sufficient
+
+The key is an *index into* the ledger, not a proof of what it points at. Before
+reporting `replayed=true`, the adapter re-verifies the whole binding against the
+frozen contract:
+
+- `movement_type = 'PURCHASE_RECEIPT'`
+- `source_system = 'p2b-purchase-receipts'`
+- `source_document_type = 'purchase_receipt'`
+- `source_document_id` = the requested receipt
+- `source_document_version` = the frozen confirmation hash
+- `dedupe_key` = P2B's `p2c_dedupe_key`
+- the receipt holds a posting lock, and `posting_locked_by = 'p2c-inventory-ledger'`
+
+Any mismatch fails closed — a source-binding mismatch as a duplicate-source
+error, a missing or foreign posting lock as an atomicity error. Returning an
+unrelated movement would report "already posted" for stock that was never posted
+for this content; reporting a replay over a movement whose lock is missing would
+hide exactly the atomicity failure the lock exists to make impossible.
+
+### The frozen confirmation hash is mandatory
+
+Validated before any replay decision or insert: it must be present and non-blank,
+and it is stored verbatim as `source_document_version`. It is never recomputed. A
+missing or blank hash fails closed and creates no movement and no posting lock —
+without it, a replay could not be distinguished from a re-post of different
+content.
+
+### Quantities are never silently rounded
+
+`text::numeric` accepts far more than `numeric(18,6)` can hold, and the
+assignment would silently round a 7th decimal away, turning a malformed payload
+into a plausible-looking stock figure. Every quantity is therefore validated
+before insertion:
+
+- matches `^(?:0|[1-9][0-9]*)(?:\.[0-9]{1,6})?$` — a plain unsigned decimal with
+  at most 6 fractional digits. This single gate rejects exponent notation, `NaN`
+  and `Infinity` text, signs, padding, empty strings, leading zeros, malformed
+  text and over-scale values.
+- strictly positive
+- below `10^12`, checked *before* the cast so an oversized value is a named
+  business error rather than a raw overflow
+- round-trip asserted: `v = v::numeric(18,6)`
+
+Exactly supported decimals are unchanged — `0.000001` and `999999999999.999999`
+both store and read back verbatim.
 
 Each movement also records `source_system`, `source_document_type`,
 `source_document_id` and `source_document_version` (the P2B confirmation hash);
@@ -96,17 +145,51 @@ document's own `item_ordinal` as its `line_ordinal`.
 
 Enforced in PostgreSQL by triggers, not merely in TypeScript:
 
-- **Lines** — `UPDATE` and `DELETE` always rejected. `INSERT` rejected once the
-  parent movement's transaction has ended, so a line cannot be bolted onto a
-  movement that already committed and silently change a historical balance.
+- **Lines** — `UPDATE` and `DELETE` always rejected.
 - **Headers** — `DELETE` always rejected. `UPDATE` rejected except the single
   transition `reversed_by_movement_id` `NULL → value`, and even that must point at
   a real `REVERSAL` row that points back, so the link cannot be forged.
 - **`line_count`** — verified against the actual lines by a *deferred* constraint
   trigger, so a header can never reach commit with a wrong count, and in
   particular never as a zero-line ghost movement holding a dedupe key hostage.
+- **The line set is sealed** by that same `line_count` (see below).
 
 Corrections are expressed as a **new reversing movement**. Nothing is ever edited.
+
+### Sealing: why not a timestamp
+
+An earlier draft compared the parent movement's `created_at` to `now()` and
+treated equality as proof of "same transaction". That is a **timestamp
+coincidence, not transaction identity**: two transactions can share a
+`transaction_timestamp` at microsecond resolution, and `created_at` is a
+caller-suppliable column, so an authorized writer could manufacture the match. It
+proved nothing it claimed to prove.
+
+It was replaced by a deferred constraint trigger on the lines asserting
+
+```
+count(lines for movement M) = M.line_count
+```
+
+which needs no clock and no transaction id. Soundness:
+
+1. `line_count` is `NOT NULL`, `CHECK`ed `> 0`, and **immutable** — the header
+   `UPDATE` whitelist rejects any change to it.
+2. Every movement that **commits** satisfies the equality — the movement's own
+   deferred trigger enforces it for the transaction that created it.
+3. Lines can **never** be deleted.
+4. Therefore any later transaction inserting a line moves the count to
+   `line_count + k` (`k ≥ 1`), which by (1) and (3) can never be brought back into
+   agreement. The trigger observes the violation at that transaction's commit and
+   rejects it.
+
+The only escapes would be changing `line_count` or deleting a line, and both are
+closed. A regression test creates a movement carrying a deliberately chosen
+`created_at`, then appends a line from a **later** transaction supplying that very
+same timestamp — the seal still rejects it.
+
+One behavioural consequence: a late append is now refused at **commit** rather
+than at statement time. Nothing persists either way.
 
 ## Reversal rules
 
@@ -223,7 +306,7 @@ therefore waits for that P2B primitive rather than reaching around it.
 | File | Role |
 |---|---|
 | `types.ts` | Contract types and constants. Quantities are decimal **strings**. |
-| `validate.ts` | Fail-closed runtime validation. No casts; a `number` where an exact quantity belongs is rejected outright, because it has already lost precision. |
+| `validate.ts` | Fail-closed runtime validation. No casts; a `number` where an exact quantity belongs is rejected outright, because it has already lost precision. The **posting lock is required** on every accepted posting result, replay included: `posting_locked_at` must be a parseable non-empty timestamp and `posting_locked_by` must be exactly `p2c-inventory-ledger`, so a response describing a movement without its lock is refused rather than typed as success. |
 | `ledger-service.ts` | `postPurchaseReceipt`, `reverseMovement`, `getBalances`, plus typed errors and RPC error mapping. |
 
 Typed errors: `InventoryNotFoundError`, `InventoryInvalidLifecycleError`,
@@ -235,9 +318,9 @@ rather than being flattened into a business case.
 
 ## Tests
 
-- `src/lib/inventory-ledger/ledger-service.test.ts` — 29 unit tests (marshalling,
-  error mapping, fail-closed response handling).
-- `src/lib/inventory-ledger/migration-0053.pg.test.ts` — 40 tests against a real
+- `src/lib/inventory-ledger/ledger-service.test.ts` — 47 unit tests (marshalling,
+  error mapping, fail-closed response handling, posting-lock enforcement).
+- `src/lib/inventory-ledger/migration-0053.pg.test.ts` — 72 tests against a real
   disposable **PostgreSQL 17** database.
 
 Concurrency tests use a deterministic advisory-lock barrier (poll `pg_locks`

@@ -221,6 +221,116 @@ describe.skipIf(!pgAvailable)("P2C migration 0053 PostgreSQL", () => {
     );
   }
 
+  /** The exact frozen values P2B issues for a receipt. */
+  async function frozenOf(rid: string): Promise<{ hash: string; dedupeKey: string }> {
+    const hash = await sql(
+      `SELECT confirmation_hash FROM public.purchase_receipts WHERE id='${rid}'`,
+    );
+    const dedupeKey = await sql(
+      `SELECT public.get_purchase_receipt_confirmation('${rid}') ->> 'p2c_dedupe_key'`,
+    );
+    return { hash, dedupeKey };
+  }
+
+  /**
+   * A stand-in `get_purchase_receipt_confirmation` returning a crafted contract.
+   *
+   * Needed only for shapes a well-behaved P2B cannot produce (a missing hash, a
+   * quantity with 7 decimals, a repeated receipt_item_id). Always used inside a
+   * transaction that is ROLLED BACK, so the real function is restored by the
+   * database rather than by a manual step that could fail.
+   */
+  function fakeContractSql(opts: {
+    hash: string; // SQL expression
+    dedupeKey: string; // SQL expression
+    items: string; // jsonb array expression
+    itemCount: number;
+  }): string {
+    return `
+      CREATE OR REPLACE FUNCTION public.get_purchase_receipt_confirmation(p_receipt_id uuid)
+      RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER
+      SET search_path = public, extensions, pg_temp AS $fake$
+        SELECT jsonb_build_object(
+          'receipt_id', p_receipt_id::text,
+          'confirmation', jsonb_build_object(
+            'hash', ${opts.hash},
+            'contract_version','p2b-purchase-confirm-v1',
+            'confirmation_key','fake',
+            'payload', jsonb_build_object(
+              'business_date','2026-07-29', 'intended_warehouse_code','MAIN',
+              'has_blocking_blockers', false, 'posts_inventory_movement', false,
+              'item_count', ${opts.itemCount},
+              'document_namespace','line-text','document_key','x',
+              'parser_contract_version','p2b-slice-a-v1',
+              'items', ${opts.items})),
+          'p2c_dedupe_key', ${opts.dedupeKey})
+      $fake$;`;
+  }
+
+  function fakeItem(fields: Record<string, string>): string {
+    const base: Record<string, string> = {
+      receipt_item_id: `'77777777-7777-4777-8777-777777777777'`,
+      item_ordinal: "1",
+      product_key: `'mango'`,
+      unit_key: `'kg'`,
+      quantity: `'1'`,
+      raw_product_text: `'m'`,
+      raw_unit: `'kg'`,
+      product_identity_status: `'RESOLVED'`,
+      unit_identity_status: `'RESOLVED'`,
+      ...fields,
+    };
+    const pairs = Object.entries(base)
+      .map(([k, v]) => `'${k}', ${v}`)
+      .join(", ");
+    return `jsonb_build_object(${pairs})`;
+  }
+
+  /**
+   * Runs an injected-contract posting attempt inside a rolled-back transaction
+   * and asserts it fails with `needle`, leaving no movement, no line and no
+   * posting lock behind.
+   */
+  async function expectInjectedRejection(
+    rid: string,
+    inject: string,
+    needle: string,
+  ): Promise<void> {
+    const r = await collect(
+      startScript(`
+        BEGIN;
+        ${inject}
+        DO $probe$
+        DECLARE n integer;
+        BEGIN
+          BEGIN
+            PERFORM public.post_purchase_receipt_inventory_movement('${rid}');
+            RAISE EXCEPTION 'PROBE_FAIL: the malformed contract was accepted';
+          EXCEPTION WHEN OTHERS THEN
+            IF position('PROBE_FAIL' IN SQLERRM) > 0 THEN RAISE; END IF;
+            IF position(${needle} IN SQLERRM) = 0 THEN
+              RAISE EXCEPTION 'PROBE_FAIL: wrong error %', SQLERRM;
+            END IF;
+          END;
+          SELECT count(*) INTO n FROM public.inventory_movements
+            WHERE source_document_id = '${rid}';
+          IF n <> 0 THEN RAISE EXCEPTION 'PROBE_FAIL: % movements survived', n; END IF;
+          SELECT count(*) INTO n FROM public.inventory_movement_lines l
+            JOIN public.inventory_movements m ON m.id = l.movement_id
+           WHERE m.source_document_id = '${rid}';
+          IF n <> 0 THEN RAISE EXCEPTION 'PROBE_FAIL: % lines survived', n; END IF;
+          SELECT count(*) INTO n FROM public.purchase_receipts
+           WHERE id = '${rid}' AND posting_locked_at IS NOT NULL;
+          IF n <> 0 THEN RAISE EXCEPTION 'PROBE_FAIL: posting lock survived'; END IF;
+          RAISE NOTICE 'PROBE_OK';
+        END $probe$;
+        ROLLBACK;`),
+    );
+    expect(r.code, `probe errored: ${r.stderr}`).toBe(0);
+    expect(r.stderr, `probe did not reach PROBE_OK: ${r.stderr}`).toMatch(/PROBE_OK/u);
+    expect(r.stderr).not.toMatch(/PROBE_FAIL/u);
+  }
+
   afterAll(async () => {
     if (!pgAvailable || !dbCreated) return;
     await runPsql(psqlPath, [
@@ -543,6 +653,301 @@ describe.skipIf(!pgAvailable)("P2C migration 0053 PostgreSQL", () => {
     ).toBe("1");
   });
 
+  // ── Replay must verify the source binding, not just the key ──────────────
+
+  describe("replay fails closed unless the existing movement really is this posting", () => {
+    /** Inserts a synthetic movement holding `dedupeKey`, with one line. */
+    async function synthetic(fields: {
+      dedupeKey: string;
+      movementType?: string;
+      sourceSystem?: string;
+      sourceDocType?: string;
+      sourceDocId: string;
+      version: string | null;
+      reversalOf?: string | null;
+      reason?: string | null;
+    }): Promise<string> {
+      const id = await sql(`SELECT gen_random_uuid()`);
+      await sql(
+        `INSERT INTO public.inventory_movements
+           (id, movement_type, business_date, source_system, source_document_type,
+            source_document_id, source_document_version, dedupe_key, line_count,
+            reversal_of_movement_id, reversal_reason)
+         VALUES ('${id}','${fields.movementType ?? "PURCHASE_RECEIPT"}','2026-07-29',
+                 '${fields.sourceSystem ?? "p2b-purchase-receipts"}',
+                 '${fields.sourceDocType ?? "purchase_receipt"}',
+                 '${fields.sourceDocId}',
+                 ${fields.version === null ? "NULL" : `'${fields.version}'`},
+                 '${fields.dedupeKey}', 1,
+                 ${fields.reversalOf ? `'${fields.reversalOf}'` : "NULL"},
+                 ${fields.reason ? `'${fields.reason}'` : "NULL"});
+         INSERT INTO public.inventory_movement_lines
+           (movement_id, line_ordinal, product_key, unit_key, location_code, signed_quantity)
+         VALUES ('${id}',1,'synthetic','kg','MAIN',1)`,
+      );
+      return id;
+    }
+
+    test("the dedupe key is bound to a DIFFERENT receipt", async () => {
+      const rid = await makeConfirmed("doc-replay-other-receipt");
+      const { dedupeKey } = await frozenOf(rid);
+      await synthetic({
+        dedupeKey,
+        sourceDocId: "12121212-1212-4212-8212-121212121212",
+        version: "b".repeat(64),
+      });
+
+      const err = await sqlFails(
+        `SELECT public.post_purchase_receipt_inventory_movement('${rid}')`,
+      );
+      expect(err).toMatch(/replay source mismatch/iu);
+      expect(await sql(`SELECT count(*) FROM public.inventory_movements
+                          WHERE source_document_id='${rid}'`)).toBe("0");
+    });
+
+    test("the dedupe key is held by a REVERSAL rather than a posting", async () => {
+      const rid = await makeConfirmed("doc-replay-wrong-type");
+      const { dedupeKey } = await frozenOf(rid);
+      // A reversal needs a real non-reversal target, so build one first.
+      const target = await synthetic({
+        dedupeKey: "replay-wrong-type-target",
+        sourceDocId: "13131313-1313-4313-8313-131313131313",
+        version: "c".repeat(64),
+      });
+      await synthetic({
+        dedupeKey,
+        movementType: "REVERSAL",
+        sourceDocId: "13131313-1313-4313-8313-131313131313",
+        version: "c".repeat(64),
+        reversalOf: target,
+        reason: "synthetic",
+      });
+
+      const err = await sqlFails(
+        `SELECT public.post_purchase_receipt_inventory_movement('${rid}')`,
+      );
+      expect(err).toMatch(/replay source mismatch/iu);
+    });
+
+    test("the receipt matches but the confirmation hash does NOT", async () => {
+      const rid = await makeConfirmed("doc-replay-wrong-hash");
+      const { dedupeKey } = await frozenOf(rid);
+      await synthetic({ dedupeKey, sourceDocId: rid, version: "d".repeat(64) });
+
+      const err = await sqlFails(
+        `SELECT public.post_purchase_receipt_inventory_movement('${rid}')`,
+      );
+      expect(err).toMatch(/replay source mismatch/iu);
+    });
+
+    test("the source binding is malformed (null version, foreign source_system)", async () => {
+      const rid = await makeConfirmed("doc-replay-malformed");
+      const { dedupeKey } = await frozenOf(rid);
+      await synthetic({
+        dedupeKey,
+        sourceSystem: "some-other-system",
+        sourceDocId: rid,
+        version: null,
+      });
+
+      expect(
+        await sqlFails(`SELECT public.post_purchase_receipt_inventory_movement('${rid}')`),
+      ).toMatch(/replay source mismatch/iu);
+    });
+
+    test("the movement exists but the receipt carries NO posting lock", async () => {
+      const rid = await makeConfirmed("doc-replay-no-lock");
+      const { dedupeKey, hash } = await frozenOf(rid);
+      // Source binding is entirely correct — only the lock is missing.
+      await synthetic({ dedupeKey, sourceDocId: rid, version: hash });
+
+      expect(
+        await sql(`SELECT coalesce(posting_locked_at::text,'NULL')
+                     FROM public.purchase_receipts WHERE id='${rid}'`),
+      ).toBe("NULL");
+
+      const err = await sqlFails(
+        `SELECT public.post_purchase_receipt_inventory_movement('${rid}')`,
+      );
+      expect(err).toMatch(/posting lock mismatch/iu);
+    });
+
+    test("the movement exists but the lock is held by someone else", async () => {
+      const rid = await makeConfirmed("doc-replay-wrong-locker");
+      const { dedupeKey, hash } = await frozenOf(rid);
+      await synthetic({ dedupeKey, sourceDocId: rid, version: hash });
+      await sql(`SELECT public.lock_purchase_receipt_for_posting('${rid}','someone-else')`);
+
+      const err = await sqlFails(
+        `SELECT public.post_purchase_receipt_inventory_movement('${rid}')`,
+      );
+      expect(err).toMatch(/posting lock mismatch/iu);
+      expect(err).toMatch(/someone-else/u);
+    });
+
+    test("a genuine retry still returns the original movement with replayed=true", async () => {
+      const rid = await makeConfirmed("doc-replay-genuine", [itemJson("cherry", "6.5")]);
+      const first = JSON.parse(
+        await sql(`SELECT public.post_purchase_receipt_inventory_movement('${rid}')`),
+      );
+      const { hash, dedupeKey } = await frozenOf(rid);
+
+      const second = JSON.parse(
+        await sql(`SELECT public.post_purchase_receipt_inventory_movement('${rid}')`),
+      );
+      expect(second.replayed).toBe(true);
+      expect(second.movement_id).toBe(first.movement_id);
+      expect(second.dedupe_key).toBe(dedupeKey);
+      expect(second.posting_locked_by).toBe("p2c-inventory-ledger");
+
+      // The binding the replay guard checks is exactly what was stored.
+      expect(
+        await sql(`SELECT source_document_version FROM public.inventory_movements
+                     WHERE id='${first.movement_id}'`),
+      ).toBe(hash);
+      expect(await balanceOf("cherry")).toBe("6.500000");
+    });
+  });
+
+  // ── Frozen confirmation hash is mandatory ────────────────────────────────
+
+  describe("a missing or malformed frozen confirmation hash fails closed", () => {
+    const badHashes: ReadonlyArray<[string, string]> = [
+      ["null", "NULL::text"],
+      ["blank", `''`],
+      ["whitespace only", `'   '`],
+    ];
+
+    for (const [label, expr] of badHashes) {
+      test(`rejects a ${label} hash`, async () => {
+        const rid = await makeConfirmed(`doc-hash-${label.replace(/\s+/gu, "-")}`);
+        await expectInjectedRejection(
+          rid,
+          fakeContractSql({
+            hash: expr,
+            dedupeKey: `'hash-probe-${label.replace(/\s+/gu, "-")}'`,
+            items: `jsonb_build_array(${fakeItem({})})`,
+            itemCount: 1,
+          }),
+          `'no frozen confirmation hash'`,
+        );
+      });
+    }
+
+    test("a well-formed hash is stored verbatim as source_document_version", async () => {
+      const rid = await makeConfirmed("doc-hash-verbatim");
+      const { hash } = await frozenOf(rid);
+      const res = JSON.parse(
+        await sql(`SELECT public.post_purchase_receipt_inventory_movement('${rid}')`),
+      );
+      expect(
+        await sql(`SELECT source_document_version FROM public.inventory_movements
+                     WHERE id='${res.movement_id}'`),
+      ).toBe(hash);
+      // Never recomputed: it equals P2B's stored column exactly.
+      expect(hash).toMatch(/^[0-9a-f]{64}$/u);
+    });
+  });
+
+  // ── Quantities must never be silently rounded ────────────────────────────
+
+  describe("a quantity that would not survive numeric(18,6) fails closed", () => {
+    const badQuantities: ReadonlyArray<[string, string, string]> = [
+      ["7 fractional digits", `'1.1234567'`, "not a plain decimal"],
+      ["many fractional digits", `'0.12345678901234'`, "not a plain decimal"],
+      ["exponent notation", `'1e3'`, "not a plain decimal"],
+      ["negative exponent", `'1E-7'`, "not a plain decimal"],
+      ["NaN text", `'NaN'`, "not a plain decimal"],
+      ["Infinity text", `'Infinity'`, "not a plain decimal"],
+      ["negative", `'-5'`, "not a plain decimal"],
+      ["leading plus", `'+5'`, "not a plain decimal"],
+      ["whitespace padded", `' 5 '`, "not a plain decimal"],
+      ["empty string", `''`, "not a plain decimal"],
+      ["malformed text", `'abc'`, "not a plain decimal"],
+      ["double dot", `'1.2.3'`, "not a plain decimal"],
+      ["leading zeros", `'007'`, "not a plain decimal"],
+      ["bare zero", `'0'`, "non-positive quantity"],
+      ["zero with decimals", `'0.000000'`, "non-positive quantity"],
+      ["precision overflow", `'1000000000000'`, "exceeds the numeric(18,6) envelope"],
+    ];
+
+    for (const [label, expr, needle] of badQuantities) {
+      test(`rejects ${label}`, async () => {
+        const rid = await makeConfirmed(`doc-qty-${label.replace(/\s+/gu, "-")}`);
+        await expectInjectedRejection(
+          rid,
+          fakeContractSql({
+            hash: `repeat('a',64)`,
+            dedupeKey: `'qty-probe-${label.replace(/\s+/gu, "-")}'`,
+            items: `jsonb_build_array(${fakeItem({ quantity: expr })})`,
+            itemCount: 1,
+          }),
+          `'${needle}'`,
+        );
+      });
+    }
+
+    test("exact supported decimals are stored unchanged", async () => {
+      // Full 6dp precision, and a value near the top of the envelope.
+      const rid = await makeConfirmed("doc-qty-exact", [
+        itemJson("exactfruit", "0.000001"),
+        itemJson("bigfruit", "999999999999.999999"),
+      ]);
+      await sql(`SELECT public.post_purchase_receipt_inventory_movement('${rid}')`);
+      expect(await balanceOf("exactfruit")).toBe("0.000001");
+      expect(await balanceOf("bigfruit")).toBe("999999999999.999999");
+    });
+  });
+
+  // ── One ledger line per source item ──────────────────────────────────────
+
+  test("a payload repeating one receipt_item_id under two ordinals fails atomically", async () => {
+    const rid = await makeConfirmed("doc-dup-source-line");
+    await expectInjectedRejection(
+      rid,
+      fakeContractSql({
+        hash: `repeat('a',64)`,
+        dedupeKey: `'dup-source-line-probe'`,
+        items:
+          `jsonb_build_array(` +
+          `${fakeItem({ item_ordinal: "1", quantity: `'5'` })},` +
+          // Same receipt_item_id, different ordinal: would double-count stock.
+          `${fakeItem({ item_ordinal: "2", quantity: `'5'` })})`,
+        itemCount: 2,
+      }),
+      `'inventory_movement_lines_source_item_uidx'`,
+    );
+  });
+
+  test("distinct source items in one movement are fine, and a reversal reuses them", async () => {
+    // The uniqueness is scoped to (movement_id, source_line_id) — a reversal
+    // carries the same source_line_id values under a different movement_id.
+    const rid = await makeConfirmed("doc-dup-scope", [
+      itemJson("fig", "1"),
+      itemJson("date", "2"),
+    ]);
+    const posted = JSON.parse(
+      await sql(`SELECT public.post_purchase_receipt_inventory_movement('${rid}')`),
+    );
+    const rev = JSON.parse(
+      await sql(`SELECT public.reverse_inventory_movement('${posted.movement_id}','rev-dup-scope','r','t')`),
+    );
+
+    expect(
+      await sql(`SELECT count(DISTINCT source_line_id) FROM public.inventory_movement_lines
+                   WHERE movement_id='${posted.movement_id}'`),
+    ).toBe("2");
+    // Reversal reuses both source_line_id values without tripping the index.
+    expect(
+      await sql(`SELECT count(*) FROM public.inventory_movement_lines r
+                   JOIN public.inventory_movement_lines o
+                     ON o.movement_id='${posted.movement_id}'
+                    AND o.source_line_id = r.source_line_id
+                  WHERE r.movement_id='${rev.reversal_id}'`),
+    ).toBe("2");
+    expect(await balanceOf("fig")).toBe("0.000000");
+  });
+
   // ── Rejections, and the "nothing partial survives" guarantee ─────────────
 
   test("a receipt with blocking blockers is rejected and leaves no trace", async () => {
@@ -760,12 +1165,79 @@ describe.skipIf(!pgAvailable)("P2C migration 0053 PostgreSQL", () => {
     const res = JSON.parse(
       await sql(`SELECT public.post_purchase_receipt_inventory_movement('${rid}')`),
     );
+    const before = await balanceOf("mango");
+
     const err = await sqlFails(
       `INSERT INTO public.inventory_movement_lines
          (movement_id, line_ordinal, product_key, unit_key, location_code, signed_quantity)
        VALUES ('${res.movement_id}', 99, 'sneaky', 'kg', 'MAIN', 1)`,
     );
-    expect(err).toMatch(/lines may only be written|earlier transaction/iu);
+    expect(err).toMatch(/is sealed at \d+ lines/iu);
+
+    // The append is rejected at commit, so nothing persists and no balance moved.
+    expect(await sql(
+      `SELECT count(*) FROM public.inventory_movement_lines
+        WHERE movement_id='${res.movement_id}'`,
+    )).toBe(String(res.line_count));
+    expect(await balanceOf("mango")).toBe(before);
+  });
+
+  test("the seal does not depend on created_at, so a forged timestamp cannot defeat it", async () => {
+    // The earlier design compared the parent's created_at to now() and treated
+    // equality as proof of "same transaction". created_at is caller-suppliable,
+    // so that check could be satisfied by a value rather than by a fact. Here the
+    // movement is created in ONE transaction carrying an explicitly chosen
+    // created_at, and a LATER transaction appends a line while supplying the very
+    // same timestamp it would have needed to match. The seal still rejects it,
+    // because it rests on line_count, not on the clock.
+    const forged = "2030-01-01 00:00:00+00";
+    const mid = "99999999-9999-4999-8999-999999999999";
+
+    await sql(
+      `INSERT INTO public.inventory_movements
+         (id, movement_type, business_date, source_system, source_document_type,
+          source_document_id, dedupe_key, line_count, created_at)
+       VALUES ('${mid}','PURCHASE_RECEIPT','2026-07-29','test','forged-clock',
+               gen_random_uuid(),'forged-clock-key',1,'${forged}');
+       INSERT INTO public.inventory_movement_lines
+         (movement_id, line_ordinal, product_key, unit_key, location_code, signed_quantity)
+       VALUES ('${mid}',1,'forged','kg','MAIN',1)`,
+    );
+
+    // Confirm the trap is genuinely armed: the stored timestamp is the forged one.
+    expect(
+      await sql(`SELECT created_at = '${forged}'::timestamptz
+                   FROM public.inventory_movements WHERE id='${mid}'`),
+    ).toBe("t");
+
+    // Separate transaction; created_at supplied explicitly to match the parent.
+    const err = await sqlFails(
+      `INSERT INTO public.inventory_movement_lines
+         (movement_id, line_ordinal, product_key, unit_key, location_code,
+          signed_quantity, created_at)
+       VALUES ('${mid}', 2, 'forged','kg','MAIN', 100, '${forged}')`,
+    );
+    expect(err).toMatch(/is sealed at 1 lines but now has 2/iu);
+
+    expect(await balanceOf("forged")).toBe("1.000000");
+  });
+
+  test("a movement cannot commit with MORE lines than it declares", async () => {
+    const err = await sqlFails(
+      `DO $probe$
+       DECLARE v_mid uuid := gen_random_uuid();
+       BEGIN
+         INSERT INTO public.inventory_movements
+           (id, movement_type, business_date, source_system, source_document_type,
+            source_document_id, dedupe_key, line_count)
+         VALUES (v_mid,'PURCHASE_RECEIPT','2026-07-29','test','over-declared',
+                 gen_random_uuid(),'over-declared-key',1);
+         INSERT INTO public.inventory_movement_lines
+           (movement_id, line_ordinal, product_key, unit_key, location_code, signed_quantity)
+         VALUES (v_mid, 1, 'a','kg','MAIN', 1), (v_mid, 2, 'b','kg','MAIN', 1);
+       END $probe$`,
+    );
+    expect(err).toMatch(/sealed at 1 lines but now has 2|declares 1 lines but has 2/iu);
   });
 
   test("a movement whose declared line_count does not match cannot commit", async () => {

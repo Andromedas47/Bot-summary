@@ -58,9 +58,15 @@ export interface InventoryPostingResult {
    * negated and the net balance is zero.
    */
   reversedByMovementId: string | null;
-  /** P2B posting-lock state, set in the SAME transaction as the movement. */
-  postingLockedAt: string | null;
-  postingLockedBy: string | null;
+  /**
+   * P2B posting-lock state, set in the SAME transaction as the movement.
+   *
+   * Never null on a successful result. A posted movement without its lock is a
+   * broken pair, so the validator rejects the response rather than handing back
+   * a nullable field for callers to forget to check.
+   */
+  postingLockedAt: string;
+  postingLockedBy: typeof INVENTORY_POSTING_LOCK_ACTOR;
 }
 
 /** Result of reversing a movement. */

@@ -74,6 +74,11 @@
 --   UNIQUE (dedupe_key)
 --     Replay protection. Re-posting the SAME confirmed content returns the
 --     original movement with replayed=true and writes nothing.
+--     A key match is necessary but NOT sufficient: before reporting a replay the
+--     adapter re-verifies the whole source binding (movement_type, source_system,
+--     source_document_type/id/version) and the P2B posting lock against the
+--     frozen contract. A dedupe key is an index into the ledger, not a proof of
+--     what it points at.
 --
 --   inventory_movements_source_posting_uidx
 --     Source-identity protection. A source document gets AT MOST ONE posting
@@ -86,9 +91,7 @@
 -- ─── Append-only ────────────────────────────────────────────────────────────
 --
 -- Enforced in PostgreSQL by triggers, not merely by the TypeScript client:
---   * movement lines   UPDATE and DELETE always rejected; INSERT rejected once
---     the parent movement's transaction has ended, so lines cannot be bolted
---     onto a movement that already exists
+--   * movement lines   UPDATE and DELETE always rejected
 --   * movement headers DELETE always rejected; UPDATE rejected except the single
 --     transition reversed_by_movement_id NULL -> value, which is how a reversal
 --     links itself back to its original. Every other column, including a second
@@ -97,6 +100,12 @@
 --   * declared line_count is verified against the actual lines by a DEFERRED
 --     constraint trigger, so a header can never reach commit with the wrong
 --     number of lines — in particular never with zero
+--   * a movement's line set is SEALED by that same immutable line_count: a
+--     second DEFERRED trigger on the lines re-checks the invariant, so a later
+--     transaction cannot append a line to a movement that already committed.
+--     See the soundness argument above the trigger — it rests only on
+--     line_count being immutable and lines being undeletable, with no appeal to
+--     timestamps or transaction ids.
 -- Corrections are expressed as a NEW reversing movement. Nothing is edited.
 --
 --
@@ -325,6 +334,18 @@ CREATE INDEX inventory_movement_lines_source_line_idx
   ON public.inventory_movement_lines (source_line_id)
   WHERE source_line_id IS NOT NULL;
 
+-- One ledger line per source document line, per movement. A frozen payload that
+-- repeated the same receipt_item_id under two ordinals would otherwise post that
+-- item's quantity twice under a single valid dedupe key — double-counting stock
+-- while every other guard stayed satisfied.
+--
+-- Scoped to (movement_id, source_line_id), NOT to source_line_id alone: a
+-- reversal legitimately carries the same source_line_id values as the movement it
+-- negates, and belongs to a different movement_id.
+CREATE UNIQUE INDEX inventory_movement_lines_source_item_uidx
+  ON public.inventory_movement_lines (movement_id, source_line_id)
+  WHERE source_line_id IS NOT NULL;
+
 -- ── RLS: enabled, zero policies ──────────────────────────────────────────────
 -- No policy is created on purpose. anon/authenticated hold no grants at all, and
 -- service_role reads via BYPASSRLS. A policy here would be a second, weaker
@@ -336,43 +357,93 @@ ALTER TABLE public.inventory_movement_lines  ENABLE ROW LEVEL SECURITY;
 
 -- ── Append-only guards ───────────────────────────────────────────────────────
 
--- Lines are immutable, and may only be inserted while their parent movement's
--- own transaction is still open. created_at defaults to now() = the transaction
--- timestamp, so "same transaction as the parent" is an exact comparison, not a
--- heuristic. Without this, a caller holding INSERT could append a line to a
--- movement that already committed and silently change a historical balance.
+-- Lines are immutable: UPDATE and DELETE are always rejected.
 CREATE OR REPLACE FUNCTION public.inventory_movement_lines_forbid_mutation()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
-DECLARE
-  v_parent_created_at timestamptz;
 BEGIN
-  IF TG_OP IN ('UPDATE', 'DELETE') THEN
-    RAISE EXCEPTION
-      'inventory_movement_lines is append-only and immutable (attempted %) — '
-      'correct stock with a reversing movement, never by editing a line', TG_OP
-      USING ERRCODE = 'restrict_violation';
-  END IF;
-
-  SELECT m.created_at INTO v_parent_created_at
-    FROM public.inventory_movements AS m
-   WHERE m.id = NEW.movement_id;
-
-  IF v_parent_created_at IS DISTINCT FROM now() THEN
-    RAISE EXCEPTION
-      'movement % already exists in an earlier transaction — lines may only be '
-      'written when the movement itself is created', NEW.movement_id
-      USING ERRCODE = 'restrict_violation';
-  END IF;
-
-  RETURN NEW;
+  RAISE EXCEPTION
+    'inventory_movement_lines is append-only and immutable (attempted %) — '
+    'correct stock with a reversing movement, never by editing a line', TG_OP
+    USING ERRCODE = 'restrict_violation';
 END;
 $$;
 
 CREATE TRIGGER inventory_movement_lines_immutable
-  BEFORE INSERT OR UPDATE OR DELETE ON public.inventory_movement_lines
+  BEFORE UPDATE OR DELETE ON public.inventory_movement_lines
   FOR EACH ROW EXECUTE FUNCTION public.inventory_movement_lines_forbid_mutation();
+
+-- ── Sealing a movement's line set ────────────────────────────────────────────
+--
+-- A movement's line set is SEALED by its immutable declared line_count. Any
+-- transaction that adds a line to a movement breaks
+--     count(lines) = movements.line_count
+-- and is rejected at commit.
+--
+-- Why this replaced the earlier design: the previous guard compared the parent's
+-- created_at to now() and treated equality as proof of "same transaction". That
+-- is a timestamp coincidence, not transaction identity — two transactions can
+-- share a transaction_timestamp at microsecond resolution, and created_at is a
+-- caller-suppliable column, so an authorized writer could manufacture the match.
+-- It proved nothing it claimed to prove.
+--
+-- The invariant below needs no clock and no transaction id, and its soundness is
+-- a short argument:
+--   1. line_count is NOT NULL, CHECKed > 0, and immutable (the header UPDATE
+--      whitelist rejects any change to it).
+--   2. Every movement that COMMITS satisfies count(lines) = line_count — the
+--      movement's own deferred trigger enforces this for the transaction that
+--      created it.
+--   3. Lines can never be deleted (rejected above).
+--   4. Therefore any later transaction that inserts a line into an existing
+--      movement moves count(lines) to line_count + k (k >= 1), which by (1) and
+--      (3) can never be brought back into agreement. This trigger observes the
+--      violation at that transaction's commit and rejects it.
+-- No timing, ordering, or privilege assumption is involved: the only escape
+-- would be changing line_count or deleting a line, and both are closed.
+--
+-- ponytail: O(lines) index-only counts per commit, bounded by the 500-line
+-- document cap. If a future adapter writes far larger movements, replace the
+-- per-row constraint trigger with one deferred check per movement.
+CREATE OR REPLACE FUNCTION public.inventory_movement_lines_assert_sealed()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_declared integer;
+  v_actual   integer;
+BEGIN
+  SELECT m.line_count INTO v_declared
+    FROM public.inventory_movements AS m
+   WHERE m.id = NEW.movement_id;
+
+  -- The FK guarantees the parent exists; a missing row here would mean the
+  -- parent was removed, which the header guard also forbids.
+  IF v_declared IS NULL THEN
+    RAISE EXCEPTION 'movement % does not exist for line %', NEW.movement_id, NEW.id
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+
+  SELECT count(*) INTO v_actual
+    FROM public.inventory_movement_lines
+   WHERE movement_id = NEW.movement_id;
+
+  IF v_actual <> v_declared THEN
+    RAISE EXCEPTION
+      'movement % is sealed at % lines but now has % — lines may only be written '
+      'when the movement itself is created', NEW.movement_id, v_declared, v_actual
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+
+  RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER inventory_movement_lines_sealed
+  AFTER INSERT ON public.inventory_movement_lines
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION public.inventory_movement_lines_assert_sealed();
 
 -- Headers are immutable except the one-way reversal back-link. Written as an
 -- explicit whitelist of the single legal transition: everything not named here
@@ -604,6 +675,8 @@ DECLARE
   v_item_count    integer;
   v_declared_count integer;
   v_business_date date;
+  v_quantity_text text;
+  v_quantity      numeric;
   v_actor         text := nullif(btrim(coalesce(p_actor, '')), '');
 BEGIN
   -- 1. Lock the document. Everything below is decided under this lock, so two
@@ -645,6 +718,18 @@ BEGIN
       USING ERRCODE = 'invalid_parameter_value';
   END IF;
 
+  -- The frozen confirmation hash is REQUIRED, before any replay decision or
+  -- insert. It is the content identity stored verbatim as source_document_version
+  -- and the half of the dedupe key that pins WHICH version of the document was
+  -- posted. Without it a replay could not be distinguished from a re-post of
+  -- different content. It is never recomputed here.
+  IF v_hash IS NULL OR btrim(v_hash) = '' THEN
+    RAISE EXCEPTION
+      'purchase receipt % has no frozen confirmation hash — refusing to post '
+      'content whose version cannot be pinned', p_receipt_id
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
   -- 9. The dedupe key is P2B's, taken verbatim. Never rebuilt from parts here.
   v_dedupe_key := v_contract ->> 'p2c_dedupe_key';
   IF v_dedupe_key IS NULL OR btrim(v_dedupe_key) = '' THEN
@@ -655,11 +740,55 @@ BEGIN
   END IF;
 
   -- Idempotent replay: same frozen content already posted.
+  --
+  -- A dedupe_key match alone is NOT sufficient to return replayed=true. The key
+  -- is an index into the ledger, not a proof of what it points at: if a movement
+  -- carrying this key were bound to a different receipt, a different document
+  -- version, or a different movement type, returning it would silently report
+  -- "already posted" for stock that was never posted for THIS content. Every
+  -- element of the source binding is therefore re-verified against the frozen
+  -- contract before the replay is trusted.
   SELECT * INTO v_existing
     FROM public.inventory_movements
    WHERE dedupe_key = v_dedupe_key;
 
   IF FOUND THEN
+    IF v_existing.movement_type        IS DISTINCT FROM 'PURCHASE_RECEIPT'
+       OR v_existing.source_system     IS DISTINCT FROM 'p2b-purchase-receipts'
+       OR v_existing.source_document_type IS DISTINCT FROM 'purchase_receipt'
+       OR v_existing.source_document_id   IS DISTINCT FROM p_receipt_id
+       OR v_existing.source_document_version IS DISTINCT FROM v_hash
+       OR v_existing.dedupe_key        IS DISTINCT FROM v_dedupe_key
+    THEN
+      RAISE EXCEPTION
+        'replay source mismatch: dedupe key % is held by movement % '
+        '(type=%, system=%, doc_type=%, doc_id=%, version=%) which does not match '
+        'purchase receipt % at version % — refusing to report it as a replay',
+        v_dedupe_key, v_existing.id,
+        v_existing.movement_type, v_existing.source_system,
+        v_existing.source_document_type,
+        coalesce(v_existing.source_document_id::text, '<null>'),
+        coalesce(v_existing.source_document_version, '<null>'),
+        p_receipt_id, v_hash
+        USING ERRCODE = 'unique_violation';
+    END IF;
+
+    -- A posted movement without its P2B posting lock is a broken pair: the two
+    -- are written in one transaction and must be observed together. Reporting a
+    -- clean replay here would hide exactly the atomicity failure the lock exists
+    -- to make impossible.
+    IF v_receipt.posting_locked_at IS NULL
+       OR v_receipt.posting_locked_by IS DISTINCT FROM 'p2c-inventory-ledger'
+    THEN
+      RAISE EXCEPTION
+        'posting lock mismatch: movement % exists for purchase receipt % but the '
+        'receipt posting lock is % (expected p2c-inventory-ledger) — refusing to '
+        'report a replay over a broken movement/lock pair',
+        v_existing.id, p_receipt_id,
+        coalesce(v_receipt.posting_locked_by, '<unlocked>')
+        USING ERRCODE = 'internal_error';
+    END IF;
+
     RETURN jsonb_build_object(
       'movement_id',             v_existing.id::text,
       'receipt_id',              p_receipt_id::text,
@@ -784,10 +913,55 @@ BEGIN
         USING ERRCODE = 'invalid_parameter_value';
     END IF;
 
-    IF (v_item ->> 'quantity') IS NULL OR (v_item ->> 'quantity')::numeric <= 0 THEN
+    -- Quantity must survive the trip into numeric(18,6) UNCHANGED.
+    --
+    -- `text::numeric` accepts far more than this column can hold, and the
+    -- subsequent assignment to numeric(18,6) would SILENTLY ROUND a 7th decimal
+    -- away — turning a malformed frozen payload into a plausible-looking stock
+    -- figure that no longer equals the document it came from. The regex is the
+    -- gate: it admits only a plain unsigned decimal with at most 6 fractional
+    -- digits, which simultaneously rejects exponent notation ('1e3'), NaN and
+    -- Infinity text, signs, whitespace, empty strings and over-scale values.
+    -- Magnitude is then bounded so the cast cannot overflow, and the round trip
+    -- is asserted rather than assumed.
+    v_quantity_text := v_item ->> 'quantity';
+
+    IF v_quantity_text IS NULL THEN
+      RAISE EXCEPTION 'purchase receipt % item % has no quantity',
+        p_receipt_id, v_item ->> 'item_ordinal'
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    IF v_quantity_text !~ '^(?:0|[1-9][0-9]*)(?:\.[0-9]{1,6})?$' THEN
+      RAISE EXCEPTION
+        'purchase receipt % item % quantity % is not a plain decimal with at most '
+        '6 fractional digits — refusing to round a frozen quantity',
+        p_receipt_id, v_item ->> 'item_ordinal', v_quantity_text
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    v_quantity := v_quantity_text::numeric;
+
+    IF v_quantity <= 0 THEN
       RAISE EXCEPTION
         'purchase receipt % item % has non-positive quantity %',
-        p_receipt_id, v_item ->> 'item_ordinal', coalesce(v_item ->> 'quantity', '<null>')
+        p_receipt_id, v_item ->> 'item_ordinal', v_quantity_text
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    -- numeric(18,6) holds 12 integer digits. Checked BEFORE the cast so an
+    -- oversized value is a named business error, never a raw overflow.
+    IF v_quantity >= 1000000000000 THEN
+      RAISE EXCEPTION
+        'purchase receipt % item % quantity % exceeds the numeric(18,6) envelope',
+        p_receipt_id, v_item ->> 'item_ordinal', v_quantity_text
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    IF v_quantity <> v_quantity::numeric(18,6) THEN
+      RAISE EXCEPTION
+        'purchase receipt % item % quantity % would not be stored exactly',
+        p_receipt_id, v_item ->> 'item_ordinal', v_quantity_text
         USING ERRCODE = 'invalid_parameter_value';
     END IF;
   END LOOP;
@@ -830,7 +1004,9 @@ BEGIN
     e ->> 'product_key',
     e ->> 'unit_key',
     'MAIN',
-    (e ->> 'quantity')::numeric,   -- positive: stock enters MAIN
+    -- Positive: stock enters MAIN. Every value reaching here was proven above to
+    -- be representable in numeric(18,6) exactly, so this cast cannot round.
+    (e ->> 'quantity')::numeric(18,6),
     (e ->> 'receipt_item_id')::uuid,
     jsonb_build_object(
       'receipt_item_id',  e ->> 'receipt_item_id',
@@ -1070,6 +1246,7 @@ BEGIN
      WHERE n.nspname = 'public'
        AND p.proname IN (
          'inventory_movement_lines_forbid_mutation',
+         'inventory_movement_lines_assert_sealed',
          'inventory_movements_forbid_mutation',
          'inventory_movements_guard_reversal_target',
          'inventory_movements_assert_line_count'

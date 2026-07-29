@@ -15,6 +15,7 @@
  * and the value cannot be trusted.
  */
 
+import { INVENTORY_POSTING_LOCK_ACTOR } from "./types";
 import type {
   InventoryBalance,
   InventoryPostingResult,
@@ -151,8 +152,38 @@ function requireDecimalString(
   return value;
 }
 
+/** A present, parseable timestamp string. Absent or unparseable is an error. */
+function requireTimestamp(source: Record<string, unknown>, key: string, path: string): string {
+  const value = requireString(source, key, path);
+  if (!Number.isFinite(Date.parse(value))) {
+    fail(`${path}.${key}`, `expected a parseable timestamp, got ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
+/**
+ * Parses a posting result.
+ *
+ * The P2B posting lock is REQUIRED on every successful result, replay included.
+ * A movement and its lock are written in one transaction and must be observed
+ * together; a response reporting a posting without its lock describes a broken
+ * pair, and accepting it would let the caller treat an atomicity failure as a
+ * success. `posting_locked_by` must be exactly this adapter — a lock held by
+ * anything else means some other writer owns the receipt.
+ */
 export function parsePostingResult(data: unknown): InventoryPostingResult {
   const root = requireObject(data, "posting");
+
+  const postingLockedAt = requireTimestamp(root, "posting_locked_at", "posting");
+  const postingLockedBy = requireString(root, "posting_locked_by", "posting");
+  if (postingLockedBy !== INVENTORY_POSTING_LOCK_ACTOR) {
+    fail(
+      "posting.posting_locked_by",
+      `expected the lock to be held by ${JSON.stringify(INVENTORY_POSTING_LOCK_ACTOR)}, ` +
+        `got ${JSON.stringify(postingLockedBy)}`,
+    );
+  }
+
   return {
     movementId: requireUuid(root, "movement_id", "posting"),
     receiptId: requireUuid(root, "receipt_id", "posting"),
@@ -160,8 +191,8 @@ export function parsePostingResult(data: unknown): InventoryPostingResult {
     lineCount: requireBoundedInteger(root, "line_count", "posting", 500),
     replayed: requireBoolean(root, "replayed", "posting"),
     reversedByMovementId: requireNullableUuid(root, "reversed_by_movement_id", "posting"),
-    postingLockedAt: requireNullableString(root, "posting_locked_at", "posting"),
-    postingLockedBy: requireNullableString(root, "posting_locked_by", "posting"),
+    postingLockedAt,
+    postingLockedBy: INVENTORY_POSTING_LOCK_ACTOR,
   };
 }
 

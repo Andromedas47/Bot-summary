@@ -170,6 +170,17 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
       active: true,
       sort_order: 1,
     });
+    db.seedMarket({
+      market_code: "wat_thung_lanna",
+      label: "วัดทุ่งลานนา",
+      active: true,
+    });
+    db.seedSellerMarket({
+      seller_code: "seller_a",
+      market_code: "wat_thung_lanna",
+      active: true,
+      sort_order: 1,
+    });
     const handler = new GuidedMenuUxHandler(db.asClient());
     const opened = await handler.openMenu({ identity: IDENTITY });
     const msg = opened.messages[0];
@@ -183,6 +194,12 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     const sellerToken = collectPostbackData(seller.messages).find(
       (token) => db.stateByWire(token)?.payload.seller_code === "seller_a",
     );
+    db.seedSellerMarket({
+      seller_code: "seller_a",
+      market_code: "wat_thung_lanna",
+      active: false,
+      sort_order: 1,
+    });
     const market = await handler.handlePostback({
       wireToken: sellerToken!,
       lineEventId: "evt-no-assignment-seller",
@@ -194,6 +211,37 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     expect(market.messages).toEqual([
       { type: "text", text: GUIDED_MENU_COPY.noActiveSellerMarkets },
     ]);
+  });
+
+  it("lists only active sellers with a currently active market assignment", async () => {
+    const db = new GuidedMenuFakeDatabase();
+    const handler = seededHandler(db);
+    db.seedSeller({
+      seller_code: "ja",
+      label: "จ๋า",
+      active: true,
+      sort_order: 2,
+    });
+    db.seedSeller({
+      seller_code: "nang",
+      label: "นาง",
+      active: true,
+      sort_order: 3,
+    });
+
+    const root = await handler.openMenu({ identity: IDENTITY });
+    const tx = root.messages[0];
+    if (tx.type !== "template") throw new Error("template");
+    const seller = await handler.handlePostback({
+      wireToken: tx.template.actions[0]!.data,
+      lineEventId: "evt-filter-sellers",
+      identity: IDENTITY,
+      lineTimestampMs: TS,
+    });
+    const rendered = JSON.stringify(seller.messages);
+    expect(rendered).toContain("พี่ดำ");
+    expect(rendered).not.toContain("จ๋า");
+    expect(rendered).not.toContain("นาง");
   });
 
   it("mapped operator gets transaction-type buttons with opaque gpm1 tokens", async () => {
@@ -369,10 +417,10 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
       identity: IDENTITY,
       lineTimestampMs: TS,
     });
-    expect(refused.screen).toBe("market_unavailable");
+    expect(refused.screen).toBe("invalid");
     expect(refused.messages[0]).toEqual({
       type: "text",
-      text: GUIDED_MENU_COPY.marketUnavailable,
+      text: GUIDED_MENU_COPY.invalidOrExpired,
     });
   });
 
@@ -521,6 +569,44 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     expect(row?.result).toBeTruthy();
   });
 
+  it("same-event replay revalidates current seller activity", async () => {
+    const db = new GuidedMenuFakeDatabase();
+    const handler = seededHandler(db);
+    const opened = await handler.openMenu({ identity: IDENTITY });
+    const tx = opened.messages[0];
+    if (tx.type !== "template") throw new Error("template");
+    const sellerScreen = await handler.handlePostback({
+      wireToken: tx.template.actions[0]!.data,
+      lineEventId: "evt-revalidate-tx",
+      identity: IDENTITY,
+      lineTimestampMs: TS,
+    });
+    const sellerToken = collectPostbackData(sellerScreen.messages).find(
+      (token) => db.stateByWire(token)?.payload.seller_code === "seller_a",
+    );
+    const first = await handler.handlePostback({
+      wireToken: sellerToken!,
+      lineEventId: "evt-revalidate-seller",
+      identity: IDENTITY,
+      lineTimestampMs: TS,
+    });
+    expect(first.screen).toBe("market");
+
+    db.seedSeller({
+      seller_code: "seller_a",
+      label: "พี่ดำ",
+      active: false,
+      sort_order: 1,
+    });
+    const replay = await handler.handlePostback({
+      wireToken: sellerToken!,
+      lineEventId: "evt-revalidate-seller",
+      identity: IDENTITY,
+      lineTimestampMs: TS,
+    });
+    expect(replay.screen).toBe("invalid");
+  });
+
   it("uses trusted labels and date helpers without payload market labels", () => {
     expect(TX_CODE_TO_LABEL.withdraw).toBe("เบิก");
     expect(resolveGuidedMenuDate("today", TS)?.thaiShort).toBe("29/07/2569");
@@ -538,6 +624,15 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     expect(built).toEqual(committed);
     expect(normalizeEvidenceTokens(built)).toEqual(
       normalizeEvidenceTokens(committed),
+    );
+    expect(built.seller).toHaveLength(2);
+    expect(JSON.stringify(built.seller)).toContain("เลือกคนขาย (1/2)");
+    expect(JSON.stringify(built.seller)).toContain("กี้");
+    expect(JSON.stringify(built.market)).toContain("คนขาย: กี้");
+    expect(JSON.stringify(built.date)).toContain("ตลาด: วัดทุ่งลานนา");
+    expect(JSON.stringify(built.confirm)).toContain("วันที่: 25/07/2569");
+    expect(JSON.stringify(built.no_seller_markets)).toContain(
+      GUIDED_MENU_COPY.noActiveSellerMarkets,
     );
     expect(JSON.stringify(built.confirm_placeholder)).toContain(
       "ยังไม่ได้เปิดรายการ",

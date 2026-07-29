@@ -1,13 +1,35 @@
--- 0055: Guided Menu seller + seller-market catalog (Slice 2.5).
+-- 0055: additive Guided Menu seller + seller-market catalog (Slice 2.5).
+-- Compatibility phase: legacy seller-less 0051 navigation remains valid until
+-- the 30-minute navigation TTL has drained and strict migration 0056 is applied.
 -- No Produce/session writes. Only explicitly reviewed catalog rows are seeded.
 
-DO $$
+BEGIN;
+
+DO $preflight$
 BEGIN
   IF to_regclass('public.line_guided_menu_markets') IS NULL
-     OR to_regclass('public.line_menu_states') IS NULL THEN
-    RAISE EXCEPTION '0055: required Guided Menu 0051 tables are missing';
+     OR to_regclass('public.line_menu_states') IS NULL
+     OR to_regprocedure(
+       'public.guided_menu_payload_valid(text,jsonb)'
+     ) IS NULL
+     OR to_regprocedure(
+       'public.consume_line_menu_state(text,text,text,text,text,text)'
+     ) IS NULL THEN
+    RAISE EXCEPTION '0055: required Guided Menu 0051 schema is missing';
   END IF;
-END $$;
+
+  IF (
+    SELECT count(*)
+    FROM public.line_guided_menu_markets
+    WHERE market_code = 'kee'
+      AND label = 'ตลาดกี้'
+      AND active IS TRUE
+  ) <> 1 THEN
+    RAISE EXCEPTION
+      '0055: kee/ตลาดกี้ differs from the reviewed 0051 baseline';
+  END IF;
+END;
+$preflight$;
 
 CREATE TABLE public.line_guided_menu_sellers (
   seller_code text PRIMARY KEY,
@@ -78,35 +100,44 @@ ALTER TABLE public.line_guided_menu_seller_aliases ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.line_guided_menu_market_aliases ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.line_guided_menu_seller_markets ENABLE ROW LEVEL SECURITY;
 
+-- Neutralize broad Production-like default ACLs before exact grants.
 REVOKE ALL ON TABLE public.line_guided_menu_sellers FROM PUBLIC;
 REVOKE ALL ON TABLE public.line_guided_menu_sellers FROM anon, authenticated;
 REVOKE ALL ON TABLE public.line_guided_menu_sellers FROM service_role;
-GRANT SELECT, INSERT, UPDATE ON TABLE public.line_guided_menu_sellers TO service_role;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.line_guided_menu_sellers
+  TO service_role;
 
 REVOKE ALL ON TABLE public.line_guided_menu_seller_aliases FROM PUBLIC;
-REVOKE ALL ON TABLE public.line_guided_menu_seller_aliases FROM anon, authenticated;
+REVOKE ALL ON TABLE public.line_guided_menu_seller_aliases
+  FROM anon, authenticated;
 REVOKE ALL ON TABLE public.line_guided_menu_seller_aliases FROM service_role;
-GRANT SELECT, INSERT, UPDATE ON TABLE public.line_guided_menu_seller_aliases TO service_role;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.line_guided_menu_seller_aliases
+  TO service_role;
 
 REVOKE ALL ON TABLE public.line_guided_menu_market_aliases FROM PUBLIC;
-REVOKE ALL ON TABLE public.line_guided_menu_market_aliases FROM anon, authenticated;
+REVOKE ALL ON TABLE public.line_guided_menu_market_aliases
+  FROM anon, authenticated;
 REVOKE ALL ON TABLE public.line_guided_menu_market_aliases FROM service_role;
-GRANT SELECT, INSERT, UPDATE ON TABLE public.line_guided_menu_market_aliases TO service_role;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.line_guided_menu_market_aliases
+  TO service_role;
 
 REVOKE ALL ON TABLE public.line_guided_menu_seller_markets FROM PUBLIC;
-REVOKE ALL ON TABLE public.line_guided_menu_seller_markets FROM anon, authenticated;
+REVOKE ALL ON TABLE public.line_guided_menu_seller_markets
+  FROM anon, authenticated;
 REVOKE ALL ON TABLE public.line_guided_menu_seller_markets FROM service_role;
-GRANT SELECT, INSERT, UPDATE ON TABLE public.line_guided_menu_seller_markets TO service_role;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.line_guided_menu_seller_markets
+  TO service_role;
 
--- 0051's ตลาดกี้ row was based on malformed history, not a genuine market.
-DELETE FROM public.line_guided_menu_markets
-WHERE market_code = 'kee';
+-- BEGIN REVIEWED CATALOG SEEDS
+-- Temporary baselines let insert-if-missing stay deterministic while any
+-- Production-managed drift fails the migration instead of being overwritten.
+CREATE TEMP TABLE _gm55_markets (
+  market_code text PRIMARY KEY,
+  label text NOT NULL,
+  active boolean NOT NULL
+) ON COMMIT DROP;
 
--- Deterministic reviewed catalog. Conflict updates are guarded so rerunning
--- the seed DML is a no-op when values already match.
-INSERT INTO public.line_guided_menu_markets
-  (market_code, label, active)
-VALUES
+INSERT INTO _gm55_markets VALUES
   ('ratchaphruek', 'ราชพฤกษ์', true),
   ('chaloem_72', 'เฉลิมฯ72', true),
   ('wat_thung_lanna', 'วัดทุ่งลานนา', true),
@@ -118,17 +149,16 @@ VALUES
   ('liap_duan', 'เลียบด่วน', true),
   ('sap_phun', 'ทรัพย์พัน', true),
   ('seven_front', 'หน้าเซเวน', true),
-  ('rot_re', 'รถเร่', true)
-ON CONFLICT (market_code) DO UPDATE
-SET label = EXCLUDED.label,
-    active = EXCLUDED.active,
-    updated_at = now()
-WHERE (line_guided_menu_markets.label, line_guided_menu_markets.active)
-  IS DISTINCT FROM (EXCLUDED.label, EXCLUDED.active);
+  ('rot_re', 'รถเร่', true);
 
-INSERT INTO public.line_guided_menu_sellers
-  (seller_code, label, active, sort_order)
-VALUES
+CREATE TEMP TABLE _gm55_sellers (
+  seller_code text PRIMARY KEY,
+  label text NOT NULL,
+  active boolean NOT NULL,
+  sort_order integer NOT NULL
+) ON COMMIT DROP;
+
+INSERT INTO _gm55_sellers VALUES
   ('ki', 'กี้', true, 10),
   ('ohm', 'โอม', true, 20),
   ('jiew', 'จิ๋ว', true, 30),
@@ -144,43 +174,26 @@ VALUES
   ('nu_lek', 'หนูเล็ก', true, 130),
   ('ja', 'จ๋า', true, 140),
   ('pa_lee', 'ป้าลี', true, 150),
-  ('nang', 'นาง', true, 160)
-ON CONFLICT (seller_code) DO UPDATE
-SET label = EXCLUDED.label,
-    active = EXCLUDED.active,
-    sort_order = EXCLUDED.sort_order,
-    updated_at = now()
-WHERE (
-  line_guided_menu_sellers.label,
-  line_guided_menu_sellers.active,
-  line_guided_menu_sellers.sort_order
-) IS DISTINCT FROM (
-  EXCLUDED.label,
-  EXCLUDED.active,
-  EXCLUDED.sort_order
-);
+  ('nang', 'นาง', true, 160);
 
-INSERT INTO public.line_guided_menu_seller_aliases
-  (alias_label, seller_code, active)
-VALUES
+CREATE TEMP TABLE _gm55_seller_aliases (
+  alias_label text PRIMARY KEY,
+  seller_code text NOT NULL,
+  active boolean NOT NULL
+) ON COMMIT DROP;
+
+INSERT INTO _gm55_seller_aliases VALUES
   ('กี่', 'ki', true),
   ('โอ', 'ohm', true),
-  ('ดำ', 'phi_dam', true)
-ON CONFLICT (alias_label) DO UPDATE
-SET seller_code = EXCLUDED.seller_code,
-    active = EXCLUDED.active,
-    updated_at = now()
-WHERE (
-  line_guided_menu_seller_aliases.seller_code,
-  line_guided_menu_seller_aliases.active
-) IS DISTINCT FROM (
-  EXCLUDED.seller_code,
-  EXCLUDED.active
-);
+  ('ดำ', 'phi_dam', true);
 
-INSERT INTO public.line_guided_menu_market_aliases
-  (alias_label, market_code, active)
-VALUES
+CREATE TEMP TABLE _gm55_market_aliases (
+  alias_label text PRIMARY KEY,
+  market_code text NOT NULL,
+  active boolean NOT NULL
+) ON COMMIT DROP;
+
+INSERT INTO _gm55_market_aliases VALUES
   ('ตลาด72', 'chaloem_72', true),
   ('เฉลิม72', 'chaloem_72', true),
   ('พาชิโอ้ทุเรียน', 'paseo_durian', true),
@@ -201,22 +214,17 @@ VALUES
   ('ตลาดวัดทุ่งลานนา', 'wat_thung_lanna', true),
   ('ทุ่งลานนา', 'wat_thung_lanna', true),
   ('หน้าเซเว่น', 'seven_front', true),
-  ('ทรัพย์พัน2', 'sap_phun', true)
-ON CONFLICT (alias_label) DO UPDATE
-SET market_code = EXCLUDED.market_code,
-    active = EXCLUDED.active,
-    updated_at = now()
-WHERE (
-  line_guided_menu_market_aliases.market_code,
-  line_guided_menu_market_aliases.active
-) IS DISTINCT FROM (
-  EXCLUDED.market_code,
-  EXCLUDED.active
-);
+  ('ทรัพย์พัน2', 'sap_phun', true);
 
-INSERT INTO public.line_guided_menu_seller_markets
-  (seller_code, market_code, active, sort_order)
-VALUES
+CREATE TEMP TABLE _gm55_assignments (
+  seller_code text NOT NULL,
+  market_code text NOT NULL,
+  active boolean NOT NULL,
+  sort_order integer NOT NULL,
+  PRIMARY KEY (seller_code, market_code)
+) ON COMMIT DROP;
+
+INSERT INTO _gm55_assignments VALUES
   ('ki', 'wat_thung_lanna', true, 10),
   ('ki', 'wat_taklam', true, 20),
   ('ki', 'wihan', true, 30),
@@ -251,18 +259,93 @@ VALUES
   ('nu_lek', 'seven_front', true, 10),
   ('nu_lek', 'paseo_fruit', true, 20),
   ('pa_lee', 'paseo_fruit', true, 10),
-  ('pa_lee', 'paseo_vegetable', true, 20)
-ON CONFLICT (seller_code, market_code) DO UPDATE
-SET active = EXCLUDED.active,
-    sort_order = EXCLUDED.sort_order,
-    updated_at = now()
-WHERE (
-  line_guided_menu_seller_markets.active,
-  line_guided_menu_seller_markets.sort_order
-) IS DISTINCT FROM (
-  EXCLUDED.active,
-  EXCLUDED.sort_order
-);
+  ('pa_lee', 'paseo_vegetable', true, 20);
+
+INSERT INTO public.line_guided_menu_markets (market_code, label, active)
+SELECT market_code, label, active
+FROM _gm55_markets
+ON CONFLICT (market_code) DO NOTHING;
+
+INSERT INTO public.line_guided_menu_sellers
+  (seller_code, label, active, sort_order)
+SELECT seller_code, label, active, sort_order
+FROM _gm55_sellers
+ON CONFLICT (seller_code) DO NOTHING;
+
+INSERT INTO public.line_guided_menu_seller_aliases
+  (alias_label, seller_code, active)
+SELECT alias_label, seller_code, active
+FROM _gm55_seller_aliases
+ON CONFLICT (alias_label) DO NOTHING;
+
+INSERT INTO public.line_guided_menu_market_aliases
+  (alias_label, market_code, active)
+SELECT alias_label, market_code, active
+FROM _gm55_market_aliases
+ON CONFLICT (alias_label) DO NOTHING;
+
+INSERT INTO public.line_guided_menu_seller_markets
+  (seller_code, market_code, active, sort_order)
+SELECT seller_code, market_code, active, sort_order
+FROM _gm55_assignments
+ON CONFLICT (seller_code, market_code) DO NOTHING;
+
+DO $seed_validation$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM _gm55_markets expected
+    JOIN public.line_guided_menu_markets actual USING (market_code)
+    WHERE (actual.label, actual.active)
+      IS DISTINCT FROM (expected.label, expected.active)
+  ) THEN
+    RAISE EXCEPTION '0055: reviewed market baseline drift';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM _gm55_sellers expected
+    JOIN public.line_guided_menu_sellers actual USING (seller_code)
+    WHERE (actual.label, actual.active, actual.sort_order)
+      IS DISTINCT FROM
+        (expected.label, expected.active, expected.sort_order)
+  ) THEN
+    RAISE EXCEPTION '0055: reviewed seller baseline drift';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM _gm55_seller_aliases expected
+    JOIN public.line_guided_menu_seller_aliases actual USING (alias_label)
+    WHERE (actual.seller_code, actual.active)
+      IS DISTINCT FROM (expected.seller_code, expected.active)
+  ) THEN
+    RAISE EXCEPTION '0055: reviewed seller alias baseline drift';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM _gm55_market_aliases expected
+    JOIN public.line_guided_menu_market_aliases actual USING (alias_label)
+    WHERE (actual.market_code, actual.active)
+      IS DISTINCT FROM (expected.market_code, expected.active)
+  ) THEN
+    RAISE EXCEPTION '0055: reviewed market alias baseline drift';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM _gm55_assignments expected
+    JOIN public.line_guided_menu_seller_markets actual
+      USING (seller_code, market_code)
+    WHERE (actual.active, actual.sort_order)
+      IS DISTINCT FROM (expected.active, expected.sort_order)
+  ) THEN
+    RAISE EXCEPTION '0055: reviewed seller-market baseline drift';
+  END IF;
+END;
+$seed_validation$;
+-- END REVIEWED CATALOG SEEDS
 
 ALTER TABLE public.line_menu_states
   DROP CONSTRAINT line_menu_states_action_type_allowed;
@@ -296,6 +379,7 @@ CREATE OR REPLACE FUNCTION public.guided_menu_payload_valid(
 ) RETURNS boolean
 LANGUAGE plpgsql
 STABLE
+SECURITY INVOKER
 SET search_path TO public, pg_temp
 AS $fn$
 DECLARE
@@ -345,7 +429,7 @@ BEGIN
       v_tx := p_payload->>'transaction_type';
       v_seller := p_payload->>'seller_code';
       RETURN v_tx IN ('withdraw', 'return', 'damaged_return')
-        AND v_seller ~ '^[a-z0-9_]{1,32}$'
+        AND coalesce(v_seller, '') ~ '^[a-z0-9_]{1,32}$'
         AND EXISTS (
           SELECT 1
           FROM public.line_guided_menu_sellers s
@@ -354,28 +438,36 @@ BEGIN
         );
 
     WHEN 'choose_market' THEN
+      v_tx := p_payload->>'transaction_type';
+      v_seller := p_payload->>'seller_code';
+      v_market := p_payload->>'market_code';
+      IF v_tx NOT IN ('withdraw', 'return', 'damaged_return')
+         OR coalesce(v_market, '') !~ '^[a-z0-9_]{1,32}$'
+         OR NOT EXISTS (
+           SELECT 1
+           FROM public.line_guided_menu_markets m
+           WHERE m.market_code = v_market
+             AND m.active IS TRUE
+         ) THEN
+        RETURN false;
+      END IF;
+      IF v_keys = ARRAY['market_code', 'transaction_type'] THEN
+        RETURN true;
+      END IF;
       IF v_keys IS DISTINCT FROM
         ARRAY['market_code', 'seller_code', 'transaction_type'] THEN
         RETURN false;
       END IF;
-      v_tx := p_payload->>'transaction_type';
-      v_seller := p_payload->>'seller_code';
-      v_market := p_payload->>'market_code';
-      RETURN v_tx IN ('withdraw', 'return', 'damaged_return')
-        AND v_seller ~ '^[a-z0-9_]{1,32}$'
-        AND v_market ~ '^[a-z0-9_]{1,32}$'
+      RETURN coalesce(v_seller, '') ~ '^[a-z0-9_]{1,32}$'
         AND EXISTS (
           SELECT 1
           FROM public.line_guided_menu_sellers s
           JOIN public.line_guided_menu_seller_markets sm
             ON sm.seller_code = s.seller_code
-          JOIN public.line_guided_menu_markets m
-            ON m.market_code = sm.market_code
           WHERE s.seller_code = v_seller
-            AND m.market_code = v_market
+            AND sm.market_code = v_market
             AND s.active IS TRUE
             AND sm.active IS TRUE
-            AND m.active IS TRUE
         );
 
     WHEN 'choose_date', 'confirm_open' THEN
@@ -385,38 +477,50 @@ BEGIN
       v_dm := p_payload->>'date_mode';
       v_iso := p_payload->>'iso_date';
       IF v_tx NOT IN ('withdraw', 'return', 'damaged_return')
-         OR v_seller !~ '^[a-z0-9_]{1,32}$'
-         OR v_market !~ '^[a-z0-9_]{1,32}$'
+         OR coalesce(v_market, '') !~ '^[a-z0-9_]{1,32}$'
          OR NOT EXISTS (
            SELECT 1
-           FROM public.line_guided_menu_sellers s
-           JOIN public.line_guided_menu_seller_markets sm
-             ON sm.seller_code = s.seller_code
-           JOIN public.line_guided_menu_markets m
-             ON m.market_code = sm.market_code
-           WHERE s.seller_code = v_seller
-             AND m.market_code = v_market
-             AND s.active IS TRUE
-             AND sm.active IS TRUE
+           FROM public.line_guided_menu_markets m
+           WHERE m.market_code = v_market
              AND m.active IS TRUE
          ) THEN
         RETURN false;
       END IF;
-      IF v_dm IN ('today', 'yesterday') THEN
-        RETURN v_keys IS NOT DISTINCT FROM
-          ARRAY['date_mode', 'market_code', 'seller_code', 'transaction_type'];
-      END IF;
-      IF v_dm = 'iso' THEN
-        IF v_keys IS DISTINCT FROM ARRAY[
-          'date_mode',
-          'iso_date',
-          'market_code',
-          'seller_code',
-          'transaction_type'
-        ] THEN
+      IF p_payload ? 'seller_code' THEN
+        IF coalesce(v_seller, '') !~ '^[a-z0-9_]{1,32}$'
+           OR NOT EXISTS (
+             SELECT 1
+             FROM public.line_guided_menu_sellers s
+             JOIN public.line_guided_menu_seller_markets sm
+               ON sm.seller_code = s.seller_code
+             WHERE s.seller_code = v_seller
+               AND sm.market_code = v_market
+               AND s.active IS TRUE
+               AND sm.active IS TRUE
+           ) THEN
           RETURN false;
         END IF;
-        RETURN public.guided_menu_iso_date_valid(v_iso);
+        IF v_dm IN ('today', 'yesterday') THEN
+          RETURN v_keys IS NOT DISTINCT FROM ARRAY[
+            'date_mode', 'market_code', 'seller_code', 'transaction_type'
+          ];
+        END IF;
+        IF v_dm = 'iso' THEN
+          RETURN v_keys IS NOT DISTINCT FROM ARRAY[
+            'date_mode', 'iso_date', 'market_code', 'seller_code',
+            'transaction_type'
+          ] AND public.guided_menu_iso_date_valid(v_iso);
+        END IF;
+        RETURN false;
+      END IF;
+      IF v_dm IN ('today', 'yesterday') THEN
+        RETURN v_keys IS NOT DISTINCT FROM
+          ARRAY['date_mode', 'market_code', 'transaction_type'];
+      END IF;
+      IF v_dm = 'iso' THEN
+        RETURN v_keys IS NOT DISTINCT FROM ARRAY[
+          'date_mode', 'iso_date', 'market_code', 'transaction_type'
+        ] AND public.guided_menu_iso_date_valid(v_iso);
       END IF;
       RETURN false;
 
@@ -428,3 +532,150 @@ BEGIN
   END CASE;
 END;
 $fn$;
+
+CREATE OR REPLACE FUNCTION public.consume_line_menu_state(
+  p_token_hash     text,
+  p_line_event_id  text,
+  p_line_user_id   text,
+  p_source_type    text,
+  p_source_id      text,
+  p_session_key    text DEFAULT NULL
+) RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path TO public, pg_temp
+AS $fn$
+DECLARE
+  v_hash   text;
+  v_event  text;
+  v_user   text;
+  v_stype  text;
+  v_sid    text;
+  v_skey   text;
+  v_row    public.line_menu_states%ROWTYPE;
+BEGIN
+  v_hash  := btrim(coalesce(p_token_hash, ''));
+  v_event := btrim(coalesce(p_line_event_id, ''));
+  v_user  := btrim(coalesce(p_line_user_id, ''));
+  v_stype := btrim(coalesce(p_source_type, ''));
+  v_sid   := btrim(coalesce(p_source_id, ''));
+  v_skey  := NULLIF(btrim(coalesce(p_session_key, '')), '');
+
+  IF v_hash !~ '^[0-9a-f]{64}$'
+     OR length(v_event) = 0
+     OR length(v_user) = 0
+     OR length(v_stype) = 0
+     OR length(v_sid) = 0 THEN
+    RETURN jsonb_build_object('status', 'invalid_or_expired');
+  END IF;
+
+  SELECT * INTO v_row
+  FROM public.line_menu_states
+  WHERE token_hash = v_hash
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('status', 'invalid_or_expired');
+  END IF;
+
+  IF v_row.line_user_id IS DISTINCT FROM v_user
+     OR v_row.source_type IS DISTINCT FROM v_stype
+     OR v_row.source_id IS DISTINCT FROM v_sid
+     OR v_row.session_key IS DISTINCT FROM v_skey
+     OR now() >= v_row.expires_at THEN
+    RETURN jsonb_build_object('status', 'invalid_or_expired');
+  END IF;
+
+  -- Revalidate before both the update trigger and same-event replay.
+  IF NOT public.guided_menu_payload_valid(
+    v_row.action_type,
+    v_row.payload
+  ) THEN
+    RETURN jsonb_build_object('status', 'invalid_or_expired');
+  END IF;
+
+  IF v_row.consumed_at IS NOT NULL THEN
+    IF v_row.consumed_line_event_id IS NOT DISTINCT FROM v_event THEN
+      RETURN jsonb_build_object(
+        'status', 'replay',
+        'action_type', v_row.action_type,
+        'payload', v_row.payload,
+        'result', v_row.result
+      );
+    END IF;
+    RETURN jsonb_build_object('status', 'already_consumed');
+  END IF;
+
+  UPDATE public.line_menu_states
+  SET
+    consumed_at            = now(),
+    consumed_line_event_id = v_event,
+    updated_at             = now()
+  WHERE token_hash = v_hash
+  RETURNING * INTO v_row;
+
+  RETURN jsonb_build_object(
+    'status', 'consumed',
+    'action_type', v_row.action_type,
+    'payload', v_row.payload
+  );
+END;
+$fn$;
+
+COMMENT ON FUNCTION public.consume_line_menu_state(
+  text, text, text, text, text, text
+) IS
+  'SECURITY INVOKER. Revalidates current catalog before first consume and replay.';
+
+REVOKE ALL ON FUNCTION public.guided_menu_payload_valid(text, jsonb)
+  FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guided_menu_payload_valid(text, jsonb)
+  FROM anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.guided_menu_payload_valid(text, jsonb)
+  TO service_role;
+
+REVOKE ALL ON FUNCTION public.consume_line_menu_state(
+  text, text, text, text, text, text
+) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.consume_line_menu_state(
+  text, text, text, text, text, text
+) FROM anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.consume_line_menu_state(
+  text, text, text, text, text, text
+) TO service_role;
+
+DO $postconditions$
+BEGIN
+  IF (
+    SELECT count(*)
+    FROM pg_class c
+    WHERE c.oid IN (
+      'public.line_guided_menu_sellers'::regclass,
+      'public.line_guided_menu_seller_aliases'::regclass,
+      'public.line_guided_menu_market_aliases'::regclass,
+      'public.line_guided_menu_seller_markets'::regclass
+    )
+      AND c.relrowsecurity
+  ) <> 4 THEN
+    RAISE EXCEPTION '0055: catalog RLS postcondition failed';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM public.line_guided_menu_seller_aliases
+    WHERE alias_label = 'ป้าลีนาง'
+  ) OR EXISTS (
+    SELECT 1
+    FROM public.line_guided_menu_market_aliases
+    WHERE alias_label IN ('พาสิโอ้', 'ผัก', 'ผลไม้', 'ทุเรียน')
+  ) OR EXISTS (
+    SELECT 1
+    FROM public.line_guided_menu_markets
+    WHERE label IN ('วิหารหลวงปู่โต', 'ทรัพย์เจริญ')
+  ) THEN
+    RAISE EXCEPTION '0055: rejected or unconfirmed catalog label present';
+  END IF;
+END;
+$postconditions$;
+
+COMMIT;

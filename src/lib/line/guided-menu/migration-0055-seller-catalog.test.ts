@@ -1,95 +1,118 @@
 import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 
-const migration = new URL(
+const additiveFile = new URL(
   "../../../../supabase/migrations/0055_guided_menu_seller_market_catalog.sql",
   import.meta.url,
 );
-const sql = await Bun.file(migration).text();
-const code = sql
-  .split("\n")
-  .filter((line) => !line.trimStart().startsWith("--"))
-  .join("\n");
-const canonicalLf = sql.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-const seedCode = code.split("ALTER TABLE public.line_menu_states")[0];
+const strictFile = new URL(
+  "../../../../supabase/migrations/0056_guided_menu_seller_catalog_strict_cleanup.sql",
+  import.meta.url,
+);
+const additive = await Bun.file(additiveFile).text();
+const strict = await Bun.file(strictFile).text();
+const canonical = (sql: string) =>
+  sql.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+const seedStart = additive.indexOf("-- BEGIN REVIEWED CATALOG SEEDS");
+const seedEnd = additive.indexOf("-- END REVIEWED CATALOG SEEDS");
+const seeds = additive.slice(seedStart, seedEnd);
 
-describe("0055 migration — seller-market catalog", () => {
-  it("creates private service-role catalogs with aliases and active assignments", () => {
-    expect(code).toContain("CREATE TABLE public.line_guided_menu_sellers");
-    expect(code).toContain("CREATE TABLE public.line_guided_menu_seller_aliases");
-    expect(code).toContain("CREATE TABLE public.line_guided_menu_market_aliases");
-    expect(code).toContain("CREATE TABLE public.line_guided_menu_seller_markets");
-    expect(code).toContain("PRIMARY KEY (seller_code, market_code)");
-    expect(code).toContain("REFERENCES public.line_guided_menu_sellers");
-    expect(code).toContain("REFERENCES public.line_guided_menu_markets");
-    expect(code).toContain(
+describe("0055 additive + 0056 strict Guided Menu catalog rollout", () => {
+  it("creates private seller catalogs and preserves legacy compatibility", () => {
+    expect(additive).toContain("CREATE TABLE public.line_guided_menu_sellers");
+    expect(additive).toContain(
+      "CREATE TABLE public.line_guided_menu_seller_aliases",
+    );
+    expect(additive).toContain(
+      "CREATE TABLE public.line_guided_menu_market_aliases",
+    );
+    expect(additive).toContain(
+      "CREATE TABLE public.line_guided_menu_seller_markets",
+    );
+    expect(additive).toContain(
+      "v_keys = ARRAY['market_code', 'transaction_type']",
+    );
+    expect(additive).not.toMatch(
+      /DELETE FROM public\.line_guided_menu_markets/,
+    );
+    expect(additive).toContain(
       "ALTER TABLE public.line_guided_menu_sellers ENABLE ROW LEVEL SECURITY",
     );
-    expect(code).toContain(
-      "ALTER TABLE public.line_guided_menu_seller_markets ENABLE ROW LEVEL SECURITY",
+    expect(additive).not.toMatch(/CREATE POLICY/i);
+  });
+
+  it("revalidates current payload before update and same-event replay", () => {
+    const validation = additive.indexOf(
+      "IF NOT public.guided_menu_payload_valid(",
     );
-    expect(code).toContain(
-      "ALTER TABLE public.line_guided_menu_seller_aliases ENABLE ROW LEVEL SECURITY",
-    );
-    expect(code).toContain(
-      "ALTER TABLE public.line_guided_menu_market_aliases ENABLE ROW LEVEL SECURITY",
-    );
-    expect(code).not.toMatch(/CREATE POLICY/i);
-    expect(code).not.toMatch(
-      /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public\.line_guided_menu_/,
+    const replay = additive.indexOf("IF v_row.consumed_at IS NOT NULL");
+    const update = additive.indexOf("UPDATE public.line_menu_states");
+    expect(validation).toBeGreaterThan(0);
+    expect(validation).toBeLessThan(replay);
+    expect(validation).toBeLessThan(update);
+    expect(additive).toContain(
+      "RETURN jsonb_build_object('status', 'invalid_or_expired')",
     );
   });
 
-  it("requires exact seller-bound payloads and active seller-market rows", () => {
-    expect(code).toContain("'choose_seller'");
-    expect(code).toContain("ARRAY['seller_code', 'transaction_type']");
-    expect(code).toContain(
-      "ARRAY['market_code', 'seller_code', 'transaction_type']",
+  it("uses insert-if-missing seeds that abort rather than overwrite drift", () => {
+    expect(seeds.match(/ON CONFLICT/g)).toHaveLength(5);
+    expect(seeds.match(/DO NOTHING/g)).toHaveLength(5);
+    expect(seeds).not.toMatch(/ON CONFLICT[\s\S]*?DO UPDATE/);
+    expect(seeds).toContain("reviewed seller baseline drift");
+    expect(seeds).toContain("reviewed market baseline drift");
+    expect(seeds).toContain("reviewed seller alias baseline drift");
+    expect(seeds).toContain("reviewed market alias baseline drift");
+    expect(seeds).toContain("reviewed seller-market baseline drift");
+  });
+
+  it("seeds approved identities and keeps rejected labels absent", () => {
+    expect(seeds).toContain("('ki', 'กี้', true, 10)");
+    expect(seeds).toContain("('กี่', 'ki', true)");
+    expect(seeds).toContain("('โอ', 'ohm', true)");
+    expect(seeds).toContain("('ดำ', 'phi_dam', true)");
+    expect(seeds).toContain("('ทรัพย์พัน2', 'sap_phun', true)");
+    expect(seeds).toContain("('ki', 'wat_thung_lanna', true, 10)");
+    expect(seeds).toContain("('tom', 'paseo_vegetable', true, 10)");
+    expect(seeds).toContain("('tom', 'paseo_durian', true, 20)");
+    expect(seeds).toContain("('tom', 'paseo_fruit', true, 30)");
+    expect(seeds).not.toContain("ป้าลีนาง");
+    expect(seeds).not.toMatch(/\('พาสิโอ้',\s*'/);
+    expect(seeds).not.toMatch(/\('(ผัก|ผลไม้|ทุเรียน)',\s*'/);
+    expect(seeds).not.toContain("วิหารหลวงปู่โต");
+    expect(seeds).not.toContain("ทรัพย์เจริญ");
+  });
+
+  it("strict migration blocks legacy states and guards malformed-market cleanup", () => {
+    expect(strict).toContain(
+      "unexpired legacy seller-less Guided Menu states remain",
     );
-    expect(code).toContain("NOT (payload ? 'seller_label')");
-    expect(code).toContain("s.active IS TRUE");
-    expect(code).toContain("sm.active IS TRUE");
-    expect(code).toContain("m.active IS TRUE");
-  });
-
-  it("seeds only the approved canonical sellers and seller aliases", () => {
-    expect(code).toContain("('ki', 'กี้', true, 10)");
-    expect(code).toContain("('กี่', 'ki', true)");
-    expect(code).toContain("('โอ', 'ohm', true)");
-    expect(code).toContain("('ดำ', 'phi_dam', true)");
-    expect(code).not.toContain("'ป้าลีนาง'");
-  });
-
-  it("keeps Pasio categories distinct and ambiguous labels unseeded", () => {
-    expect(code).toContain("('paseo_durian', 'พาซิโอ้ทุเรียน', true)");
-    expect(code).toContain("('paseo_vegetable', 'พาซิโอ้ผัก', true)");
-    expect(code).toContain("('paseo_fruit', 'พาซิโอ้ผลไม้', true)");
-    expect(code).not.toMatch(/\('พาสิโอ้',\s*'/);
-    expect(code).not.toMatch(/\('(ผัก|ผลไม้|ทุเรียน)',\s*'/);
-  });
-
-  it("applies approved market corrections and supports multiple active markets", () => {
-    expect(code).toContain("('ทรัพย์พัน2', 'sap_phun', true)");
-    expect(code).toContain("DELETE FROM public.line_guided_menu_markets");
-    expect(code).toContain("WHERE market_code = 'kee'");
-    expect(code).not.toContain("('kee', 'ตลาดกี้'");
-    expect(code).toContain("('ki', 'wat_thung_lanna', true, 10)");
-    expect(code).toContain("('tom', 'paseo_vegetable', true, 10)");
-    expect(code).toContain("('tom', 'paseo_durian', true, 20)");
-    expect(code).toContain("('tom', 'paseo_fruit', true, 30)");
-    expect(code).not.toContain("'วิหารหลวงปู่โต'");
-    expect(code).not.toContain("'ทรัพย์เจริญ'");
-  });
-
-  it("uses guarded upserts for deterministic idempotent seed DML", () => {
-    expect(seedCode.match(/ON CONFLICT/g)).toHaveLength(5);
-    expect(seedCode.match(/IS DISTINCT FROM/g)).toHaveLength(5);
-  });
-
-  it("matches the reviewed canonical LF migration", () => {
-    expect(createHash("sha256").update(canonicalLf, "utf8").digest("hex")).toBe(
-      "2e839eb5ca147bbf8fce2e7cf44aaaec6c1451fe50c12bb11bac9b50c419f4fa",
+    expect(strict).toContain(
+      "kee/ตลาดกี้ differs from the original 0051 baseline",
     );
-    expect(Buffer.byteLength(canonicalLf, "utf8")).toBe(15804);
+    expect(strict).toContain("unexpected foreign-key dependency");
+    expect(strict).toContain(
+      "DELETE FROM public.line_guided_menu_markets",
+    );
+    expect(strict).toContain("GET DIAGNOSTICS v_deleted = ROW_COUNT");
+    expect(strict).toContain(
+      "an unexpired Guided Menu state is invalid under strict catalog rules",
+    );
+    expect(strict).not.toContain(
+      "v_keys = ARRAY['market_code', 'transaction_type']",
+    );
+  });
+
+  it("matches canonical LF checksums and byte counts", () => {
+    const additiveLf = canonical(additive);
+    const strictLf = canonical(strict);
+    expect(createHash("sha256").update(additiveLf).digest("hex")).toBe(
+      "de3d9af9c929a518367d1662d4d4a127961698ef73c3880194bc16e28ad90bec",
+    );
+    expect(Buffer.byteLength(additiveLf)).toBe(23350);
+    expect(createHash("sha256").update(strictLf).digest("hex")).toBe(
+      "69e964c0e1dcb3310d669a39de9accd1f74bc37cc82cb63969c2c3eb2ad89207",
+    );
+    expect(Buffer.byteLength(strictLf)).toBe(8019);
   });
 });

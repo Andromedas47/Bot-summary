@@ -2,8 +2,8 @@
 
 Discovery date: 2026-07-29 (Asia/Bangkok)
 
-Status: **approved business decisions encoded in migration 0055; ready for code
-review.**
+Status: **approved business decisions encoded in additive migration 0055 and
+strict cleanup migration 0056; ready for code review.**
 
 ## Source and screening
 
@@ -30,6 +30,54 @@ seller/market-inverted rows.
 
 Counts below are historical evidence, not a rule that permits new catalog rows.
 Only explicitly reviewed rows are seeded.
+
+## Mixed-version rollout and abort conditions
+
+Migration 0055 is additive: it creates the reviewed seller catalogs, supports
+new seller-aware states, and temporarily accepts legacy 0051 seller-less
+`choose_market`, `choose_date`, and `confirm_open` payloads. It leaves the
+original `kee` / `ตลาดกี้` row untouched so old application code remains
+operational. The consume RPC revalidates current catalog state before both its
+first update and same-event replay, returning `invalid_or_expired` rather than
+letting the update trigger raise.
+
+Migration 0056 is strict: it rejects seller-less payloads and removes
+`kee` / `ตลาดกี้` only after exact baseline, dependency, and live-state guards.
+The required rollout is:
+
+1. Apply additive compatibility migration 0055.
+2. Verify schema, reviewed catalog, RLS, grants, and compatibility behavior.
+3. Deploy the new seller-aware application code.
+4. Wait at least the Guided Menu navigation TTL of 30 minutes.
+5. Verify no unexpired legacy seller-less states remain.
+6. Apply strict cleanup migration 0056.
+7. Verify seller-less payload rejection, reviewed seller-aware navigation, and
+   absence of `kee` / `ตลาดกี้`.
+
+Abort 0055 on any reviewed seller, market, alias, assignment, or original 0051
+market drift; it never overwrites Production-managed state. If application
+verification fails after 0055, stop before 0056—the additive schema remains
+compatible with old code. Abort 0056 if legacy states remain, `kee` differs
+from the exact 0051 baseline, any alias/assignment/unexpired state references
+it, an unexpected market foreign key exists, or any unexpired new state is
+invalid. After strict cleanup, use a reviewed forward migration rather than
+recreating malformed catalog data.
+
+Canonical LF migration contracts:
+
+| Migration | Role | SHA-256 | Bytes |
+|---|---|---|---:|
+| `0055` | Additive compatibility | `de3d9af9c929a518367d1662d4d4a127961698ef73c3880194bc16e28ad90bec` | 23,350 |
+| `0056` | Strict cleanup | `69e964c0e1dcb3310d669a39de9accd1f74bc37cc82cb63969c2c3eb2ad89207` | 8,019 |
+
+## Production seller navigation
+
+`จ๋า` and `นาง` remain approved active catalog sellers. Production seller
+navigation lists only active sellers with at least one active assignment to an
+active market, so these two sellers are hidden until an assignment is reviewed.
+If an assignment becomes inactive after a seller button was issued, the shared
+runtime renderer returns the clear no-active-market response. Arbitrary LINE
+text never creates a seller.
 
 ## Reviewed active sellers
 
@@ -75,7 +123,9 @@ observed row is inverted and does not support an assignment.
 
 The three Pasio categories are distinct markets. `ทรัพย์พัน2` evidence is
 included in the `ทรัพย์พัน` total because it is an approved alias.
-`ตลาดกี้` is not a market and migration 0055 removes the malformed 0051 row.
+`ตลาดกี้` is not a market. Additive migration 0055 temporarily preserves the
+original 0051 row for mixed-version compatibility; guarded strict migration
+0056 removes it after the 30-minute drain.
 
 ## Reviewed active seller-market assignments
 
@@ -172,7 +222,7 @@ Market aliases with an explicit market identity:
 | Bare ผัก / ผลไม้ / ทุเรียน | 3 observed groups | Not seeded globally because surrounding context is insufficient. |
 | ดำ / วิหารหลวงปู่โต | 5 / 2026-07-11 | Market identity unconfirmed; unseeded. |
 | น้อย / ทรัพย์เจริญ | 3 / 2026-07-04 | Likely market, but official identity unconfirmed; pending and unseeded. |
-| กี้ / ตลาดกี้ | 2 / 2026-06-28 | Malformed history; excluded and removed from the catalog. |
+| กี้ / ตลาดกี้ | 2 / 2026-06-28 | Malformed history; excluded from the canonical catalog and removed only by guarded strict migration 0056. |
 | กี้ / วัดตะกร่ำ | 3 / 2026-06-15 | Likely typo; target not confirmed. |
 | กี้ / วัดวานนา | 1 / 2026-06-28 | Likely typo; target not confirmed. |
 | กี้ / 2วัดทุ่งลานนา | 1 / 2026-06-14 | Prefix meaning unclear. |

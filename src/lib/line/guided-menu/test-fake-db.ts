@@ -427,6 +427,17 @@ export class GuidedMenuFakeDatabase {
     ) {
       return { status: "invalid_or_expired" };
     }
+    if (
+      !payloadLooksValid(
+        row.action_type,
+        row.payload,
+        this.sellers,
+        this.markets,
+        this.sellerMarkets,
+      )
+    ) {
+      return { status: "invalid_or_expired" };
+    }
     if (row.consumed_at) {
       if (row.consumed_line_event_id === eventId) {
         return {

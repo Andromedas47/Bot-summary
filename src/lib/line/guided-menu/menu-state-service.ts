@@ -365,23 +365,55 @@ export class GuidedMenuStateService {
 
   /** Active seller catalog, ordered for the LINE menu. */
   async listActiveSellers(): Promise<GuidedMenuSeller[]> {
-    const { data, error } = await this.supabase
-      .from("line_guided_menu_sellers")
-      .select("seller_code, label, active, sort_order")
-      .eq("active", true)
-      .order("sort_order");
+    const [sellerResult, assignmentResult, activeMarkets] = await Promise.all([
+      this.supabase
+        .from("line_guided_menu_sellers")
+        .select("seller_code, label, active, sort_order")
+        .eq("active", true)
+        .order("sort_order"),
+      this.supabase
+        .from("line_guided_menu_seller_markets")
+        .select("seller_code, market_code, active")
+        .eq("active", true)
+        .order("seller_code"),
+      this.listActiveMarkets(),
+    ]);
 
-    if (error) {
-      throw new Error(`seller catalog lookup failed: ${error.message}`);
+    if (sellerResult.error) {
+      throw new Error(
+        `seller catalog lookup failed: ${sellerResult.error.message}`,
+      );
     }
-    return (data ?? [])
+    if (assignmentResult.error) {
+      throw new Error(
+        `seller-market lookup failed: ${assignmentResult.error.message}`,
+      );
+    }
+    const activeMarketCodes = new Set(
+      activeMarkets.map((market) => market.marketCode),
+    );
+    const navigableSellerCodes = new Set(
+      (assignmentResult.data ?? [])
+        .filter(
+          (row) =>
+            row.active === true &&
+            activeMarketCodes.has(String(row.market_code)),
+        )
+        .map((row) => String(row.seller_code)),
+    );
+    return (sellerResult.data ?? [])
       .map((row) => ({
         sellerCode: String(row.seller_code),
         label: String(row.label),
         active: row.active === true,
         sortOrder: Number(row.sort_order),
       }))
-      .filter((seller) => seller.active && seller.label.trim())
+      .filter(
+        (seller) =>
+          seller.active &&
+          seller.label.trim() &&
+          navigableSellerCodes.has(seller.sellerCode),
+      )
       .sort(
         (a, b) =>
           a.sortOrder - b.sortOrder || a.label.localeCompare(b.label, "th"),
@@ -394,10 +426,27 @@ export class GuidedMenuStateService {
     markets: GuidedMenuSellerMarket[];
   }> {
     const code = nonblank(sellerCode, "sellerCode");
-    const seller = (await this.listActiveSellers()).find(
-      (row) => row.sellerCode === code,
-    );
-    if (!seller) return { seller: null, markets: [] };
+    const { data: sellerRow, error: sellerError } = await this.supabase
+      .from("line_guided_menu_sellers")
+      .select("seller_code, label, active, sort_order")
+      .eq("seller_code", code)
+      .maybeSingle();
+    if (sellerError) {
+      throw new Error(`seller catalog lookup failed: ${sellerError.message}`);
+    }
+    if (
+      !sellerRow ||
+      sellerRow.active !== true ||
+      !String(sellerRow.label ?? "").trim()
+    ) {
+      return { seller: null, markets: [] };
+    }
+    const seller: GuidedMenuSeller = {
+      sellerCode: String(sellerRow.seller_code),
+      label: String(sellerRow.label),
+      active: true,
+      sortOrder: Number(sellerRow.sort_order),
+    };
 
     const { data, error } = await this.supabase
       .from("line_guided_menu_seller_markets")

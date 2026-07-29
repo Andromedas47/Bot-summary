@@ -4,7 +4,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { parseMenuToken } from "./menu-token";
+import { MENU_TOKEN_PREFIX, parseMenuToken } from "./menu-token";
 import { GuidedMenuStateService } from "./menu-state-service";
 import type {
   CreateMenuStateInput,
@@ -45,8 +45,18 @@ export function isExactGuidedMenuTrigger(text: string): boolean {
   return text.trim() === GUIDED_MENU_TRIGGER;
 }
 
+/** True when postback data carries a well-formed opaque gpm1 token. */
 export function isGuidedMenuPostbackData(data: string): boolean {
   return parseMenuToken(data).ok;
+}
+
+/**
+ * True when postback data looks like Guided Menu (`gpm1:` prefix).
+ * Malformed candidates must fail closed with the invalid-menu reply —
+ * they must not fall through as "unrelated" postbacks.
+ */
+export function isGuidedMenuPostbackCandidate(data: string): boolean {
+  return typeof data === "string" && data.startsWith(MENU_TOKEN_PREFIX);
 }
 
 function asSourceType(value: string): MenuSourceType | null {
@@ -253,13 +263,14 @@ export class GuidedMenuUxHandler {
     }
 
     if (input.actionType === "confirm_open") {
-      // Slice 2 boundary: no open/append/admission/ingest/close.
+      // UX boundary: no open/append/admission/ingest/close — placeholder only.
       return resultEnvelope(
         "confirm_placeholder",
         [buildConfirmPlaceholderMessage()],
         {
-          slice: "2",
-          deferred: "slice_3a_open",
+          opened: false,
+          recorded: false,
+          use_existing_method: true,
           note: GUIDED_MENU_COPY.confirmPlaceholder,
         },
       );

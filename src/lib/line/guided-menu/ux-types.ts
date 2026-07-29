@@ -20,12 +20,26 @@ export const LABEL_TO_TX_CODE: Record<string, MenuTransactionTypeCode> = {
 
 export const GUIDED_MENU_TRIGGER = "เมนู";
 
+/** LINE buttons-template action label limit (code points). */
+export const TEMPLATE_ACTION_LABEL_MAX = 20;
+/** LINE Flex button label limit (code points). */
+export const FLEX_BUTTON_LABEL_MAX = 40;
+/** LINE Flex bubble JSON size limit (UTF-8 bytes). */
+export const FLEX_BUBBLE_MAX_UTF8_BYTES = 30 * 1024;
+
 export const GUIDED_MENU_COPY = {
   unmapped:
     "บัญชีไลน์นี้ยังไม่ได้รับสิทธิ์ใช้งานเมนู กรุณาติดต่อผู้ดูแล",
   invalidOrExpired: "เมนูหมดอายุหรือไม่ถูกต้อง กรุณาพิมพ์ เมนู ใหม่",
   cancelled: "ยกเลิกแล้ว",
-  confirmPlaceholder: "พร้อมเปิดรายการ — รอ Slice 3A",
+  /**
+   * Confirm boundary placeholder — must not read as a successful open.
+   * Explicitly: no session opened, no data recorded, use existing method.
+   */
+  confirmPlaceholder: [
+    "ยังไม่ได้เปิดรายการ",
+    "ขณะนี้เมนูทดลองยังไม่บันทึกข้อมูล กรุณาใช้วิธีเดิมก่อน",
+  ].join("\n"),
   txPrompt: "เลือกรายการที่ต้องการบันทึก",
   marketPrompt: "เลือกตลาด",
   datePrompt: "เลือกวันที่",
@@ -105,7 +119,7 @@ export type GuidedMenuUxResult = {
   messages: GuidedMenuLineMessage[];
   /** Compact result persisted for same-event replay. */
   result: Record<string, unknown>;
-  /** True when confirm_open landed on the Slice-3A placeholder. */
+  /** True when confirm_open landed on the no-write placeholder. */
   confirmPlaceholder?: boolean;
 };
 

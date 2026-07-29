@@ -73,8 +73,7 @@ export class GuidedMenuFakeDatabase {
     return this as unknown as SupabaseClient;
   }
 
-  from(table: string) {
-    const self = this;
+  from = (table: string) => {
     return {
       insert: (payload: Row | Row[]) => {
         const rows = Array.isArray(payload) ? payload : [payload];
@@ -96,8 +95,8 @@ export class GuidedMenuFakeDatabase {
               consumed_line_event_id: null,
               result: null,
             };
-            self.states.push(state);
-            self.tables.line_menu_states = [...self.states] as unknown as Row[];
+            this.states.push(state);
+            this.tables.line_menu_states = [...this.states] as unknown as Row[];
           }
           return {
             select: () => ({
@@ -106,10 +105,13 @@ export class GuidedMenuFakeDatabase {
           };
         }
         if (table === "raw_messages") {
-          const row = { id: `raw-${self.tables.raw_messages.length + 1}`, ...rows[0] };
+          const row: Row = {
+            id: `raw-${this.tables.raw_messages.length + 1}`,
+            ...rows[0],
+          };
           // Duplicate event id → 23505
           if (
-            self.tables.raw_messages.some(
+            this.tables.raw_messages.some(
               (r) => r.line_event_id === row.line_event_id,
             )
           ) {
@@ -122,56 +124,63 @@ export class GuidedMenuFakeDatabase {
               }),
             };
           }
-          self.tables.raw_messages.push(row);
+          this.tables.raw_messages.push(row);
           return {
             select: () => ({
               single: async () => ({ data: row, error: null }),
             }),
           };
         }
-        self.tables[table] = [...(self.tables[table] ?? []), ...rows];
+        this.tables[table] = [...(this.tables[table] ?? []), ...rows];
         return {
           select: () => ({
             single: async () => ({ data: rows[0], error: null }),
           }),
         };
       },
-      select: (_cols?: string) => ({
-        eq: (column: string, value: unknown) => ({
-          maybeSingle: async () => {
-            if (table === "line_operator_identities") {
-              const data =
-                self.operators.find((o) => (o as Row)[column] === value) ?? null;
-              return { data, error: null };
-            }
-            const data =
-              (self.tables[table] ?? []).find((r) => r[column] === value) ?? null;
-            return { data, error: null };
-          },
-          single: async () => {
-            const data =
-              (self.tables[table] ?? []).find((r) => r[column] === value) ?? null;
-            return { data, error: null };
-          },
-          limit: () => ({
+      select: (cols?: string) => {
+        void cols;
+        return {
+          eq: (column: string, value: unknown) => ({
             maybeSingle: async () => {
+              if (table === "line_operator_identities") {
+                const data =
+                  this.operators.find((o) => (o as Row)[column] === value) ??
+                  null;
+                return { data, error: null };
+              }
               const data =
-                (self.tables[table] ?? []).find((r) => r[column] === value) ?? null;
+                (this.tables[table] ?? []).find((r) => r[column] === value) ??
+                null;
               return { data, error: null };
             },
+            single: async () => {
+              const data =
+                (this.tables[table] ?? []).find((r) => r[column] === value) ??
+                null;
+              return { data, error: null };
+            },
+            limit: () => ({
+              maybeSingle: async () => {
+                const data =
+                  (this.tables[table] ?? []).find((r) => r[column] === value) ??
+                  null;
+                return { data, error: null };
+              },
+            }),
           }),
-        }),
-      }),
+        };
+      },
       update: (patch: Row) => ({
         eq: async (column: string, value: unknown) => {
-          self.tables[table] = (self.tables[table] ?? []).map((r) =>
+          this.tables[table] = (this.tables[table] ?? []).map((r) =>
             r[column] === value ? { ...r, ...patch } : r,
           );
           return { data: null, error: null };
         },
       }),
     };
-  }
+  };
 
   rpc = async (name: string, args: Row) => {
     if (name === "open_produce_structured_session") {

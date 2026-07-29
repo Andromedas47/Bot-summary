@@ -23,6 +23,7 @@ import {
   buildGuidedMenuIdentity,
   buildInvalidMenuMessage,
   isExactGuidedMenuTrigger,
+  isGuidedMenuPostbackCandidate,
   isGuidedMenuPostbackData,
 } from "@/lib/line/guided-menu";
 import {
@@ -2016,8 +2017,20 @@ export class WebhookService {
     const data = event.postback?.data ?? "";
     const replyToken = event.replyToken;
 
+    // Unrelated postbacks: persist raw event only; leave available to other routers.
+    if (!isGuidedMenuPostbackCandidate(data)) {
+      log.debug("non-guided-menu postback — ignored after raw persist");
+      return { eventId, eventType: event.type, status: "saved" };
+    }
+
+    // Malformed gpm1-looking data fails closed (still after normal raw persist).
     if (!isGuidedMenuPostbackData(data)) {
-      log.debug("non-guided-menu postback — ignored");
+      log.info("malformed guided-menu postback — invalid reply");
+      if (replyToken) {
+        await this.replyApiMessages(replyToken, [
+          buildInvalidMenuMessage() as LineApiMessage,
+        ]);
+      }
       return { eventId, eventType: event.type, status: "saved" };
     }
 

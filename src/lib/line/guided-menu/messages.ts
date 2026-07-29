@@ -3,12 +3,19 @@
  * Postback `data` is always an opaque gpm1 token — never business labels.
  */
 
-import type { GuidedMenuMarketOption } from "./markets";
+import {
+  resolveMarketButtonLabel,
+  type GuidedMenuMarketOption,
+} from "./markets";
 import type { MenuTransactionTypeCode } from "./menu-state-types";
 import {
+  FLEX_BUBBLE_MAX_UTF8_BYTES,
+  FLEX_BUTTON_LABEL_MAX,
   GUIDED_MENU_COPY,
+  TEMPLATE_ACTION_LABEL_MAX,
   TX_CODE_TO_LABEL,
   type GuidedMenuLineMessage,
+  type LineFlexBubble,
   type LineFlexMessage,
   type LinePostbackAction,
   type LineQuickReply,
@@ -17,18 +24,26 @@ import {
   type TokenButtonSpec,
 } from "./ux-types";
 
-const POSTBACK_LABEL_MAX = 20;
+export function measureFlexBubbleUtf8Bytes(bubble: LineFlexBubble): number {
+  return Buffer.byteLength(JSON.stringify(bubble), "utf8");
+}
 
-function clipLabel(label: string): string {
-  const chars = [...label];
-  if (chars.length <= POSTBACK_LABEL_MAX) return label;
-  return chars.slice(0, POSTBACK_LABEL_MAX).join("");
+function assertLabelLength(label: string, maxChars: number, kind: string): void {
+  const len = [...label].length;
+  if (len > maxChars) {
+    throw new Error(
+      `${kind} label exceeds ${maxChars} characters (${len}): ${label}`,
+    );
+  }
 }
 
 export function postbackAction(
   label: string,
   wireToken: string,
-  displayText?: string,
+  options: {
+    maxLabelChars: number;
+    displayText?: string;
+  },
 ): LinePostbackAction {
   if (!wireToken.startsWith("gpm1:")) {
     throw new Error("guided menu postback data must be a gpm1 token");
@@ -36,12 +51,12 @@ export function postbackAction(
   if (wireToken.length > 300) {
     throw new Error(`postback data exceeds LINE 300-char limit (${wireToken.length})`);
   }
-  const clipped = clipLabel(label);
+  assertLabelLength(label, options.maxLabelChars, "postback action");
   return {
     type: "postback",
-    label: clipped,
+    label,
     data: wireToken,
-    displayText: displayText ?? clipped,
+    displayText: options.displayText ?? label,
   };
 }
 
@@ -51,7 +66,10 @@ function quickReplyFromTokens(
   return {
     items: buttons.slice(0, 13).map((b) => ({
       type: "action" as const,
-      action: postbackAction(b.label, b.wireToken, b.displayText),
+      action: postbackAction(b.label, b.wireToken, {
+        maxLabelChars: TEMPLATE_ACTION_LABEL_MAX,
+        displayText: b.displayText,
+      }),
     })),
   };
 }
@@ -65,8 +83,20 @@ function bubbleButton(
     type: "button",
     style,
     height: "sm",
-    action: postbackAction(label, wireToken),
+    action: postbackAction(label, wireToken, {
+      maxLabelChars: FLEX_BUTTON_LABEL_MAX,
+    }),
   };
+}
+
+function assertUniqueRenderedLabels(labels: string[], context: string): void {
+  const seen = new Set<string>();
+  for (const label of labels) {
+    if (seen.has(label)) {
+      throw new Error(`duplicate rendered ${context} label: ${label}`);
+    }
+    seen.add(label);
+  }
 }
 
 function flexShell(
@@ -75,43 +105,52 @@ function flexShell(
   bodyLines: string[],
   footerButtons: Record<string, unknown>[],
 ): LineFlexMessage {
+  const contents: LineFlexBubble = {
+    type: "bubble",
+    size: "mega",
+    body: {
+      type: "box",
+      layout: "vertical",
+      spacing: "md",
+      paddingAll: "16px",
+      contents: [
+        {
+          type: "text",
+          text: title,
+          weight: "bold",
+          size: "lg",
+          color: "#0F172A",
+          wrap: true,
+        },
+        ...bodyLines.map((line) => ({
+          type: "text" as const,
+          text: line,
+          size: "sm",
+          color: "#334155",
+          wrap: true,
+        })),
+      ],
+    },
+    footer: {
+      type: "box",
+      layout: "vertical",
+      spacing: "sm",
+      paddingAll: "12px",
+      contents: footerButtons,
+    },
+  };
+
+  const bytes = measureFlexBubbleUtf8Bytes(contents);
+  if (bytes > FLEX_BUBBLE_MAX_UTF8_BYTES) {
+    throw new Error(
+      `flex bubble exceeds ${FLEX_BUBBLE_MAX_UTF8_BYTES} UTF-8 bytes (${bytes})`,
+    );
+  }
+
   return {
     type: "flex",
     altText,
-    contents: {
-      type: "bubble",
-      size: "mega",
-      body: {
-        type: "box",
-        layout: "vertical",
-        spacing: "md",
-        paddingAll: "16px",
-        contents: [
-          {
-            type: "text",
-            text: title,
-            weight: "bold",
-            size: "lg",
-            color: "#0F172A",
-            wrap: true,
-          },
-          ...bodyLines.map((line) => ({
-            type: "text" as const,
-            text: line,
-            size: "sm",
-            color: "#334155",
-            wrap: true,
-          })),
-        ],
-      },
-      footer: {
-        type: "box",
-        layout: "vertical",
-        spacing: "sm",
-        paddingAll: "12px",
-        contents: footerButtons,
-      },
-    },
+    contents,
   };
 }
 
@@ -122,9 +161,15 @@ export function buildTransactionTypeMessage(tokens: {
   damagedReturn: string;
 }): LineTemplateButtonsMessage {
   const actions = [
-    postbackAction("เบิก", tokens.withdraw),
-    postbackAction("ชั่งคืน", tokens.return),
-    postbackAction("คืนเสีย", tokens.damagedReturn),
+    postbackAction("เบิก", tokens.withdraw, {
+      maxLabelChars: TEMPLATE_ACTION_LABEL_MAX,
+    }),
+    postbackAction("ชั่งคืน", tokens.return, {
+      maxLabelChars: TEMPLATE_ACTION_LABEL_MAX,
+    }),
+    postbackAction("คืนเสีย", tokens.damagedReturn, {
+      maxLabelChars: TEMPLATE_ACTION_LABEL_MAX,
+    }),
   ];
   const text = GUIDED_MENU_COPY.txPrompt;
   if ([...text].length > 160) {
@@ -150,10 +195,23 @@ export function buildMarketSelectMessage(input: {
   cancelToken: string;
 }): LineFlexMessage {
   const txLabel = TX_CODE_TO_LABEL[input.transactionType];
+  const renderedMarketLabels = input.markets.map((market) => {
+    const buttonLabel = resolveMarketButtonLabel(market);
+    assertLabelLength(buttonLabel, FLEX_BUTTON_LABEL_MAX, "flex market button");
+    return buttonLabel;
+  });
+  assertUniqueRenderedLabels(renderedMarketLabels, "market button");
+
+  const navLabels = ["กลับ", "ยกเลิก"];
+  assertUniqueRenderedLabels(
+    [...renderedMarketLabels, ...navLabels],
+    "market screen",
+  );
+
   const buttons = input.markets.map((market) => {
     const token = input.marketTokens.get(market.code);
     if (!token) throw new Error(`missing market token for ${market.code}`);
-    return bubbleButton(market.label, token);
+    return bubbleButton(resolveMarketButtonLabel(market), token);
   });
   buttons.push(bubbleButton("กลับ", input.backToken, "secondary"));
   buttons.push(bubbleButton("ยกเลิก", input.cancelToken, "secondary"));
@@ -251,6 +309,11 @@ export function assertGuidedMenuMessageLimits(
           if (item.action.data.length > 300) {
             throw new Error("quickReply postback data exceeds 300 chars");
           }
+          assertLabelLength(
+            item.action.label,
+            TEMPLATE_ACTION_LABEL_MAX,
+            "quickReply",
+          );
         }
       }
     }
@@ -265,46 +328,55 @@ export function assertGuidedMenuMessageLimits(
         if (action.data.length > 300) {
           throw new Error("template postback data exceeds 300 chars");
         }
-        if ([...action.label].length > POSTBACK_LABEL_MAX) {
-          throw new Error("template action label exceeds 20 chars");
-        }
+        assertLabelLength(
+          action.label,
+          TEMPLATE_ACTION_LABEL_MAX,
+          "template action",
+        );
       }
     }
     if (msg.type === "flex") {
       if ([...msg.altText].length > 400) {
         throw new Error("flex altText exceeds 400 code points");
       }
-      const json = JSON.stringify(msg);
-      if (json.length > 50_000) {
-        throw new Error("flex message JSON exceeds practical LINE size");
+      const bytes = measureFlexBubbleUtf8Bytes(msg.contents);
+      if (bytes > FLEX_BUBBLE_MAX_UTF8_BYTES) {
+        throw new Error(
+          `flex bubble exceeds ${FLEX_BUBBLE_MAX_UTF8_BYTES} UTF-8 bytes (${bytes})`,
+        );
       }
-      walkPostbackData(msg, (data) => {
-        if (!data.startsWith("gpm1:")) {
+      walkPostbackActions(msg, (action) => {
+        if (!action.data.startsWith("gpm1:")) {
           throw new Error("flex postback data must be gpm1 token");
         }
-        if (data.length > 300) {
+        if (action.data.length > 300) {
           throw new Error("flex postback data exceeds 300 chars");
         }
+        assertLabelLength(action.label, FLEX_BUTTON_LABEL_MAX, "flex button");
       });
     }
   }
 }
 
-function walkPostbackData(
+function walkPostbackActions(
   value: unknown,
-  visit: (data: string) => void,
+  visit: (action: LinePostbackAction) => void,
 ): void {
   if (!value || typeof value !== "object") return;
   if (Array.isArray(value)) {
-    for (const item of value) walkPostbackData(item, visit);
+    for (const item of value) walkPostbackActions(item, visit);
     return;
   }
   const obj = value as Record<string, unknown>;
-  if (obj.type === "postback" && typeof obj.data === "string") {
-    visit(obj.data);
+  if (
+    obj.type === "postback" &&
+    typeof obj.data === "string" &&
+    typeof obj.label === "string"
+  ) {
+    visit(obj as LinePostbackAction);
   }
   for (const child of Object.values(obj)) {
-    walkPostbackData(child, visit);
+    walkPostbackActions(child, visit);
   }
 }
 

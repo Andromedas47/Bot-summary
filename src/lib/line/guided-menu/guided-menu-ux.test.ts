@@ -1,19 +1,20 @@
 import { describe, expect, it } from "bun:test";
-import { mkdirSync, writeFileSync } from "fs";
+import { readFileSync } from "fs";
 import { join } from "path";
 import {
   GuidedMenuUxHandler,
   isExactGuidedMenuTrigger,
 } from "./ux-handler";
 import { formatThaiDateShort, resolveGuidedMenuDate } from "./dates";
-import {
-  assertGuidedMenuMessageLimits,
-  buildInvalidMenuMessage,
-} from "./messages";
+import { assertGuidedMenuMessageLimits } from "./messages";
 import { parseGuidedMenuMarketsEnv } from "./markets";
 import { MENU_TOKEN_PREFIX, parseMenuToken } from "./menu-token";
 import { GUIDED_MENU_COPY, TX_CODE_TO_LABEL } from "./ux-types";
 import { GuidedMenuFakeDatabase } from "./test-fake-db";
+import {
+  buildSlice2EvidenceMessages,
+  normalizeEvidenceTokens,
+} from "./evidence";
 
 const IDENTITY = {
   lineUserId: "U-op-1",
@@ -102,7 +103,7 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     assertGuidedMenuMessageLimits(opened.messages);
   });
 
-  it("walks tx → market → date → confirm → Slice 3A placeholder", async () => {
+  it("walks tx → market → date → confirm → field-safe no-write placeholder", async () => {
     const db = new GuidedMenuFakeDatabase();
     db.seedOperator({
       line_user_id: IDENTITY.lineUserId,
@@ -181,6 +182,20 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     expect(placeholder.messages[0]).toEqual({
       type: "text",
       text: GUIDED_MENU_COPY.confirmPlaceholder,
+    });
+    const copy = GUIDED_MENU_COPY.confirmPlaceholder;
+    // Operational meaning: not opened, not recorded, use existing method.
+    expect(copy).toContain("ยังไม่ได้เปิดรายการ");
+    expect(copy).toContain("ยังไม่บันทึกข้อมูล");
+    expect(copy).toContain("ใช้วิธีเดิมก่อน");
+    expect(copy).not.toMatch(/Slice\s*3A/i);
+    expect(copy).not.toContain("พร้อมเปิดรายการ");
+    expect(copy).not.toMatch(/เปิดรายการแล้ว/);
+    expect(copy).not.toMatch(/สำเร็จ/);
+    expect(placeholder.result).toMatchObject({
+      opened: false,
+      recorded: false,
+      use_existing_method: true,
     });
     expect(db.openProduceCalls).toBe(0);
     expect(db.appendCalls).toBe(0);
@@ -354,92 +369,36 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
       { code: "kee", label: "ตลาดกี้" },
       { code: "seven_front", label: "หน้าเซเวน" },
     ]);
+    const abbreviated = parseGuidedMenuMarketsEnv(
+      "long:ตลาดชื่อยาวมากที่ต้องการย่อบนปุ่ม>ตลาดยาว",
+    );
+    expect(abbreviated[0]).toEqual({
+      code: "long",
+      label: "ตลาดชื่อยาวมากที่ต้องการย่อบนปุ่ม",
+      buttonLabel: "ตลาดยาว",
+    });
     expect(TX_CODE_TO_LABEL.withdraw).toBe("เบิก");
     expect(resolveGuidedMenuDate("today", TS)?.thaiShort).toBe("29/07/2569");
     expect(resolveGuidedMenuDate("yesterday", TS)?.thaiShort).toBe("28/07/2569");
   });
 
-  it("writes Thai UX JSON evidence for review", async () => {
-    const db = new GuidedMenuFakeDatabase();
-    db.seedOperator({
-      line_user_id: IDENTITY.lineUserId,
-      staff_label: "พี่ดำ",
-      active: true,
-    });
-    const handler = new GuidedMenuUxHandler(db.asClient(), {
-      markets: [{ code: "kee", label: "ตลาดกี้" }],
-    });
-
-    const evidence: Record<string, unknown> = {};
-    const root = await handler.openMenu({ identity: IDENTITY });
-    evidence.transaction_type = root.messages;
-
-    const txMsg = root.messages[0];
-    if (txMsg.type !== "template") throw new Error("template");
-    const market = await handler.handlePostback({
-      wireToken: txMsg.template.actions[0]!.data,
-      lineEventId: "ev-e1",
-      identity: IDENTITY,
-      lineTimestampMs: TS,
-    });
-    evidence.market = market.messages;
-
-    const kee = collectPostbackData(market.messages).find((t) => {
-      return db.stateByWire(t)?.payload.market_code === "kee";
-    })!;
-    const date = await handler.handlePostback({
-      wireToken: kee,
-      lineEventId: "ev-e2",
-      identity: IDENTITY,
-      lineTimestampMs: TS,
-    });
-    evidence.date = date.messages;
-
-    const today = collectPostbackData(date.messages).find((t) => {
-      return db.stateByWire(t)?.payload.date_mode === "today";
-    })!;
-    const confirm = await handler.handlePostback({
-      wireToken: today,
-      lineEventId: "ev-e3",
-      identity: IDENTITY,
-      lineTimestampMs: TS,
-    });
-    evidence.confirm = confirm.messages;
-
-    const confirmTok = collectPostbackData(confirm.messages).find((t) => {
-      return db.stateByWire(t)?.action_type === "confirm_open";
-    })!;
-    const placeholder = await handler.handlePostback({
-      wireToken: confirmTok,
-      lineEventId: "ev-e4",
-      identity: IDENTITY,
-      lineTimestampMs: TS,
-    });
-    evidence.confirm_placeholder = placeholder.messages;
-    evidence.unmapped = (await handler.openMenu({
-      identity: { ...IDENTITY, lineUserId: "U-none" },
-    })).messages;
-    evidence.invalid = [buildInvalidMenuMessage()];
-
-    const dir = join(process.cwd(), "guided-menu-slice2-evidence");
-    mkdirSync(dir, { recursive: true });
-    const path = join(dir, "line-messages.json");
-    writeFileSync(path, JSON.stringify(evidence, null, 2), "utf8");
-    writeFileSync(
-      join(dir, "README.md"),
-      [
-        "# Guided Menu Slice 2 Evidence",
-        "",
-        "Generated by `guided-menu-ux.test.ts`.",
-        "",
-        "- `line-messages.json` — actual LINE Messaging API message objects",
-        "  (template / flex / text) for each UX screen.",
-        "- Postback `data` values are opaque `gpm1:` tokens.",
-        "- No merge, migration apply, deploy, or real LINE send.",
-        "",
-      ].join("\n"),
-      "utf8",
+  it("matches committed Thai UX evidence without rewriting the worktree", () => {
+    const built = buildSlice2EvidenceMessages();
+    const committedPath = join(
+      process.cwd(),
+      "guided-menu-slice2-evidence",
+      "line-messages.json",
     );
-    expect(path.endsWith("line-messages.json")).toBe(true);
+    const committed = JSON.parse(readFileSync(committedPath, "utf8"));
+    // Exact deterministic match (fixed tokens) — running tests must leave git clean.
+    expect(built).toEqual(committed);
+    // Structural guard: even if tokens drift, shapes stay comparable.
+    expect(normalizeEvidenceTokens(built)).toEqual(
+      normalizeEvidenceTokens(committed),
+    );
+    expect(JSON.stringify(built.confirm_placeholder)).toContain(
+      "ยังไม่ได้เปิดรายการ",
+    );
+    expect(JSON.stringify(built.confirm_placeholder)).not.toMatch(/Slice\s*3A/i);
   });
 });

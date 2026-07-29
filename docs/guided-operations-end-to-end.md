@@ -303,8 +303,64 @@ difference               = submitted_transfer_total - checked_slip_total
 |---|---|
 | 3A — open real produce session | **delivered** |
 | 3B — guided capture and finalize | **delivered** |
-| 3C — digital white sheet | see PR description |
-| 3D — slips, reconciliation, close round | see PR description |
+| 3C — digital white sheet | **not delivered** — see §5.1 |
+| 3D — slips, reconciliation, close round | **not delivered** — blocked on 3C |
+
+### 5.1 Why 3C stopped, and the decision it needs
+
+Slices 3A and 3B needed no migration: every action they use
+(`confirm_open`, `view_status`, `request_close`, `confirm_finalize`,
+`menu_root`) is already in the `line_menu_states_action_type_allowed` CHECK.
+
+3C is different. The white sheet needs six numeric values —
+`labor`, `location_fee`, `bag`, `snack`, `other` (+ `other_note`) and
+`actual_cash_submitted` — and LINE has no numeric button. The operator must
+type them, which means the flow needs somewhere to accumulate partial input
+between messages. `line_menu_states` is single-use token storage keyed by
+token hash; it is not a per-operator accumulator, and there is no existing
+table that serves as one.
+
+Two viable shapes, and they differ enough that guessing would be wrong:
+
+**A. Per-field guided prompts (matches the requested UX).**
+Migration `0057` adds a white-sheet draft table keyed
+`(source_id, line_user_id, market_label_normalized, business_date)` with the
+collected values, plus new `action_type` values and their
+`guided_menu_payload_valid` branches for start / back / cancel / confirm.
+Persistence still goes through `saveWhiteSheetCashEntry`, so the lifecycle,
+the FINALIZED guard and the arithmetic stay authoritative. Cost: a real
+forward migration with RLS, grants, pinned `search_path` and a PostgreSQL 17
+harness.
+
+**B. Guided template message (no migration).**
+After finalization the bot replies with a ready-to-edit template in the
+existing white-sheet closing format, which
+`parseWhiteSheetCloseCommandFromMessage` and
+`processWhiteSheetCloseCommand` already accept end to end:
+
+```
+ตลาดวัดทุ่งลานนา ปิดยอด 29/07/2569
+ค่าแรง 0
+ค่าที่ 0
+ค่าถุง 0
+ค่าขนม 0
+ค่าอื่น 0
+เงินสด 0
+จบปิดยอด
+```
+
+The operator edits the numbers and sends one message. Validation, the
+FINALIZED guard, the canonical recalculation and the reply are all existing
+code; nothing new is written. Cost: no per-field Back/Cancel, and the
+operator edits text rather than answering prompts.
+
+3D depends on whichever shape 3C takes, because the slip stage is entered
+from the white-sheet completion reply and shares the same
+`(source_id, market, business_date)` binding.
+
+Neither shape was chosen unilaterally: option A commits a migration and new
+state that this epic would have to design, and option B changes the promised
+UX. That is a product decision, not an implementation detail.
 
 Production is untouched: no migration has been applied, no deployment made
 and no LINE message sent from this work.

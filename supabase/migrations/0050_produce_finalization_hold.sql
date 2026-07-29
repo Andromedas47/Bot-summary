@@ -422,7 +422,27 @@ BEGIN
     );
   END IF;
 
-
+  -- 0050 H-1: a structured session that is closing without a hold and without
+  -- confirmation (for example plain-text "จบรายการ" via append markClose) must
+  -- never persist. Legacy rows (entry_origin IS NULL) skip this guard.
+  -- Confirmed structured rows (finalize_confirmed_at IS NOT NULL) continue.
+  IF v_row.entry_origin IS NOT NULL
+     AND v_row.finalize_confirmed_at IS NULL THEN
+    UPDATE public.pending_sessions
+       SET terminalized = true,
+           next_attempt_at = NULL,
+           finalized_at = clock_timestamp(),
+           finalization_status = 'failed_closed',
+           finalization_error = jsonb_build_object(
+             'reason', 'unconfirmed_structured_close'
+           )
+     WHERE session_key = p_session_key
+       AND session_generation = p_expected_generation;
+    RETURN jsonb_build_object(
+      'status', 'failed_closed',
+      'reason', 'unconfirmed_structured_close'
+    );
+  END IF;
 
   IF v_row.ingest_revision IS DISTINCT FROM p_snapshot_revision THEN
     RETURN jsonb_build_object(
@@ -866,7 +886,8 @@ BEGIN
     'public.try_finalize_pending_generation(text,uuid,text,integer,text,text,jsonb,jsonb)'::regprocedure
   ) INTO v_body;
   IF position('awaiting_confirmation' IN v_body) = 0
-     OR position('review_not_confirmed' IN v_body) = 0 THEN
+     OR position('review_not_confirmed' IN v_body) = 0
+     OR position('unconfirmed_structured_close' IN v_body) = 0 THEN
     RAISE EXCEPTION '0050: try_finalize must contain the hold gate';
   END IF;
 END $$;

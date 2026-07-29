@@ -11,6 +11,16 @@ const code = sql
   .filter((line) => !line.trimStart().startsWith("--"))
   .join("\n");
 
+/** Canonical review hash: normalize CRLF/CR to LF before hashing. */
+function sha256Lf(text: string): string {
+  const lf = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  return createHash("sha256").update(lf, "utf8").digest("hex");
+}
+
+/** Canonical committed LF blob SHA-256 (git stores LF). */
+const CANONICAL_LF_SHA256 =
+  "7f79d2dfb1f741ac4d37d2a0ddb748313c7117749cbb047cdc8376c8f9776a60";
+
 describe("0050 migration — schema contract", () => {
   it("adds the three hold columns without DEFAULT or backfill", () => {
     expect(code).toContain("ADD COLUMN finalize_hold_until");
@@ -61,35 +71,43 @@ describe("0050 migration — schema contract", () => {
     expect(confirm).toContain("FROM anon, authenticated");
   });
 
-  it("gates try_finalize with awaiting_confirmation and review_not_confirmed", () => {
+  it("gates try_finalize with hold, expiry, and unconfirmed structured close", () => {
     expect(code).toContain("awaiting_confirmation");
     expect(code).toContain("review_not_confirmed");
+    expect(code).toContain("unconfirmed_structured_close");
     const tryIdx = code.indexOf(
       "CREATE OR REPLACE FUNCTION public.try_finalize_pending_generation",
     );
     const holdIdx = code.indexOf("finalize_hold_until IS NOT NULL", tryIdx);
+    const bypassIdx = code.indexOf("unconfirmed_structured_close", tryIdx);
     const staleIdx = code.indexOf(
       "ingest_revision IS DISTINCT FROM p_snapshot_revision",
       tryIdx,
     );
     expect(holdIdx).toBeGreaterThan(tryIdx);
-    expect(staleIdx).toBeGreaterThan(holdIdx);
+    expect(bypassIdx).toBeGreaterThan(holdIdx);
+    expect(staleIdx).toBeGreaterThan(bypassIdx);
   });
 
   it("asserts postconditions for columns, grants, and hold gate", () => {
     expect(code).toContain("expected 3 hold columns");
     expect(code).toContain("confirm_produce_structured_finalization must be SECURITY INVOKER");
     expect(code).toContain("try_finalize must contain the hold gate");
+    expect(code).toContain("unconfirmed_structured_close");
   });
 });
 
 describe("0050 migration — checksum stability", () => {
-  it("records a stable sha256 for review", () => {
-    const hash = createHash("sha256").update(sql).digest("hex");
+  it("pins the canonical LF blob sha256", () => {
+    const hash = sha256Lf(sql);
     expect(hash).toHaveLength(64);
-    // Printed for the implementation report; change only when SQL intentionally changes.
-    expect(hash).toBe(
-      "c0f982277346f74425c2a42a31e8e7d68318c3407783fd6341ab612d2172ca37",
-    );
+    expect(hash).toBe(CANONICAL_LF_SHA256);
+  });
+
+  it("hashes LF and CRLF inputs identically after normalization", () => {
+    const lf = sql.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    const crlf = lf.replace(/\n/g, "\r\n");
+    expect(sha256Lf(lf)).toBe(sha256Lf(crlf));
+    expect(sha256Lf(crlf)).toBe(CANONICAL_LF_SHA256);
   });
 });

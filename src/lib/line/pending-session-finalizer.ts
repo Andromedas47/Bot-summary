@@ -52,6 +52,10 @@ export function buildReviewNotConfirmedMessage(): string {
   return "หมดเวลารอการยืนยัน จึงไม่บันทึกรายการ";
 }
 
+export function buildUnconfirmedStructuredCloseMessage(): string {
+  return "รายการโครงสร้างปิดโดยไม่ยืนยัน จึงไม่บันทึก";
+}
+
 const defaultPush: PushMessage = (to, text) => pushLineMessage(to, text);
 
 export function formatMissingItemNumbers(missing: number[]): string {
@@ -357,7 +361,9 @@ export async function finalizePendingGeneration(
       ? buildMissingItemsMessage(result.missing ?? [], true)
       : result.reason === "review_not_confirmed"
         ? buildReviewNotConfirmedMessage()
-        : buildWeighSessionValidationReply(parsed);
+        : result.reason === "unconfirmed_structured_close"
+          ? buildUnconfirmedStructuredCloseMessage()
+          : buildWeighSessionValidationReply(parsed);
   } else if (result.status === "finalized" && !result.notification_id) {
     // Rolling-deploy fallback: the pre-0034 RPC cannot create an outbox row.
     // Once 0034 is installed, notification_id is always returned and success

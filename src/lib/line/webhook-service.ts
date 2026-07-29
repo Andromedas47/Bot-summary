@@ -132,6 +132,10 @@ const PRODUCE_CLOSE_PENDING_REPLY =
 const PRODUCE_AFTER_BOUNDARY_REPLY =
   "รายการนี้ส่งหลังคำสั่งจบ จึงไม่ถูกรวมในรายการเดิม กรุณาเริ่มหัวรายการใหม่";
 
+/** 0050: plain-text จบรายการ must not close a Guided/structured session. */
+export const STRUCTURED_TEXT_CLOSE_REFUSED_REPLY =
+  "รายการนี้เปิดจากเมนู กรุณากดตรวจและจบจากเมนู ไม่รับคำสั่งจบจากข้อความ";
+
 interface WebhookServiceDependencies {
   evidenceIngestor?: SlipEvidenceIngestor;
   checkProcessor?: SlipCheckProcessor;
@@ -514,6 +518,23 @@ export class WebhookService {
           sessionGeneration: pending.session_generation,
         });
         if (replyToken) await this.replyMessage(replyToken, STALE_PRODUCE_SESSION_REPLY);
+        return { eventId, eventType: event.type, status: "saved", parsed: false };
+      }
+
+      // 0050 H-1: plain-text จบรายการ must not markClose a structured session.
+      // DB try_finalize also fail-closes unconfirmed structured closes; this
+      // refusal keeps the operator UX clear before Guided Menu wiring.
+      if (
+        markClose
+        && (pending as StructuredPendingSession).entry_origin != null
+      ) {
+        log.warn("text close refused for structured produce session", {
+          sessionKey,
+          sessionGeneration: pending.session_generation,
+        });
+        if (replyToken) {
+          await this.replyMessage(replyToken, STRUCTURED_TEXT_CLOSE_REFUSED_REPLY);
+        }
         return { eventId, eventType: event.type, status: "saved", parsed: false };
       }
 

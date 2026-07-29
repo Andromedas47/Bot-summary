@@ -7,7 +7,9 @@ import {
 } from "./produce-session-commands";
 import {
   buildReviewNotConfirmedMessage,
+  buildUnconfirmedStructuredCloseMessage,
 } from "./pending-session-finalizer";
+import { STRUCTURED_TEXT_CLOSE_REFUSED_REPLY } from "./webhook-service";
 import { COMMAND_CONTRACT_VERSION } from "@/lib/parsers/weigh-session/seed";
 
 const SOURCE: ProduceCommandSource = {
@@ -171,6 +173,46 @@ describe("0050 — finalizer messaging", () => {
   it("uses a dedicated reply for review_not_confirmed", () => {
     expect(buildReviewNotConfirmedMessage()).toContain("ยืนยัน");
     expect(buildReviewNotConfirmedMessage()).toContain("ไม่บันทึก");
+  });
+
+  it("uses a dedicated reply for unconfirmed_structured_close", () => {
+    expect(buildUnconfirmedStructuredCloseMessage()).toContain("ไม่ยืนยัน");
+    expect(buildUnconfirmedStructuredCloseMessage()).toContain("ไม่บันทึก");
+  });
+});
+
+describe("0050 — text close cannot bypass structured confirmation", () => {
+  it("exports a clear refusal for plain จบรายการ on structured sessions", () => {
+    expect(STRUCTURED_TEXT_CLOSE_REFUSED_REPLY).toContain("เมนู");
+    expect(STRUCTURED_TEXT_CLOSE_REFUSED_REPLY).toContain("ไม่รับคำสั่งจบจากข้อความ");
+  });
+
+  it("refuses text close before append/admit/ingest on structured rows", async () => {
+    const source = await Bun.file(
+      new URL("./webhook-service.ts", import.meta.url),
+    ).text();
+    const guard = source.indexOf("text close refused for structured produce session");
+    const append = source.indexOf("pendingService.append(");
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(append);
+    expect(source).toContain("STRUCTURED_TEXT_CLOSE_REFUSED_REPLY");
+    expect(source).toContain("markClose");
+    expect(source).toContain("entry_origin != null");
+  });
+
+  it("DB try_finalize fail-closes unconfirmed structured closes", async () => {
+    const migration = await Bun.file(
+      new URL(
+        "../../../supabase/migrations/0050_produce_finalization_hold.sql",
+        import.meta.url,
+      ),
+    ).text();
+    expect(migration).toContain("unconfirmed_structured_close");
+    const tryIdx = migration.indexOf("try_finalize_pending_generation");
+    const bypassIdx = migration.indexOf("unconfirmed_structured_close", tryIdx);
+    const insertIdx = migration.indexOf("INSERT INTO public.produce_sessions", tryIdx);
+    expect(bypassIdx).toBeGreaterThan(tryIdx);
+    expect(insertIdx).toBeGreaterThan(bypassIdx);
   });
 });
 

@@ -35,15 +35,66 @@ BEGIN
 END;
 $$;
 
--- Minimal Produce stubs so expiry/hold assertions can prove zero persistence
--- without pulling the full Produce schema into the 0049-era harness.
+-- Produce schema stubs sufficient for a real successful try_finalize path.
+CREATE TABLE IF NOT EXISTS public.raw_messages (
+  id uuid PRIMARY KEY,
+  is_processed boolean NOT NULL DEFAULT false,
+  processed_at timestamptz
+);
+
+CREATE TABLE IF NOT EXISTS public.imported_sessions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_hash text NOT NULL UNIQUE,
+  transaction_date date,
+  staff_name text,
+  market_name text,
+  transaction_type text,
+  raw_text text
+);
+
 CREATE TABLE IF NOT EXISTS public.produce_sessions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  ingest_idempotency_key text
+  raw_message_id uuid,
+  line_user_id text,
+  staff_name text,
+  sender_name text,
+  transaction_time text,
+  session_date date,
+  session_title text,
+  total_items integer,
+  parser_errors text,
+  finalization_started_at timestamptz,
+  finalized_at timestamptz,
+  session_kind text,
+  declared_transaction_type text,
+  ingest_idempotency_key text UNIQUE,
+  ingest_source text
 );
+
 CREATE TABLE IF NOT EXISTS public.produce_items (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id uuid REFERENCES public.produce_sessions(id)
+  session_id uuid REFERENCES public.produce_sessions(id),
+  item_number integer,
+  product_name text,
+  price_per_unit numeric,
+  quantity numeric,
+  unit text,
+  section text,
+  transaction_type text,
+  item_hash text,
+  basis_quantity numeric,
+  basis_unit text,
+  basis_price numeric
+);
+
+CREATE TABLE IF NOT EXISTS public.produce_session_notifications (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  produce_session_id uuid,
+  session_key text,
+  session_generation uuid,
+  source_id text,
+  correlation_id text,
+  notification_payload text
 );
 
 DO $$
@@ -364,6 +415,177 @@ BEGIN
   );
   PERFORM pg_temp.p50_assert(v_result->>'reason' = 'confirmed', '12: confirm wins after hold');
 
+  -- ── H-1. Plain markClose close without hold → unconfirmed_structured_close ─
+  v_result := pg_temp.p50_open('dm:U-bypass','U-bypass','evt-open-bypass');
+  v_gen := (v_result->>'session_generation')::uuid;
+  UPDATE public.pending_sessions
+     SET close_event_timestamp_ms = 1800000050000,
+         close_requested_at = now(),
+         close_deadline_at = now() + interval '30 seconds',
+         next_attempt_at = now() - interval '1 second',
+         close_session_generation = v_gen,
+         finalize_hold_until = NULL,
+         finalize_confirmed_at = NULL,
+         finalize_confirm_line_event_id = NULL
+   WHERE session_key = 'dm:U-bypass';
+  SELECT ingest_revision INTO v_rev FROM public.pending_sessions WHERE session_key='dm:U-bypass';
+  v_fin := public.try_finalize_pending_generation(
+    'dm:U-bypass', v_gen, 'U-bypass', v_rev,
+    'hash-bypass', 'x',
+    jsonb_build_object(
+      'raw_message_id', '00000000-0000-4000-8000-000000000020',
+      'staff_name', 'พี่ดำ', 'session_kind', 'main',
+      'validation_errors', '[]'::jsonb,
+      'ingest_idempotency_key', 'dm:U-bypass:' || v_gen::text,
+      'ingest_source', 'line_webhook'
+    ),
+    '[]'::jsonb
+  );
+  PERFORM pg_temp.p50_assert(v_fin->>'status' = 'failed_closed', 'H1: bypass failed_closed');
+  PERFORM pg_temp.p50_assert(
+    v_fin->>'reason' = 'unconfirmed_structured_close', 'H1: unconfirmed_structured_close'
+  );
+  SELECT count(*) INTO v_count FROM public.produce_sessions
+   WHERE ingest_idempotency_key = 'dm:U-bypass:' || v_gen::text;
+  PERFORM pg_temp.p50_assert(v_count = 0, 'H1: no Produce on bypass');
+
+  -- Legacy plain close still finalizes without hold fields (byte-compatible path).
+  UPDATE public.pending_sessions
+     SET close_event_timestamp_ms = 1800000060000,
+         close_requested_at = now(),
+         close_deadline_at = now() + interval '30 seconds',
+         next_attempt_at = now() - interval '1 second',
+         close_session_generation = session_generation,
+         finalize_hold_until = NULL,
+         finalize_confirmed_at = NULL
+   WHERE session_key = 'dm:LEGACY1';
+  SELECT session_generation, ingest_revision INTO v_gen, v_rev
+    FROM public.pending_sessions WHERE session_key='dm:LEGACY1';
+  INSERT INTO public.raw_messages(id) VALUES ('00000000-0000-4000-8000-000000000030')
+  ON CONFLICT DO NOTHING;
+  v_fin := public.try_finalize_pending_generation(
+    'dm:LEGACY1', v_gen, 'LEGACY1', v_rev,
+    'hash-legacy-ok-1',
+    E'พี่ดำ-วิหาร เบิก 10/6/2569\n1.แตงโม10บาท\n1โล',
+    jsonb_build_object(
+      'raw_message_id', '00000000-0000-4000-8000-000000000030',
+      'staff_name', 'พี่ดำ',
+      'session_date', '2026-07-28',
+      'session_title', 'วิหาร',
+      'session_kind', 'main',
+      'validation_errors', '[]'::jsonb,
+      'ingest_idempotency_key', 'dm:LEGACY1:' || v_gen::text,
+      'ingest_source', 'line_webhook'
+    ),
+    jsonb_build_array(
+      jsonb_build_object(
+        'item_number', '1',
+        'product_name', 'แตงโม',
+        'price_per_unit', '10',
+        'quantity', '1',
+        'unit', 'โล',
+        'section', 'main',
+        'transaction_type', 'เบิก',
+        'item_hash', 'item-legacy-1'
+      )
+    )
+  );
+  PERFORM pg_temp.p50_assert(v_fin->>'status' = 'finalized', 'H1b: legacy finalize ok');
+  SELECT count(*) INTO v_count FROM public.produce_sessions
+   WHERE ingest_idempotency_key = 'dm:LEGACY1:' || v_gen::text;
+  PERFORM pg_temp.p50_assert(v_count = 1, 'H1b: legacy Produce inserted');
+
+  -- ── M-2. Confirmed structured session successfully finalizes exactly once ──
+  v_result := pg_temp.p50_open('dm:U-ok','U-ok','evt-open-ok');
+  v_gen := (v_result->>'session_generation')::uuid;
+  PERFORM public.close_produce_structured_session(
+    'dm:U-ok','U-ok','evt-close-ok', 1800000070000, v_gen, NULL
+  );
+  PERFORM pg_temp.p50_admit_ingest(
+    'dm:U-ok', v_gen, 'ok-1', 1800000069000, '1.ส้ม10บาท'
+  );
+  v_result := public.confirm_produce_structured_finalization(
+    'dm:U-ok','U-ok','evt-confirm-ok', v_gen
+  );
+  PERFORM pg_temp.p50_assert(v_result->>'reason' = 'confirmed', 'M2: confirmed');
+  SELECT ingest_revision INTO v_rev FROM public.pending_sessions WHERE session_key='dm:U-ok';
+  INSERT INTO public.raw_messages(id) VALUES ('00000000-0000-4000-8000-000000000040')
+  ON CONFLICT DO NOTHING;
+  v_fin := public.try_finalize_pending_generation(
+    'dm:U-ok', v_gen, 'U-ok', v_rev,
+    'hash-structured-ok-1',
+    '1.ส้ม10บาท',
+    jsonb_build_object(
+      'raw_message_id', '00000000-0000-4000-8000-000000000040',
+      'staff_name', 'พี่ดำ',
+      'session_date', '2026-07-28',
+      'session_title', 'วิหาร',
+      'session_kind', 'main',
+      'validation_errors', '[]'::jsonb,
+      'ingest_idempotency_key', 'dm:U-ok:' || v_gen::text,
+      'ingest_source', 'line_webhook',
+      'notification_payload', 'สรุปทดสอบ',
+      'notification_source_id', 'U-ok'
+    ),
+    jsonb_build_array(
+      jsonb_build_object(
+        'item_number', '1',
+        'product_name', 'ส้ม',
+        'price_per_unit', '10',
+        'quantity', '1',
+        'unit', 'โล',
+        'section', 'main',
+        'transaction_type', 'เบิก',
+        'item_hash', 'item-ok-1'
+      )
+    )
+  );
+  PERFORM pg_temp.p50_assert(v_fin->>'status' = 'finalized', 'M2: finalized');
+  SELECT count(*) INTO v_count FROM public.produce_sessions
+   WHERE ingest_idempotency_key = 'dm:U-ok:' || v_gen::text;
+  PERFORM pg_temp.p50_assert(v_count = 1, 'M2: exactly one produce_sessions');
+  SELECT count(*) INTO v_count FROM public.produce_items i
+    JOIN public.produce_sessions s ON s.id = i.session_id
+   WHERE s.ingest_idempotency_key = 'dm:U-ok:' || v_gen::text;
+  PERFORM pg_temp.p50_assert(v_count = 1, 'M2: expected produce_items inserted');
+
+  -- Retry/duplicate finalize creates no duplicates.
+  v_fin2 := public.try_finalize_pending_generation(
+    'dm:U-ok', v_gen, 'U-ok', v_rev,
+    'hash-structured-ok-1',
+    '1.ส้ม10บาท',
+    jsonb_build_object(
+      'raw_message_id', '00000000-0000-4000-8000-000000000040',
+      'staff_name', 'พี่ดำ',
+      'session_date', '2026-07-28',
+      'session_title', 'วิหาร',
+      'session_kind', 'main',
+      'validation_errors', '[]'::jsonb,
+      'ingest_idempotency_key', 'dm:U-ok:' || v_gen::text,
+      'ingest_source', 'line_webhook'
+    ),
+    jsonb_build_array(
+      jsonb_build_object(
+        'item_number', '1',
+        'product_name', 'ส้ม',
+        'price_per_unit', '10',
+        'quantity', '1',
+        'unit', 'โล',
+        'section', 'main',
+        'transaction_type', 'เบิก',
+        'item_hash', 'item-ok-1'
+      )
+    )
+  );
+  PERFORM pg_temp.p50_assert(v_fin2->>'reason' = 'already_terminalized', 'M2: retry terminal');
+  SELECT count(*) INTO v_count FROM public.produce_sessions
+   WHERE ingest_idempotency_key = 'dm:U-ok:' || v_gen::text;
+  PERFORM pg_temp.p50_assert(v_count = 1, 'M2: still exactly one produce_sessions');
+  SELECT count(*) INTO v_count FROM public.produce_items i
+    JOIN public.produce_sessions s ON s.id = i.session_id
+   WHERE s.ingest_idempotency_key = 'dm:U-ok:' || v_gen::text;
+  PERFORM pg_temp.p50_assert(v_count = 1, 'M2: still exactly one produce_items');
+
   -- ── 14. Structured-only: hold fields on legacy forbidden by CHECK ─────────
   BEGIN
     UPDATE public.pending_sessions
@@ -461,7 +683,8 @@ BEGIN
   ) INTO v_body;
   PERFORM pg_temp.p50_assert(
     position('awaiting_confirmation' IN v_body) > 0
-    AND position('review_not_confirmed' IN v_body) > 0,
+    AND position('review_not_confirmed' IN v_body) > 0
+    AND position('unconfirmed_structured_close' IN v_body) > 0,
     '17: try_finalize hold gate present'
   );
 

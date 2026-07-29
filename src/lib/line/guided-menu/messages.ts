@@ -351,6 +351,39 @@ export function buildConfirmPlaceholderMessage(): LineTextMessage {
   return buildPlainTextMessage(GUIDED_MENU_COPY.confirmPlaceholder);
 }
 
+/**
+ * Slice 3A success receipt. Text rather than Flex so Slice 3B can attach the
+ * guided capture actions as a quickReply without re-laying out the bubble.
+ */
+export function buildSessionOpenedMessage(input: {
+  transactionType: MenuTransactionTypeCode;
+  sellerLabel: string;
+  marketLabel: string;
+  dateThaiShort: string;
+  /** Trailing instruction lines; 3A ships the send-items hint, 3B the close button hint. */
+  instructions: readonly string[];
+}): LineTextMessage {
+  const txLabel = TX_CODE_TO_LABEL[input.transactionType];
+  return buildPlainTextMessage(
+    [
+      `เปิดรายการ${txLabel}แล้ว ✅`,
+      `คนขาย: ${input.sellerLabel}`,
+      `ตลาด: ${input.marketLabel}`,
+      `วันที่: ${input.dateThaiShort}`,
+      "",
+      ...input.instructions,
+    ].join("\n"),
+  );
+}
+
+export function buildSessionAlreadyOpenMessage(): LineTextMessage {
+  return buildPlainTextMessage(GUIDED_MENU_COPY.sessionAlreadyOpen);
+}
+
+export function buildSessionOpenConflictMessage(): LineTextMessage {
+  return buildPlainTextMessage(GUIDED_MENU_COPY.sessionOpenConflict);
+}
+
 
 export function buildNoActiveSellersMessage(): LineTextMessage {
   return buildPlainTextMessage(GUIDED_MENU_COPY.noActiveSellers);

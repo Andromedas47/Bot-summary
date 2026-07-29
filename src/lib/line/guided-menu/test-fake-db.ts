@@ -360,8 +360,93 @@ export class GuidedMenuFakeDatabase {
     if (name === "record_line_menu_state_result") {
       return { data: this.record(args), error: null };
     }
+    if (name === "open_or_rotate_produce_structured_session") {
+      return { data: this.openOrRotate(args), error: null };
+    }
     throw new Error(`Unexpected RPC: ${name}`);
   };
+
+  /**
+   * Mirrors 0049 open_or_rotate_produce_structured_session closely enough to
+   * exercise Slice 3A: canonical-key check, ownership refusal, same-event
+   * idempotency, optimistic concurrency, then insert-or-rotate.
+   */
+  private openOrRotate(args: Row): Record<string, unknown> {
+    this.openProduceCalls += 1;
+    const key = String(args.p_session_key ?? "");
+    const user = String(args.p_line_user_id ?? "");
+    const source = String(args.p_source_id ?? "");
+    const event = String(args.p_opened_line_event_id ?? "");
+    const expected = args.p_expected_session_generation ?? null;
+    const rows = this.tables.pending_sessions ?? [];
+    const existing = rows.find((r) => r.session_key === key);
+
+    if (existing) {
+      if (existing.source_id !== source) {
+        return { outcome: "ownership_conflict", reason: "source_mismatch" };
+      }
+      if (existing.line_user_id != null && existing.line_user_id !== user) {
+        return { outcome: "ownership_conflict", reason: "user_mismatch" };
+      }
+      if (existing.opened_line_event_id === event) {
+        return {
+          outcome: "idempotent",
+          reason: "duplicate_open_event",
+          session_key: key,
+          session_generation: String(existing.session_generation),
+        };
+      }
+      if (expected != null && existing.session_generation !== expected) {
+        return { outcome: "generation_conflict", reason: "stale_generation" };
+      }
+    }
+
+    const generation = `gen-${this.openProduceCalls}`;
+    const row: Row = {
+      session_key: key,
+      source_id: source,
+      line_user_id: user,
+      accumulated_text: "",
+      session_generation: generation,
+      terminalized: false,
+      close_event_timestamp_ms: null,
+      ingest_revision: 0,
+      finalization_status: "pending",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      entry_origin: "structured_menu",
+      business_date: args.p_business_date,
+      transaction_time: args.p_transaction_time,
+      transaction_time_source: args.p_transaction_time_source,
+      staff_label: args.p_staff_label,
+      market_label: args.p_market_label,
+      session_kind: args.p_session_kind,
+      initial_transaction_type: args.p_initial_transaction_type,
+      declared_transaction_type: args.p_declared_transaction_type ?? null,
+      additional_opener: args.p_additional_opener ?? null,
+      opened_line_event_id: event,
+    };
+    this.tables.pending_sessions = existing
+      ? rows.map((r) => (r.session_key === key ? row : r))
+      : [...rows, row];
+
+    return {
+      outcome: existing ? "rotated" : "opened",
+      reason: existing ? "rotated" : "opened",
+      session_key: key,
+      session_generation: generation,
+    };
+  }
+
+  /** Seed a pre-existing pending session row (e.g. an unfinished round). */
+  seedPendingSession(row: Row): void {
+    this.tables.pending_sessions = [
+      ...(this.tables.pending_sessions ?? []).filter(
+        (r) => r.session_key !== row.session_key,
+      ),
+      row,
+    ];
+  }
 
   private create(args: Row): Record<string, unknown> {
     const hash = String(args.p_token_hash ?? "");

@@ -211,7 +211,7 @@ describe("0051 Slice 2 — webhook Guided Menu", () => {
     assertNoBusinessSideEffects(db);
   });
 
-  it("postback walk uses reply only and ends on field-safe no-write placeholder", async () => {
+  it("postback walk uses reply only and ends by opening a real session", async () => {
     const db = new GuidedMenuFakeDatabase();
     seedMappedSeller(db);
     const replies: LineApiMessage[][] = [];
@@ -257,21 +257,38 @@ describe("0051 Slice 2 — webhook Guided Menu", () => {
     expect(JSON.stringify(replies[4])).toContain("พี่ดำ");
     expect(JSON.stringify(replies[4])).toContain("วัดทุ่งลานนา");
 
+    // Everything up to and including the preview is still write-free.
+    assertNoBusinessSideEffects(db);
+
     const confirmTok = collectPostbackData(replies[4]).find(
       (t) => db.stateByWire(t)?.action_type === "confirm_open",
     )!;
     await service.processEvents([
       postbackEvent(confirmTok, { webhookEventId: "pb-walk-confirm" }),
     ], "dest");
-    expect(replies[5]).toEqual([
-      { type: "text", text: GUIDED_MENU_COPY.confirmPlaceholder },
-    ]);
-    expect(GUIDED_MENU_COPY.confirmPlaceholder).toContain("ยังไม่ได้เปิดรายการ");
-    expect(GUIDED_MENU_COPY.confirmPlaceholder).not.toMatch(/Slice\s*3A/i);
+    const openedReply = replies[5]![0]!;
+    expect(openedReply.type).toBe("text");
+    const openedText = (openedReply as { text: string }).text;
+    expect(openedText).toContain("เปิดรายการเบิกแล้ว ✅");
+    expect(openedText).toContain("คนขาย: พี่ดำ");
+    expect(openedText).toContain("ตลาด: วัดทุ่งลานนา");
+    expect(openedText).toContain(GUIDED_MENU_COPY.sendItemsHint);
+
+    // Confirm opened exactly one real structured session, through the
+    // authoritative RPC, with no append/admit/ingest side effects.
+    expect(db.openProduceCalls).toBe(1);
+    expect(db.tables.pending_sessions).toHaveLength(1);
+    expect(db.tables.pending_sessions[0]!.entry_origin).toBe("structured_menu");
+    expect(db.tables.pending_sessions[0]!.staff_label).toBe("พี่ดำ");
+    expect(db.appendCalls).toBe(0);
+    expect(db.admitCalls).toBe(0);
+    expect(db.ingestCalls).toBe(0);
+    expect(db.closeRpcCalls).toBe(0);
+    expect(db.tables.pending_session_admission).toHaveLength(0);
+    expect(db.tables.pending_session_ingest).toHaveLength(0);
 
     // Exactly one raw row per genuine inbound event; no synthetic extras.
     expect(db.tables.raw_messages).toHaveLength(6);
-    assertNoBusinessSideEffects(db);
     expect(counts().pushCalls).toBe(0);
     expect(counts().multicastCalls).toBe(0);
     // One replyApiMessages call per handled Guided Menu event.

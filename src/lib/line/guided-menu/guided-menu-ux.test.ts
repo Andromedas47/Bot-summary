@@ -352,29 +352,42 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     });
     expect(confirmToken).toBeTruthy();
 
-    const placeholder = await handler.handlePostback({
+    const opened = await handler.handlePostback({
       wireToken: confirmToken!,
       lineEventId: "evt-confirm",
       identity: IDENTITY,
       lineTimestampMs: TS,
     });
-    expect(placeholder.screen).toBe("confirm_placeholder");
-    expect(placeholder.confirmPlaceholder).toBe(true);
-    expect(placeholder.messages[0]).toEqual({
-      type: "text",
-      text: GUIDED_MENU_COPY.confirmPlaceholder,
+    expect(opened.screen).toBe("session_opened");
+    expect(opened.confirmPlaceholder).toBe(false);
+    const openedText = opened.messages[0];
+    if (openedText.type !== "text") throw new Error("text");
+    expect(openedText.text).toContain("เปิดรายการเบิกแล้ว ✅");
+    expect(openedText.text).toContain("คนขาย: พี่ดำ");
+    expect(openedText.text).toContain("ตลาด: วัดทุ่งลานนา");
+    expect(openedText.text).toContain(
+      `วันที่: ${formatThaiDateShort("2026-07-29")}`,
+    );
+    expect(openedText.text).toContain(GUIDED_MENU_COPY.sendItemsHint);
+    expect(opened.result).toMatchObject({
+      opened: true,
+      transaction_type: "withdraw",
+      seller_code: "seller_a",
+      market_code: "wat_thung_lanna",
+      business_date_iso: "2026-07-29",
+      open_outcome: "opened",
     });
-    const copy = GUIDED_MENU_COPY.confirmPlaceholder;
-    expect(copy).toContain("ยังไม่ได้เปิดรายการ");
-    expect(copy).toContain("ยังไม่บันทึกข้อมูล");
-    expect(copy).toContain("ใช้วิธีเดิมก่อน");
-    expect(copy).not.toMatch(/Slice\s*3A/i);
-    expect(placeholder.result).toMatchObject({
-      opened: false,
-      recorded: false,
-      use_existing_method: true,
-    });
-    expect(db.openProduceCalls).toBe(0);
+    // The session is real: the row the parser appends to now exists, carries
+    // the operator's declared metadata, and no legacy text path was used.
+    expect(db.openProduceCalls).toBe(1);
+    const row = db.tables.pending_sessions[0]!;
+    expect(row.entry_origin).toBe("structured_menu");
+    expect(row.staff_label).toBe("พี่ดำ");
+    expect(row.market_label).toBe("วัดทุ่งลานนา");
+    expect(row.initial_transaction_type).toBe("เบิก");
+    expect(row.session_kind).toBe("main");
+    expect(row.business_date).toBe("2026-07-29");
+    expect(row.opened_line_event_id).toBe("evt-confirm");
     expect(db.appendCalls).toBe(0);
     expect(db.admitCalls).toBe(0);
     expect(db.ingestCalls).toBe(0);

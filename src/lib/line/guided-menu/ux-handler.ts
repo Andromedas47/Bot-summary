@@ -24,10 +24,10 @@ import {
   findGuidedMenuMarket,
   type GuidedMenuMarketOption,
 } from "./markets";
+import { GuidedSessionOpener } from "./session-opener";
 import {
   assertGuidedMenuMessageLimits,
   buildCancelledMessage,
-  buildConfirmPlaceholderMessage,
   buildConfirmPreviewMessage,
   buildDateSelectMessage,
   buildNoActiveSellerMarketsMessage,
@@ -37,6 +37,9 @@ import {
   buildInvalidMenuMessage,
   buildMarketSelectMessage,
   buildMarketUnavailableMessage,
+  buildSessionAlreadyOpenMessage,
+  buildSessionOpenConflictMessage,
+  buildSessionOpenedMessage,
   buildTransactionTypeMessage,
   buildUnmappedMessage,
 } from "./messages";
@@ -129,14 +132,17 @@ type CreateToken = <A extends MenuActionType>(input: {
 
 export class GuidedMenuUxHandler {
   private readonly state: GuidedMenuStateService;
+  private readonly opener: GuidedSessionOpener;
 
   constructor(
     supabase: SupabaseClient,
     options: {
       stateService?: GuidedMenuStateService;
+      sessionOpener?: GuidedSessionOpener;
     } = {},
   ) {
     this.state = options.stateService ?? new GuidedMenuStateService(supabase);
+    this.opener = options.sessionOpener ?? new GuidedSessionOpener(supabase);
   }
 
   async openMenu(input: {
@@ -188,6 +194,7 @@ export class GuidedMenuUxHandler {
       actionType: consumed.actionType,
       payload: consumed.payload,
       identity: input.identity,
+      lineEventId: input.lineEventId,
       lineTimestampMs: input.lineTimestampMs,
     });
 
@@ -219,6 +226,7 @@ export class GuidedMenuUxHandler {
     actionType: MenuActionType;
     payload: MenuPayload;
     identity: GuidedMenuIdentity;
+    lineEventId: string;
     lineTimestampMs: number;
   }): Promise<GuidedMenuUxResult> {
     // Re-check operator on every navigation step (inactive mid-flow → refuse).
@@ -337,36 +345,114 @@ export class GuidedMenuUxHandler {
     }
 
     if (input.actionType === "confirm_open") {
-      const sellerCode = input.payload.seller_code?.trim();
-      const marketCode = input.payload.market_code?.trim();
-      if (!sellerCode || !marketCode) {
-        return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
-      }
-      const selection = await this.state.loadActiveSellerMarkets(sellerCode);
-      if (!selection.seller) {
-        return resultEnvelope("seller_unavailable", [
-          buildSellerUnavailableMessage(),
-        ]);
-      }
-      if (!selection.markets.some((row) => row.marketCode === marketCode)) {
-        return resultEnvelope("market_unavailable", [
-          buildMarketUnavailableMessage(),
-        ]);
-      }
-      // UX boundary: no open/append/admission/ingest/close — placeholder only.
-      return resultEnvelope(
-        "confirm_placeholder",
-        [buildConfirmPlaceholderMessage()],
-        {
-          opened: false,
-          recorded: false,
-          use_existing_method: true,
-          note: GUIDED_MENU_COPY.confirmPlaceholder,
-        },
-      );
+      return this.confirmOpen({
+        payload: input.payload,
+        identity: input.identity,
+        lineEventId: input.lineEventId,
+        lineTimestampMs: input.lineTimestampMs,
+      });
     }
 
     return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
+  }
+
+  /**
+   * Slice 3A — the confirm boundary now opens a REAL structured session.
+   *
+   * Every selection is re-validated against the live catalog at press time,
+   * not trusted from the token payload: the operator, the transaction type,
+   * the seller, the market, the seller→market assignment and the business
+   * date are all re-derived here. A stale button whose assignment was revoked
+   * after the token was minted therefore refuses instead of opening.
+   */
+  private async confirmOpen(input: {
+    payload: MenuPayload;
+    identity: GuidedMenuIdentity;
+    lineEventId: string;
+    lineTimestampMs: number;
+  }): Promise<GuidedMenuUxResult> {
+    const tx = asTx(input.payload.transaction_type);
+    const sellerCode = input.payload.seller_code?.trim();
+    const marketCode = input.payload.market_code?.trim();
+    const dateMode = input.payload.date_mode;
+    if (
+      !tx ||
+      !sellerCode ||
+      !marketCode ||
+      (dateMode !== "today" && dateMode !== "yesterday")
+    ) {
+      return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
+    }
+
+    const selection = await this.state.loadActiveSellerMarkets(sellerCode);
+    if (!selection.seller) {
+      return resultEnvelope("seller_unavailable", [
+        buildSellerUnavailableMessage(),
+      ]);
+    }
+    const assignment = selection.markets.find(
+      (row) => row.marketCode === marketCode,
+    );
+    if (!assignment) {
+      return resultEnvelope("market_unavailable", [
+        buildMarketUnavailableMessage(),
+      ]);
+    }
+
+    // The date is resolved from the LINE event timestamp against the Bangkok
+    // calendar at press time — never carried as a label in the token.
+    const resolved = resolveGuidedMenuDate(dateMode, input.lineTimestampMs);
+    if (!resolved) {
+      return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
+    }
+
+    const opened = await this.opener.open({
+      identity: input.identity,
+      transactionType: tx,
+      sellerLabel: selection.seller.label,
+      marketLabel: assignment.marketLabel,
+      businessDateIso: resolved.iso,
+      lineEventId: input.lineEventId,
+      lineTimestampMs: input.lineTimestampMs,
+    });
+
+    if (opened.status === "already_open") {
+      return resultEnvelope(
+        "session_already_open",
+        [buildSessionAlreadyOpenMessage()],
+        { opened: false, recorded: false, reason: "session_already_open" },
+      );
+    }
+    if (opened.status !== "opened") {
+      return resultEnvelope(
+        "session_open_conflict",
+        [buildSessionOpenConflictMessage()],
+        { opened: false, recorded: false, reason: opened.reason },
+      );
+    }
+
+    return resultEnvelope(
+      "session_opened",
+      [
+        buildSessionOpenedMessage({
+          transactionType: tx,
+          sellerLabel: selection.seller.label,
+          marketLabel: assignment.marketLabel,
+          dateThaiShort: resolved.thaiShort,
+          instructions: [GUIDED_MENU_COPY.sendItemsHint],
+        }),
+      ],
+      {
+        opened: true,
+        transaction_type: tx,
+        seller_code: selection.seller.sellerCode,
+        market_code: assignment.marketCode,
+        business_date_iso: resolved.iso,
+        session_key: opened.sessionKey,
+        session_generation: opened.sessionGeneration,
+        open_outcome: opened.outcome,
+      },
+    );
   }
 
   private createTokenFn(identity: GuidedMenuIdentity): CreateToken {

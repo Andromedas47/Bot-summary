@@ -58,7 +58,8 @@ function Start-DockerPsql([string]$RemoteSql, [string]$OutFile, [string]$ErrFile
 
 function Await-Proc($Proc, [string]$Label, [int]$TimeoutSec = 60, [string]$OutFile = $null, [string]$ErrFile = $null) {
   if (-not $Proc.HasExited) {
-    Wait-Process -Id $Proc.Id -Timeout $TimeoutSec
+    # Process may exit between HasExited and Wait-Process on fast paths.
+    Wait-Process -Id $Proc.Id -Timeout $TimeoutSec -ErrorAction SilentlyContinue
   }
   for ($i = 0; $i -lt 20 -and $null -eq $Proc.ExitCode; $i++) {
     Start-Sleep -Milliseconds 50

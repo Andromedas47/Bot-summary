@@ -1,0 +1,310 @@
+{
+  "transaction_type": [
+    {
+      "type": "template",
+      "altText": "เลือกรายการที่ต้องการบันทึก",
+      "template": {
+        "type": "buttons",
+        "text": "เลือกรายการที่ต้องการบันทึก",
+        "actions": [
+          {
+            "type": "postback",
+            "label": "เบิก",
+            "data": "gpm1:AQEBAQEBAQEBAQEBAQEBAQ",
+            "displayText": "เบิก"
+          },
+          {
+            "type": "postback",
+            "label": "ชั่งคืน",
+            "data": "gpm1:AgICAgICAgICAgICAgICAg",
+            "displayText": "ชั่งคืน"
+          },
+          {
+            "type": "postback",
+            "label": "คืนเสีย",
+            "data": "gpm1:AwMDAwMDAwMDAwMDAwMDAw",
+            "displayText": "คืนเสีย"
+          }
+        ]
+      }
+    }
+  ],
+  "market": [
+    {
+      "type": "flex",
+      "altText": "เลือกตลาด",
+      "contents": {
+        "type": "bubble",
+        "size": "mega",
+        "body": {
+          "type": "box",
+          "layout": "vertical",
+          "spacing": "md",
+          "paddingAll": "16px",
+          "contents": [
+            {
+              "type": "text",
+              "text": "เลือกตลาด",
+              "weight": "bold",
+              "size": "lg",
+              "color": "#0F172A",
+              "wrap": true
+            },
+            {
+              "type": "text",
+              "text": "ประเภท: เบิก",
+              "size": "sm",
+              "color": "#334155",
+              "wrap": true
+            }
+          ]
+        },
+        "footer": {
+          "type": "box",
+          "layout": "vertical",
+          "spacing": "sm",
+          "paddingAll": "12px",
+          "contents": [
+            {
+              "type": "button",
+              "style": "primary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "ตลาดกี้",
+                "data": "gpm1:BAQEBAQEBAQEBAQEBAQEBA",
+                "displayText": "ตลาดกี้"
+              }
+            },
+            {
+              "type": "button",
+              "style": "secondary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "กลับ",
+                "data": "gpm1:BQUFBQUFBQUFBQUFBQUFBQ",
+                "displayText": "กลับ"
+              }
+            },
+            {
+              "type": "button",
+              "style": "secondary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "ยกเลิก",
+                "data": "gpm1:BgYGBgYGBgYGBgYGBgYGBg",
+                "displayText": "ยกเลิก"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "date": [
+    {
+      "type": "flex",
+      "altText": "เลือกวันที่",
+      "contents": {
+        "type": "bubble",
+        "size": "mega",
+        "body": {
+          "type": "box",
+          "layout": "vertical",
+          "spacing": "md",
+          "paddingAll": "16px",
+          "contents": [
+            {
+              "type": "text",
+              "text": "เลือกวันที่",
+              "weight": "bold",
+              "size": "lg",
+              "color": "#0F172A",
+              "wrap": true
+            },
+            {
+              "type": "text",
+              "text": "ประเภท: เบิก",
+              "size": "sm",
+              "color": "#334155",
+              "wrap": true
+            },
+            {
+              "type": "text",
+              "text": "ตลาด: ตลาดกี้",
+              "size": "sm",
+              "color": "#334155",
+              "wrap": true
+            }
+          ]
+        },
+        "footer": {
+          "type": "box",
+          "layout": "vertical",
+          "spacing": "sm",
+          "paddingAll": "12px",
+          "contents": [
+            {
+              "type": "button",
+              "style": "primary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "วันนี้",
+                "data": "gpm1:BwcHBwcHBwcHBwcHBwcHBw",
+                "displayText": "วันนี้"
+              }
+            },
+            {
+              "type": "button",
+              "style": "primary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "เมื่อวาน",
+                "data": "gpm1:CAgICAgICAgICAgICAgICA",
+                "displayText": "เมื่อวาน"
+              }
+            },
+            {
+              "type": "button",
+              "style": "secondary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "กลับ",
+                "data": "gpm1:CQkJCQkJCQkJCQkJCQkJCQ",
+                "displayText": "กลับ"
+              }
+            },
+            {
+              "type": "button",
+              "style": "secondary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "ยกเลิก",
+                "data": "gpm1:BgYGBgYGBgYGBgYGBgYGBg",
+                "displayText": "ยกเลิก"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "confirm": [
+    {
+      "type": "flex",
+      "altText": "กำลังจะเปิดรายการ",
+      "contents": {
+        "type": "bubble",
+        "size": "mega",
+        "body": {
+          "type": "box",
+          "layout": "vertical",
+          "spacing": "md",
+          "paddingAll": "16px",
+          "contents": [
+            {
+              "type": "text",
+              "text": "กำลังจะเปิดรายการ",
+              "weight": "bold",
+              "size": "lg",
+              "color": "#0F172A",
+              "wrap": true
+            },
+            {
+              "type": "text",
+              "text": "ประเภท: เบิก",
+              "size": "sm",
+              "color": "#334155",
+              "wrap": true
+            },
+            {
+              "type": "text",
+              "text": "ตลาด: ตลาดกี้",
+              "size": "sm",
+              "color": "#334155",
+              "wrap": true
+            },
+            {
+              "type": "text",
+              "text": "วันที่: 29/07/2569",
+              "size": "sm",
+              "color": "#334155",
+              "wrap": true
+            }
+          ]
+        },
+        "footer": {
+          "type": "box",
+          "layout": "vertical",
+          "spacing": "sm",
+          "paddingAll": "12px",
+          "contents": [
+            {
+              "type": "button",
+              "style": "primary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "ยืนยัน",
+                "data": "gpm1:CgoKCgoKCgoKCgoKCgoKCg",
+                "displayText": "ยืนยัน"
+              }
+            },
+            {
+              "type": "button",
+              "style": "secondary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "กลับ",
+                "data": "gpm1:CwsLCwsLCwsLCwsLCwsLCw",
+                "displayText": "กลับ"
+              }
+            },
+            {
+              "type": "button",
+              "style": "secondary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "ยกเลิก",
+                "data": "gpm1:DAwMDAwMDAwMDAwMDAwMDA",
+                "displayText": "ยกเลิก"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "confirm_placeholder": [
+    {
+      "type": "text",
+      "text": "ยังไม่ได้เปิดรายการ\nขณะนี้เมนูทดลองยังไม่บันทึกข้อมูล กรุณาใช้วิธีเดิมก่อน"
+    }
+  ],
+  "cancelled": [
+    {
+      "type": "text",
+      "text": "ยกเลิกแล้ว"
+    }
+  ],
+  "unmapped": [
+    {
+      "type": "text",
+      "text": "บัญชีไลน์นี้ยังไม่ได้รับสิทธิ์ใช้งานเมนู กรุณาติดต่อผู้ดูแล"
+    }
+  ],
+  "invalid": [
+    {
+      "type": "text",
+      "text": "เมนูหมดอายุหรือไม่ถูกต้อง กรุณาพิมพ์ เมนู ใหม่"
+    }
+  ]
+}

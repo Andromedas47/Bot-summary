@@ -49,6 +49,7 @@ DECLARE
   v_expires  timestamptz;
   v_ttl_sec  numeric;
   v_ok       boolean;
+  v_table    text;
 BEGIN
   INSERT INTO public.pending_sessions (session_key)
   SELECT format('dm:stub-%s', g)
@@ -349,11 +350,48 @@ BEGIN
   PERFORM pg_temp.gm51_assert(v_admit = 0, '12: no admission writes');
   PERFORM pg_temp.gm51_assert(v_pending = 35, '12: pending_sessions unchanged');
 
-  -- ── 13. Grants: no DELETE, no anon EXECUTE ─────────────────────────────────
-  PERFORM pg_temp.gm51_assert(
-    NOT has_table_privilege('service_role', 'public.line_menu_states', 'DELETE'),
-    '13: no DELETE on line_menu_states'
-  );
+  -- ── 13. Grants: SIU only for service_role; no anon/auth table or RPC access ─
+  FOREACH v_table IN ARRAY ARRAY[
+    'public.line_operator_identities',
+    'public.line_guided_menu_markets',
+    'public.line_menu_states'
+  ]
+  LOOP
+    PERFORM pg_temp.gm51_assert(
+      has_table_privilege('service_role', v_table, 'SELECT'),
+      '13: service_role SELECT on ' || v_table
+    );
+    PERFORM pg_temp.gm51_assert(
+      has_table_privilege('service_role', v_table, 'INSERT'),
+      '13: service_role INSERT on ' || v_table
+    );
+    PERFORM pg_temp.gm51_assert(
+      has_table_privilege('service_role', v_table, 'UPDATE'),
+      '13: service_role UPDATE on ' || v_table
+    );
+    PERFORM pg_temp.gm51_assert(
+      NOT has_table_privilege('service_role', v_table, 'DELETE'),
+      '13: no service_role DELETE on ' || v_table
+    );
+    PERFORM pg_temp.gm51_assert(
+      NOT has_table_privilege('service_role', v_table, 'TRUNCATE'),
+      '13: no service_role TRUNCATE on ' || v_table
+    );
+    PERFORM pg_temp.gm51_assert(
+      NOT has_table_privilege('service_role', v_table, 'REFERENCES'),
+      '13: no service_role REFERENCES on ' || v_table
+    );
+    PERFORM pg_temp.gm51_assert(
+      NOT has_table_privilege('service_role', v_table, 'TRIGGER'),
+      '13: no service_role TRIGGER on ' || v_table
+    );
+    PERFORM pg_temp.gm51_assert(
+      NOT has_table_privilege('anon', v_table, 'SELECT')
+        AND NOT has_table_privilege('authenticated', v_table, 'SELECT'),
+      '13: anon/authenticated no SELECT on ' || v_table
+    );
+  END LOOP;
+
   PERFORM pg_temp.gm51_assert(
     NOT has_function_privilege(
       'anon',
@@ -362,6 +400,34 @@ BEGIN
     ),
     '13: anon cannot create'
   );
+  PERFORM pg_temp.gm51_assert(
+    has_function_privilege(
+      'service_role',
+      'public.create_line_menu_state(text,text,text,text,text,text,jsonb)',
+      'EXECUTE'
+    )
+    AND has_function_privilege(
+      'service_role',
+      'public.consume_line_menu_state(text,text,text,text,text,text)',
+      'EXECUTE'
+    )
+    AND has_function_privilege(
+      'service_role',
+      'public.record_line_menu_state_result(text,text,text,text,text,text,jsonb)',
+      'EXECUTE'
+    ),
+    '13: service_role executes menu RPCs'
+  );
+
+  SELECT count(*) INTO v_count
+  FROM pg_policies
+  WHERE schemaname = 'public'
+    AND tablename IN (
+      'line_operator_identities',
+      'line_menu_states',
+      'line_guided_menu_markets'
+    );
+  PERFORM pg_temp.gm51_assert(v_count = 0, '13: zero RLS policies');
 
   RAISE NOTICE 'guided_menu_0051_verification: OK';
 END

@@ -1745,6 +1745,29 @@ export interface Database {
         Args: { p_receipt_id: string };
         Returns: Json;
       };
+      // ─── P2C inventory movement ledger (migration 0053) ───────────────
+      post_purchase_receipt_inventory_movement: {
+        Args: { p_receipt_id: string; p_actor?: string | null };
+        Returns: Json;
+      };
+      reverse_inventory_movement: {
+        Args: {
+          p_movement_id:  string;
+          p_reversal_key: string;
+          p_reason:       string;
+          p_actor?:       string | null;
+        };
+        Returns: Json;
+      };
+      get_inventory_balances: {
+        Args: {
+          p_location_code?: string | null;
+          p_product_key?:   string | null;
+          p_unit_key?:      string | null;
+          p_include_zero?:  boolean;
+        };
+        Returns: Json;
+      };
       purchase_receipt_canonical_json: {
         Args: { p_value: Json };
         Returns: string;

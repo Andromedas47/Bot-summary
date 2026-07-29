@@ -268,7 +268,7 @@ describe("0051 Slice 2 — webhook Guided Menu", () => {
     ], "dest");
     const openedReply = replies[5]![0]!;
     expect(openedReply.type).toBe("text");
-    const openedText = (openedReply as { text: string }).text;
+    const openedText = (openedReply as unknown as { text: string }).text;
     expect(openedText).toContain("เปิดรายการเบิกแล้ว ✅");
     expect(openedText).toContain("คนขาย: พี่ดำ");
     expect(openedText).toContain("ตลาด: วัดทุ่งลานนา");

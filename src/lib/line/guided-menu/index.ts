@@ -8,3 +8,4 @@ export * from "./messages";
 export * from "./ux-handler";
 export * from "./evidence";
 export * from "./session-opener";
+export * from "./session-capture";

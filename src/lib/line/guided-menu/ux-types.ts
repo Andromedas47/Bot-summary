@@ -66,6 +66,47 @@ export const GUIDED_MENU_COPY = {
   ].join("\n"),
   /** 3A: post-open instruction. 3B adds the จบรายการ button beside it. */
   sendItemsHint: "ส่งรายการสินค้าได้เลย",
+  /** 3B: shown under the open-session receipt once the action buttons exist. */
+  closeWhenDoneHint: "เมื่อครบแล้วกด “จบรายการ”",
+  /** 3B: no guided round is open for this operator right now. */
+  noOpenSession: [
+    "ไม่พบรายการที่เปิดจากเมนู",
+    "กรุณาพิมพ์ เมนู เพื่อเริ่มรายการใหม่",
+  ].join("\n"),
+  /** 3B: nothing has been captured yet. */
+  noCapturedItems: "ยังไม่มีรายการสินค้าที่บันทึกไว้",
+  /** 3B: correction is the existing parser contract — resend the item line. */
+  correctionHint: [
+    "แก้ไขรายการ: ส่งบรรทัดเดิมใหม่พร้อมราคาที่ถูกต้อง",
+    "ระบบจะใช้ค่าล่าสุดของสินค้านั้น",
+  ].join("\n"),
+  /**
+   * 3B: dismissing the menu does NOT void an open round. There is no
+   * authoritative cancel-open-session contract to call, so the copy must not
+   * imply one — see §2.3.
+   */
+  menuDismissedSessionOpen: [
+    "ปิดเมนูแล้ว",
+    "รายการที่เปิดไว้ยังอยู่ ส่งรายการสินค้าต่อได้",
+    "หากต้องการยกเลิกรายการ กรุณาแจ้งผู้ดูแล",
+  ].join("\n"),
+  /** 3B: close accepted, waiting for the operator's final confirmation. */
+  closeRequested: [
+    "รับคำสั่งจบรายการแล้ว",
+    "กรุณาตรวจสอบยอดด้านบน แล้วกด “ยืนยันจบรายการ”",
+  ].join("\n"),
+  /** 3B: the close barrier is not satisfied yet — nothing was released. */
+  finalizeNotReady: [
+    "ยังยืนยันไม่ได้ ระบบยังรอรายการที่ส่งมาไม่ครบ",
+    "กรุณารอสักครู่แล้วกดยืนยันอีกครั้ง",
+  ].join("\n"),
+  /** 3B: the guided close/confirm could not proceed — nothing was written. */
+  sessionActionConflict: [
+    "ทำรายการไม่สำเร็จ ระบบยังไม่ได้บันทึกการเปลี่ยนแปลง",
+    "กรุณาพิมพ์ เมนู แล้วลองใหม่อีกครั้ง",
+  ].join("\n"),
+  /** 3B → 3C handoff. */
+  nextStepWhiteSheet: "ขั้นต่อไป: กรอกใบขาว",
   txPrompt: "เลือกรายการที่ต้องการบันทึก",
   marketPrompt: "เลือกตลาด",
   sellerPrompt: "เลือกคนขาย",
@@ -84,6 +125,13 @@ export type GuidedMenuScreen =
   | "session_opened"
   | "session_already_open"
   | "session_open_conflict"
+  | "session_status"
+  | "session_close_requested"
+  | "session_finalize_confirmed"
+  | "session_finalize_not_ready"
+  | "session_action_conflict"
+  | "session_menu_dismissed"
+  | "no_open_session"
   | "unmapped"
   | "no_sellers"
   | "seller_unavailable"

@@ -26,9 +26,22 @@ import {
 } from "./markets";
 import { GuidedSessionOpener } from "./session-opener";
 import {
+  GuidedSessionCaptureService,
+  type GuidedCaptureRefusal,
+} from "./session-capture";
+import { buildWeighSessionSummary } from "@/lib/line/reply";
+import {
   assertGuidedMenuMessageLimits,
+  bindQuickReply,
   buildCancelledMessage,
+  buildCapturedItemsMessages,
   buildConfirmPreviewMessage,
+  buildFinalizeConfirmedMessage,
+  buildFinalizeNotReadyMessage,
+  buildMenuDismissedSessionOpenMessage,
+  buildNoOpenSessionMessage,
+  buildSessionActionConflictMessage,
+  type BoundTokenButton,
   buildDateSelectMessage,
   buildNoActiveSellerMarketsMessage,
   buildNoActiveSellersMessage,
@@ -51,6 +64,7 @@ import {
   type GuidedMenuIdentity,
   type GuidedMenuLineMessage,
   type GuidedMenuUxResult,
+  type LineQuickReply,
 } from "./ux-types";
 
 export function isExactGuidedMenuTrigger(text: string): boolean {
@@ -133,16 +147,20 @@ type CreateToken = <A extends MenuActionType>(input: {
 export class GuidedMenuUxHandler {
   private readonly state: GuidedMenuStateService;
   private readonly opener: GuidedSessionOpener;
+  private readonly capture: GuidedSessionCaptureService;
 
   constructor(
     supabase: SupabaseClient,
     options: {
       stateService?: GuidedMenuStateService;
       sessionOpener?: GuidedSessionOpener;
+      captureService?: GuidedSessionCaptureService;
     } = {},
   ) {
     this.state = options.stateService ?? new GuidedMenuStateService(supabase);
     this.opener = options.sessionOpener ?? new GuidedSessionOpener(supabase);
+    this.capture =
+      options.captureService ?? new GuidedSessionCaptureService(supabase);
   }
 
   async openMenu(input: {
@@ -237,9 +255,30 @@ export class GuidedMenuUxHandler {
 
     if (input.actionType === "menu_root") {
       if (isCancelPayload(input.payload)) {
+        // Dismissing the menu never voids an open round — there is no
+        // authoritative cancel-open-session contract to call. Say so plainly
+        // rather than let "ยกเลิกแล้ว" read as a cancelled round.
+        const open = await this.capture.snapshot(input.identity);
+        if (open.status === "ok") {
+          return resultEnvelope("session_menu_dismissed", [
+            buildMenuDismissedSessionOpenMessage(),
+          ]);
+        }
         return resultEnvelope("cancelled", [buildCancelledMessage()]);
       }
       return this.buildTransactionTypeScreen(input.identity);
+    }
+
+    if (input.actionType === "view_status") {
+      return this.viewStatus(input.identity);
+    }
+
+    if (input.actionType === "request_close") {
+      return this.requestClose(input);
+    }
+
+    if (input.actionType === "confirm_finalize") {
+      return this.confirmFinalize(input);
     }
 
     if (input.actionType === "choose_transaction_type") {
@@ -431,17 +470,26 @@ export class GuidedMenuUxHandler {
       );
     }
 
+    // 3B: the round is immediately actionable — review and close ride along
+    // as single-use tokens so the operator never has to remember a command.
+    const quickReply = await this.buildSessionActions(input.identity, {
+      close: true,
+      confirm: false,
+    });
+    const openedMessage = buildSessionOpenedMessage({
+      transactionType: tx,
+      sellerLabel: selection.seller.label,
+      marketLabel: assignment.marketLabel,
+      dateThaiShort: resolved.thaiShort,
+      instructions: [
+        GUIDED_MENU_COPY.sendItemsHint,
+        GUIDED_MENU_COPY.closeWhenDoneHint,
+      ],
+    });
+
     return resultEnvelope(
       "session_opened",
-      [
-        buildSessionOpenedMessage({
-          transactionType: tx,
-          sellerLabel: selection.seller.label,
-          marketLabel: assignment.marketLabel,
-          dateThaiShort: resolved.thaiShort,
-          instructions: [GUIDED_MENU_COPY.sendItemsHint],
-        }),
-      ],
+      [quickReply ? { ...openedMessage, quickReply } : openedMessage],
       {
         opened: true,
         transaction_type: tx,
@@ -451,6 +499,192 @@ export class GuidedMenuUxHandler {
         session_key: opened.sessionKey,
         session_generation: opened.sessionGeneration,
         open_outcome: opened.outcome,
+      },
+    );
+  }
+
+  // ── Slice 3B — guided capture, review and finalize ──────────────────────
+
+  /**
+   * Action buttons for an open round. Built fresh on every screen so each is
+   * a single-use token bound to this operator, source and session key.
+   */
+  private async buildSessionActions(
+    identity: GuidedMenuIdentity,
+    include: { close: boolean; confirm: boolean },
+  ): Promise<LineQuickReply | undefined> {
+    try {
+      const create = this.createTokenFn(identity);
+      const buttons: BoundTokenButton[] = [];
+      buttons.push({
+        label: "ดูรายการ",
+        actionType: "view_status",
+        payload: {},
+        wireToken: await create({ actionType: "view_status", payload: {} }),
+      });
+      if (include.close) {
+        buttons.push({
+          label: "จบรายการ",
+          actionType: "request_close",
+          payload: {},
+          wireToken: await create({ actionType: "request_close", payload: {} }),
+        });
+      }
+      if (include.confirm) {
+        buttons.push({
+          label: "ยืนยันจบรายการ",
+          actionType: "confirm_finalize",
+          payload: {},
+          wireToken: await create({
+            actionType: "confirm_finalize",
+            payload: {},
+          }),
+        });
+      }
+      buttons.push({
+        label: "ปิดเมนู",
+        actionType: "menu_root",
+        payload: { intent: "cancel" },
+        wireToken: await create({
+          actionType: "menu_root",
+          payload: { intent: "cancel" },
+        }),
+      });
+      return bindQuickReply(buttons);
+    } catch {
+      // Losing the buttons must not lose the message: the operator still sees
+      // their summary and can reopen the menu with the เมนู trigger.
+      return undefined;
+    }
+  }
+
+  /** Map a capture refusal onto operator copy without leaking internals. */
+  private refusalEnvelope(reason: GuidedCaptureRefusal): GuidedMenuUxResult {
+    if (reason === "no_open_session" || reason === "not_structured" || reason === "terminalized") {
+      return resultEnvelope("no_open_session", [buildNoOpenSessionMessage()], {
+        reason,
+      });
+    }
+    // ownership/session-key mismatches disclose nothing beyond the generic
+    // invalid-menu copy — a stranger must not learn a round exists.
+    return resultEnvelope("invalid", [buildInvalidMenuMessage()], { reason });
+  }
+
+  private async viewStatus(
+    identity: GuidedMenuIdentity,
+  ): Promise<GuidedMenuUxResult> {
+    const snapshot = await this.capture.snapshot(identity);
+    if (snapshot.status !== "ok") return this.refusalEnvelope(snapshot.reason);
+
+    const quickReply = await this.buildSessionActions(identity, {
+      close: !snapshot.closeRequested,
+      confirm: snapshot.closeRequested,
+    });
+    const summary =
+      snapshot.parsed.items.length > 0
+        ? buildWeighSessionSummary(snapshot.parsed)
+        : GUIDED_MENU_COPY.noCapturedItems;
+
+    return resultEnvelope(
+      "session_status",
+      buildCapturedItemsMessages({
+        summary: [summary, "", GUIDED_MENU_COPY.correctionHint].join("\n"),
+        quickReply,
+        maxMessages: LINE_REPLY_MESSAGE_MAX,
+      }),
+      {
+        item_count: snapshot.parsed.items.length,
+        parse_error_count: snapshot.parsed.parse_errors.length,
+        close_requested: snapshot.closeRequested,
+      },
+    );
+  }
+
+  private async requestClose(input: {
+    identity: GuidedMenuIdentity;
+    lineEventId: string;
+    lineTimestampMs: number;
+  }): Promise<GuidedMenuUxResult> {
+    const outcome = await this.capture.requestClose({
+      identity: input.identity,
+      lineEventId: input.lineEventId,
+      lineTimestampMs: input.lineTimestampMs,
+    });
+    if (outcome.status === "refused") return this.refusalEnvelope(outcome.reason);
+    if (outcome.status === "conflict") {
+      return resultEnvelope(
+        "session_action_conflict",
+        [buildSessionActionConflictMessage()],
+        { reason: outcome.reason },
+      );
+    }
+
+    const quickReply = await this.buildSessionActions(input.identity, {
+      close: false,
+      confirm: true,
+    });
+    const summary =
+      outcome.parsed.items.length > 0
+        ? buildWeighSessionSummary(outcome.parsed)
+        : GUIDED_MENU_COPY.noCapturedItems;
+
+    return resultEnvelope(
+      "session_close_requested",
+      buildCapturedItemsMessages({
+        summary: [summary, "", GUIDED_MENU_COPY.closeRequested].join("\n"),
+        quickReply,
+        maxMessages: LINE_REPLY_MESSAGE_MAX,
+      }),
+      {
+        close_reason: outcome.reason,
+        item_count: outcome.parsed.items.length,
+      },
+    );
+  }
+
+  private async confirmFinalize(input: {
+    identity: GuidedMenuIdentity;
+    lineEventId: string;
+  }): Promise<GuidedMenuUxResult> {
+    const outcome = await this.capture.confirmFinalize({
+      identity: input.identity,
+      lineEventId: input.lineEventId,
+    });
+    if (outcome.status === "refused") return this.refusalEnvelope(outcome.reason);
+    if (outcome.status === "not_ready") {
+      // The barrier decides readiness, not this handler. Re-offer confirm.
+      const quickReply = await this.buildSessionActions(input.identity, {
+        close: false,
+        confirm: true,
+      });
+      const message = buildFinalizeNotReadyMessage();
+      return resultEnvelope(
+        "session_finalize_not_ready",
+        [quickReply ? { ...message, quickReply } : message],
+        { reason: "not_ready", detail: outcome.detail ?? null },
+      );
+    }
+    if (outcome.status === "conflict") {
+      return resultEnvelope(
+        "session_action_conflict",
+        [buildSessionActionConflictMessage()],
+        { reason: outcome.reason },
+      );
+    }
+
+    return resultEnvelope(
+      "session_finalize_confirmed",
+      buildFinalizeConfirmedMessage({
+        summary:
+          outcome.parsed.items.length > 0
+            ? buildWeighSessionSummary(outcome.parsed)
+            : GUIDED_MENU_COPY.noCapturedItems,
+        maxMessages: LINE_REPLY_MESSAGE_MAX,
+      }),
+      {
+        confirm_reason: outcome.reason,
+        item_count: outcome.parsed.items.length,
+        next_step: "white_sheet",
       },
     );
   }

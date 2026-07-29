@@ -376,6 +376,96 @@ export function buildSessionOpenedMessage(input: {
   );
 }
 
+/** Safety margin under LINE's 5000-code-point text limit. */
+const TEXT_SPLIT_BUDGET = 4500;
+
+/**
+ * Split a long summary on line boundaries, deterministically and in order.
+ *
+ * A single line longer than the budget is emitted whole rather than cut
+ * mid-word; assertGuidedMenuMessageLimits still refuses anything that then
+ * exceeds the hard limit, so an unsplittable monster fails closed instead of
+ * being silently truncated.
+ */
+export function splitTextForLineReply(
+  text: string,
+  maxMessages: number,
+  budget: number = TEXT_SPLIT_BUDGET,
+): string[] {
+  if ([...text].length <= budget) return [text];
+
+  const chunks: string[] = [];
+  let current = "";
+  for (const line of text.split("\n")) {
+    const candidate = current ? `${current}\n${line}` : line;
+    if (current && [...candidate].length > budget) {
+      chunks.push(current);
+      current = line;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) chunks.push(current);
+
+  if (chunks.length <= maxMessages) return chunks;
+  // Keep the head and mark the truncation explicitly — never silently drop.
+  const head = chunks.slice(0, maxMessages - 1);
+  return [...head, "รายการยาวเกินกว่าจะแสดงครบในข้อความเดียว กรุณาดูในระบบหลังบ้าน"];
+}
+
+/** Slice 3B — captured-item review, split across at most `maxMessages`. */
+export function buildCapturedItemsMessages(input: {
+  summary: string;
+  quickReply?: LineQuickReply;
+  maxMessages: number;
+}): LineTextMessage[] {
+  const parts = splitTextForLineReply(input.summary, input.maxMessages);
+  return parts.map((text, index) => ({
+    type: "text" as const,
+    text,
+    // The action buttons ride on the last message so they stay reachable
+    // after the operator has scrolled through the whole summary.
+    ...(input.quickReply && index === parts.length - 1
+      ? { quickReply: input.quickReply }
+      : {}),
+  }));
+}
+
+export function buildNoOpenSessionMessage(): LineTextMessage {
+  return buildPlainTextMessage(GUIDED_MENU_COPY.noOpenSession);
+}
+
+export function buildMenuDismissedSessionOpenMessage(): LineTextMessage {
+  return buildPlainTextMessage(GUIDED_MENU_COPY.menuDismissedSessionOpen);
+}
+
+export function buildFinalizeNotReadyMessage(): LineTextMessage {
+  return buildPlainTextMessage(GUIDED_MENU_COPY.finalizeNotReady);
+}
+
+export function buildSessionActionConflictMessage(): LineTextMessage {
+  return buildPlainTextMessage(GUIDED_MENU_COPY.sessionActionConflict);
+}
+
+/** Slice 3B — finalization confirmed; the deferred finalizer persists it. */
+export function buildFinalizeConfirmedMessage(input: {
+  summary: string;
+  maxMessages: number;
+  quickReply?: LineQuickReply;
+}): LineTextMessage[] {
+  return buildCapturedItemsMessages({
+    summary: [
+      "บันทึกรายการสินค้าเรียบร้อย ✅",
+      "",
+      input.summary,
+      "",
+      GUIDED_MENU_COPY.nextStepWhiteSheet,
+    ].join("\n"),
+    quickReply: input.quickReply,
+    maxMessages: input.maxMessages,
+  });
+}
+
 export function buildSessionAlreadyOpenMessage(): LineTextMessage {
   return buildPlainTextMessage(GUIDED_MENU_COPY.sessionAlreadyOpen);
 }

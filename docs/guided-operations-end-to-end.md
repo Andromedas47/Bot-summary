@@ -182,7 +182,21 @@ only, and the seller is carried in guided state for display and for the
 produce session, not persisted onto the sheet. Adding a seller dimension to
 the white sheet is a schema and reporting change beyond this epic.
 
-### 2.3 Cold subsystems
+### 2.3 There is no cancel-open-round contract
+
+`produce/void.ts` voids a **finalized** `produce_sessions` row and requires
+admin authentication; it cannot void a pending round. The only way to discard
+an open pending row in existing code is `PendingSessionService.delete`, which
+has no barrier, no audit trail and no ownership check of its own.
+
+Slice 3B therefore does **not** offer a "cancel this round" write. `ยกเลิก`
+dismisses the menu and says so explicitly
+(`GUIDED_MENU_COPY.menuDismissedSessionOpen`) — the copy must never read as a
+voided round. Recovering from a mistaken open still requires an administrator.
+A real guided cancel needs an authoritative, audited pending-void contract
+that does not exist yet.
+
+### 2.4 Cold subsystems
 
 `slip_batches` last wrote 2026-06-30, `settlement_entries` 2026-07-16,
 `settlement_drafts` 2026-06-26, while `produce_sessions` is live
@@ -288,7 +302,7 @@ difference               = submitted_transfer_total - checked_slip_total
 | Slice | Status |
 |---|---|
 | 3A — open real produce session | **delivered** |
-| 3B — guided capture and finalize | see PR description |
+| 3B — guided capture and finalize | **delivered** |
 | 3C — digital white sheet | see PR description |
 | 3D — slips, reconciliation, close round | see PR description |
 

@@ -363,8 +363,90 @@ export class GuidedMenuFakeDatabase {
     if (name === "open_or_rotate_produce_structured_session") {
       return { data: this.openOrRotate(args), error: null };
     }
+    if (name === "close_produce_structured_session") {
+      return { data: this.closeStructured(args), error: null };
+    }
+    if (name === "confirm_produce_structured_finalization") {
+      return { data: this.confirmStructured(args), error: null };
+    }
     throw new Error(`Unexpected RPC: ${name}`);
   };
+
+  /** Set when the fake close barrier should answer `not_ready`. */
+  finalizeNotReady = false;
+
+  private structuredRow(args: Row): Row | undefined {
+    return (this.tables.pending_sessions ?? []).find(
+      (r) => r.session_key === args.p_session_key,
+    );
+  }
+
+  /** Mirrors 0050 close_produce_structured_session. */
+  private closeStructured(args: Row): Record<string, unknown> {
+    const row = this.structuredRow(args);
+    if (!row) return { accepted: false, reason: "not_found" };
+    if (row.entry_origin == null) {
+      return { accepted: false, reason: "not_structured" };
+    }
+    if (row.line_user_id !== args.p_line_user_id) {
+      return { accepted: false, reason: "ownership_conflict" };
+    }
+    const expected = args.p_expected_session_generation ?? null;
+    if (expected != null && row.session_generation !== expected) {
+      return { accepted: false, reason: "generation_conflict" };
+    }
+    if (row.terminalized === true) {
+      return { accepted: false, reason: "terminalized", session: row };
+    }
+    // Repeat close is a status request; the first boundary is immutable.
+    if (row.close_event_timestamp_ms != null) {
+      return { accepted: true, reason: "close_already_requested", session: row };
+    }
+    row.close_event_timestamp_ms = args.p_line_timestamp_ms;
+    row.close_line_event_id = args.p_close_line_event_id;
+    row.close_session_generation = row.session_generation;
+    row.finalize_hold_until = new Date(Date.now() + 600_000).toISOString();
+    return { accepted: true, reason: "first_close", session: row };
+  }
+
+  /** Mirrors 0050 confirm_produce_structured_finalization. */
+  private confirmStructured(args: Row): Record<string, unknown> {
+    const row = this.structuredRow(args);
+    if (!row) return { accepted: false, reason: "not_found" };
+    if (row.entry_origin == null) {
+      return { accepted: false, reason: "not_structured" };
+    }
+    if (row.line_user_id !== args.p_line_user_id) {
+      return { accepted: false, reason: "ownership_conflict" };
+    }
+    const expected = args.p_expected_session_generation ?? null;
+    if (expected != null && row.session_generation !== expected) {
+      return { accepted: false, reason: "generation_conflict" };
+    }
+    if (row.close_event_timestamp_ms == null) {
+      return { accepted: false, reason: "not_closing" };
+    }
+    if (this.finalizeNotReady) {
+      return {
+        accepted: false,
+        reason: "not_ready",
+        readiness_reason: "ingest_admission_mismatch",
+        admission_count: 3,
+        ingest_count: 2,
+        straggler_count: 1,
+      };
+    }
+    // Redelivery of the same confirm postback is idempotent.
+    const already = row.finalize_confirm_line_event_id === args.p_confirm_line_event_id;
+    row.finalize_confirmed_at = row.finalize_confirmed_at ?? new Date().toISOString();
+    row.finalize_confirm_line_event_id =
+      row.finalize_confirm_line_event_id ?? args.p_confirm_line_event_id;
+    return {
+      accepted: true,
+      reason: already ? "already_confirmed" : "confirmed",
+      session: row,
+    };
+  }
 
   /**
    * Mirrors 0049 open_or_rotate_produce_structured_session closely enough to

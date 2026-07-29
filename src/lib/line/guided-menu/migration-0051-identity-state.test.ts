@@ -16,35 +16,52 @@ function sha256Lf(text: string): string {
   return createHash("sha256").update(lf, "utf8").digest("hex");
 }
 
-/** Canonical committed LF blob SHA-256 (git stores LF). */
+function lfByteCount(text: string): number {
+  const lf = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  return Buffer.byteLength(lf, "utf8");
+}
+
+/** Canonical committed LF blob — updated when 0051 is edited in place (unapplied). */
 const CANONICAL_LF_SHA256 =
-  "1928700ef68ac08c26a44d231e08c5f498d824328a2eb7b336db219eda6e4d9d";
+  "4820056ec94360fc84a694e7a60c9a281ef500a1301b5867689a589e741d4da8";
+const CANONICAL_LF_BYTES = 28598;
 
 describe("0051 migration — schema contract", () => {
-  it("creates exactly the two foundation tables", () => {
+  it("creates foundation tables including trusted markets", () => {
     expect(code).toContain("CREATE TABLE public.line_operator_identities");
     expect(code).toContain("CREATE TABLE public.line_menu_states");
+    expect(code).toContain("CREATE TABLE public.line_guided_menu_markets");
     expect(code).not.toContain("INSERT INTO public.line_operator_identities");
+    expect(code).toContain("INSERT INTO public.line_guided_menu_markets");
   });
 
-  it("enables RLS with zero policies and service_role-only grants", () => {
+  it("enables RLS with zero policies and service_role grants without DELETE", () => {
     expect(code).toContain(
       "ALTER TABLE public.line_operator_identities ENABLE ROW LEVEL SECURITY",
     );
     expect(code).toContain(
       "ALTER TABLE public.line_menu_states ENABLE ROW LEVEL SECURITY",
     );
+    expect(code).toContain(
+      "ALTER TABLE public.line_guided_menu_markets ENABLE ROW LEVEL SECURITY",
+    );
     expect(code).not.toMatch(/CREATE POLICY/i);
     expect(code).toContain(
-      "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.line_operator_identities TO service_role",
+      "GRANT SELECT, INSERT, UPDATE ON TABLE public.line_operator_identities TO service_role",
     );
     expect(code).toContain(
-      "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.line_menu_states TO service_role",
+      "GRANT SELECT, INSERT, UPDATE ON TABLE public.line_menu_states TO service_role",
+    );
+    expect(code).not.toMatch(
+      /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public\.line_menu_states/,
     );
     expect(code).toContain("FROM anon, authenticated");
   });
 
-  it("adds consume + record RPCs as SECURITY INVOKER", () => {
+  it("adds create/consume/record RPCs as SECURITY INVOKER with search_path", () => {
+    expect(code).toContain(
+      "CREATE OR REPLACE FUNCTION public.create_line_menu_state(",
+    );
     expect(code).toContain(
       "CREATE OR REPLACE FUNCTION public.consume_line_menu_state(",
     );
@@ -52,20 +69,37 @@ describe("0051 migration — schema contract", () => {
       "CREATE OR REPLACE FUNCTION public.record_line_menu_state_result(",
     );
     expect(code).not.toMatch(/SECURITY DEFINER/i);
+    expect(code).toContain("SET search_path TO public, pg_temp");
     expect(code).toContain("invalid_or_expired");
     expect(code).toContain("already_consumed");
     expect(code).toContain("result_conflict");
+    expect(code).toContain("guided_menu_payload_valid");
+    expect(code).toContain("trg_enforce_line_menu_state_invariants");
   });
 
-  it("stores token_hash only and forbids trusted labels in payload", () => {
+  it("stores token_hash only with lowercase hex CHECK and forbids trusted labels", () => {
     expect(code).toContain("token_hash              text PRIMARY KEY");
+    expect(code).toContain("line_menu_states_token_hash_sha256_hex");
+    expect(code).toContain("^[0-9a-f]{64}$");
     expect(code).not.toMatch(/raw_token/i);
     expect(code).toContain("line_menu_states_payload_no_trusted_labels");
     expect(code).toContain("staff_label");
     expect(code).toContain("market_label");
   });
 
-  it("matches the canonical LF SHA-256", () => {
+  it("redacts different-event already_consumed and binds result RPC fully", () => {
+    expect(code).toContain(
+      "RETURN jsonb_build_object('status', 'already_consumed');",
+    );
+    expect(code).toContain("p_line_user_id           text");
+    expect(code).toContain("p_source_type            text");
+    expect(code).toContain("p_source_id              text");
+    expect(code).toContain("interval '30 minutes'");
+    expect(code).toContain("interval '10 minutes'");
+  });
+
+  it("matches the canonical LF SHA-256 and reports byte count", () => {
     expect(sha256Lf(sql)).toBe(CANONICAL_LF_SHA256);
+    expect(lfByteCount(sql)).toBe(CANONICAL_LF_BYTES);
   });
 });

@@ -10,16 +10,21 @@ import {
 import {
   MENU_ACTION_TYPES,
   MENU_DATE_MODES,
+  MENU_ROOT_INTENTS,
   MENU_SOURCE_TYPES,
   MENU_TTL_MUTATING_MS,
   MENU_TTL_NAVIGATION_MS,
   MENU_TRANSACTION_TYPE_CODES,
   MUTATING_MENU_ACTIONS,
+  SESSION_KEY_REQUIRED_ACTIONS,
   type ConsumeMenuStateInput,
   type ConsumeMenuStateOutcome,
   type CreateMenuStateInput,
+  type CreateMenuStateOutcome,
+  type GuidedMenuMarket,
   type MenuActionType,
   type MenuPayload,
+  type MenuPayloadByAction,
   type OperatorIdentity,
   type RecordMenuStateResultInput,
   type RecordMenuStateResultOutcome,
@@ -27,7 +32,7 @@ import {
 } from "./menu-state-types";
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const SHORT_CODE_RE = /^[a-z0-9_]{1,32}$/;
+const MARKET_CODE_RE = /^[a-z0-9_]{1,32}$/;
 
 function nonblank(value: string | null | undefined, label: string): string {
   const v = (value ?? "").trim();
@@ -41,13 +46,168 @@ function assertNeverTrustedLabels(payload: Record<string, unknown>): void {
   }
 }
 
+function isValidIsoCalendarDate(iso: string): boolean {
+  if (!ISO_DATE_RE.test(iso)) return false;
+  const [y, m, d] = iso.split("-").map(Number);
+  const utcNoon = new Date(Date.UTC(y!, m! - 1, d!, 12, 0, 0));
+  return (
+    utcNoon.getUTCFullYear() === y &&
+    utcNoon.getUTCMonth() === m! - 1 &&
+    utcNoon.getUTCDate() === d
+  );
+}
+
+function sortedKeys(payload: Record<string, unknown>): string[] {
+  return Object.keys(payload).sort();
+}
+
+function keysEqual(actual: string[], expected: string[]): boolean {
+  if (actual.length !== expected.length) return false;
+  return actual.every((k, i) => k === expected[i]);
+}
+
+/**
+ * Action-specific payload validation (mirrors DB guided_menu_payload_valid).
+ * market_code format is checked here; active allowlist is enforced by DB.
+ */
+export function validateMenuPayloadForAction<A extends MenuActionType>(
+  actionType: A,
+  payload: MenuPayloadByAction[A],
+): MenuPayloadByAction[A] {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("menu payload must be an object");
+  }
+  const raw = payload as Record<string, unknown>;
+  assertNeverTrustedLabels(raw);
+  const keys = sortedKeys(raw);
+
+  switch (actionType) {
+    case "menu_root": {
+      if (keys.length === 0) return {} as MenuPayloadByAction[A];
+      if (
+        keysEqual(keys, ["intent"]) &&
+        (MENU_ROOT_INTENTS as readonly string[]).includes(String(raw.intent))
+      ) {
+        return { intent: raw.intent as "cancel" } as MenuPayloadByAction[A];
+      }
+      throw new Error("invalid menu_root payload");
+    }
+    case "choose_transaction_type": {
+      if (!keysEqual(keys, ["transaction_type"])) {
+        throw new Error("invalid choose_transaction_type payload keys");
+      }
+      if (
+        !(MENU_TRANSACTION_TYPE_CODES as readonly string[]).includes(
+          String(raw.transaction_type),
+        )
+      ) {
+        throw new Error("invalid transaction_type code");
+      }
+      return {
+        transaction_type: raw.transaction_type,
+      } as MenuPayloadByAction[A];
+    }
+    case "choose_market": {
+      if (!keysEqual(keys, ["market_code", "transaction_type"])) {
+        throw new Error("invalid choose_market payload keys");
+      }
+      const marketCode = String(raw.market_code ?? "").trim();
+      if (!MARKET_CODE_RE.test(marketCode)) {
+        throw new Error("invalid market_code");
+      }
+      if (
+        !(MENU_TRANSACTION_TYPE_CODES as readonly string[]).includes(
+          String(raw.transaction_type),
+        )
+      ) {
+        throw new Error("invalid transaction_type code");
+      }
+      return {
+        transaction_type: raw.transaction_type,
+        market_code: marketCode,
+      } as MenuPayloadByAction[A];
+    }
+    case "choose_date":
+    case "confirm_open": {
+      const tx = String(raw.transaction_type ?? "");
+      const marketCode = String(raw.market_code ?? "").trim();
+      const dateMode = String(raw.date_mode ?? "");
+      if (
+        !(MENU_TRANSACTION_TYPE_CODES as readonly string[]).includes(tx)
+      ) {
+        throw new Error("invalid transaction_type code");
+      }
+      if (!MARKET_CODE_RE.test(marketCode)) {
+        throw new Error("invalid market_code");
+      }
+      if (dateMode === "today" || dateMode === "yesterday") {
+        if (
+          !keysEqual(keys, ["date_mode", "market_code", "transaction_type"])
+        ) {
+          throw new Error(`invalid ${actionType} payload keys`);
+        }
+        return {
+          transaction_type: tx,
+          market_code: marketCode,
+          date_mode: dateMode,
+        } as MenuPayloadByAction[A];
+      }
+      if (dateMode === "iso") {
+        if (
+          !keysEqual(keys, [
+            "date_mode",
+            "iso_date",
+            "market_code",
+            "transaction_type",
+          ])
+        ) {
+          throw new Error(`invalid ${actionType} payload keys`);
+        }
+        const iso = String(raw.iso_date ?? "");
+        if (!isValidIsoCalendarDate(iso)) {
+          throw new Error("invalid iso_date");
+        }
+        return {
+          transaction_type: tx,
+          market_code: marketCode,
+          date_mode: "iso",
+          iso_date: iso,
+        } as MenuPayloadByAction[A];
+      }
+      throw new Error("invalid date_mode");
+    }
+    case "view_status":
+    case "request_close":
+    case "confirm_finalize": {
+      if (keys.length !== 0) {
+        throw new Error(`invalid ${actionType} payload keys`);
+      }
+      return {} as MenuPayloadByAction[A];
+    }
+    default: {
+      const _exhaustive: never = actionType;
+      throw new Error(`unknown action_type: ${_exhaustive}`);
+    }
+  }
+}
+
+/** @deprecated Prefer validateMenuPayloadForAction — kept for older call sites. */
 export function validateMenuPayload(payload: MenuPayload): MenuPayload {
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
     throw new Error("menu payload must be an object");
   }
   assertNeverTrustedLabels(payload as Record<string, unknown>);
-
+  // Reject free-form step — removed from contract.
+  if ("step" in (payload as Record<string, unknown>)) {
+    throw new Error("unknown payload key: step");
+  }
   const out: MenuPayload = {};
+  if (payload.intent !== undefined) {
+    if (!(MENU_ROOT_INTENTS as readonly string[]).includes(payload.intent)) {
+      throw new Error("invalid intent");
+    }
+    out.intent = payload.intent;
+  }
   if (payload.transaction_type !== undefined) {
     if (
       !(MENU_TRANSACTION_TYPE_CODES as readonly string[]).includes(
@@ -60,7 +220,7 @@ export function validateMenuPayload(payload: MenuPayload): MenuPayload {
   }
   if (payload.market_code !== undefined) {
     const code = payload.market_code.trim();
-    if (!SHORT_CODE_RE.test(code)) {
+    if (!MARKET_CODE_RE.test(code)) {
       throw new Error("invalid market_code");
     }
     out.market_code = code;
@@ -72,35 +232,16 @@ export function validateMenuPayload(payload: MenuPayload): MenuPayload {
     out.date_mode = payload.date_mode;
   }
   if (payload.iso_date !== undefined) {
-    if (!ISO_DATE_RE.test(payload.iso_date)) {
+    if (!isValidIsoCalendarDate(payload.iso_date)) {
       throw new Error("invalid iso_date");
     }
     out.iso_date = payload.iso_date;
   }
-  if (payload.step !== undefined) {
-    const step = payload.step.trim();
-    if (!SHORT_CODE_RE.test(step)) {
-      throw new Error("invalid step code");
-    }
-    out.step = step;
-  }
-  if (out.date_mode === "iso" && !out.iso_date) {
-    throw new Error("iso_date required when date_mode is iso");
-  }
-  if (out.iso_date && out.date_mode !== "iso") {
-    throw new Error("iso_date only allowed when date_mode is iso");
-  }
-
-  // Reject unknown keys.
   for (const key of Object.keys(payload as Record<string, unknown>)) {
     if (
-      ![
-        "transaction_type",
-        "market_code",
-        "date_mode",
-        "iso_date",
-        "step",
-      ].includes(key)
+      !["intent", "transaction_type", "market_code", "date_mode", "iso_date"].includes(
+        key,
+      )
     ) {
       throw new Error(`unknown payload key: ${key}`);
     }
@@ -169,51 +310,103 @@ export class GuidedMenuStateService {
     return { status: "mapped", identity };
   }
 
+  /** Load trusted market allowlist from DB (authoritative source). */
+  async listActiveMarkets(): Promise<GuidedMenuMarket[]> {
+    const { data, error } = await this.supabase
+      .from("line_guided_menu_markets")
+      .select("market_code, label, active")
+      .eq("active", true)
+      .order("market_code");
+
+    if (error) {
+      throw new Error(`market allowlist lookup failed: ${error.message}`);
+    }
+    return (data ?? []).map((row) => ({
+      marketCode: String(row.market_code),
+      label: String(row.label),
+      active: row.active === true,
+    }));
+  }
+
   /**
-   * Create opaque menu state. Returns the wire token once; only the hash is stored.
+   * Create opaque menu state via DB-authoritative RPC.
+   * Returns the wire token once; only the hash is stored. TTL is set by PostgreSQL.
    */
-  async createState(input: CreateMenuStateInput): Promise<{
-    wireToken: string;
-    tokenHash: string;
-    expiresAt: string;
-  }> {
+  async createState(
+    input: CreateMenuStateInput,
+  ): Promise<CreateMenuStateOutcome> {
     if (!(MENU_ACTION_TYPES as readonly string[]).includes(input.actionType)) {
-      throw new Error("invalid action_type");
+      return { status: "invalid_or_expired" };
     }
     if (!(MENU_SOURCE_TYPES as readonly string[]).includes(input.sourceType)) {
-      throw new Error("invalid source_type");
+      return { status: "invalid_or_expired" };
     }
 
-    const lineUserId = nonblank(input.lineUserId, "lineUserId");
-    const sourceId = nonblank(input.sourceId, "sourceId");
-    const sessionKey =
-      input.sessionKey === undefined || input.sessionKey === null
-        ? null
-        : nonblank(input.sessionKey, "sessionKey");
-    const payload = validateMenuPayload(input.payload);
+    let lineUserId: string;
+    let sourceId: string;
+    let sessionKey: string | null;
+    let payload: MenuPayloadByAction[MenuActionType];
+    try {
+      lineUserId = nonblank(input.lineUserId, "lineUserId");
+      sourceId = nonblank(input.sourceId, "sourceId");
+      sessionKey =
+        input.sessionKey === undefined || input.sessionKey === null
+          ? null
+          : nonblank(input.sessionKey, "sessionKey");
+      payload = validateMenuPayloadForAction(input.actionType, input.payload);
+    } catch {
+      return { status: "invalid_or_expired" };
+    }
+
+    if (
+      SESSION_KEY_REQUIRED_ACTIONS.has(input.actionType) &&
+      sessionKey === null
+    ) {
+      return { status: "invalid_or_expired" };
+    }
 
     const raw = generateRawMenuToken(randomBytes);
     const wireToken = encodeMenuToken(raw);
     const tokenHash = hashMenuToken(raw);
-    const ttlMs = ttlMsForAction(input.actionType);
-    const expiresAt = new Date(Date.now() + ttlMs).toISOString();
 
-    const { error } = await this.supabase.from("line_menu_states").insert({
-      token_hash: tokenHash,
-      action_type: input.actionType,
-      line_user_id: lineUserId,
-      source_type: input.sourceType,
-      source_id: sourceId,
-      session_key: sessionKey,
-      payload,
-      expires_at: expiresAt,
+    const { data, error } = await this.supabase.rpc("create_line_menu_state", {
+      p_token_hash: tokenHash,
+      p_action_type: input.actionType,
+      p_line_user_id: lineUserId,
+      p_source_type: input.sourceType,
+      p_source_id: sourceId,
+      p_session_key: sessionKey,
+      p_payload: payload,
     });
 
     if (error) {
       throw new Error(`create menu state failed: ${error.message}`);
     }
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      return { status: "invalid_or_expired" };
+    }
+    const row = data as Record<string, unknown>;
+    if (row.status !== "created") {
+      return { status: "invalid_or_expired" };
+    }
+    if (!isActionType(row.action_type)) {
+      return { status: "invalid_or_expired" };
+    }
+    if (
+      typeof row.created_at !== "string" ||
+      typeof row.expires_at !== "string"
+    ) {
+      return { status: "invalid_or_expired" };
+    }
 
-    return { wireToken, tokenHash, expiresAt };
+    return {
+      status: "created",
+      wireToken,
+      tokenHash,
+      actionType: row.action_type,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+    };
   }
 
   async consumeState(
@@ -224,16 +417,24 @@ export class GuidedMenuStateService {
       return { status: "invalid_or_expired" };
     }
     const tokenHash = hashMenuToken(parsed.raw);
-    const lineEventId = nonblank(input.lineEventId, "lineEventId");
-    const lineUserId = nonblank(input.lineUserId, "lineUserId");
-    const sourceId = nonblank(input.sourceId, "sourceId");
+    let lineEventId: string;
+    let lineUserId: string;
+    let sourceId: string;
+    let sessionKey: string | null;
+    try {
+      lineEventId = nonblank(input.lineEventId, "lineEventId");
+      lineUserId = nonblank(input.lineUserId, "lineUserId");
+      sourceId = nonblank(input.sourceId, "sourceId");
+      sessionKey =
+        input.sessionKey === undefined || input.sessionKey === null
+          ? null
+          : nonblank(input.sessionKey, "sessionKey");
+    } catch {
+      return { status: "invalid_or_expired" };
+    }
     if (!(MENU_SOURCE_TYPES as readonly string[]).includes(input.sourceType)) {
       return { status: "invalid_or_expired" };
     }
-    const sessionKey =
-      input.sessionKey === undefined || input.sessionKey === null
-        ? null
-        : nonblank(input.sessionKey, "sessionKey");
 
     const { data, error } = await this.supabase.rpc("consume_line_menu_state", {
       p_token_hash: tokenHash,
@@ -257,7 +458,24 @@ export class GuidedMenuStateService {
     if (!tokenHash) {
       return { status: "invalid_or_expired" };
     }
-    const eventId = nonblank(input.consumedLineEventId, "consumedLineEventId");
+    let eventId: string;
+    let lineUserId: string;
+    let sourceId: string;
+    let sessionKey: string | null;
+    try {
+      eventId = nonblank(input.consumedLineEventId, "consumedLineEventId");
+      lineUserId = nonblank(input.lineUserId, "lineUserId");
+      sourceId = nonblank(input.sourceId, "sourceId");
+      sessionKey =
+        input.sessionKey === undefined || input.sessionKey === null
+          ? null
+          : nonblank(input.sessionKey, "sessionKey");
+    } catch {
+      return { status: "invalid_or_expired" };
+    }
+    if (!(MENU_SOURCE_TYPES as readonly string[]).includes(input.sourceType)) {
+      return { status: "invalid_or_expired" };
+    }
     if (
       !input.result ||
       typeof input.result !== "object" ||
@@ -271,6 +489,10 @@ export class GuidedMenuStateService {
       {
         p_token_hash: tokenHash,
         p_consumed_line_event_id: eventId,
+        p_line_user_id: lineUserId,
+        p_source_type: input.sourceType,
+        p_source_id: sourceId,
+        p_session_key: sessionKey,
         p_result: input.result,
       },
     );
@@ -290,11 +512,11 @@ export class GuidedMenuStateService {
     if (status === "invalid_or_expired") {
       return { status: "invalid_or_expired" };
     }
-    if (
-      status === "consumed" ||
-      status === "replay" ||
-      status === "already_consumed"
-    ) {
+    if (status === "already_consumed") {
+      // Different-event consumption: no action/payload/result disclosure.
+      return { status: "already_consumed" };
+    }
+    if (status === "consumed" || status === "replay") {
       if (!isActionType(row.action_type)) {
         return { status: "invalid_or_expired" };
       }

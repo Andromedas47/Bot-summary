@@ -1,6 +1,6 @@
 -- Conn B: consume with different event while Conn A holds the row lock.
 SELECT public.consume_line_menu_state(
-  'gm51-race-token',
+  encode(extensions.digest('gm51-race-token', 'sha256'), 'hex'),
   'evt-race-b',
   'U-race',
   'user',

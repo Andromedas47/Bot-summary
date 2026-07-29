@@ -1,6 +1,4 @@
--- Fixtures for deterministic two-connection 0051 consume races.
--- Never Production. Requires guided_menu_0051_verification tables/RPCs.
-
+-- Setup identical concurrent result recording race.
 CREATE TABLE IF NOT EXISTS public.gm51_sync (
   k text PRIMARY KEY,
   v text NOT NULL,
@@ -9,7 +7,7 @@ CREATE TABLE IF NOT EXISTS public.gm51_sync (
 
 DO $$
 DECLARE
-  v_hash text := encode(extensions.digest('gm51-race-token', 'sha256'), 'hex');
+  v_hash text := encode(extensions.digest('gm51-result-same', 'sha256'), 'hex');
 BEGIN
   DELETE FROM public.gm51_sync;
   DELETE FROM public.line_menu_states WHERE token_hash = v_hash;
@@ -20,15 +18,12 @@ BEGIN
     SET staff_label = EXCLUDED.staff_label, active = EXCLUDED.active;
 
   PERFORM public.create_line_menu_state(
-    v_hash,
-    'menu_root',
-    'U-race',
-    'user',
-    'U-race',
-    'dm:race-1',
-    '{}'::jsonb
+    v_hash, 'menu_root', 'U-race', 'user', 'U-race', 'dm:race-1', '{}'::jsonb
+  );
+  PERFORM public.consume_line_menu_state(
+    v_hash, 'evt-result-same', 'U-race', 'user', 'U-race', 'dm:race-1'
   );
 
-  RAISE NOTICE 'guided_menu_0051_concurrency_setup: ready hash=%', v_hash;
+  RAISE NOTICE 'guided_menu_0051_result_same_setup: ready';
 END
 $$;

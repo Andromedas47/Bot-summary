@@ -47,6 +47,65 @@ wait_until() {
   exit 1
 }
 
+# Deterministic two-connection race: gate holds advisory lock; A takes row lock then
+# waits on advisory; B blocks on row; unlock gate; assert.
+run_two_connection_race() {
+  local label="$1"
+  local lock_id="$2"
+  local setup_src="$3"
+  local a_src="$4"
+  local b_src="$5"
+  local assert_src="$6"
+  local unlock_key="$7"
+  local blocker_key="$8"
+  local a_wait_pattern="$9"
+  local b_wait_pattern="${10}"
+
+  echo "==> 0051 deterministic two-connection $label"
+  docker cp "$ROOT/supabase/tests/$setup_src" "${CONTAINER}:/tmp/gm51_r_setup.sql"
+  docker cp "$ROOT/supabase/tests/$a_src" "${CONTAINER}:/tmp/gm51_r_a.sql"
+  docker cp "$ROOT/supabase/tests/$b_src" "${CONTAINER}:/tmp/gm51_r_b.sql"
+  docker cp "$ROOT/supabase/tests/$assert_src" "${CONTAINER}:/tmp/gm51_r_assert.sql"
+
+  cat > /tmp/gm51_r_gate.sql <<EOSQL
+SELECT pg_advisory_lock($lock_id);
+DO \$wait\$
+BEGIN
+  WHILE NOT EXISTS (SELECT 1 FROM public.gm51_sync WHERE k = '$unlock_key') LOOP
+    PERFORM pg_sleep(0.05);
+  END LOOP;
+END
+\$wait\$;
+SELECT pg_advisory_unlock($lock_id);
+EOSQL
+  docker cp /tmp/gm51_r_gate.sql "${CONTAINER}:/tmp/gm51_r_gate.sql"
+
+  docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d verify -f /tmp/gm51_r_setup.sql
+
+  docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d verify -f /tmp/gm51_r_gate.sql &
+  local GATE=$!
+  wait_until "$label gate held" \
+    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=$lock_id AND granted)"
+
+  docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d verify -f /tmp/gm51_r_a.sql &
+  local JOB_A=$!
+  wait_until "$label A waiting" \
+    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname='verify' AND wait_event_type='Lock' AND query ILIKE '%${a_wait_pattern}%')"
+
+  docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d verify -f /tmp/gm51_r_b.sql &
+  local JOB_B=$!
+  wait_until "$label B blocked" \
+    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname='verify' AND wait_event_type='Lock' AND query ILIKE '%${b_wait_pattern}%' AND pid <> pg_backend_pid())"
+
+  psql_t "INSERT INTO public.gm51_sync(k,v) VALUES ('$blocker_key','1') ON CONFLICT (k) DO UPDATE SET v=excluded.v"
+  psql_t "INSERT INTO public.gm51_sync(k,v) VALUES ('$unlock_key','1') ON CONFLICT (k) DO UPDATE SET v=excluded.v"
+  wait "$JOB_A"
+  wait "$JOB_B"
+  wait "$GATE"
+
+  docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d verify -f /tmp/gm51_r_assert.sql
+}
+
 run_sql "bootstrap (0051 minimal stub)" \
   "$ROOT/supabase/tests/guided_menu_0051_bootstrap.sql"
 run_sql "apply candidate 0051" \
@@ -103,5 +162,29 @@ wait "$JOB_B"
 wait "$GATE"
 
 docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d verify -f /tmp/gm51_assert.sql
+
+run_two_connection_race \
+  "result-same" \
+  9100512 \
+  "guided_menu_0051_result_same_setup.sql" \
+  "guided_menu_0051_result_same_a.sql" \
+  "guided_menu_0051_result_same_b.sql" \
+  "guided_menu_0051_result_same_assert.sql" \
+  "unlock_result_same" \
+  "result_same_blocker_observed" \
+  "pg_advisory_lock(9100512)" \
+  "record_line_menu_state_result"
+
+run_two_connection_race \
+  "result-conflict" \
+  9100513 \
+  "guided_menu_0051_result_conflict_setup.sql" \
+  "guided_menu_0051_result_conflict_a.sql" \
+  "guided_menu_0051_result_conflict_b.sql" \
+  "guided_menu_0051_result_conflict_assert.sql" \
+  "unlock_result_conflict" \
+  "result_conflict_blocker_observed" \
+  "pg_advisory_lock(9100513)" \
+  "record_line_menu_state_result"
 
 echo "==> guided_menu_0051: OK"

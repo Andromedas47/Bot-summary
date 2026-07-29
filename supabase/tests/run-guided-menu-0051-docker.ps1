@@ -160,5 +160,122 @@ Write-Host "consume B:`n$(Get-Content $consBOut -Raw)`n$(Get-Content $consBErr -
 docker exec $Container psql -v ON_ERROR_STOP=1 -U postgres -d verify -f /tmp/gm51_assert.sql
 if ($LASTEXITCODE -ne 0) { throw "SQL failed: concurrency assert" }
 
+function Invoke-TwoConnectionRace {
+  param(
+    [string]$Label,
+    [int]$LockId,
+    [string]$SetupSrc,
+    [string]$ASrc,
+    [string]$BSrc,
+    [string]$AssertSrc,
+    [string]$UnlockKey,
+    [string]$BlockerKey,
+    [string]$AWaitPattern,
+    [string]$BWaitPattern
+  )
+
+  Write-Host "==> 0051 deterministic two-connection $Label"
+  Copy-Sql (Join-Path $Root "supabase/tests/$SetupSrc") "/tmp/gm51_r_setup.sql"
+  Copy-Sql (Join-Path $Root "supabase/tests/$ASrc") "/tmp/gm51_r_a.sql"
+  Copy-Sql (Join-Path $Root "supabase/tests/$BSrc") "/tmp/gm51_r_b.sql"
+  Copy-Sql (Join-Path $Root "supabase/tests/$AssertSrc") "/tmp/gm51_r_assert.sql"
+
+  $gateSql = @"
+SELECT pg_advisory_lock($LockId);
+DO `$wait`$
+BEGIN
+  WHILE NOT EXISTS (SELECT 1 FROM public.gm51_sync WHERE k = '$UnlockKey') LOOP
+    PERFORM pg_sleep(0.05);
+  END LOOP;
+END
+`$wait`$;
+SELECT pg_advisory_unlock($LockId);
+"@
+  $gateTmp = [System.IO.Path]::GetTempFileName() + ".sql"
+  [System.IO.File]::WriteAllText($gateTmp, $gateSql)
+  docker cp $gateTmp "${Container}:/tmp/gm51_r_gate.sql"
+  Remove-Item $gateTmp -Force
+
+  docker exec $Container psql -v ON_ERROR_STOP=1 -U postgres -d verify -f /tmp/gm51_r_setup.sql
+  if ($LASTEXITCODE -ne 0) { throw "SQL failed: $Label setup" }
+
+  $gateOut = Join-Path $env:TEMP "gm51-$Label-gate-$PID.out"
+  $gateErr = Join-Path $env:TEMP "gm51-$Label-gate-$PID.err"
+  $gate = Start-DockerPsql "/tmp/gm51_r_gate.sql" $gateOut $gateErr
+  Wait-Until {
+    Invoke-Psql "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=$LockId AND granted)"
+  } "$Label gate held"
+
+  $aOut = Join-Path $env:TEMP "gm51-$Label-a-$PID.out"
+  $aErr = Join-Path $env:TEMP "gm51-$Label-a-$PID.err"
+  $procA = Start-DockerPsql "/tmp/gm51_r_a.sql" $aOut $aErr
+
+  Wait-Until {
+    if ($procA.HasExited -and $procA.ExitCode -ne 0) {
+      throw "$Label A exited early: $(Get-Content $aErr -Raw)$(Get-Content $aOut -Raw)"
+    }
+    Invoke-Psql @"
+SELECT EXISTS (
+  SELECT 1 FROM pg_stat_activity
+  WHERE datname = 'verify'
+    AND wait_event_type = 'Lock'
+    AND query ILIKE '%$AWaitPattern%'
+)
+"@
+  } "$Label A waiting"
+
+  $bOut = Join-Path $env:TEMP "gm51-$Label-b-$PID.out"
+  $bErr = Join-Path $env:TEMP "gm51-$Label-b-$PID.err"
+  $procB = Start-DockerPsql "/tmp/gm51_r_b.sql" $bOut $bErr
+
+  Wait-Until {
+    Invoke-Psql @"
+SELECT EXISTS (
+  SELECT 1 FROM pg_stat_activity
+  WHERE datname = 'verify'
+    AND wait_event_type = 'Lock'
+    AND query ILIKE '%$BWaitPattern%'
+    AND pid <> pg_backend_pid()
+)
+"@
+  } "$Label B blocked"
+
+  Invoke-Psql "INSERT INTO public.gm51_sync(k,v) VALUES ('$BlockerKey','1') ON CONFLICT (k) DO UPDATE SET v=excluded.v"
+  Invoke-Psql "INSERT INTO public.gm51_sync(k,v) VALUES ('$UnlockKey','1') ON CONFLICT (k) DO UPDATE SET v=excluded.v"
+
+  Await-Proc $procA "$Label A" 60 $aOut $aErr
+  Await-Proc $procB "$Label B" 60 $bOut $bErr
+  Await-Proc $gate "$Label gate" 60 $gateOut $gateErr
+  Write-Host "$Label A:`n$(Get-Content $aOut -Raw)`n$(Get-Content $aErr -Raw)"
+  Write-Host "$Label B:`n$(Get-Content $bOut -Raw)`n$(Get-Content $bErr -Raw)"
+
+  docker exec $Container psql -v ON_ERROR_STOP=1 -U postgres -d verify -f /tmp/gm51_r_assert.sql
+  if ($LASTEXITCODE -ne 0) { throw "SQL failed: $Label assert" }
+}
+
+Invoke-TwoConnectionRace `
+  -Label "result-same" `
+  -LockId 9100512 `
+  -SetupSrc "guided_menu_0051_result_same_setup.sql" `
+  -ASrc "guided_menu_0051_result_same_a.sql" `
+  -BSrc "guided_menu_0051_result_same_b.sql" `
+  -AssertSrc "guided_menu_0051_result_same_assert.sql" `
+  -UnlockKey "unlock_result_same" `
+  -BlockerKey "result_same_blocker_observed" `
+  -AWaitPattern "pg_advisory_lock(9100512)" `
+  -BWaitPattern "record_line_menu_state_result"
+
+Invoke-TwoConnectionRace `
+  -Label "result-conflict" `
+  -LockId 9100513 `
+  -SetupSrc "guided_menu_0051_result_conflict_setup.sql" `
+  -ASrc "guided_menu_0051_result_conflict_a.sql" `
+  -BSrc "guided_menu_0051_result_conflict_b.sql" `
+  -AssertSrc "guided_menu_0051_result_conflict_assert.sql" `
+  -UnlockKey "unlock_result_conflict" `
+  -BlockerKey "result_conflict_blocker_observed" `
+  -AWaitPattern "pg_advisory_lock(9100513)" `
+  -BWaitPattern "record_line_menu_state_result"
+
 Write-Host "==> guided_menu_0051: OK"
 Cleanup

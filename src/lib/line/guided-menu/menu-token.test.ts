@@ -59,19 +59,17 @@ describe("0051 menu token", () => {
 });
 
 describe("0051 menu payload + TTL", () => {
-  it("accepts known short codes only and rejects trusted labels", () => {
+  it("accepts known short codes only and rejects trusted labels / free-form step", () => {
     expect(
       validateMenuPayload({
         transaction_type: "withdraw",
-        market_code: "wihan",
+        market_code: "kee",
         date_mode: "today",
-        step: "root",
       }),
     ).toEqual({
       transaction_type: "withdraw",
-      market_code: "wihan",
+      market_code: "kee",
       date_mode: "today",
-      step: "root",
     });
 
     expect(() =>
@@ -84,11 +82,8 @@ describe("0051 menu payload + TTL", () => {
       validateMenuPayload({ transaction_type: "เบิก" as never }),
     ).toThrow(/transaction_type/);
     expect(() =>
-      validateMenuPayload({ date_mode: "iso" }),
-    ).toThrow(/iso_date required/);
-    expect(() =>
-      validateMenuPayload({ date_mode: "today", iso_date: "2026-07-29" }),
-    ).toThrow(/only allowed/);
+      validateMenuPayload({ step: "root" } as never),
+    ).toThrow(/step/);
     expect(() =>
       validateMenuPayload({ mystery: "x" } as never),
     ).toThrow(/unknown payload key/);

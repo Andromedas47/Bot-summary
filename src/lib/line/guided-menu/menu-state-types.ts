@@ -27,35 +27,86 @@ export type MenuTransactionTypeCode =
 export const MENU_DATE_MODES = ["today", "yesterday", "iso"] as const;
 export type MenuDateMode = (typeof MENU_DATE_MODES)[number];
 
-/** Mutating confirmation actions use a shorter absolute TTL. */
+export const MENU_ROOT_INTENTS = ["cancel"] as const;
+export type MenuRootIntent = (typeof MENU_ROOT_INTENTS)[number];
+
+/** Mutating confirmation actions use a shorter absolute TTL (DB-enforced). */
 export const MUTATING_MENU_ACTIONS = new Set<MenuActionType>([
   "confirm_open",
   "request_close",
   "confirm_finalize",
 ]);
 
+/** Actions that require a non-null session_key binding column. */
+export const SESSION_KEY_REQUIRED_ACTIONS = new Set<MenuActionType>([
+  "view_status",
+  "request_close",
+  "confirm_finalize",
+]);
+
+/** Documented TTL constants — database is authoritative at create time. */
 export const MENU_TTL_NAVIGATION_MS = 30 * 60 * 1000;
 export const MENU_TTL_MUTATING_MS = 10 * 60 * 1000;
 
-export type MenuPayload = {
-  /** Known short code only; never a display label. */
-  transaction_type?: MenuTransactionTypeCode;
-  /** Server-config market code; never market_label. */
-  market_code?: string;
-  date_mode?: MenuDateMode;
-  /** Required when date_mode === "iso"; YYYY-MM-DD only. */
-  iso_date?: string;
-  /** Opaque step marker; short code only. */
-  step?: string;
+/**
+ * Action-specific payloads. Only stable identifiers — never display labels.
+ * Unknown keys are rejected by validateMenuPayloadForAction / DB.
+ */
+export type MenuRootPayload =
+  | Record<string, never>
+  | { intent: MenuRootIntent };
+
+export type MenuChooseTransactionTypePayload = {
+  transaction_type: MenuTransactionTypeCode;
 };
 
-export type CreateMenuStateInput = {
-  actionType: MenuActionType;
+export type MenuChooseMarketPayload = {
+  transaction_type: MenuTransactionTypeCode;
+  market_code: string;
+};
+
+export type MenuChooseDatePayload =
+  | {
+      transaction_type: MenuTransactionTypeCode;
+      market_code: string;
+      date_mode: "today" | "yesterday";
+    }
+  | {
+      transaction_type: MenuTransactionTypeCode;
+      market_code: string;
+      date_mode: "iso";
+      iso_date: string;
+    };
+
+export type MenuEmptyPayload = Record<string, never>;
+
+export type MenuPayloadByAction = {
+  menu_root: MenuRootPayload;
+  choose_transaction_type: MenuChooseTransactionTypePayload;
+  choose_market: MenuChooseMarketPayload;
+  choose_date: MenuChooseDatePayload;
+  confirm_open: MenuChooseDatePayload;
+  view_status: MenuEmptyPayload;
+  request_close: MenuEmptyPayload;
+  confirm_finalize: MenuEmptyPayload;
+};
+
+/** Loose payload shape used when reading back validated DB JSON. */
+export type MenuPayload = {
+  intent?: MenuRootIntent;
+  transaction_type?: MenuTransactionTypeCode;
+  market_code?: string;
+  date_mode?: MenuDateMode;
+  iso_date?: string;
+};
+
+export type CreateMenuStateInput<A extends MenuActionType = MenuActionType> = {
+  actionType: A;
   lineUserId: string;
   sourceType: MenuSourceType;
   sourceId: string;
   sessionKey?: string | null;
-  payload: MenuPayload;
+  payload: MenuPayloadByAction[A];
 };
 
 export type ConsumeMenuStateInput = {
@@ -70,6 +121,10 @@ export type ConsumeMenuStateInput = {
 export type RecordMenuStateResultInput = {
   wireToken: string;
   consumedLineEventId: string;
+  lineUserId: string;
+  sourceType: MenuSourceType;
+  sourceId: string;
+  sessionKey?: string | null;
   result: Record<string, unknown>;
 };
 
@@ -78,6 +133,17 @@ export type OperatorIdentity = {
   staffLabel: string;
   active: boolean;
 };
+
+export type CreateMenuStateOutcome =
+  | {
+      status: "created";
+      wireToken: string;
+      tokenHash: string;
+      actionType: MenuActionType;
+      createdAt: string;
+      expiresAt: string;
+    }
+  | { status: "invalid_or_expired" };
 
 export type ConsumeMenuStateOutcome =
   | {
@@ -91,12 +157,7 @@ export type ConsumeMenuStateOutcome =
       payload: MenuPayload;
       result: Record<string, unknown> | null;
     }
-  | {
-      status: "already_consumed";
-      actionType: MenuActionType;
-      payload: MenuPayload;
-      result: Record<string, unknown> | null;
-    }
+  | { status: "already_consumed" }
   | { status: "invalid_or_expired" };
 
 export type RecordMenuStateResultOutcome =
@@ -108,3 +169,9 @@ export type RecordMenuStateResultOutcome =
 export type ResolveOperatorOutcome =
   | { status: "mapped"; identity: OperatorIdentity }
   | { status: "unmapped" };
+
+export type GuidedMenuMarket = {
+  marketCode: string;
+  label: string;
+  active: boolean;
+};

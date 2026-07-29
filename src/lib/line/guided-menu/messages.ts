@@ -292,6 +292,14 @@ export function buildConfirmPlaceholderMessage(): LineTextMessage {
   return buildPlainTextMessage(GUIDED_MENU_COPY.confirmPlaceholder);
 }
 
+export function buildNoActiveMarketsMessage(): LineTextMessage {
+  return buildPlainTextMessage(GUIDED_MENU_COPY.noActiveMarkets);
+}
+
+export function buildMarketUnavailableMessage(): LineTextMessage {
+  return buildPlainTextMessage(GUIDED_MENU_COPY.marketUnavailable);
+}
+
 /** Assert outbound messages stay within LINE payload budgets. */
 export function assertGuidedMenuMessageLimits(
   messages: GuidedMenuLineMessage[],

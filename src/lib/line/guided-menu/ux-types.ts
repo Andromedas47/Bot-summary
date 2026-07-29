@@ -32,6 +32,10 @@ export const GUIDED_MENU_COPY = {
     "บัญชีไลน์นี้ยังไม่ได้รับสิทธิ์ใช้งานเมนู กรุณาติดต่อผู้ดูแล",
   invalidOrExpired: "เมนูหมดอายุหรือไม่ถูกต้อง กรุณาพิมพ์ เมนู ใหม่",
   cancelled: "ยกเลิกแล้ว",
+  noActiveMarkets:
+    "ยังไม่มีตลาดที่พร้อมใช้งาน กรุณาติดต่อผู้ดูแล",
+  marketUnavailable:
+    "ตลาดนี้ไม่พร้อมใช้งานแล้ว กรุณาพิมพ์ เมนู ใหม่",
   /**
    * Confirm boundary placeholder — must not read as a successful open.
    * Explicitly: no session opened, no data recorded, use existing method.
@@ -54,6 +58,8 @@ export type GuidedMenuScreen =
   | "cancelled"
   | "confirm_placeholder"
   | "unmapped"
+  | "no_markets"
+  | "market_unavailable"
   | "invalid";
 
 export type LinePostbackAction = {

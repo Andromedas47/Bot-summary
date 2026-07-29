@@ -7,6 +7,7 @@ import { encodeMenuToken } from "./menu-token";
 import {
   buildConfirmPlaceholderMessage,
   buildConfirmPreviewMessage,
+  buildCancelledMessage,
   buildDateSelectMessage,
   buildInvalidMenuMessage,
   buildMarketSelectMessage,
@@ -26,6 +27,7 @@ export type Slice2EvidenceBundle = {
   date: GuidedMenuLineMessage[];
   confirm: GuidedMenuLineMessage[];
   confirm_placeholder: GuidedMenuLineMessage[];
+  cancelled: GuidedMenuLineMessage[];
   unmapped: GuidedMenuLineMessage[];
   invalid: GuidedMenuLineMessage[];
 };
@@ -83,6 +85,7 @@ export function buildSlice2EvidenceMessages(): Slice2EvidenceBundle {
       }),
     ],
     confirm_placeholder: [buildConfirmPlaceholderMessage()],
+    cancelled: [buildCancelledMessage()],
     unmapped: [buildUnmappedMessage()],
     invalid: [buildInvalidMenuMessage()],
   };

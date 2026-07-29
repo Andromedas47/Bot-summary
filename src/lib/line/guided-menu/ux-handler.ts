@@ -1,6 +1,7 @@
 /**
  * Guided Menu Slice 2 UX handler.
  * Opens menu on exact "เมนู", consumes opaque gpm1 tokens, never opens sessions.
+ * Adapted to corrected Slice 1 create/consume/record contracts.
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -11,6 +12,7 @@ import type {
   MenuActionType,
   MenuDateMode,
   MenuPayload,
+  MenuPayloadByAction,
   MenuSourceType,
   MenuTransactionTypeCode,
 } from "./menu-state-types";
@@ -18,7 +20,7 @@ import { MENU_SOURCE_TYPES, MENU_TRANSACTION_TYPE_CODES } from "./menu-state-typ
 import { resolveGuidedMenuDate } from "./dates";
 import {
   findGuidedMenuMarket,
-  loadGuidedMenuMarkets,
+  marketOptionsFromActive,
   type GuidedMenuMarketOption,
 } from "./markets";
 import {
@@ -29,13 +31,14 @@ import {
   buildDateSelectMessage,
   buildInvalidMenuMessage,
   buildMarketSelectMessage,
+  buildMarketUnavailableMessage,
+  buildNoActiveMarketsMessage,
   buildTransactionTypeMessage,
   buildUnmappedMessage,
 } from "./messages";
 import {
   GUIDED_MENU_COPY,
   GUIDED_MENU_TRIGGER,
-  TX_CODE_TO_LABEL,
   type GuidedMenuIdentity,
   type GuidedMenuLineMessage,
   type GuidedMenuUxResult,
@@ -73,7 +76,7 @@ function asTx(value: unknown): MenuTransactionTypeCode | null {
 }
 
 function isCancelPayload(payload: MenuPayload): boolean {
-  return payload.step === "cancel";
+  return payload.intent === "cancel";
 }
 
 function resultEnvelope(
@@ -113,14 +116,15 @@ function restoreFromResult(result: Record<string, unknown> | null): GuidedMenuUx
   };
 }
 
-type CreateToken = (input: {
-  actionType: MenuActionType;
-  payload: MenuPayload;
+type CreateToken = <A extends MenuActionType>(input: {
+  actionType: A;
+  payload: MenuPayloadByAction[A];
 }) => Promise<string>;
 
 export class GuidedMenuUxHandler {
   private readonly state: GuidedMenuStateService;
-  private readonly markets: GuidedMenuMarketOption[];
+  /** Optional test override — production always loads via listActiveMarkets(). */
+  private readonly marketsOverride: GuidedMenuMarketOption[] | null;
 
   constructor(
     supabase: SupabaseClient,
@@ -130,7 +134,13 @@ export class GuidedMenuUxHandler {
     } = {},
   ) {
     this.state = options.stateService ?? new GuidedMenuStateService(supabase);
-    this.markets = options.markets ?? loadGuidedMenuMarkets();
+    this.marketsOverride = options.markets ?? null;
+  }
+
+  private async loadActiveMarkets(): Promise<GuidedMenuMarketOption[]> {
+    if (this.marketsOverride) return this.marketsOverride;
+    const rows = await this.state.listActiveMarkets();
+    return marketOptionsFromActive(rows);
   }
 
   async openMenu(input: {
@@ -166,13 +176,14 @@ export class GuidedMenuUxHandler {
       return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
     }
 
-    if (consumed.status === "replay" || consumed.status === "already_consumed") {
-      // Same-event replay is idempotent via stored result.
-      // Different-event already_consumed → generic invalid (no side effects).
-      if (consumed.status === "replay") {
-        const restored = restoreFromResult(consumed.result);
-        if (restored) return restored;
-      }
+    if (consumed.status === "already_consumed") {
+      // Different-event: no action/payload/result disclosure — generic refuse.
+      return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
+    }
+
+    if (consumed.status === "replay") {
+      const restored = restoreFromResult(consumed.result);
+      if (restored) return restored;
       return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
     }
 
@@ -187,6 +198,10 @@ export class GuidedMenuUxHandler {
     const recorded = await this.state.recordResult({
       wireToken: input.wireToken,
       consumedLineEventId: input.lineEventId,
+      lineUserId: input.identity.lineUserId,
+      sourceType: input.identity.sourceType,
+      sourceId: input.identity.sourceId,
+      sessionKey: input.identity.sessionKey,
       result: outcome.result,
     });
 
@@ -194,7 +209,10 @@ export class GuidedMenuUxHandler {
       const restored = restoreFromResult(recorded.result);
       if (restored) return restored;
     }
-    if (recorded.status === "result_conflict" || recorded.status === "invalid_or_expired") {
+    if (
+      recorded.status === "result_conflict" ||
+      recorded.status === "invalid_or_expired"
+    ) {
       return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
     }
 
@@ -234,10 +252,12 @@ export class GuidedMenuUxHandler {
       if (!tx || !marketCode) {
         return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
       }
-      const market = findGuidedMenuMarket(this.markets, marketCode);
+      const markets = await this.loadActiveMarkets();
+      const market = findGuidedMenuMarket(markets, marketCode);
       if (!market) {
-        // Unknown market_code in stored state (config removed) → safe refuse.
-        return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
+        return resultEnvelope("market_unavailable", [
+          buildMarketUnavailableMessage(),
+        ]);
       }
       return this.buildDateScreen(input.identity, tx, market);
     }
@@ -246,12 +266,19 @@ export class GuidedMenuUxHandler {
       const tx = asTx(input.payload.transaction_type);
       const marketCode = input.payload.market_code?.trim();
       const dateMode = input.payload.date_mode;
-      if (!tx || !marketCode || (dateMode !== "today" && dateMode !== "yesterday")) {
+      if (
+        !tx ||
+        !marketCode ||
+        (dateMode !== "today" && dateMode !== "yesterday")
+      ) {
         return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
       }
-      const market = findGuidedMenuMarket(this.markets, marketCode);
+      const markets = await this.loadActiveMarkets();
+      const market = findGuidedMenuMarket(markets, marketCode);
       if (!market) {
-        return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
+        return resultEnvelope("market_unavailable", [
+          buildMarketUnavailableMessage(),
+        ]);
       }
       return this.buildConfirmScreen(
         input.identity,
@@ -264,6 +291,16 @@ export class GuidedMenuUxHandler {
 
     if (input.actionType === "confirm_open") {
       // UX boundary: no open/append/admission/ingest/close — placeholder only.
+      // Re-validate market still active before placeholder (fail closed).
+      const marketCode = input.payload.market_code?.trim();
+      if (marketCode) {
+        const markets = await this.loadActiveMarkets();
+        if (!findGuidedMenuMarket(markets, marketCode)) {
+          return resultEnvelope("market_unavailable", [
+            buildMarketUnavailableMessage(),
+          ]);
+        }
+      }
       return resultEnvelope(
         "confirm_placeholder",
         [buildConfirmPlaceholderMessage()],
@@ -288,7 +325,10 @@ export class GuidedMenuUxHandler {
         sourceId: identity.sourceId,
         sessionKey: identity.sessionKey,
         payload,
-      } satisfies CreateMenuStateInput);
+      } as CreateMenuStateInput);
+      if (created.status !== "created") {
+        throw new Error("guided menu state create refused");
+      }
       return created.wireToken;
     };
   }
@@ -296,62 +336,74 @@ export class GuidedMenuUxHandler {
   private async buildTransactionTypeScreen(
     identity: GuidedMenuIdentity,
   ): Promise<GuidedMenuUxResult> {
-    const create = this.createTokenFn(identity);
-    const [withdraw, ret, damaged] = await Promise.all([
-      create({
-        actionType: "choose_transaction_type",
-        payload: { transaction_type: "withdraw" },
-      }),
-      create({
-        actionType: "choose_transaction_type",
-        payload: { transaction_type: "return" },
-      }),
-      create({
-        actionType: "choose_transaction_type",
-        payload: { transaction_type: "damaged_return" },
-      }),
-    ]);
-    const message = buildTransactionTypeMessage({
-      withdraw,
-      return: ret,
-      damagedReturn: damaged,
-    });
-    return resultEnvelope("transaction_type", [message]);
+    try {
+      const create = this.createTokenFn(identity);
+      const [withdraw, ret, damaged] = await Promise.all([
+        create({
+          actionType: "choose_transaction_type",
+          payload: { transaction_type: "withdraw" },
+        }),
+        create({
+          actionType: "choose_transaction_type",
+          payload: { transaction_type: "return" },
+        }),
+        create({
+          actionType: "choose_transaction_type",
+          payload: { transaction_type: "damaged_return" },
+        }),
+      ]);
+      const message = buildTransactionTypeMessage({
+        withdraw,
+        return: ret,
+        damagedReturn: damaged,
+      });
+      return resultEnvelope("transaction_type", [message]);
+    } catch {
+      return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
+    }
   }
 
   private async buildMarketScreen(
     identity: GuidedMenuIdentity,
     transactionType: MenuTransactionTypeCode,
   ): Promise<GuidedMenuUxResult> {
-    if (this.markets.length === 0) {
+    const markets = await this.loadActiveMarkets();
+    if (markets.length === 0) {
+      return resultEnvelope("no_markets", [buildNoActiveMarketsMessage()]);
+    }
+    try {
+      const create = this.createTokenFn(identity);
+      const marketTokens = new Map<string, string>();
+      for (const market of markets) {
+        const token = await create({
+          actionType: "choose_market",
+          payload: {
+            transaction_type: transactionType,
+            market_code: market.code,
+          },
+        });
+        marketTokens.set(market.code, token);
+      }
+      const [backToken, cancelToken] = await Promise.all([
+        create({ actionType: "menu_root", payload: {} }),
+        create({
+          actionType: "menu_root",
+          payload: { intent: "cancel" },
+        }),
+      ]);
+      const message = buildMarketSelectMessage({
+        transactionType,
+        markets,
+        marketTokens,
+        backToken,
+        cancelToken,
+      });
+      return resultEnvelope("market", [message], {
+        transaction_type: transactionType,
+      });
+    } catch {
       return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
     }
-    const create = this.createTokenFn(identity);
-    const marketTokens = new Map<string, string>();
-    for (const market of this.markets) {
-      const token = await create({
-        actionType: "choose_market",
-        payload: {
-          transaction_type: transactionType,
-          market_code: market.code,
-        },
-      });
-      marketTokens.set(market.code, token);
-    }
-    const [backToken, cancelToken] = await Promise.all([
-      create({ actionType: "menu_root", payload: {} }),
-      create({ actionType: "menu_root", payload: { step: "cancel" } }),
-    ]);
-    const message = buildMarketSelectMessage({
-      transactionType,
-      markets: this.markets,
-      marketTokens,
-      backToken,
-      cancelToken,
-    });
-    return resultEnvelope("market", [message], {
-      transaction_type: transactionType,
-    });
   }
 
   private async buildDateScreen(
@@ -359,47 +411,57 @@ export class GuidedMenuUxHandler {
     transactionType: MenuTransactionTypeCode,
     market: GuidedMenuMarketOption,
   ): Promise<GuidedMenuUxResult> {
-    const create = this.createTokenFn(identity);
-    const base: MenuPayload = {
-      transaction_type: transactionType,
-      market_code: market.code,
-    };
-    const [todayToken, yesterdayToken, backToken, cancelToken] =
-      await Promise.all([
-        create({
-          actionType: "choose_date",
-          payload: { ...base, date_mode: "today" },
-        }),
-        create({
-          actionType: "choose_date",
-          payload: { ...base, date_mode: "yesterday" },
-        }),
-        // Back → re-show markets for this transaction type.
-        create({
-          actionType: "choose_transaction_type",
-          payload: { transaction_type: transactionType },
-        }),
-        create({ actionType: "menu_root", payload: { step: "cancel" } }),
-      ]);
-    const message = buildDateSelectMessage({
-      transactionType,
-      marketLabel: market.label,
-      todayToken,
-      yesterdayToken,
-      backToken,
-      cancelToken,
-    });
-    return resultEnvelope("date", [message], {
-      transaction_type: transactionType,
-      market_code: market.code,
-    });
+    try {
+      const create = this.createTokenFn(identity);
+      const [todayToken, yesterdayToken, backToken, cancelToken] =
+        await Promise.all([
+          create({
+            actionType: "choose_date",
+            payload: {
+              transaction_type: transactionType,
+              market_code: market.code,
+              date_mode: "today",
+            },
+          }),
+          create({
+            actionType: "choose_date",
+            payload: {
+              transaction_type: transactionType,
+              market_code: market.code,
+              date_mode: "yesterday",
+            },
+          }),
+          create({
+            actionType: "choose_transaction_type",
+            payload: { transaction_type: transactionType },
+          }),
+          create({
+            actionType: "menu_root",
+            payload: { intent: "cancel" },
+          }),
+        ]);
+      const message = buildDateSelectMessage({
+        transactionType,
+        marketLabel: market.label,
+        todayToken,
+        yesterdayToken,
+        backToken,
+        cancelToken,
+      });
+      return resultEnvelope("date", [message], {
+        transaction_type: transactionType,
+        market_code: market.code,
+      });
+    } catch {
+      return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
+    }
   }
 
   private async buildConfirmScreen(
     identity: GuidedMenuIdentity,
     transactionType: MenuTransactionTypeCode,
     market: GuidedMenuMarketOption,
-    dateMode: MenuDateMode,
+    dateMode: Extract<MenuDateMode, "today" | "yesterday">,
     lineTimestampMs: number,
   ): Promise<GuidedMenuUxResult> {
     const resolved = resolveGuidedMenuDate(dateMode, lineTimestampMs);
@@ -407,43 +469,47 @@ export class GuidedMenuUxHandler {
       return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
     }
 
-    const create = this.createTokenFn(identity);
-    const selection: MenuPayload = {
-      transaction_type: transactionType,
-      market_code: market.code,
-      date_mode: dateMode,
-    };
-    const [confirmToken, backToken, cancelToken] = await Promise.all([
-      create({ actionType: "confirm_open", payload: selection }),
-      // Back → re-show date select (same as choosing this market again).
-      create({
-        actionType: "choose_market",
-        payload: {
-          transaction_type: transactionType,
-          market_code: market.code,
-        },
-      }),
-      create({ actionType: "menu_root", payload: { step: "cancel" } }),
-    ]);
+    try {
+      const create = this.createTokenFn(identity);
+      const selection: MenuPayloadByAction["confirm_open"] = {
+        transaction_type: transactionType,
+        market_code: market.code,
+        date_mode: dateMode,
+      };
+      const [confirmToken, backToken, cancelToken] = await Promise.all([
+        create({ actionType: "confirm_open", payload: selection }),
+        create({
+          actionType: "choose_market",
+          payload: {
+            transaction_type: transactionType,
+            market_code: market.code,
+          },
+        }),
+        create({
+          actionType: "menu_root",
+          payload: { intent: "cancel" },
+        }),
+      ]);
 
-    const message = buildConfirmPreviewMessage({
-      transactionType,
-      marketLabel: market.label,
-      dateThaiShort: resolved.thaiShort,
-      confirmToken,
-      backToken,
-      cancelToken,
-    });
+      const message = buildConfirmPreviewMessage({
+        transactionType,
+        marketLabel: market.label,
+        dateThaiShort: resolved.thaiShort,
+        confirmToken,
+        backToken,
+        cancelToken,
+      });
 
-    return resultEnvelope("confirm", [message], {
-      transaction_type: transactionType,
-      market_code: market.code,
-      date_mode: dateMode,
-      business_date_iso: resolved.iso,
-      business_date_thai: resolved.thaiShort,
-      transaction_label: TX_CODE_TO_LABEL[transactionType],
-      market_label: market.label,
-    });
+      // Result stores stable codes only — display labels reconstructed from config.
+      return resultEnvelope("confirm", [message], {
+        transaction_type: transactionType,
+        market_code: market.code,
+        date_mode: dateMode,
+        business_date_iso: resolved.iso,
+      });
+    } catch {
+      return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
+    }
   }
 }
 

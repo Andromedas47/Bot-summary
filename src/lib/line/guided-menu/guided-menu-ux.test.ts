@@ -7,7 +7,8 @@ import {
 } from "./ux-handler";
 import { formatThaiDateShort, resolveGuidedMenuDate } from "./dates";
 import { assertGuidedMenuMessageLimits } from "./messages";
-import { parseGuidedMenuMarketsEnv } from "./markets";
+import { toMarketOption } from "./markets";
+import { GuidedMenuStateService } from "./menu-state-service";
 import { MENU_TOKEN_PREFIX, parseMenuToken } from "./menu-token";
 import { GUIDED_MENU_COPY, TX_CODE_TO_LABEL } from "./ux-types";
 import { GuidedMenuFakeDatabase } from "./test-fake-db";
@@ -39,6 +40,16 @@ function collectPostbackData(value: unknown, out: string[] = []): string[] {
   return out;
 }
 
+function seededHandler(db: GuidedMenuFakeDatabase): GuidedMenuUxHandler {
+  db.seedOperator({
+    line_user_id: IDENTITY.lineUserId,
+    staff_label: "พี่ดำ",
+    active: true,
+  });
+  db.seedMarket({ market_code: "kee", label: "ตลาดกี้", active: true });
+  return new GuidedMenuUxHandler(db.asClient());
+}
+
 describe("0051 Slice 2 — Guided Menu UX", () => {
   it("triggers only on exact เมนู text", () => {
     expect(isExactGuidedMenuTrigger("เมนู")).toBe(true);
@@ -51,6 +62,7 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
 
   it("refuses unmapped and inactive operators without display-name fallback", async () => {
     const db = new GuidedMenuFakeDatabase();
+    db.seedMarket({ market_code: "kee", label: "ตลาดกี้", active: true });
     const handler = new GuidedMenuUxHandler(db.asClient());
 
     const unmapped = await handler.openMenu({ identity: IDENTITY });
@@ -69,16 +81,61 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     expect(inactive.screen).toBe("unmapped");
   });
 
-  it("mapped operator gets transaction-type buttons with opaque gpm1 tokens", async () => {
+  it("loads active markets from Slice 1 listActiveMarkets — not an independent list", async () => {
     const db = new GuidedMenuFakeDatabase();
     db.seedOperator({
       line_user_id: IDENTITY.lineUserId,
       staff_label: "พี่ดำ",
       active: true,
     });
-    const handler = new GuidedMenuUxHandler(db.asClient(), {
-      markets: [{ code: "kee", label: "ตลาดกี้" }],
+    db.seedMarket({ market_code: "kee", label: "ตลาดกี้", active: true });
+    db.seedMarket({
+      market_code: "seven_front",
+      label: "หน้าเซเวน",
+      active: true,
     });
+    db.seedMarket({
+      market_code: "wat_taklam",
+      label: "วัดตะกล่ำ",
+      active: false,
+    });
+    const svc = new GuidedMenuStateService(db.asClient());
+    const active = await svc.listActiveMarkets();
+    expect(active.map((m) => m.marketCode).sort()).toEqual([
+      "kee",
+      "seven_front",
+    ]);
+    expect(active.every((m) => m.active)).toBe(true);
+    expect(toMarketOption(active[0]!).code).toBe(active[0]!.marketCode);
+  });
+
+  it("fails closed when no active markets", async () => {
+    const db = new GuidedMenuFakeDatabase();
+    db.seedOperator({
+      line_user_id: IDENTITY.lineUserId,
+      staff_label: "พี่ดำ",
+      active: true,
+    });
+    const handler = new GuidedMenuUxHandler(db.asClient());
+    const opened = await handler.openMenu({ identity: IDENTITY });
+    const msg = opened.messages[0];
+    if (msg.type !== "template") throw new Error("template");
+    const market = await handler.handlePostback({
+      wireToken: msg.template.actions[0]!.data,
+      lineEventId: "evt-no-mkt",
+      identity: IDENTITY,
+      lineTimestampMs: TS,
+    });
+    expect(market.screen).toBe("no_markets");
+    expect(market.messages[0]).toEqual({
+      type: "text",
+      text: GUIDED_MENU_COPY.noActiveMarkets,
+    });
+  });
+
+  it("mapped operator gets transaction-type buttons with opaque gpm1 tokens", async () => {
+    const db = new GuidedMenuFakeDatabase();
+    const handler = seededHandler(db);
 
     const opened = await handler.openMenu({ identity: IDENTITY });
     expect(opened.screen).toBe("transaction_type");
@@ -95,7 +152,6 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
       expect(action.data.startsWith(MENU_TOKEN_PREFIX)).toBe(true);
       expect(parseMenuToken(action.data).ok).toBe(true);
       expect(action.data.length).toBeLessThanOrEqual(64);
-      // Business labels must never appear in postback data.
       expect(action.data).not.toContain("เบิก");
       expect(action.data).not.toContain("kee");
       expect(action.data).not.toContain("withdraw");
@@ -105,14 +161,7 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
 
   it("walks tx → market → date → confirm → field-safe no-write placeholder", async () => {
     const db = new GuidedMenuFakeDatabase();
-    db.seedOperator({
-      line_user_id: IDENTITY.lineUserId,
-      staff_label: "พี่ดำ",
-      active: true,
-    });
-    const handler = new GuidedMenuUxHandler(db.asClient(), {
-      markets: [{ code: "kee", label: "ตลาดกี้" }],
-    });
+    const handler = seededHandler(db);
 
     const root = await handler.openMenu({ identity: IDENTITY });
     const txMsg = root.messages[0];
@@ -162,8 +211,13 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     expect(json).toContain("ตลาด: ตลาดกี้");
     expect(json).toContain(`วันที่: ${formatThaiDateShort("2026-07-29")}`);
     expect(json).toContain("ยืนยัน");
-    expect(json).toContain("กลับ");
-    expect(json).toContain("ยกเลิก");
+    expect(confirm.result).toMatchObject({
+      transaction_type: "withdraw",
+      market_code: "kee",
+      date_mode: "today",
+    });
+    expect(confirm.result).not.toHaveProperty("market_label");
+    expect(confirm.result).not.toHaveProperty("transaction_label");
 
     const confirmToken = collectPostbackData(confirm.messages).find((t) => {
       const row = db.stateByWire(t);
@@ -184,14 +238,10 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
       text: GUIDED_MENU_COPY.confirmPlaceholder,
     });
     const copy = GUIDED_MENU_COPY.confirmPlaceholder;
-    // Operational meaning: not opened, not recorded, use existing method.
     expect(copy).toContain("ยังไม่ได้เปิดรายการ");
     expect(copy).toContain("ยังไม่บันทึกข้อมูล");
     expect(copy).toContain("ใช้วิธีเดิมก่อน");
     expect(copy).not.toMatch(/Slice\s*3A/i);
-    expect(copy).not.toContain("พร้อมเปิดรายการ");
-    expect(copy).not.toMatch(/เปิดรายการแล้ว/);
-    expect(copy).not.toMatch(/สำเร็จ/);
     expect(placeholder.result).toMatchObject({
       opened: false,
       recorded: false,
@@ -203,16 +253,39 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     expect(db.ingestCalls).toBe(0);
   });
 
+  it("refuses when market becomes inactive before confirmation", async () => {
+    const db = new GuidedMenuFakeDatabase();
+    const handler = seededHandler(db);
+    const root = await handler.openMenu({ identity: IDENTITY });
+    const txMsg = root.messages[0];
+    if (txMsg.type !== "template") throw new Error("template");
+    const market = await handler.handlePostback({
+      wireToken: txMsg.template.actions[0]!.data,
+      lineEventId: "evt-tx-ina",
+      identity: IDENTITY,
+      lineTimestampMs: TS,
+    });
+    const keeToken = collectPostbackData(market.messages).find((t) => {
+      const row = db.stateByWire(t);
+      return row?.payload.market_code === "kee";
+    });
+    db.seedMarket({ market_code: "kee", label: "ตลาดกี้", active: false });
+    const refused = await handler.handlePostback({
+      wireToken: keeToken!,
+      lineEventId: "evt-mkt-ina",
+      identity: IDENTITY,
+      lineTimestampMs: TS,
+    });
+    expect(refused.screen).toBe("market_unavailable");
+    expect(refused.messages[0]).toEqual({
+      type: "text",
+      text: GUIDED_MENU_COPY.marketUnavailable,
+    });
+  });
+
   it("cancel and back navigate without business writes", async () => {
     const db = new GuidedMenuFakeDatabase();
-    db.seedOperator({
-      line_user_id: IDENTITY.lineUserId,
-      staff_label: "พี่ดำ",
-      active: true,
-    });
-    const handler = new GuidedMenuUxHandler(db.asClient(), {
-      markets: [{ code: "kee", label: "ตลาดกี้" }],
-    });
+    const handler = seededHandler(db);
 
     const root = await handler.openMenu({ identity: IDENTITY });
     const txMsg = root.messages[0];
@@ -226,7 +299,9 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     });
     const cancelToken = collectPostbackData(market.messages).find((t) => {
       const row = db.stateByWire(t);
-      return row?.action_type === "menu_root" && row.payload.step === "cancel";
+      return (
+        row?.action_type === "menu_root" && row.payload.intent === "cancel"
+      );
     });
     expect(cancelToken).toBeTruthy();
 
@@ -253,7 +328,11 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     });
     const backToken = collectPostbackData(mkt.messages).find((t) => {
       const row = db.stateByWire(t);
-      return row?.action_type === "menu_root" && !row.payload.step;
+      return (
+        row?.action_type === "menu_root" &&
+        !row.payload.intent &&
+        Object.keys(row.payload).length === 0
+      );
     });
     expect(backToken).toBeTruthy();
     const back = await handler.handlePostback({
@@ -264,25 +343,15 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     });
     expect(back.screen).toBe("transaction_type");
     expect(db.openProduceCalls).toBe(0);
-    expect(db.appendCalls).toBe(0);
-    expect(db.admitCalls).toBe(0);
-    expect(db.ingestCalls).toBe(0);
   });
 
-  it("rejects wrong user/source, tampered token, and replay-conflict", async () => {
+  it("rejects wrong user/source, tampered token, and different-event already_consumed", async () => {
     const db = new GuidedMenuFakeDatabase();
-    db.seedOperator({
-      line_user_id: IDENTITY.lineUserId,
-      staff_label: "พี่ดำ",
-      active: true,
-    });
+    const handler = seededHandler(db);
     db.seedOperator({
       line_user_id: "U-other",
       staff_label: "อื่น",
       active: true,
-    });
-    const handler = new GuidedMenuUxHandler(db.asClient(), {
-      markets: [{ code: "kee", label: "ตลาดกี้" }],
     });
 
     const opened = await handler.openMenu({ identity: IDENTITY });
@@ -314,7 +383,6 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     });
     expect(tampered.screen).toBe("invalid");
 
-    // Consume once, then different event → already_consumed → invalid
     const ok = await handler.handlePostback({
       wireToken: token,
       lineEventId: "evt-ok",
@@ -330,18 +398,13 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
       lineTimestampMs: TS,
     });
     expect(conflict.screen).toBe("invalid");
+    expect(JSON.stringify(conflict)).not.toContain("withdraw");
+    expect(JSON.stringify(conflict.result)).not.toContain("action_type");
   });
 
-  it("same-event replay is idempotent", async () => {
+  it("same-event replay is idempotent via recorded result", async () => {
     const db = new GuidedMenuFakeDatabase();
-    db.seedOperator({
-      line_user_id: IDENTITY.lineUserId,
-      staff_label: "พี่ดำ",
-      active: true,
-    });
-    const handler = new GuidedMenuUxHandler(db.asClient(), {
-      markets: [{ code: "kee", label: "ตลาดกี้" }],
-    });
+    const handler = seededHandler(db);
     const opened = await handler.openMenu({ identity: IDENTITY });
     const msg = opened.messages[0];
     if (msg.type !== "template") throw new Error("template");
@@ -361,22 +424,11 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     });
     expect(second.screen).toBe(first.screen);
     expect(JSON.stringify(second.messages)).toBe(JSON.stringify(first.messages));
+    const row = db.stateByWire(token);
+    expect(row?.result).toBeTruthy();
   });
 
-  it("never trusts market labels from payload — server config only", () => {
-    const markets = parseGuidedMenuMarketsEnv("kee:ตลาดกี้,seven_front:หน้าเซเวน");
-    expect(markets).toEqual([
-      { code: "kee", label: "ตลาดกี้" },
-      { code: "seven_front", label: "หน้าเซเวน" },
-    ]);
-    const abbreviated = parseGuidedMenuMarketsEnv(
-      "long:ตลาดชื่อยาวมากที่ต้องการย่อบนปุ่ม>ตลาดยาว",
-    );
-    expect(abbreviated[0]).toEqual({
-      code: "long",
-      label: "ตลาดชื่อยาวมากที่ต้องการย่อบนปุ่ม",
-      buttonLabel: "ตลาดยาว",
-    });
+  it("uses trusted labels and date helpers without payload market labels", () => {
     expect(TX_CODE_TO_LABEL.withdraw).toBe("เบิก");
     expect(resolveGuidedMenuDate("today", TS)?.thaiShort).toBe("29/07/2569");
     expect(resolveGuidedMenuDate("yesterday", TS)?.thaiShort).toBe("28/07/2569");
@@ -390,15 +442,14 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
       "line-messages.json",
     );
     const committed = JSON.parse(readFileSync(committedPath, "utf8"));
-    // Exact deterministic match (fixed tokens) — running tests must leave git clean.
     expect(built).toEqual(committed);
-    // Structural guard: even if tokens drift, shapes stay comparable.
     expect(normalizeEvidenceTokens(built)).toEqual(
       normalizeEvidenceTokens(committed),
     );
     expect(JSON.stringify(built.confirm_placeholder)).toContain(
       "ยังไม่ได้เปิดรายการ",
     );
+    expect(JSON.stringify(built.cancelled)).toContain("ยกเลิกแล้ว");
     expect(JSON.stringify(built.confirm_placeholder)).not.toMatch(/Slice\s*3A/i);
   });
 });

@@ -11,3 +11,4 @@ export * from "./session-opener";
 export * from "./session-capture";
 export * from "./journey";
 export * from "./journey-bridge";
+export * from "./round-close";

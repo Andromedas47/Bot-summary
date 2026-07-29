@@ -21,8 +21,20 @@ import {
   type GuidedJourneyContext,
   type GuidedJourneyState,
 } from "./journey";
+import {
+  GuidedRoundService,
+  GUIDED_ROUND_BLOCKER_LABEL,
+  summarizeSlipStatuses,
+  type GuidedRoundCloseOutcome,
+} from "./round-close";
+import { buildRoundStatusMessage } from "./messages";
 import { GUIDED_MENU_COPY } from "./ux-types";
 import type { GuidedMenuIdentity } from "./ux-types";
+
+/** Exact text that asks the guided flow to close the round. */
+export function isGuidedRoundCloseCommand(text: string): boolean {
+  return text.trim() === GUIDED_MENU_COPY.roundCloseCommand;
+}
 
 export type GuidedWhiteSheetGuard =
   /** No guided round for this operator — the legacy direct command is unaffected. */
@@ -92,6 +104,75 @@ export function buildSlipHandoffMessages(
       GUIDED_MENU_COPY.slipInstructions,
     ].join("\n"),
     header,
+    `เมื่อตรวจสลิปครบแล้ว พิมพ์ "${GUIDED_MENU_COPY.roundCloseCommand}" เพื่อปิดรอบ`,
   ];
+}
+
+export type GuidedRoundCloseReply = {
+  messages: string[];
+  closed: boolean;
+};
+
+/**
+ * Handle the `ปิดรอบ` command end to end and render the operator's receipt.
+ *
+ * The decision to close is never made here: closeGuidedRound checks the
+ * existing lifecycle blockers and then defers to tryFinalizeSettlement, which
+ * remains authoritative and idempotent on retry.
+ */
+export async function processGuidedRoundClose(input: {
+  journey: GuidedJourneyService;
+  rounds: GuidedRoundService;
+  identity: GuidedMenuIdentity;
+  push?: (to: string, text: string, retryKey?: string) => Promise<unknown>;
+}): Promise<GuidedRoundCloseReply> {
+  const state = await input.journey.resolve(input.identity);
+  if (state.stage === "idle") {
+    return { messages: [GUIDED_MENU_COPY.roundCloseNoJourney], closed: false };
+  }
+  // An unfinished produce round is never skipped past to close a settlement.
+  if (state.stage === "capture" || state.stage === "awaiting_confirm") {
+    return {
+      messages: [
+        [
+          "ยังปิดรอบไม่ได้ รายการสินค้ายังไม่จบ",
+          'กรุณากด "จบรายการ" และยืนยันให้เรียบร้อยก่อน',
+        ].join("\n"),
+      ],
+      closed: false,
+    };
+  }
+
+  const whiteSheetSubmitted = state.whiteSheet.status !== "not_submitted";
+  const outcome: GuidedRoundCloseOutcome = await input.rounds.close(
+    state.context,
+    whiteSheetSubmitted,
+    input.push,
+  );
+
+  const dateThaiShort =
+    thaiDateFromIso(state.context.businessDate) ?? state.context.businessDate;
+  const blockerLines =
+    outcome.status === "closed"
+      ? []
+      : [
+          ...outcome.report.blockers.map((b) => GUIDED_ROUND_BLOCKER_LABEL[b]),
+          ...(outcome.status === "settlement_refused"
+            ? [`ระบบปิดยอดยังไม่พร้อม (${outcome.settlement})`]
+            : []),
+          `แก้ไขแล้วพิมพ์ "${GUIDED_MENU_COPY.roundCloseCommand}" อีกครั้ง`,
+        ];
+
+  const receipt = buildRoundStatusMessage({
+    sellerLabel: state.context.sellerLabel,
+    marketLabel: state.context.marketLabel,
+    dateThaiShort,
+    totals: outcome.report.totals,
+    slipCounts: summarizeSlipStatuses(outcome.report.slips),
+    blockerLines,
+    closed: outcome.status === "closed",
+  });
+
+  return { messages: [receipt.text], closed: outcome.status === "closed" };
 }
 

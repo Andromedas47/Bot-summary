@@ -36,6 +36,11 @@ import {
   thaiDateFromIso,
   type GuidedJourneyContext,
 } from "./journey";
+import {
+  GuidedRoundService,
+  GUIDED_ROUND_BLOCKER_LABEL,
+  summarizeSlipStatuses,
+} from "./round-close";
 import { buildWeighSessionSummary } from "@/lib/line/reply";
 import {
   assertGuidedMenuMessageLimits,
@@ -43,6 +48,7 @@ import {
   buildCancelledMessage,
   buildCapturedItemsMessages,
   buildConfirmPreviewMessage,
+  buildRoundStatusMessage,
   buildSlipInstructionMessages,
   buildWhiteSheetTemplateMessages,
   buildFinalizeConfirmedMessage,
@@ -158,6 +164,7 @@ export class GuidedMenuUxHandler {
   private readonly opener: GuidedSessionOpener;
   private readonly capture: GuidedSessionCaptureService;
   private readonly journey: GuidedJourneyService;
+  private readonly rounds: GuidedRoundService;
 
   constructor(
     supabase: SupabaseClient,
@@ -166,6 +173,7 @@ export class GuidedMenuUxHandler {
       sessionOpener?: GuidedSessionOpener;
       captureService?: GuidedSessionCaptureService;
       journeyService?: GuidedJourneyService;
+      roundService?: GuidedRoundService;
     } = {},
   ) {
     this.state = options.stateService ?? new GuidedMenuStateService(supabase);
@@ -173,6 +181,10 @@ export class GuidedMenuUxHandler {
     this.capture =
       options.captureService ?? new GuidedSessionCaptureService(supabase);
     this.journey = options.journeyService ?? new GuidedJourneyService(supabase);
+    this.rounds =
+      options.roundService ??
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      new GuidedRoundService(supabase as any);
   }
 
   async openMenu(input: {
@@ -627,8 +639,53 @@ export class GuidedMenuUxHandler {
     if (journey.stage === "white_sheet") {
       return this.renderWhiteSheetStage(identity, journey.context);
     }
-    // 3C ends at the slip handoff; 3D adds the reconciliation rendering.
-    return this.renderSlipStage(identity, journey.context);
+    if (journey.stage === "slips") {
+      return this.renderSlipStage(identity, journey.context);
+    }
+    return this.renderRoundStatus(
+      identity,
+      journey.context,
+      journey.whiteSheet.status !== "not_submitted",
+    );
+  }
+
+  /** Slice 3D — read-only reconciliation with the remaining blockers spelled out. */
+  private async renderRoundStatus(
+    identity: GuidedMenuIdentity,
+    context: GuidedJourneyContext,
+    whiteSheetSubmitted: boolean,
+  ): Promise<GuidedMenuUxResult> {
+    const report = await this.rounds.report(context, whiteSheetSubmitted);
+    const dateThaiShort =
+      thaiDateFromIso(context.businessDate) ?? context.businessDate;
+    const quickReply = await this.buildJourneyActions(identity, "ตรวจยอด");
+    return resultEnvelope(
+      "round_status",
+      [
+        buildRoundStatusMessage({
+          sellerLabel: context.sellerLabel,
+          marketLabel: context.marketLabel,
+          dateThaiShort,
+          totals: report.totals,
+          slipCounts: summarizeSlipStatuses(report.slips),
+          blockerLines: [
+            ...report.blockers.map((b) => GUIDED_ROUND_BLOCKER_LABEL[b]),
+            ...(report.blockers.length === 0
+              ? [`พิมพ์ "${GUIDED_MENU_COPY.roundCloseCommand}" เพื่อปิดรอบ`]
+              : [
+                  `แก้ไขแล้วพิมพ์ "${GUIDED_MENU_COPY.roundCloseCommand}" อีกครั้ง`,
+                ]),
+          ],
+          closed: false,
+          quickReply,
+        }),
+      ],
+      {
+        stage: "reconcile",
+        blockers: report.blockers,
+        difference: report.totals.difference,
+      },
+    );
   }
 
   private async renderCaptureStatus(

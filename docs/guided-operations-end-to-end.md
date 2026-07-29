@@ -34,8 +34,9 @@ Allowed `action_type` values after 0055:
 **Consequence for this epic:** the four guided capture actions of Slice 3B
 (`ดูรายการที่บันทึกแล้ว`, `แก้ไข`, `ยกเลิก`, `จบรายการ`) map onto
 `view_status` / `menu_root` / `request_close` / `confirm_finalize`, which
-0051 already allows. Slices 3C and 3D need action types that do not exist
-yet and therefore require a forward migration.
+0051 already allows. Slices 3C and 3D add no action type at all: the read-only
+`view_status` renders whichever stage the operator is in, and every mutating
+step is an existing text command (§2.5). **The whole epic needs no migration.**
 
 ### 1.2 Pending / produce sessions
 
@@ -136,7 +137,7 @@ free number for this epic is **0057**.
 These are recorded rather than invented. Nothing below was implemented by
 guessing a business rule.
 
-### 2.1 `work_rounds` is orphaned Production drift — **blocking for the requested Slice 3D shape**
+### 2.1 `work_rounds` is orphaned Production drift — not revived
 
 | Object | Repo at PR #9 base | Production `apjjsqibavjaitcedavn` |
 |---|---|---|
@@ -196,7 +197,51 @@ voided round. Recovering from a mistaken open still requires an administrator.
 A real guided cancel needs an authoritative, audited pending-void contract
 that does not exist yet.
 
-### 2.4 Cold subsystems
+### 2.4 The guided journey has no state table
+
+`line_menu_states` is single-use token storage keyed by token hash, not a
+per-operator accumulator, and this epic adds no table. The journey stage is
+therefore **derived on every press** from state the existing subsystems already
+own (`GuidedJourneyService`):
+
+| Stage | Derived from |
+|---|---|
+| `capture` / `awaiting_confirm` | `pending_sessions` structured metadata + `close_event_timestamp_ms` |
+| `white_sheet` | produce confirmed, `digital_white_sheet_cash_entries` not submitted |
+| `slips` | sheet submitted, a `slip_batches` row still collecting/closing/processing or a manual session open |
+| `reconcile` | sheet submitted, no open slip work |
+
+Seller, market, business date and transaction type all come from the produce
+session's own frozen metadata, so a later stage can never drift onto a
+different round. `produce_sessions.work_round_id` is left NULL throughout.
+
+### 2.5 Mutating steps are text commands, not shared tokens
+
+Slices 3C and 3D need no new `action_type` because the single read-only
+`view_status` action renders whichever stage the operator is actually in — the
+stage is re-derived server-side and never carried in the token, so a button
+minted earlier always renders the current stage.
+
+The mutating steps deliberately do **not** share a token that way. Reusing
+`request_close` / `confirm_finalize` across stages would mean a stale produce
+button could trigger a settlement finalization, and the 0051 payload contract
+(`keys.length === 0` for those actions) leaves nowhere to put a stage
+discriminator. So each mutating step is the text command that already exists,
+which the bot hands the operator verbatim at the moment they need it:
+
+| Step | Command | Owner |
+|---|---|---|
+| Submit the white sheet | `<market> ปิดยอด <date>` … `จบปิดยอด` | existing `processWhiteSheetCloseCommand` |
+| Open the slip batch | `<seller> <market> สลิปเงินโอน <date>` | existing `parseSlipSessionHeader` |
+| Close the slip batch | `จบสลิป` | existing slip close |
+| Manual slips | existing `สลิปมือ` flow | existing manual slip session |
+| Close the round | `ปิดรอบ` | **new application-only command**, routes to `tryFinalizeSettlement` |
+
+`ปิดรอบ` is exact-match only and adds no schema. It is the one command in the
+journey the operator was not already typing, and the bot prints it in the slip
+handoff so it never has to be remembered.
+
+### 2.6 Cold subsystems
 
 `slip_batches` last wrote 2026-06-30, `settlement_entries` 2026-07-16,
 `settlement_drafts` 2026-06-26, while `produce_sessions` is live
@@ -250,26 +295,63 @@ Write points, in order, all fail-closed:
    of overwriting.
 4. `record_line_menu_state_result` — stores the rendered reply for replay.
 
-### 3.2 Slices 3B / 3C / 3D
+### 3.2 Slices 3B / 3C / 3D — the complete journey
 
-Recorded here as the target once implemented; see §5 for delivery status.
+Buttons are `[…]`; text the bot hands the operator verbatim is `"…"`. The
+stage is re-derived server-side on every press, never carried in a token.
 
 ```mermaid
 stateDiagram-v2
     SessionOpen --> SessionOpen: free-text product lines (existing parser, append RPC)
-    SessionOpen --> Status: view_status — ดูรายการที่บันทึกแล้ว
+    SessionOpen --> Status: [ดูรายการ] view_status
     Status --> SessionOpen
-    SessionOpen --> Cancelled: menu_root(cancel) — ยกเลิก
-    SessionOpen --> Closing: request_close — จบรายการ
-    Closing --> Held: 0050 finalization hold
-    Held --> Finalized: confirm_finalize
-    Finalized --> WhiteSheet: ขั้นต่อไป กรอกใบขาว
-    WhiteSheet --> WhiteSheetSaved: validated fields → saveWhiteSheetCashEntry
-    WhiteSheetSaved --> Slips: ขั้นต่อไป ส่งสลิป
-    Slips --> Reconcile: slip images → existing OCR/batch pipeline
-    Reconcile --> RoundClosed: no blockers → tryFinalizeSettlement
-    Reconcile --> Blocked: OCR pending / manual slip open / settlement missing / hold
+    SessionOpen --> MenuDismissed: [ออกจากเมนู] — round stays OPEN
+    SessionOpen --> Closing: [จบรายการ] request_close
+    Closing --> Held: 0050 finalization hold armed
+    Held --> Held: confirm_finalize → not_ready (barrier unsatisfied)
+    Held --> Finalized: [ยืนยันจบรายการ] confirm_finalize
+    Finalized --> WhiteSheet: [กรอกใบขาว] view_status
+
+    state WhiteSheet {
+        [*] --> Template
+        Template --> Guard: operator sends the edited template
+        Guard --> Refused: market/date ≠ the open round — zero writes
+        Guard --> ExistingCommand: matches the round
+        ExistingCommand --> Submitted: processWhiteSheetCloseCommand
+        ExistingCommand --> FinalizedSheet: already FINALIZED — never overwritten
+    }
+
+    WhiteSheet --> Slips: handoff prints the slip header + "ปิดรอบ"
+    Slips --> Slips: images → existing evidence / batch / OCR pipeline
+    Slips --> Slips: "จบสลิป" closes the batch, "สลิปมือ" is the fallback
+    Slips --> Reconcile: [ตรวจยอด] view_status
+
+    state Reconcile {
+        [*] --> Report
+        Report --> Blocked: any existing lifecycle blocker
+        Report --> Ready: no blockers
+    }
+
+    Reconcile --> RoundClosed: "ปิดรอบ" → tryFinalizeSettlement
+    Reconcile --> Blocked: receipt lists exactly what remains
+    RoundClosed --> RoundClosed: repeat "ปิดรอบ" → already_done
 ```
+
+Per-slip status, from existing evidence truth only, in classification order:
+
+| Status | Condition |
+|---|---|
+| `รอตรวจมือ` | check status not EXTRACTED/PARTIAL_EXTRACTED, **or** verified with no reference id (BR-02) |
+| `สลิปซ้ำ` | verified, but its reference already has a global winner |
+| `ตลาดไม่ชัด` | evidence market missing, unknown for the source/date, or another market |
+| `วันที่ไม่ตรง` | transaction time outside the business-date window |
+| `อ่านสำเร็จ` | survives all of the above |
+
+Close blockers, every one an existing lifecycle state:
+`white_sheet_not_submitted`, `slip_batch_open`, `ocr_pending`,
+`manual_slip_open`, `attribution_ambiguous`, `settlement_missing`,
+`settlement_ambiguous`, `difference_non_zero` — plus whatever
+`tryFinalizeSettlement` itself refuses on.
 
 Money definitions, reused verbatim, never recomputed:
 
@@ -303,43 +385,59 @@ difference               = submitted_transfer_total - checked_slip_total
 |---|---|
 | 3A — open real produce session | **delivered** |
 | 3B — guided capture and finalize | **delivered** |
-| 3C — digital white sheet | **not delivered** — see §5.1 |
-| 3D — slips, reconciliation, close round | **not delivered** — blocked on 3C |
+| 3C — digital white sheet | **delivered** (guided template through the existing close command) |
+| 3D — slips, reconciliation, close round | **delivered** |
 
-### 5.1 Why 3C stopped, and the decision it needs
+**No migration.** `0054` remains reserved for P2D and untouched; `0055`/`0056`
+belong to PR #9. Nothing in slices 3A–3D changes SQL, so no PostgreSQL 17
+harness run was required.
 
-Slices 3A and 3B needed no migration: every action they use
-(`confirm_open`, `view_status`, `request_close`, `confirm_finalize`,
-`menu_root`) is already in the `line_menu_states_action_type_allowed` CHECK.
+Production is untouched: no migration applied, no deployment, no LINE message
+sent and no Production data written by this work.
 
-3C is different. The white sheet needs six numeric values —
-`labor`, `location_fee`, `bag`, `snack`, `other` (+ `other_note`) and
-`actual_cash_submitted` — and LINE has no numeric button. The operator must
-type them, which means the flow needs somewhere to accumulate partial input
-between messages. `line_menu_states` is single-use token storage keyed by
-token hash; it is not a per-operator accumulator, and there is no existing
-table that serves as one.
+### 5.1 Deterministic LINE evidence — the happy path
 
-Two viable shapes, and they differ enough that guessing would be wrong:
+Every message below is produced by the committed builders and asserted in
+`slice3a-open-session.test.ts`, `slice3b-capture-finalize.test.ts`,
+`slice3c-white-sheet.test.ts` and `slice3d-round-close.test.ts`.
 
-**A. Per-field guided prompts (matches the requested UX).**
-Migration `0057` adds a white-sheet draft table keyed
-`(source_id, line_user_id, market_label_normalized, business_date)` with the
-collected values, plus new `action_type` values and their
-`guided_menu_payload_valid` branches for start / back / cancel / confirm.
-Persistence still goes through `saveWhiteSheetCashEntry`, so the lifecycle,
-the FINALIZED guard and the arithmetic stay authoritative. Cost: a real
-forward migration with RLS, grants, pinned `search_path` and a PostgreSQL 17
-harness.
-
-**B. Guided template message (no migration).**
-After finalization the bot replies with a ready-to-edit template in the
-existing white-sheet closing format, which
-`parseWhiteSheetCloseCommandFromMessage` and
-`processWhiteSheetCloseCommand` already accept end to end:
+**1. `เมนู` → เบิก → กี้ → วัดทุ่งลานนา → วันนี้ → ยืนยัน**
 
 ```
-ตลาดวัดทุ่งลานนา ปิดยอด 29/07/2569
+เปิดรายการเบิกแล้ว ✅
+คนขาย: กี้
+ตลาด: วัดทุ่งลานนา
+วันที่: 29/07/2569
+
+ส่งรายการสินค้าได้เลย
+เมื่อครบแล้วกด “จบรายการ”
+```
+Buttons: `[ดูรายการ] [จบรายการ] [ออกจากเมนู]`
+
+**2. Product lines sent as free text, then `[จบรายการ]` → `[ยืนยันจบรายการ]`**
+
+```
+บันทึกรายการสินค้าเรียบร้อย ✅
+
+<summary from buildWeighSessionSummary>
+
+ขั้นต่อไป: กรอกใบขาว
+```
+Buttons: `[กรอกใบขาว] [ออกจากเมนู]`
+
+**3. `[กรอกใบขาว]` — two messages, the template isolated for copying**
+
+```
+กรอกใบขาว
+คัดลอกข้อความด้านล่าง แก้เฉพาะตัวเลข แล้วส่งกลับมา
+บรรทัดไหนไม่มีค่าใช้จ่าย ใส่ 0 ไว้
+
+คนขาย: กี้
+ตลาด: วัดทุ่งลานนา
+วันที่: 29/07/2569
+```
+```
+วัดทุ่งลานนา ปิดยอด 29/07/2569
 ค่าแรง 0
 ค่าที่ 0
 ค่าถุง 0
@@ -349,21 +447,65 @@ existing white-sheet closing format, which
 จบปิดยอด
 ```
 
-The operator edits the numbers and sends one message. Validation, the
-FINALIZED guard, the canonical recalculation and the reply are all existing
-code; nothing new is written. Cost: no per-field Back/Cancel, and the
-operator edits text rather than answering prompts.
+**4. The edited template is sent → existing White Sheet reply, then the handoff**
 
-3D depends on whichever shape 3C takes, because the slip stage is entered
-from the white-sheet completion reply and shares the same
-`(source_id, market, business_date)` binding.
+```
+ส่งสลิป
 
-Neither shape was chosen unilaterally: option A commits a migration and new
-state that this epic would have to design, and option B changes the promised
-UX. That is a product decision, not an implementation detail.
+ส่งสลิปเงินโอน
+ส่งข้อความด้านล่างก่อน แล้วส่งรูปสลิปตามได้เลย
+เมื่อส่งครบ พิมพ์ "จบสลิป"
+ถ้ามีสลิปที่ระบบอ่านไม่ได้ ใช้ "สลิปมือ" ตามวิธีเดิม
+```
+```
+กี้ วัดทุ่งลานนา สลิปเงินโอน 29/07/2569
+```
+```
+เมื่อตรวจสลิปครบแล้ว พิมพ์ "ปิดรอบ" เพื่อปิดรอบ
+```
 
-Production is untouched: no migration has been applied, no deployment made
-and no LINE message sent from this work.
+**5. Slips uploaded, `จบสลิป`, then `ปิดรอบ` with an exact match**
+
+```
+ปิดรอบเรียบร้อย ✅
+
+คนขาย: กี้
+ตลาด: วัดทุ่งลานนา
+วันที่: 29/07/2569
+ยอดส่งตามใบขาว: 1,250 บาท
+ยอดสลิปที่ตรวจแล้ว: 1,250 บาท
+ผลต่าง: 0 บาท
+
+สลิป:
+- อ่านสำเร็จ: 2
+```
+
+### 5.2 Failure evidence — one blocked reconciliation
+
+One verified slip of 1,000, one slip still `NEED_REVIEW`, and a settlement
+entry of 1,500. `ปิดรอบ` refuses and writes no finalization row:
+
+```
+ตรวจยอดรอบขาย
+
+คนขาย: กี้
+ตลาด: วัดทุ่งลานนา
+วันที่: 29/07/2569
+ยอดส่งตามใบขาว: 1,500 บาท
+ยอดสลิปที่ตรวจแล้ว: 1,000 บาท
+ผลต่าง: 500 บาท
+
+สลิป:
+- อ่านสำเร็จ: 1
+- รอตรวจมือ: 1
+
+ยังปิดรอบไม่ได้ เพราะ:
+- ระบบยังอ่านสลิปไม่เสร็จ กรุณารอสักครู่
+- ยอดสลิปกับยอดส่งเงินยังไม่ตรงกัน
+- แก้ไขแล้วพิมพ์ "ปิดรอบ" อีกครั้ง
+```
+
+A missing settlement renders `—`, never a guessed `0`.
 
 ---
 
@@ -373,15 +515,50 @@ and no LINE message sent from this work.
 
 1. Merge PR #9 (`0055`, `0056`) and apply both to Production first — this
    epic's branch is stacked on them and `choose_seller` is not yet an allowed
-   `action_type` in Production.
-2. Deploy the application. Slice 3A is inert until an operator presses
-   `ยืนยัน`; nothing changes for text-command users.
-3. Verify with one real round in a pilot LINE group before widening.
+   `action_type` in Production. **This is the only migration step in the whole
+   rollout; slices 3A–3D add none.**
+2. Deploy the application. Everything is inert until an operator presses
+   `ยืนยัน`: no scheduled job changes, and nothing changes for text-command
+   users.
+3. Walk one real round in a pilot LINE group before widening —
+   `เมนู` → confirm → items → `จบรายการ` → `ยืนยันจบรายการ` → `กรอกใบขาว` →
+   send the template → send slips → `จบสลิป` → `ปิดรอบ`.
+4. Watch for `guided round close handled` in the logs: `closed: false` on the
+   first attempt is the expected, correct outcome while any blocker remains.
 
 **Rollback**
 
-* Application-only rollback is sufficient for Slice 3A: it adds no migration
-  and no column. Reverting the deploy restores the previous confirm-boundary
-  placeholder, and any session already opened stays valid — it was opened
-  through the same RPC the text flow uses and finalizes identically.
-* No data migration is required in either direction.
+* **Application-only rollback is sufficient for every slice.** 3A–3D add no
+  migration, no table and no column, so reverting the deploy is the complete
+  rollback and no data migration is required in either direction.
+* Rounds already opened stay valid: they were opened through the same RPC the
+  text flow uses and finalize identically.
+* White sheets already submitted stay valid: they were written by the existing
+  `processWhiteSheetCloseCommand`, exactly as a hand-typed message would.
+* Settlements already closed stay closed: `tryFinalizeSettlement` is the same
+  function the web API calls, and its rows are unchanged by this work.
+* After a rollback the operator falls back to typing the same commands the bot
+  had been handing them, because the guided flow never introduced a syntax of
+  its own — only `ปิดรอบ` disappears, and the round can still be closed from
+  the web settlement path.
+
+### 6.1 Known operational limitations
+
+1. **No cancel for an open round.** `ออกจากเมนู` dismisses the guided controls
+   and says the round is still open. Recovering from a mistaken open needs an
+   administrator — see §2.3.
+2. **`ปิดรอบ` needs a settlement entry that only the web API writes.** LINE can
+   report `settlement_missing` but cannot create it, so the round cannot be
+   closed from LINE alone until someone submits the settlement.
+3. **The guided receipt suppresses the finalizer's push.** `closeGuidedRound`
+   passes a no-op push so the receipt is not delivered twice; the record still
+   moves to `sent`. A LINE-initiated close therefore notifies only the group
+   that typed `ปิดรอบ`.
+4. **The captured-item preview can differ from the final persist.** The preview
+   parses `accumulated_text`; the finalizer additionally intersects the
+   admission and ingest ledgers through the close boundary, so a straggler
+   still in flight is visible in the preview but excluded from the round.
+5. **The white sheet cannot record the seller** — there is no column. It is
+   keyed `(source_id, market_label_normalized, business_date)` only (§2.2).
+6. **`produce_sessions.work_round_id` stays NULL**, as every row written since
+   2026-06-27 already is (§2.1).

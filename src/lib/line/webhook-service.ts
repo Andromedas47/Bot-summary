@@ -21,6 +21,7 @@ import {
 import {
   GuidedJourneyService,
   GuidedMenuUxHandler,
+  GuidedRoundService,
   buildGuidedMenuIdentity,
   buildInvalidMenuMessage,
   buildSlipHandoffMessages,
@@ -28,6 +29,8 @@ import {
   isExactGuidedMenuTrigger,
   isGuidedMenuPostbackCandidate,
   isGuidedMenuPostbackData,
+  isGuidedRoundCloseCommand,
+  processGuidedRoundClose,
   LINE_REPLY_MESSAGE_MAX,
 } from "@/lib/line/guided-menu";
 import {
@@ -169,6 +172,7 @@ interface WebhookServiceDependencies {
   replyApiMessages?: ReplyLineApiMessages;
   guidedMenuHandler?: GuidedMenuUxHandler;
   guidedJourneyService?: GuidedJourneyService;
+  guidedRoundService?: GuidedRoundService;
   scheduleBackgroundTask?: ScheduleBackgroundTask;
   physicalInventoryFinalizer?: PhysicalInventoryFinalizer;
   physicalInventoryService?: PhysicalInventorySessionGateway;
@@ -289,6 +293,7 @@ export class WebhookService {
   private readonly replyApiMessages: ReplyLineApiMessages;
   private readonly guidedMenuHandler: GuidedMenuUxHandler;
   private readonly guidedJourney: GuidedJourneyService;
+  private readonly guidedRounds: GuidedRoundService;
   private readonly scheduleBackgroundTask: ScheduleBackgroundTask;
   private readonly physicalInventoryFinalizer: PhysicalInventoryFinalizer;
   private readonly physicalInventoryService: PhysicalInventorySessionGateway;
@@ -313,6 +318,8 @@ export class WebhookService {
       dependencies.guidedMenuHandler ?? new GuidedMenuUxHandler(supabase);
     this.guidedJourney =
       dependencies.guidedJourneyService ?? new GuidedJourneyService(supabase);
+    this.guidedRounds =
+      dependencies.guidedRoundService ?? new GuidedRoundService(supabase);
     this.scheduleBackgroundTask =
       dependencies.scheduleBackgroundTask
       ?? ((task) => {
@@ -426,6 +433,13 @@ export class WebhookService {
     // ── 3.0. Guided Menu exact trigger "เมนู" ────────────────────────────────
     if (isExactGuidedMenuTrigger(text)) {
       return this.processGuidedMenuOpen(msgEvent, eventId, log);
+    }
+
+    // ── 3.0b. Guided round close "ปิดรอบ" (3D) ──────────────────────────────
+    // Exact-match only. It closes nothing by itself: the command routes to the
+    // existing settlement finalization, behind the existing lifecycle blockers.
+    if (isGuidedRoundCloseCommand(text)) {
+      return this.processGuidedRoundCloseCommand(msgEvent, eventId, log);
     }
 
     // ── 3.1. P2A Physical Inventory (allowlisted LINE groups only) ───────────
@@ -2046,6 +2060,67 @@ export class WebhookService {
     }
     log.info("guided menu opened", { screen: outcome.screen });
     return { eventId, eventType: event.type, status: "saved", parsed: false };
+  }
+
+  /**
+   * Slice 3D — "ปิดรอบ".
+   *
+   * Closes nothing on its own: every blocker is an existing lifecycle state,
+   * and the close itself is tryFinalizeSettlement, which stays authoritative
+   * and idempotent on retry. The receipt is delivered in the reply the
+   * operator is already waiting on, so the finalizer's own push is suppressed
+   * rather than sending the same receipt twice.
+   */
+  private async processGuidedRoundCloseCommand(
+    event: LineMessageEvent,
+    eventId: string,
+    log: ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const replyToken = event.replyToken;
+    const identity = buildGuidedMenuIdentity({
+      lineUserId: getUserId(event.source),
+      sourceType: event.source.type,
+      sourceId: getSourceId(event.source),
+      sessionKey: getPendingSessionKey(event.source),
+    });
+    if (!identity) {
+      log.info("guided round close refused — missing identity binding");
+      return { eventId, eventType: event.type, status: "saved", parsed: false };
+    }
+
+    try {
+      const outcome = await processGuidedRoundClose({
+        journey: this.guidedJourney,
+        rounds: this.guidedRounds,
+        identity,
+      });
+      if (replyToken) {
+        await this.replyMessages(
+          replyToken,
+          outcome.messages.slice(0, LINE_REPLY_MESSAGE_MAX),
+        );
+      }
+      log.info("guided round close handled", { closed: outcome.closed });
+      return { eventId, eventType: event.type, status: "saved", parsed: false };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("guided round close failed", { error: errorMessage });
+      if (replyToken) {
+        try {
+          await this.replyMessage(
+            replyToken,
+            "ตรวจยอดปิดรอบไม่สำเร็จ ระบบยังไม่ได้ปิดรอบ กรุณาลองใหม่อีกครั้ง",
+          );
+        } catch { /* ignore reply error */ }
+      }
+      return {
+        eventId,
+        eventType: event.type,
+        status: "error",
+        parsed: false,
+        error: errorMessage,
+      };
+    }
   }
 
   private async processGuidedMenuPostback(

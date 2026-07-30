@@ -22,6 +22,7 @@ import {
   loadMarketScopedAiVerifiedTransfers,
   loadMarketScopedManualSlipTotal,
 } from "@/lib/reconciliation";
+import { normalizedMarketLabel } from "@/lib/market";
 import {
   isVerifiedSlipCheckStatus,
   normalizeTransactionId,
@@ -142,7 +143,7 @@ export async function loadGuidedSlipRows(
 
   const { data: evidences, error: evidenceError } = await supabase
     .from("slip_evidences")
-    .select("id, market_label_normalized, received_at")
+    .select("id, market_label, received_at")
     .eq("source_id", context.sourceId)
     .gte("received_at", startUtc)
     .lt("received_at", endUtc);
@@ -155,7 +156,7 @@ export async function loadGuidedSlipRows(
   const evidenceMarket = new Map(
     evidenceRows.map((row) => [
       String(row.id),
-      row.market_label_normalized as string | null,
+      normalizedMarketLabel(row.market_label) || null,
     ]),
   );
 

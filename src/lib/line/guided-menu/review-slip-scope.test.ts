@@ -9,6 +9,7 @@
 import { describe, expect, it } from "bun:test";
 import { RoundFakeDatabase } from "./test-fake-round-db";
 import { buildGuidedRoundReport, loadGuidedSlipRows } from "./round-close";
+import { buildRoundStatusMessage } from "./messages";
 import { businessDateToUtcRange } from "@/lib/reconciliation";
 import { listKnownProduceMarketLabels } from "@/lib/white-sheet";
 import type { GuidedJourneyContext } from "./journey";
@@ -46,18 +47,21 @@ function seedSlip(
   input: {
     id: string;
     market?: string | null;
+    normalizedMarket?: string | null;
     amount?: number;
     receivedAt?: string;
     transactionTime?: string | null;
     status?: string;
   },
 ): void {
+  const market = input.market === undefined ? MARKET : input.market;
   db.seed("slip_evidences", [
     {
       id: `ev-${input.id}`,
       source_id: SOURCE,
-      market_label: input.market === undefined ? MARKET : input.market,
-      market_label_normalized: input.market === undefined ? MARKET : input.market,
+      market_label: market,
+      market_label_normalized:
+        input.normalizedMarket === undefined ? market : input.normalizedMarket,
       received_at: input.receivedAt ?? MID_WINDOW,
     },
   ]);
@@ -90,6 +94,40 @@ describe("slip list scope matches the reconciliation scope", () => {
 
     const list = await rows(db, [MARKET, OTHER_MARKET]);
     expect(list.map((row) => row.checkId)).toEqual(["mine"]);
+  });
+
+  it("canonicalizes the raw market label and ignores a stale normalized column", async () => {
+    const db = baseDb([MARKET, OTHER_MARKET]);
+    seedSlip(db, {
+      id: "raw-market",
+      market: `  ${MARKET}  `,
+      normalizedMarket: OTHER_MARKET,
+      amount: 1234,
+    });
+
+    const report = await buildGuidedRoundReport(db.asClient(), CONTEXT, true);
+    expect(report.slips).toEqual([
+      {
+        checkId: "raw-market",
+        amount: 1234,
+        referenceId: "ref-raw-market",
+        status: "verified",
+      },
+    ]);
+    expect(report.totals.checkedSlipTotal).toBe(1234);
+
+    const message = buildRoundStatusMessage({
+      sellerLabel: CONTEXT.sellerLabel,
+      marketLabel: CONTEXT.marketLabel,
+      dateThaiShort: "29/07/2569",
+      totals: report.totals,
+      slipCounts: [["verified", 1]],
+      blockerLines: [],
+      closed: false,
+    });
+    expect(message.text).toContain(
+      report.totals.checkedSlipTotal.toLocaleString("en-US"),
+    );
   });
 
   it("still reports an unknown or missing market as ตลาดไม่ชัด", async () => {
@@ -161,7 +199,7 @@ describe("every verified row is inside the authoritative total", () => {
     expect(report.totals.aiVerifiedTotal).toBe(12000);
     expect(report.totals.checkedSlipTotal).toBe(12000);
     // And nothing verified is missing from the total.
-    expect(report.totals.aiVerifiedTotal).toBeGreaterThanOrEqual(verifiedSum);
+    expect(report.totals.checkedSlipTotal).toBe(verifiedSum);
   });
 
   it("never lists another market's slip in this round's report", async () => {

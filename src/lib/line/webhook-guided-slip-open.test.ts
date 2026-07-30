@@ -10,7 +10,10 @@
 import { describe, expect, it } from "bun:test";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { WebhookService } from "./webhook-service";
-import { GuidedJourneyService } from "@/lib/line/guided-menu";
+import {
+  buildSlipHeaderTemplate,
+  GuidedJourneyService,
+} from "@/lib/line/guided-menu";
 import type { GuidedJourneyContext, GuidedJourneyState } from "@/lib/line/guided-menu";
 import type { LineMessageEvent } from "./types";
 import type { SlipSessionIngestor } from "@/lib/slips/slip-session-service";
@@ -96,7 +99,14 @@ type FakeOwner =
   | { kind: "unknown" }
   | { kind: "owned"; lineUserId: string; sessionKey: string };
 
-function journeyStub(state: GuidedJourneyState, owner: FakeOwner = { kind: "none" }) {
+function journeyStub(
+  state: GuidedJourneyState,
+  owner: FakeOwner = {
+    kind: "owned",
+    lineUserId: OWNER_USER,
+    sessionKey: CONTEXT.sessionKey,
+  },
+) {
   return {
     resolve: async () => state,
     findRoundOwner: async () => owner,
@@ -134,7 +144,7 @@ async function openWith(input: {
   return { opened, replies };
 }
 
-const GUIDED_HEADER = `${SELLER} ${MARKET} สลิปเงินโอน 29/07/2569`;
+const GUIDED_HEADER = buildSlipHeaderTemplate(CONTEXT)!;
 
 describe("guided slip open at the webhook boundary", () => {
   it("opens the batch for the round's own operator", async () => {
@@ -162,7 +172,7 @@ describe("guided slip open at the webhook boundary", () => {
 
   it("creates no batch for an edited market", async () => {
     const result = await openWith({
-      text: `${SELLER} หน้าเซเวน สลิปเงินโอน 29/07/2569`,
+      text: GUIDED_HEADER.replace(MARKET, "หน้าเซเวน"),
       journey: journeyStub(stageState("slips")),
     });
     expect(result.opened).toBe(false);
@@ -171,7 +181,7 @@ describe("guided slip open at the webhook boundary", () => {
 
   it("creates no batch for an edited seller", async () => {
     const result = await openWith({
-      text: `คนอื่น ${MARKET} สลิปเงินโอน 29/07/2569`,
+      text: GUIDED_HEADER.replace(SELLER, "คนอื่น"),
       journey: journeyStub(stageState("slips")),
     });
     expect(result.opened).toBe(false);
@@ -179,10 +189,21 @@ describe("guided slip open at the webhook boundary", () => {
 
   it("creates no batch for an edited date", async () => {
     const result = await openWith({
-      text: `${SELLER} ${MARKET} สลิปเงินโอน 28/07/2569`,
+      text: GUIDED_HEADER.replace("29/07/2569", "28/07/2569"),
       journey: journeyStub(stageState("slips")),
     });
     expect(result.opened).toBe(false);
+  });
+
+  it("creates no batch for a malformed, missing or impossible recognized date", async () => {
+    for (const badDate of ["29-07-2569", "ไม่ระบุ", "32/13/2569"]) {
+      const result = await openWith({
+        text: GUIDED_HEADER.replace("29/07/2569", badDate),
+        journey: journeyStub(stageState("slips")),
+      });
+      expect(result.opened).toBe(false);
+      expect(result.replies[0]).toContain("วันที่");
+    }
   });
 
   it("creates no batch when the seller-market assignment was revoked", async () => {
@@ -237,11 +258,11 @@ describe("guided slip open at the webhook boundary", () => {
   it("is idempotent across a duplicate delivery of the same refusal", async () => {
     const journey = journeyStub(stageState("slips"));
     const first = await openWith({
-      text: `${SELLER} หน้าเซเวน สลิปเงินโอน 29/07/2569`,
+      text: GUIDED_HEADER.replace(MARKET, "หน้าเซเวน"),
       journey,
     });
     const second = await openWith({
-      text: `${SELLER} หน้าเซเวน สลิปเงินโอน 29/07/2569`,
+      text: GUIDED_HEADER.replace(MARKET, "หน้าเซเวน"),
       journey,
     });
     expect(first.opened).toBe(false);

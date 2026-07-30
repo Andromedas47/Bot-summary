@@ -17,6 +17,7 @@ import {
   parseGuidedSettlementCommand,
   processGuidedSettlementSubmission,
 } from "./settlement-command";
+import { extractGuidedMarker } from "./provenance";
 import { processGuidedRoundClose } from "./journey-bridge";
 import { GuidedRoundService } from "./round-close";
 import {
@@ -81,7 +82,14 @@ function state(
 }
 
 function fakeJourney(resolved: GuidedJourneyState) {
-  return { resolve: async () => resolved } as never;
+  return {
+    resolve: async () => resolved,
+    findRoundOwner: async () => ({
+      kind: "owned",
+      lineUserId: CONTEXT.lineUserId,
+      sessionKey: CONTEXT.sessionKey,
+    }),
+  } as never;
 }
 
 function baseDb(): RoundFakeDatabase {
@@ -117,8 +125,7 @@ function seedVerifiedSlip(db: RoundFakeDatabase, id: string, amount: number): vo
 }
 
 function template(overrides: Partial<Record<string, string>> = {}): string {
-  const base = buildSettlementTemplate(CONTEXT)!;
-  let text = base;
+  let text = extractGuidedMarker(buildSettlementTemplate(CONTEXT)!).text;
   for (const [from, to] of Object.entries(overrides)) {
     text = text.replace(from, to!);
   }
@@ -129,6 +136,7 @@ async function submit(
   db: RoundFakeDatabase,
   text: string,
   resolved: GuidedJourneyState = state(),
+  marker = extractGuidedMarker(buildSettlementTemplate(CONTEXT)!).marker,
 ) {
   return processGuidedSettlementSubmission({
     supabase: db.asClient(),
@@ -136,6 +144,7 @@ async function submit(
     rounds: new GuidedRoundService(db.asClient()),
     identity: IDENTITY,
     text,
+    marker,
   });
 }
 
@@ -147,7 +156,7 @@ function entries(db: RoundFakeDatabase): Row[] {
 
 describe("guided settlement template", () => {
   it("renders the exact fields the settlement contract accepts", () => {
-    expect(buildSettlementTemplate(CONTEXT)).toBe(
+    expect(extractGuidedMarker(buildSettlementTemplate(CONTEXT)!).text).toBe(
       [
         "กี้ วัดทุ่งลานนา ส่งยอด 29/07/2569",
         "ยอดโอน 0",
@@ -160,7 +169,7 @@ describe("guided settlement template", () => {
   });
 
   it("round-trips through its own parser", () => {
-    const parsed = parseGuidedSettlementCommand(buildSettlementTemplate(CONTEXT)!);
+    const parsed = parseGuidedSettlementCommand(template());
     expect(parsed.kind).toBe("ok");
     if (parsed.kind !== "ok") return;
     expect(parsed.command.subject).toBe("กี้ วัดทุ่งลานนา");
@@ -204,13 +213,11 @@ describe("guided settlement template", () => {
   });
 
   it("claims a message carrying the guided settlement header", () => {
-    expect(isGuidedSettlementCommandText(buildSettlementTemplate(CONTEXT)!)).toBe(
-      true,
-    );
+    expect(isGuidedSettlementCommandText(template())).toBe(true);
   });
 
   it("tolerates LINE transcript export prefixes", () => {
-    const prefixed = buildSettlementTemplate(CONTEXT)!
+    const prefixed = template()
       .split("\n")
       .map((line) => `09:12 กี้ ${line}`)
       .join("\n");
@@ -230,7 +237,7 @@ describe("guided settlement template", () => {
   });
 
   it("rejects a missing required field", () => {
-    const withoutCash = buildSettlementTemplate(CONTEXT)!
+    const withoutCash = template()
       .split("\n")
       .filter((line) => !line.startsWith("เงินสด"))
       .join("\n");
@@ -249,7 +256,7 @@ describe("guided settlement template", () => {
 
   it("rejects a missing closing line", () => {
     const parsed = parseGuidedSettlementCommand(
-      buildSettlementTemplate(CONTEXT)!.replace("\nจบส่งยอด", ""),
+      template().replace("\nจบส่งยอด", ""),
     );
     expect(parsed.kind).toBe("invalid");
     if (parsed.kind === "invalid") expect(parsed.message).toContain("จบส่งยอด");
@@ -275,6 +282,41 @@ describe("guided settlement template", () => {
 // ── Binding: everything is refused before the write ───────────────────────────
 
 describe("guided settlement binding", () => {
+  it("accepts the owner's signed template", async () => {
+    const db = baseDb();
+    const reply = await submit(db, template());
+    expect(reply.saved).toBe(true);
+    expect(entries(db)).toHaveLength(1);
+  });
+
+  it("rejects a copied or tampered signed template before writing", async () => {
+    const generated = extractGuidedMarker(buildSettlementTemplate(CONTEXT)!);
+    const copied = await processGuidedSettlementSubmission({
+      supabase: baseDb().asClient(),
+      journey: fakeJourney(state()),
+      rounds: new GuidedRoundService(baseDb().asClient()),
+      identity: {
+        ...IDENTITY,
+        lineUserId: "U-other",
+        sessionKey: `group:${SOURCE}:user:U-other`,
+      },
+      text: generated.text,
+      marker: generated.marker,
+    });
+    expect(copied.saved).toBe(false);
+
+    const db = baseDb();
+    const marker = generated.marker!;
+    const tampered = await submit(
+      db,
+      generated.text,
+      state(),
+      `${marker.slice(0, -1)}${marker.endsWith("A") ? "B" : "A"}`,
+    );
+    expect(tampered.saved).toBe(false);
+    expect(entries(db)).toHaveLength(0);
+  });
+
   it("saves nothing when the amount is invalid", async () => {
     const db = baseDb();
     const reply = await submit(db, template({ "ยอดโอน 0": "ยอดโอน -5" }));

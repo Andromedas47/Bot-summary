@@ -165,6 +165,7 @@ export class GuidedMenuFakeDatabase {
     line_guided_menu_markets: [],
     line_guided_menu_sellers: [],
     line_guided_menu_seller_markets: [],
+    produce_sessions: [],
   };
 
   seedOperator(row: OperatorRow): void {
@@ -401,20 +402,38 @@ export class GuidedMenuFakeDatabase {
 
   /**
    * Apply a deferred-finalizer outcome to the round, the way 0050's finalizer
-   * does: every terminal status also terminalizes the row.
+   * does: every terminal status also terminalizes the row, and a successful one
+   * leaves a produce_sessions row behind carrying the authoritative
+   * `ingest_idempotency_key` (0036) — `<session_key>:<session_generation>`.
+   *
+   * `options.ingestKey` overrides that identity so a test can reproduce 0050's
+   * OTHER duplicate route: a content-hash match whose produce row belongs to a
+   * different generation, which must NOT read as this round having been saved.
+   * `null` writes no produce row at all: a status that claims success with
+   * nothing behind it.
    */
   runDeferredFinalizer(
     outcome: "finalized" | "duplicate" | "failed_closed" | "validation_failed",
     target?: Row,
+    options: { ingestKey?: string | null } = {},
   ): void {
     const row = target ?? (this.tables.pending_sessions ?? [])[0];
     if (!row) return;
     row.finalization_status = outcome;
     row.finalized_at = new Date().toISOString();
     row.terminalized = true;
-    if (outcome === "finalized" || outcome === "duplicate") {
-      row.finalized_produce_session_id = "produce-session-1";
-    }
+    if (outcome !== "finalized" && outcome !== "duplicate") return;
+    row.finalized_produce_session_id = "produce-session-1";
+    const ingestKey =
+      options.ingestKey === undefined
+        ? `${row.session_key}:${row.session_generation}`
+        : options.ingestKey;
+    if (ingestKey === null) return;
+    const existing = this.tables.produce_sessions ?? [];
+    this.tables.produce_sessions = [
+      ...existing,
+      { id: `produce-session-${existing.length + 1}`, ingest_idempotency_key: ingestKey },
+    ];
   }
 
   private structuredRow(args: Row): Row | undefined {

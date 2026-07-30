@@ -23,7 +23,7 @@ import {
   getWeighSessionFinalizationErrors,
   parseWeighSession,
 } from "@/lib/parsers/weigh-session/parser";
-import { classifyGuidedProduceFinalization } from "./produce-finalization";
+import { resolveGuidedProduceFinalization } from "./produce-finalization";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 import { bangkokBusinessDateNow } from "@/lib/business-date";
 import { produceCommandSourceFromIdentity } from "./session-opener";
@@ -94,7 +94,7 @@ export class GuidedSessionCaptureService {
   private readonly commands: ProduceSessionCommandService;
 
   constructor(
-    supabase: AnyClient,
+    private readonly supabase: AnyClient,
     options: {
       pendingService?: PendingSessionService;
       commandService?: ProduceSessionCommandService;
@@ -275,7 +275,9 @@ export class GuidedSessionCaptureService {
     }
 
     const snapshot = this.readSnapshot(row);
-    const outcome = classifyGuidedProduceFinalization(row);
+    // Success needs a current-generation produce_sessions row, not just a
+    // status: a content-hash `duplicate` can point at another generation.
+    const outcome = await resolveGuidedProduceFinalization(this.supabase, row);
     if (outcome === "succeeded") {
       return {
         status: "confirmed",

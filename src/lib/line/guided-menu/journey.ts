@@ -29,8 +29,8 @@ import type { WhiteSheetCashEntryState } from "@/lib/white-sheet/persist";
 import { normalizedMarketLabel } from "@/lib/market";
 import { produceCommandSourceFromIdentity } from "./session-opener";
 import {
-  classifyGuidedProduceFinalization,
   guidedProduceHandedToFinalizer,
+  resolveGuidedProduceFinalization,
 } from "./produce-finalization";
 import type { GuidedMenuIdentity } from "./ux-types";
 
@@ -182,7 +182,7 @@ export class GuidedJourneyService {
     // The hold is released, but produce rows are only proven by the
     // authoritative finalization status. Neither `finalizing` nor
     // `finalize_failed` may proceed to the White Sheet.
-    const produce = classifyGuidedProduceFinalization(row);
+    const produce = await resolveGuidedProduceFinalization(this.supabase, row);
     if (produce !== "succeeded") {
       return {
         stage: produce === "failed" ? "finalize_failed" : "finalizing",

@@ -15,8 +15,10 @@ import { GuidedSessionCaptureService } from "./session-capture";
 import {
   classifyGuidedProduceFinalization,
   guidedProduceHandedToFinalizer,
+  resolveGuidedProduceFinalization,
   SUCCESSFUL_PRODUCE_FINALIZATION_STATUSES,
 } from "./produce-finalization";
+import { produceIngestIdempotencyKey } from "@/lib/line/produce-session-commands";
 import { GUIDED_MENU_COPY } from "./ux-types";
 import type { MenuActionType } from "./menu-state-types";
 
@@ -79,6 +81,20 @@ function seedClosedRound(
     finalization_status: "pending",
     ...overrides,
   });
+}
+
+/**
+ * The produce_sessions row the deferred finalizer leaves behind, keyed by the
+ * authoritative ingest identity. Without it, a successful status proves nothing.
+ */
+function seedProduceRow(
+  db: GuidedMenuFakeDatabase,
+  ingestKey = `${SESSION_KEY}:gen-open`,
+): void {
+  db.tables.produce_sessions = [
+    ...(db.tables.produce_sessions ?? []),
+    { id: `produce-${(db.tables.produce_sessions ?? []).length + 1}`, ingest_idempotency_key: ingestKey },
+  ];
 }
 
 async function mintConfirm(db: GuidedMenuFakeDatabase): Promise<string> {
@@ -480,6 +496,7 @@ describe("ดูสถานะ re-reads the produce outcome", () => {
       terminalized: true,
       finalization_status: "finalized",
     });
+    seedProduceRow(db);
 
     const capture = new GuidedSessionCaptureService(db.asClient());
     const outcome = await capture.produceOutcome(IDENTITY);
@@ -487,5 +504,156 @@ describe("ดูสถานะ re-reads the produce outcome", () => {
     if (outcome.status !== "confirmed") return;
     expect(outcome.produce).toBe("finalized");
     expect(outcome.parsed.items).toHaveLength(2);
+  });
+});
+
+// ── Second review, finding #1: the row itself has to exist ───────────────────
+
+describe("a successful status is only success with a current-generation row", () => {
+  /** The authoritative ingest identity the deferred finalizer writes. */
+  it("derives the ingest key exactly as the finalizer does", () => {
+    expect(produceIngestIdempotencyKey(SESSION_KEY, "gen-open")).toBe(
+      `${SESSION_KEY}:gen-open`,
+    );
+    expect(produceIngestIdempotencyKey(SESSION_KEY, "")).toBeNull();
+    expect(produceIngestIdempotencyKey("", "gen-open")).toBeNull();
+  });
+
+  it("succeeds for 'finalized' with the current generation's produce row", async () => {
+    const db = new GuidedMenuFakeDatabase();
+    seed(db);
+    seedClosedRound(db, {
+      finalize_confirmed_at: "2026-07-29T04:00:00Z",
+      terminalized: true,
+      finalization_status: "finalized",
+    });
+    seedProduceRow(db);
+    const state = await new GuidedJourneyService(db.asClient()).resolve(IDENTITY);
+    expect(state.stage).toBe("white_sheet");
+  });
+
+  it("succeeds for 'duplicate' when the row carries THIS generation's key", async () => {
+    const db = new GuidedMenuFakeDatabase();
+    seed(db);
+    seedClosedRound(db, {
+      finalize_confirmed_at: "2026-07-29T04:00:00Z",
+      terminalized: true,
+      finalization_status: "duplicate",
+    });
+    seedProduceRow(db);
+    const state = await new GuidedJourneyService(db.asClient()).resolve(IDENTITY);
+    expect(state.stage).toBe("white_sheet");
+  });
+
+  it("fails a content-hash 'duplicate' whose row belongs to another generation", async () => {
+    const db = new GuidedMenuFakeDatabase();
+    seed(db);
+    seedClosedRound(db, {
+      finalize_confirmed_at: "2026-07-29T04:00:00Z",
+      terminalized: true,
+      finalization_status: "duplicate",
+    });
+    // 0050's other duplicate route: rows exist, but for an earlier generation.
+    seedProduceRow(db, `${SESSION_KEY}:gen-earlier`);
+    const state = await new GuidedJourneyService(db.asClient()).resolve(IDENTITY);
+    expect(state.stage).toBe("finalize_failed");
+  });
+
+  it("fails a 'duplicate' with no produce row at all", async () => {
+    const db = new GuidedMenuFakeDatabase();
+    seed(db);
+    seedClosedRound(db, {
+      finalize_confirmed_at: "2026-07-29T04:00:00Z",
+      terminalized: true,
+      finalization_status: "duplicate",
+    });
+    const state = await new GuidedJourneyService(db.asClient()).resolve(IDENTITY);
+    expect(state.stage).toBe("finalize_failed");
+  });
+
+  it("fails 'finalized' with no matching row — the status alone proves nothing", async () => {
+    const db = new GuidedMenuFakeDatabase();
+    seed(db);
+    seedClosedRound(db, {
+      finalize_confirmed_at: "2026-07-29T04:00:00Z",
+      terminalized: true,
+      finalization_status: "finalized",
+    });
+    seedProduceRow(db, "dm:U-someone-else:gen-1");
+    const state = await new GuidedJourneyService(db.asClient()).resolve(IDENTITY);
+    expect(state.stage).toBe("finalize_failed");
+  });
+
+  it("stays 'finalizing' while the row is live and the proof is missing", async () => {
+    const db = new GuidedMenuFakeDatabase();
+    seed(db);
+    seedClosedRound(db, {
+      finalize_confirmed_at: "2026-07-29T04:00:00Z",
+      terminalized: false,
+      finalization_status: "finalized",
+    });
+    const state = await new GuidedJourneyService(db.asClient()).resolve(IDENTITY);
+    expect(state.stage).toBe("finalizing");
+  });
+
+  it("is pending, never success, when the produce lookup cannot be answered", async () => {
+    const db = new GuidedMenuFakeDatabase();
+    seed(db);
+    seedClosedRound(db, {
+      finalize_confirmed_at: "2026-07-29T04:00:00Z",
+      terminalized: false,
+      finalization_status: "finalized",
+    });
+    const failing = {
+      from: (table: string) =>
+        table === "produce_sessions"
+          ? {
+              select: () => ({
+                eq: () => ({
+                  limit: () => ({
+                    maybeSingle: async () => ({ data: null, error: { message: "down" } }),
+                  }),
+                }),
+              }),
+            }
+          : (db.asClient() as { from: (t: string) => unknown }).from(table),
+    } as never;
+    expect(
+      await resolveGuidedProduceFinalization(failing, {
+        session_key: SESSION_KEY,
+        session_generation: "gen-open",
+        finalization_status: "finalized",
+        terminalized: false,
+      } as never),
+    ).toBe("pending");
+  });
+
+  it("advances ดูสถานะ only once the matching row appears", async () => {
+    const db = new GuidedMenuFakeDatabase();
+    const handler = seed(db);
+    seedClosedRound(db, {
+      finalize_confirmed_at: "2026-07-29T04:00:00Z",
+      terminalized: false,
+      finalization_status: "duplicate",
+    });
+
+    const before = await handler.handlePostback({
+      wireToken: await mintStatus(db),
+      lineEventId: "evt-status-1",
+      identity: IDENTITY,
+      lineTimestampMs: TS + 1000,
+    });
+    expect(before.screen).toBe("session_finalizing");
+
+    seedProduceRow(db);
+    const after = await handler.handlePostback({
+      wireToken: await mintStatus(db),
+      lineEventId: "evt-status-2",
+      identity: IDENTITY,
+      lineTimestampMs: TS + 2000,
+    });
+    // The proof exists, so the status screen advances to the next real stage.
+    expect(after.screen).toBe("white_sheet_template");
+    expect(bodyOf(after)).not.toContain(GUIDED_MENU_COPY.produceFinalizing);
   });
 });

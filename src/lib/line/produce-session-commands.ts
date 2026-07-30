@@ -132,6 +132,24 @@ export function produceSessionKey(source: ProduceCommandSource): string | null {
 }
 
 /**
+ * The authoritative produce ingest identity: `<session_key>:<session_generation>`.
+ *
+ * 0036 makes `produce_sessions.ingest_idempotency_key` the idempotency identity,
+ * and the deferred finalizer writes exactly this value. Anything that needs to
+ * ask "were THIS generation's produce rows written?" must derive the key here
+ * rather than composing the string again — see produce-finalization.ts.
+ */
+export function produceIngestIdempotencyKey(
+  sessionKey: string,
+  sessionGeneration: string | null | undefined,
+): string | null {
+  const key = sessionKey.trim();
+  const generation = String(sessionGeneration ?? "").trim();
+  if (!key || !generation) return null;
+  return `${key}:${generation}`;
+}
+
+/**
  * True when the text carries a produce session header.
  *
  * Delegates to the webhook's findProduceSessionHeader so structured-append

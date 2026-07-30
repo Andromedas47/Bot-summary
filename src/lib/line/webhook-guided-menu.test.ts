@@ -100,13 +100,32 @@ function assertSingleGenuineRaw(
   }
 }
 
-function seedMappedKee(db: GuidedMenuFakeDatabase, lineUserId = "U-op-1"): void {
+function seedMappedSeller(
+  db: GuidedMenuFakeDatabase,
+  lineUserId = "U-op-1",
+): void {
   db.seedOperator({
     line_user_id: lineUserId,
     staff_label: "พี่ดำ",
     active: true,
   });
-  db.seedMarket({ market_code: "kee", label: "ตลาดกี้", active: true });
+  db.seedMarket({
+    market_code: "wat_thung_lanna",
+    label: "วัดทุ่งลานนา",
+    active: true,
+  });
+  db.seedSeller({
+    seller_code: "seller_a",
+    label: "พี่ดำ",
+    active: true,
+    sort_order: 1,
+  });
+  db.seedSellerMarket({
+    seller_code: "seller_a",
+    market_code: "wat_thung_lanna",
+    active: true,
+    sort_order: 1,
+  });
 }
 
 function makeService(db: GuidedMenuFakeDatabase, replies: LineApiMessage[][]) {
@@ -144,7 +163,7 @@ function makeService(db: GuidedMenuFakeDatabase, replies: LineApiMessage[][]) {
 describe("0051 Slice 2 — webhook Guided Menu", () => {
   it("exact เมนู opens transaction menu via one reply call; persists genuine raw only", async () => {
     const db = new GuidedMenuFakeDatabase();
-    seedMappedKee(db);
+    seedMappedSeller(db);
     const replies: LineApiMessage[][] = [];
     const { service, counts } = makeService(db, replies);
     const event = textEvent("เมนู", { webhookEventId: "msg-menu-1" });
@@ -163,7 +182,7 @@ describe("0051 Slice 2 — webhook Guided Menu", () => {
 
   it("similar text does not trigger Guided Menu", async () => {
     const db = new GuidedMenuFakeDatabase();
-    seedMappedKee(db);
+    seedMappedSeller(db);
     const replies: LineApiMessage[][] = [];
     const { service } = makeService(db, replies);
 
@@ -174,7 +193,11 @@ describe("0051 Slice 2 — webhook Guided Menu", () => {
 
   it("unmapped operator refused on webhook", async () => {
     const db = new GuidedMenuFakeDatabase();
-    db.seedMarket({ market_code: "kee", label: "ตลาดกี้", active: true });
+    db.seedMarket({
+      market_code: "wat_thung_lanna",
+      label: "วัดทุ่งลานนา",
+      active: true,
+    });
     const replies: LineApiMessage[][] = [];
     const { service } = makeService(db, replies);
     const event = textEvent("เมนู", { webhookEventId: "msg-unmapped" });
@@ -190,7 +213,7 @@ describe("0051 Slice 2 — webhook Guided Menu", () => {
 
   it("postback walk uses reply only and ends on field-safe no-write placeholder", async () => {
     const db = new GuidedMenuFakeDatabase();
-    seedMappedKee(db);
+    seedMappedSeller(db);
     const replies: LineApiMessage[][] = [];
     const { service, counts } = makeService(db, replies);
 
@@ -207,48 +230,57 @@ describe("0051 Slice 2 — webhook Guided Menu", () => {
     expect(db.tables.raw_messages[1]!.line_event_id).toBe("pb-walk-tx");
     expect(db.tables.raw_messages[1]!.event_type).toBe("postback");
 
-    const marketTokens = collectPostbackData(replies[1]);
-    const kee = marketTokens.find(
-      (t) => db.stateByWire(t)?.payload.market_code === "kee",
+    const sellerTokens = collectPostbackData(replies[1]);
+    const seller = sellerTokens.find(
+      (t) => db.stateByWire(t)?.payload.seller_code === "seller_a",
+    )!;
+    await service.processEvents([
+      postbackEvent(seller, { webhookEventId: "pb-walk-seller" }),
+    ], "dest");
+
+    const marketTokens = collectPostbackData(replies[2]);
+    const market = marketTokens.find(
+      (t) => db.stateByWire(t)?.payload.market_code === "wat_thung_lanna",
     )!;
 
     await service.processEvents([
-      postbackEvent(kee, { webhookEventId: "pb-walk-mkt" }),
+      postbackEvent(market, { webhookEventId: "pb-walk-mkt" }),
     ], "dest");
-    const today = collectPostbackData(replies[2]).find(
+    const today = collectPostbackData(replies[3]).find(
       (t) => db.stateByWire(t)?.payload.date_mode === "today",
     )!;
 
     await service.processEvents([
       postbackEvent(today, { webhookEventId: "pb-walk-date" }),
     ], "dest");
-    expect(JSON.stringify(replies[3])).toContain("กำลังจะเปิดรายการ");
-    expect(JSON.stringify(replies[3])).toContain("ตลาดกี้");
+    expect(JSON.stringify(replies[4])).toContain("กำลังจะเปิดรายการ");
+    expect(JSON.stringify(replies[4])).toContain("พี่ดำ");
+    expect(JSON.stringify(replies[4])).toContain("วัดทุ่งลานนา");
 
-    const confirmTok = collectPostbackData(replies[3]).find(
+    const confirmTok = collectPostbackData(replies[4]).find(
       (t) => db.stateByWire(t)?.action_type === "confirm_open",
     )!;
     await service.processEvents([
       postbackEvent(confirmTok, { webhookEventId: "pb-walk-confirm" }),
     ], "dest");
-    expect(replies[4]).toEqual([
+    expect(replies[5]).toEqual([
       { type: "text", text: GUIDED_MENU_COPY.confirmPlaceholder },
     ]);
     expect(GUIDED_MENU_COPY.confirmPlaceholder).toContain("ยังไม่ได้เปิดรายการ");
     expect(GUIDED_MENU_COPY.confirmPlaceholder).not.toMatch(/Slice\s*3A/i);
 
     // Exactly one raw row per genuine inbound event; no synthetic extras.
-    expect(db.tables.raw_messages).toHaveLength(5);
+    expect(db.tables.raw_messages).toHaveLength(6);
     assertNoBusinessSideEffects(db);
     expect(counts().pushCalls).toBe(0);
     expect(counts().multicastCalls).toBe(0);
     // One replyApiMessages call per handled Guided Menu event.
-    expect(replies).toHaveLength(5);
+    expect(replies).toHaveLength(6);
   });
 
   it("wrong-user postback yields generic invalid reply", async () => {
     const db = new GuidedMenuFakeDatabase();
-    seedMappedKee(db);
+    seedMappedSeller(db);
     db.seedOperator({
       line_user_id: "U-other",
       staff_label: "อื่น",
@@ -274,7 +306,7 @@ describe("0051 Slice 2 — webhook Guided Menu", () => {
 
   it("same-event postback replay is idempotent via handler after raw persist", async () => {
     const db = new GuidedMenuFakeDatabase();
-    seedMappedKee(db);
+    seedMappedSeller(db);
     const replies: LineApiMessage[][] = [];
     const { service } = makeService(db, replies);
 
@@ -297,13 +329,13 @@ describe("0051 Slice 2 — webhook Guided Menu", () => {
       },
       lineTimestampMs: TS,
     });
-    expect(replay.screen).toBe("market");
+    expect(replay.screen).toBe("seller");
     expect(JSON.stringify(replay.messages)).toBe(JSON.stringify(replies[1]));
   });
 
   it("supports DM/user source for เมนู", async () => {
     const db = new GuidedMenuFakeDatabase();
-    seedMappedKee(db);
+    seedMappedSeller(db);
     const replies: LineApiMessage[][] = [];
     const { service } = makeService(db, replies);
     const source: LineSource = { type: "user", userId: "U-op-1" };
@@ -323,7 +355,7 @@ describe("0051 Slice 2 — webhook Guided Menu", () => {
 
   it("supports room source for เมนู and postback", async () => {
     const db = new GuidedMenuFakeDatabase();
-    seedMappedKee(db);
+    seedMappedSeller(db);
     const replies: LineApiMessage[][] = [];
     const { service } = makeService(db, replies);
     const source: LineSource = {

@@ -7,12 +7,17 @@ import {
   resolveMarketButtonLabel,
   type GuidedMenuMarketOption,
 } from "./markets";
-import type { MenuTransactionTypeCode } from "./menu-state-types";
+import type {
+  GuidedMenuSeller,
+  MenuTransactionTypeCode,
+} from "./menu-state-types";
 import {
   FLEX_BUBBLE_MAX_UTF8_BYTES,
   FLEX_BUTTON_LABEL_MAX,
   GUIDED_MENU_COPY,
   TEMPLATE_ACTION_LABEL_MAX,
+  LINE_REPLY_MESSAGE_MAX,
+  SELLERS_PER_MESSAGE,
   TX_CODE_TO_LABEL,
   type GuidedMenuLineMessage,
   type LineFlexBubble,
@@ -186,9 +191,56 @@ export function buildTransactionTypeMessage(tokens: {
   };
 }
 
+/** Seller selection, split across LINE reply messages without truncation. */
+export function buildSellerSelectMessages(input: {
+  transactionType: MenuTransactionTypeCode;
+  sellers: readonly GuidedMenuSeller[];
+  sellerTokens: ReadonlyMap<string, string>;
+  backToken: string;
+  cancelToken: string;
+}): LineFlexMessage[] {
+  const labels = input.sellers.map((seller) => {
+    assertLabelLength(seller.label, FLEX_BUTTON_LABEL_MAX, "flex seller button");
+    return seller.label;
+  });
+  assertUniqueRenderedLabels([...labels, "กลับ", "ยกเลิก"], "seller screen");
+
+  const pageCount = Math.ceil(input.sellers.length / SELLERS_PER_MESSAGE);
+  if (pageCount > LINE_REPLY_MESSAGE_MAX) {
+    throw new Error("seller catalog exceeds LINE reply capacity");
+  }
+
+  const txLabel = TX_CODE_TO_LABEL[input.transactionType];
+  return Array.from({ length: pageCount }, (_, page) => {
+    const sellers = input.sellers.slice(
+      page * SELLERS_PER_MESSAGE,
+      (page + 1) * SELLERS_PER_MESSAGE,
+    );
+    const buttons = sellers.map((seller) => {
+      const token = input.sellerTokens.get(seller.sellerCode);
+      if (!token) throw new Error(`missing seller token for ${seller.sellerCode}`);
+      return bubbleButton(seller.label, token);
+    });
+    buttons.push(bubbleButton("กลับ", input.backToken, "secondary"));
+    buttons.push(bubbleButton("ยกเลิก", input.cancelToken, "secondary"));
+
+    const title =
+      pageCount === 1
+        ? GUIDED_MENU_COPY.sellerPrompt
+        : `${GUIDED_MENU_COPY.sellerPrompt} (${page + 1}/${pageCount})`;
+    return flexShell(
+      GUIDED_MENU_COPY.sellerPrompt,
+      title,
+      [`ประเภท: ${txLabel}`],
+      buttons,
+    );
+  });
+}
+
 /** Market selection — Flex; labels from server config only. */
 export function buildMarketSelectMessage(input: {
   transactionType: MenuTransactionTypeCode;
+  sellerLabel: string;
   markets: readonly GuidedMenuMarketOption[];
   marketTokens: ReadonlyMap<string, string>;
   backToken: string;
@@ -219,13 +271,14 @@ export function buildMarketSelectMessage(input: {
   return flexShell(
     GUIDED_MENU_COPY.marketPrompt,
     GUIDED_MENU_COPY.marketPrompt,
-    [`ประเภท: ${txLabel}`],
+    [`ประเภท: ${txLabel}`, `คนขาย: ${input.sellerLabel}`],
     buttons,
   );
 }
 
 export function buildDateSelectMessage(input: {
   transactionType: MenuTransactionTypeCode;
+  sellerLabel: string;
   marketLabel: string;
   todayToken: string;
   yesterdayToken: string;
@@ -236,7 +289,11 @@ export function buildDateSelectMessage(input: {
   return flexShell(
     GUIDED_MENU_COPY.datePrompt,
     GUIDED_MENU_COPY.datePrompt,
-    [`ประเภท: ${txLabel}`, `ตลาด: ${input.marketLabel}`],
+    [
+      `ประเภท: ${txLabel}`,
+      `คนขาย: ${input.sellerLabel}`,
+      `ตลาด: ${input.marketLabel}`,
+    ],
     [
       bubbleButton("วันนี้", input.todayToken),
       bubbleButton("เมื่อวาน", input.yesterdayToken),
@@ -248,6 +305,7 @@ export function buildDateSelectMessage(input: {
 
 export function buildConfirmPreviewMessage(input: {
   transactionType: MenuTransactionTypeCode;
+  sellerLabel: string;
   marketLabel: string;
   dateThaiShort: string;
   confirmToken: string;
@@ -257,6 +315,7 @@ export function buildConfirmPreviewMessage(input: {
   const txLabel = TX_CODE_TO_LABEL[input.transactionType];
   const body = [
     `ประเภท: ${txLabel}`,
+    `คนขาย: ${input.sellerLabel}`,
     `ตลาด: ${input.marketLabel}`,
     `วันที่: ${input.dateThaiShort}`,
   ];
@@ -292,10 +351,18 @@ export function buildConfirmPlaceholderMessage(): LineTextMessage {
   return buildPlainTextMessage(GUIDED_MENU_COPY.confirmPlaceholder);
 }
 
-export function buildNoActiveMarketsMessage(): LineTextMessage {
-  return buildPlainTextMessage(GUIDED_MENU_COPY.noActiveMarkets);
+
+export function buildNoActiveSellersMessage(): LineTextMessage {
+  return buildPlainTextMessage(GUIDED_MENU_COPY.noActiveSellers);
 }
 
+export function buildSellerUnavailableMessage(): LineTextMessage {
+  return buildPlainTextMessage(GUIDED_MENU_COPY.sellerUnavailable);
+}
+
+export function buildNoActiveSellerMarketsMessage(): LineTextMessage {
+  return buildPlainTextMessage(GUIDED_MENU_COPY.noActiveSellerMarkets);
+}
 export function buildMarketUnavailableMessage(): LineTextMessage {
   return buildPlainTextMessage(GUIDED_MENU_COPY.marketUnavailable);
 }

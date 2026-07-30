@@ -26,14 +26,21 @@ export const TEMPLATE_ACTION_LABEL_MAX = 20;
 export const FLEX_BUTTON_LABEL_MAX = 40;
 /** LINE Flex bubble JSON size limit (UTF-8 bytes). */
 export const FLEX_BUBBLE_MAX_UTF8_BYTES = 30 * 1024;
+/** Split seller choices across reply messages; LINE permits at most five. */
+export const SELLERS_PER_MESSAGE = 8;
+export const LINE_REPLY_MESSAGE_MAX = 5;
 
 export const GUIDED_MENU_COPY = {
   unmapped:
     "บัญชีไลน์นี้ยังไม่ได้รับสิทธิ์ใช้งานเมนู กรุณาติดต่อผู้ดูแล",
   invalidOrExpired: "เมนูหมดอายุหรือไม่ถูกต้อง กรุณาพิมพ์ เมนู ใหม่",
   cancelled: "ยกเลิกแล้ว",
-  noActiveMarkets:
-    "ยังไม่มีตลาดที่พร้อมใช้งาน กรุณาติดต่อผู้ดูแล",
+  noActiveSellers:
+    "ยังไม่มีคนขายที่พร้อมใช้งาน กรุณาติดต่อผู้ดูแล",
+  sellerUnavailable:
+    "คนขายนี้ไม่พร้อมใช้งานแล้ว กรุณาพิมพ์ เมนู ใหม่",
+  noActiveSellerMarkets:
+    "คนขายนี้ยังไม่มีตลาดที่พร้อมใช้งาน กรุณาติดต่อผู้ดูแล",
   marketUnavailable:
     "ตลาดนี้ไม่พร้อมใช้งานแล้ว กรุณาพิมพ์ เมนู ใหม่",
   /**
@@ -46,6 +53,7 @@ export const GUIDED_MENU_COPY = {
   ].join("\n"),
   txPrompt: "เลือกรายการที่ต้องการบันทึก",
   marketPrompt: "เลือกตลาด",
+  sellerPrompt: "เลือกคนขาย",
   datePrompt: "เลือกวันที่",
   confirmHeading: "กำลังจะเปิดรายการ",
 } as const;
@@ -53,12 +61,15 @@ export const GUIDED_MENU_COPY = {
 export type GuidedMenuScreen =
   | "transaction_type"
   | "market"
+  | "seller"
   | "date"
   | "confirm"
   | "cancelled"
   | "confirm_placeholder"
   | "unmapped"
-  | "no_markets"
+  | "no_sellers"
+  | "seller_unavailable"
+  | "no_seller_markets"
   | "market_unavailable"
   | "invalid";
 
@@ -140,4 +151,5 @@ export type SelectionSnapshot = {
   transactionType?: MenuTransactionTypeCode;
   marketCode?: string;
   dateMode?: MenuDateMode;
+  sellerCode?: string;
 };

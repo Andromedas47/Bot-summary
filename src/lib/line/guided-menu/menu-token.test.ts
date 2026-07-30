@@ -63,12 +63,12 @@ describe("0051 menu payload + TTL", () => {
     expect(
       validateMenuPayload({
         transaction_type: "withdraw",
-        market_code: "kee",
+        market_code: "wat_thung_lanna",
         date_mode: "today",
       }),
     ).toEqual({
       transaction_type: "withdraw",
-      market_code: "kee",
+      market_code: "wat_thung_lanna",
       date_mode: "today",
     });
 

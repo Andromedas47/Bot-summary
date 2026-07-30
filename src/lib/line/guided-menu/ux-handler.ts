@@ -9,6 +9,8 @@ import { MENU_TOKEN_PREFIX, parseMenuToken } from "./menu-token";
 import { GuidedMenuStateService } from "./menu-state-service";
 import type {
   CreateMenuStateInput,
+  GuidedMenuSeller,
+  GuidedMenuSellerMarket,
   MenuActionType,
   MenuDateMode,
   MenuPayload,
@@ -20,7 +22,6 @@ import { MENU_SOURCE_TYPES, MENU_TRANSACTION_TYPE_CODES } from "./menu-state-typ
 import { resolveGuidedMenuDate } from "./dates";
 import {
   findGuidedMenuMarket,
-  marketOptionsFromActive,
   type GuidedMenuMarketOption,
 } from "./markets";
 import {
@@ -29,16 +30,21 @@ import {
   buildConfirmPlaceholderMessage,
   buildConfirmPreviewMessage,
   buildDateSelectMessage,
+  buildNoActiveSellerMarketsMessage,
+  buildNoActiveSellersMessage,
+  buildSellerSelectMessages,
+  buildSellerUnavailableMessage,
   buildInvalidMenuMessage,
   buildMarketSelectMessage,
   buildMarketUnavailableMessage,
-  buildNoActiveMarketsMessage,
   buildTransactionTypeMessage,
   buildUnmappedMessage,
 } from "./messages";
 import {
   GUIDED_MENU_COPY,
   GUIDED_MENU_TRIGGER,
+  LINE_REPLY_MESSAGE_MAX,
+  SELLERS_PER_MESSAGE,
   type GuidedMenuIdentity,
   type GuidedMenuLineMessage,
   type GuidedMenuUxResult,
@@ -123,24 +129,14 @@ type CreateToken = <A extends MenuActionType>(input: {
 
 export class GuidedMenuUxHandler {
   private readonly state: GuidedMenuStateService;
-  /** Optional test override — production always loads via listActiveMarkets(). */
-  private readonly marketsOverride: GuidedMenuMarketOption[] | null;
 
   constructor(
     supabase: SupabaseClient,
     options: {
-      markets?: GuidedMenuMarketOption[];
       stateService?: GuidedMenuStateService;
     } = {},
   ) {
     this.state = options.stateService ?? new GuidedMenuStateService(supabase);
-    this.marketsOverride = options.markets ?? null;
-  }
-
-  private async loadActiveMarkets(): Promise<GuidedMenuMarketOption[]> {
-    if (this.marketsOverride) return this.marketsOverride;
-    const rows = await this.state.listActiveMarkets();
-    return marketOptionsFromActive(rows);
   }
 
   async openMenu(input: {
@@ -243,38 +239,88 @@ export class GuidedMenuUxHandler {
       if (!tx) {
         return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
       }
-      return this.buildMarketScreen(input.identity, tx);
+      return this.buildSellerScreen(input.identity, tx);
+    }
+
+    if (input.actionType === "choose_seller") {
+      const tx = asTx(input.payload.transaction_type);
+      const sellerCode = input.payload.seller_code?.trim();
+      if (!tx || !sellerCode) {
+        return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
+      }
+      const selection = await this.state.loadActiveSellerMarkets(sellerCode);
+      if (!selection.seller) {
+        return resultEnvelope("seller_unavailable", [
+          buildSellerUnavailableMessage(),
+        ]);
+      }
+      if (selection.markets.length === 0) {
+        return resultEnvelope("no_seller_markets", [
+          buildNoActiveSellerMarketsMessage(),
+        ]);
+      }
+      return this.buildMarketScreen(
+        input.identity,
+        tx,
+        selection.seller,
+        selection.markets,
+      );
     }
 
     if (input.actionType === "choose_market") {
       const tx = asTx(input.payload.transaction_type);
+      const sellerCode = input.payload.seller_code?.trim();
       const marketCode = input.payload.market_code?.trim();
-      if (!tx || !marketCode) {
+      if (!tx || !sellerCode || !marketCode) {
         return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
       }
-      const markets = await this.loadActiveMarkets();
-      const market = findGuidedMenuMarket(markets, marketCode);
+      const selection = await this.state.loadActiveSellerMarkets(sellerCode);
+      if (!selection.seller) {
+        return resultEnvelope("seller_unavailable", [
+          buildSellerUnavailableMessage(),
+        ]);
+      }
+      const market = findGuidedMenuMarket(
+        selection.markets.map((row) => ({
+          code: row.marketCode,
+          label: row.marketLabel,
+        })),
+        marketCode,
+      );
       if (!market) {
         return resultEnvelope("market_unavailable", [
           buildMarketUnavailableMessage(),
         ]);
       }
-      return this.buildDateScreen(input.identity, tx, market);
+      return this.buildDateScreen(input.identity, tx, selection.seller, market);
     }
 
     if (input.actionType === "choose_date") {
       const tx = asTx(input.payload.transaction_type);
+      const sellerCode = input.payload.seller_code?.trim();
       const marketCode = input.payload.market_code?.trim();
       const dateMode = input.payload.date_mode;
       if (
         !tx ||
+        !sellerCode ||
         !marketCode ||
         (dateMode !== "today" && dateMode !== "yesterday")
       ) {
         return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
       }
-      const markets = await this.loadActiveMarkets();
-      const market = findGuidedMenuMarket(markets, marketCode);
+      const selection = await this.state.loadActiveSellerMarkets(sellerCode);
+      if (!selection.seller) {
+        return resultEnvelope("seller_unavailable", [
+          buildSellerUnavailableMessage(),
+        ]);
+      }
+      const market = findGuidedMenuMarket(
+        selection.markets.map((row) => ({
+          code: row.marketCode,
+          label: row.marketLabel,
+        })),
+        marketCode,
+      );
       if (!market) {
         return resultEnvelope("market_unavailable", [
           buildMarketUnavailableMessage(),
@@ -283,6 +329,7 @@ export class GuidedMenuUxHandler {
       return this.buildConfirmScreen(
         input.identity,
         tx,
+        selection.seller,
         market,
         dateMode,
         input.lineTimestampMs,
@@ -290,17 +337,23 @@ export class GuidedMenuUxHandler {
     }
 
     if (input.actionType === "confirm_open") {
-      // UX boundary: no open/append/admission/ingest/close — placeholder only.
-      // Re-validate market still active before placeholder (fail closed).
+      const sellerCode = input.payload.seller_code?.trim();
       const marketCode = input.payload.market_code?.trim();
-      if (marketCode) {
-        const markets = await this.loadActiveMarkets();
-        if (!findGuidedMenuMarket(markets, marketCode)) {
-          return resultEnvelope("market_unavailable", [
-            buildMarketUnavailableMessage(),
-          ]);
-        }
+      if (!sellerCode || !marketCode) {
+        return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
       }
+      const selection = await this.state.loadActiveSellerMarkets(sellerCode);
+      if (!selection.seller) {
+        return resultEnvelope("seller_unavailable", [
+          buildSellerUnavailableMessage(),
+        ]);
+      }
+      if (!selection.markets.some((row) => row.marketCode === marketCode)) {
+        return resultEnvelope("market_unavailable", [
+          buildMarketUnavailableMessage(),
+        ]);
+      }
+      // UX boundary: no open/append/admission/ingest/close — placeholder only.
       return resultEnvelope(
         "confirm_placeholder",
         [buildConfirmPlaceholderMessage()],
@@ -363,13 +416,65 @@ export class GuidedMenuUxHandler {
     }
   }
 
-  private async buildMarketScreen(
+  private async buildSellerScreen(
     identity: GuidedMenuIdentity,
     transactionType: MenuTransactionTypeCode,
   ): Promise<GuidedMenuUxResult> {
-    const markets = await this.loadActiveMarkets();
+    const sellers = await this.state.listActiveSellers();
+    if (sellers.length === 0) {
+      return resultEnvelope("no_sellers", [buildNoActiveSellersMessage()]);
+    }
+    if (sellers.length > SELLERS_PER_MESSAGE * LINE_REPLY_MESSAGE_MAX) {
+      return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
+    }
+    try {
+      const create = this.createTokenFn(identity);
+      const [sellerEntries, backToken, cancelToken] = await Promise.all([
+        Promise.all(
+          sellers.map(async (seller) => [
+            seller.sellerCode,
+            await create({
+              actionType: "choose_seller",
+              payload: {
+                transaction_type: transactionType,
+                seller_code: seller.sellerCode,
+              },
+            }),
+          ] as const),
+        ),
+        create({ actionType: "menu_root", payload: {} }),
+        create({ actionType: "menu_root", payload: { intent: "cancel" } }),
+      ]);
+      const sellerTokens = new Map(sellerEntries);
+      const messages = buildSellerSelectMessages({
+        transactionType,
+        sellers,
+        sellerTokens,
+        backToken,
+        cancelToken,
+      });
+      return resultEnvelope("seller", messages, {
+        transaction_type: transactionType,
+      });
+    } catch {
+      return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
+    }
+  }
+
+  private async buildMarketScreen(
+    identity: GuidedMenuIdentity,
+    transactionType: MenuTransactionTypeCode,
+    seller: GuidedMenuSeller,
+    assignments: GuidedMenuSellerMarket[],
+  ): Promise<GuidedMenuUxResult> {
+    const markets = assignments.map((row) => ({
+      code: row.marketCode,
+      label: row.marketLabel,
+    }));
     if (markets.length === 0) {
-      return resultEnvelope("no_markets", [buildNoActiveMarketsMessage()]);
+      return resultEnvelope("no_seller_markets", [
+        buildNoActiveSellerMarketsMessage(),
+      ]);
     }
     try {
       const create = this.createTokenFn(identity);
@@ -379,20 +484,22 @@ export class GuidedMenuUxHandler {
           actionType: "choose_market",
           payload: {
             transaction_type: transactionType,
+            seller_code: seller.sellerCode,
             market_code: market.code,
           },
         });
         marketTokens.set(market.code, token);
       }
       const [backToken, cancelToken] = await Promise.all([
-        create({ actionType: "menu_root", payload: {} }),
         create({
-          actionType: "menu_root",
-          payload: { intent: "cancel" },
+          actionType: "choose_transaction_type",
+          payload: { transaction_type: transactionType },
         }),
+        create({ actionType: "menu_root", payload: { intent: "cancel" } }),
       ]);
       const message = buildMarketSelectMessage({
         transactionType,
+        sellerLabel: seller.label,
         markets,
         marketTokens,
         backToken,
@@ -400,6 +507,7 @@ export class GuidedMenuUxHandler {
       });
       return resultEnvelope("market", [message], {
         transaction_type: transactionType,
+        seller_code: seller.sellerCode,
       });
     } catch {
       return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
@@ -409,49 +517,45 @@ export class GuidedMenuUxHandler {
   private async buildDateScreen(
     identity: GuidedMenuIdentity,
     transactionType: MenuTransactionTypeCode,
+    seller: GuidedMenuSeller,
     market: GuidedMenuMarketOption,
   ): Promise<GuidedMenuUxResult> {
     try {
       const create = this.createTokenFn(identity);
+      const base = {
+        transaction_type: transactionType,
+        seller_code: seller.sellerCode,
+        market_code: market.code,
+      };
       const [todayToken, yesterdayToken, backToken, cancelToken] =
         await Promise.all([
           create({
             actionType: "choose_date",
-            payload: {
-              transaction_type: transactionType,
-              market_code: market.code,
-              date_mode: "today",
-            },
+            payload: { ...base, date_mode: "today" },
           }),
           create({
             actionType: "choose_date",
+            payload: { ...base, date_mode: "yesterday" },
+          }),
+          create({
+            actionType: "choose_seller",
             payload: {
               transaction_type: transactionType,
-              market_code: market.code,
-              date_mode: "yesterday",
+              seller_code: seller.sellerCode,
             },
           }),
-          create({
-            actionType: "choose_transaction_type",
-            payload: { transaction_type: transactionType },
-          }),
-          create({
-            actionType: "menu_root",
-            payload: { intent: "cancel" },
-          }),
+          create({ actionType: "menu_root", payload: { intent: "cancel" } }),
         ]);
       const message = buildDateSelectMessage({
         transactionType,
+        sellerLabel: seller.label,
         marketLabel: market.label,
         todayToken,
         yesterdayToken,
         backToken,
         cancelToken,
       });
-      return resultEnvelope("date", [message], {
-        transaction_type: transactionType,
-        market_code: market.code,
-      });
+      return resultEnvelope("date", [message], base);
     } catch {
       return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
     }
@@ -460,6 +564,7 @@ export class GuidedMenuUxHandler {
   private async buildConfirmScreen(
     identity: GuidedMenuIdentity,
     transactionType: MenuTransactionTypeCode,
+    seller: GuidedMenuSeller,
     market: GuidedMenuMarketOption,
     dateMode: Extract<MenuDateMode, "today" | "yesterday">,
     lineTimestampMs: number,
@@ -473,6 +578,7 @@ export class GuidedMenuUxHandler {
       const create = this.createTokenFn(identity);
       const selection: MenuPayloadByAction["confirm_open"] = {
         transaction_type: transactionType,
+        seller_code: seller.sellerCode,
         market_code: market.code,
         date_mode: dateMode,
       };
@@ -482,17 +588,16 @@ export class GuidedMenuUxHandler {
           actionType: "choose_market",
           payload: {
             transaction_type: transactionType,
+            seller_code: seller.sellerCode,
             market_code: market.code,
           },
         }),
-        create({
-          actionType: "menu_root",
-          payload: { intent: "cancel" },
-        }),
+        create({ actionType: "menu_root", payload: { intent: "cancel" } }),
       ]);
 
       const message = buildConfirmPreviewMessage({
         transactionType,
+        sellerLabel: seller.label,
         marketLabel: market.label,
         dateThaiShort: resolved.thaiShort,
         confirmToken,
@@ -500,9 +605,9 @@ export class GuidedMenuUxHandler {
         cancelToken,
       });
 
-      // Result stores stable codes only — display labels reconstructed from config.
       return resultEnvelope("confirm", [message], {
         transaction_type: transactionType,
+        seller_code: seller.sellerCode,
         market_code: market.code,
         date_mode: dateMode,
         business_date_iso: resolved.iso,

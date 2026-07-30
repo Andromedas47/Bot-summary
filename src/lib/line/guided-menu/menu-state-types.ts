@@ -3,6 +3,7 @@
 export const MENU_ACTION_TYPES = [
   "menu_root",
   "choose_transaction_type",
+  "choose_seller",
   "choose_market",
   "choose_date",
   "confirm_open",
@@ -60,19 +61,27 @@ export type MenuChooseTransactionTypePayload = {
   transaction_type: MenuTransactionTypeCode;
 };
 
+export type MenuChooseSellerPayload = {
+  transaction_type: MenuTransactionTypeCode;
+  seller_code: string;
+};
+
 export type MenuChooseMarketPayload = {
   transaction_type: MenuTransactionTypeCode;
+  seller_code: string;
   market_code: string;
 };
 
 export type MenuChooseDatePayload =
   | {
       transaction_type: MenuTransactionTypeCode;
+      seller_code: string;
       market_code: string;
       date_mode: "today" | "yesterday";
     }
   | {
       transaction_type: MenuTransactionTypeCode;
+      seller_code: string;
       market_code: string;
       date_mode: "iso";
       iso_date: string;
@@ -83,6 +92,7 @@ export type MenuEmptyPayload = Record<string, never>;
 export type MenuPayloadByAction = {
   menu_root: MenuRootPayload;
   choose_transaction_type: MenuChooseTransactionTypePayload;
+  choose_seller: MenuChooseSellerPayload;
   choose_market: MenuChooseMarketPayload;
   choose_date: MenuChooseDatePayload;
   confirm_open: MenuChooseDatePayload;
@@ -95,6 +105,7 @@ export type MenuPayloadByAction = {
 export type MenuPayload = {
   intent?: MenuRootIntent;
   transaction_type?: MenuTransactionTypeCode;
+  seller_code?: string;
   market_code?: string;
   date_mode?: MenuDateMode;
   iso_date?: string;
@@ -174,4 +185,19 @@ export type GuidedMenuMarket = {
   marketCode: string;
   label: string;
   active: boolean;
+};
+
+export type GuidedMenuSeller = {
+  sellerCode: string;
+  label: string;
+  active: boolean;
+  sortOrder: number;
+};
+
+export type GuidedMenuSellerMarket = {
+  sellerCode: string;
+  sellerLabel: string;
+  marketCode: string;
+  marketLabel: string;
+  sortOrder: number;
 };

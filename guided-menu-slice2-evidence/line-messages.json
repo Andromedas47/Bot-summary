@@ -29,6 +29,284 @@
       }
     }
   ],
+  "seller": [
+    {
+      "type": "flex",
+      "altText": "เลือกคนขาย",
+      "contents": {
+        "type": "bubble",
+        "size": "mega",
+        "body": {
+          "type": "box",
+          "layout": "vertical",
+          "spacing": "md",
+          "paddingAll": "16px",
+          "contents": [
+            {
+              "type": "text",
+              "text": "เลือกคนขาย (1/2)",
+              "weight": "bold",
+              "size": "lg",
+              "color": "#0F172A",
+              "wrap": true
+            },
+            {
+              "type": "text",
+              "text": "ประเภท: เบิก",
+              "size": "sm",
+              "color": "#334155",
+              "wrap": true
+            }
+          ]
+        },
+        "footer": {
+          "type": "box",
+          "layout": "vertical",
+          "spacing": "sm",
+          "paddingAll": "12px",
+          "contents": [
+            {
+              "type": "button",
+              "style": "primary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "กี้",
+                "data": "gpm1:BAQEBAQEBAQEBAQEBAQEBA",
+                "displayText": "กี้"
+              }
+            },
+            {
+              "type": "button",
+              "style": "primary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "โอม",
+                "data": "gpm1:BQUFBQUFBQUFBQUFBQUFBQ",
+                "displayText": "โอม"
+              }
+            },
+            {
+              "type": "button",
+              "style": "primary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "จิ๋ว",
+                "data": "gpm1:BgYGBgYGBgYGBgYGBgYGBg",
+                "displayText": "จิ๋ว"
+              }
+            },
+            {
+              "type": "button",
+              "style": "primary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "น้อย",
+                "data": "gpm1:BwcHBwcHBwcHBwcHBwcHBw",
+                "displayText": "น้อย"
+              }
+            },
+            {
+              "type": "button",
+              "style": "primary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "แทน",
+                "data": "gpm1:CAgICAgICAgICAgICAgICA",
+                "displayText": "แทน"
+              }
+            },
+            {
+              "type": "button",
+              "style": "primary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "ต้อม",
+                "data": "gpm1:CQkJCQkJCQkJCQkJCQkJCQ",
+                "displayText": "ต้อม"
+              }
+            },
+            {
+              "type": "button",
+              "style": "primary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "วุฒิ",
+                "data": "gpm1:CgoKCgoKCgoKCgoKCgoKCg",
+                "displayText": "วุฒิ"
+              }
+            },
+            {
+              "type": "button",
+              "style": "primary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "ขวัญ",
+                "data": "gpm1:CwsLCwsLCwsLCwsLCwsLCw",
+                "displayText": "ขวัญ"
+              }
+            },
+            {
+              "type": "button",
+              "style": "secondary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "กลับ",
+                "data": "gpm1:EhISEhISEhISEhISEhISEg",
+                "displayText": "กลับ"
+              }
+            },
+            {
+              "type": "button",
+              "style": "secondary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "ยกเลิก",
+                "data": "gpm1:ExMTExMTExMTExMTExMTEw",
+                "displayText": "ยกเลิก"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "flex",
+      "altText": "เลือกคนขาย",
+      "contents": {
+        "type": "bubble",
+        "size": "mega",
+        "body": {
+          "type": "box",
+          "layout": "vertical",
+          "spacing": "md",
+          "paddingAll": "16px",
+          "contents": [
+            {
+              "type": "text",
+              "text": "เลือกคนขาย (2/2)",
+              "weight": "bold",
+              "size": "lg",
+              "color": "#0F172A",
+              "wrap": true
+            },
+            {
+              "type": "text",
+              "text": "ประเภท: เบิก",
+              "size": "sm",
+              "color": "#334155",
+              "wrap": true
+            }
+          ]
+        },
+        "footer": {
+          "type": "box",
+          "layout": "vertical",
+          "spacing": "sm",
+          "paddingAll": "12px",
+          "contents": [
+            {
+              "type": "button",
+              "style": "primary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "มิ้น",
+                "data": "gpm1:DAwMDAwMDAwMDAwMDAwMDA",
+                "displayText": "มิ้น"
+              }
+            },
+            {
+              "type": "button",
+              "style": "primary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "พี่ดำ",
+                "data": "gpm1:DQ0NDQ0NDQ0NDQ0NDQ0NDQ",
+                "displayText": "พี่ดำ"
+              }
+            },
+            {
+              "type": "button",
+              "style": "primary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "ปลา",
+                "data": "gpm1:Dg4ODg4ODg4ODg4ODg4ODg",
+                "displayText": "ปลา"
+              }
+            },
+            {
+              "type": "button",
+              "style": "primary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "เต้ย",
+                "data": "gpm1:Dw8PDw8PDw8PDw8PDw8PDw",
+                "displayText": "เต้ย"
+              }
+            },
+            {
+              "type": "button",
+              "style": "primary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "หนูเล็ก",
+                "data": "gpm1:EBAQEBAQEBAQEBAQEBAQEA",
+                "displayText": "หนูเล็ก"
+              }
+            },
+            {
+              "type": "button",
+              "style": "primary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "ป้าลี",
+                "data": "gpm1:EREREREREREREREREREREQ",
+                "displayText": "ป้าลี"
+              }
+            },
+            {
+              "type": "button",
+              "style": "secondary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "กลับ",
+                "data": "gpm1:EhISEhISEhISEhISEhISEg",
+                "displayText": "กลับ"
+              }
+            },
+            {
+              "type": "button",
+              "style": "secondary",
+              "height": "sm",
+              "action": {
+                "type": "postback",
+                "label": "ยกเลิก",
+                "data": "gpm1:ExMTExMTExMTExMTExMTEw",
+                "displayText": "ยกเลิก"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
   "market": [
     {
       "type": "flex",
@@ -56,6 +334,13 @@
               "size": "sm",
               "color": "#334155",
               "wrap": true
+            },
+            {
+              "type": "text",
+              "text": "คนขาย: กี้",
+              "size": "sm",
+              "color": "#334155",
+              "wrap": true
             }
           ]
         },
@@ -71,9 +356,9 @@
               "height": "sm",
               "action": {
                 "type": "postback",
-                "label": "ตลาดกี้",
-                "data": "gpm1:BAQEBAQEBAQEBAQEBAQEBA",
-                "displayText": "ตลาดกี้"
+                "label": "วัดทุ่งลานนา",
+                "data": "gpm1:FBQUFBQUFBQUFBQUFBQUFA",
+                "displayText": "วัดทุ่งลานนา"
               }
             },
             {
@@ -83,7 +368,7 @@
               "action": {
                 "type": "postback",
                 "label": "กลับ",
-                "data": "gpm1:BQUFBQUFBQUFBQUFBQUFBQ",
+                "data": "gpm1:FRUVFRUVFRUVFRUVFRUVFQ",
                 "displayText": "กลับ"
               }
             },
@@ -94,7 +379,7 @@
               "action": {
                 "type": "postback",
                 "label": "ยกเลิก",
-                "data": "gpm1:BgYGBgYGBgYGBgYGBgYGBg",
+                "data": "gpm1:ExMTExMTExMTExMTExMTEw",
                 "displayText": "ยกเลิก"
               }
             }
@@ -133,7 +418,14 @@
             },
             {
               "type": "text",
-              "text": "ตลาด: ตลาดกี้",
+              "text": "คนขาย: กี้",
+              "size": "sm",
+              "color": "#334155",
+              "wrap": true
+            },
+            {
+              "type": "text",
+              "text": "ตลาด: วัดทุ่งลานนา",
               "size": "sm",
               "color": "#334155",
               "wrap": true
@@ -153,7 +445,7 @@
               "action": {
                 "type": "postback",
                 "label": "วันนี้",
-                "data": "gpm1:BwcHBwcHBwcHBwcHBwcHBw",
+                "data": "gpm1:FhYWFhYWFhYWFhYWFhYWFg",
                 "displayText": "วันนี้"
               }
             },
@@ -164,7 +456,7 @@
               "action": {
                 "type": "postback",
                 "label": "เมื่อวาน",
-                "data": "gpm1:CAgICAgICAgICAgICAgICA",
+                "data": "gpm1:FxcXFxcXFxcXFxcXFxcXFw",
                 "displayText": "เมื่อวาน"
               }
             },
@@ -175,7 +467,7 @@
               "action": {
                 "type": "postback",
                 "label": "กลับ",
-                "data": "gpm1:CQkJCQkJCQkJCQkJCQkJCQ",
+                "data": "gpm1:GBgYGBgYGBgYGBgYGBgYGA",
                 "displayText": "กลับ"
               }
             },
@@ -186,7 +478,7 @@
               "action": {
                 "type": "postback",
                 "label": "ยกเลิก",
-                "data": "gpm1:BgYGBgYGBgYGBgYGBgYGBg",
+                "data": "gpm1:ExMTExMTExMTExMTExMTEw",
                 "displayText": "ยกเลิก"
               }
             }
@@ -225,14 +517,21 @@
             },
             {
               "type": "text",
-              "text": "ตลาด: ตลาดกี้",
+              "text": "คนขาย: กี้",
               "size": "sm",
               "color": "#334155",
               "wrap": true
             },
             {
               "type": "text",
-              "text": "วันที่: 29/07/2569",
+              "text": "ตลาด: วัดทุ่งลานนา",
+              "size": "sm",
+              "color": "#334155",
+              "wrap": true
+            },
+            {
+              "type": "text",
+              "text": "วันที่: 25/07/2569",
               "size": "sm",
               "color": "#334155",
               "wrap": true
@@ -252,7 +551,7 @@
               "action": {
                 "type": "postback",
                 "label": "ยืนยัน",
-                "data": "gpm1:CgoKCgoKCgoKCgoKCgoKCg",
+                "data": "gpm1:GRkZGRkZGRkZGRkZGRkZGQ",
                 "displayText": "ยืนยัน"
               }
             },
@@ -263,7 +562,7 @@
               "action": {
                 "type": "postback",
                 "label": "กลับ",
-                "data": "gpm1:CwsLCwsLCwsLCwsLCwsLCw",
+                "data": "gpm1:GhoaGhoaGhoaGhoaGhoaGg",
                 "displayText": "กลับ"
               }
             },
@@ -274,13 +573,19 @@
               "action": {
                 "type": "postback",
                 "label": "ยกเลิก",
-                "data": "gpm1:DAwMDAwMDAwMDAwMDAwMDA",
+                "data": "gpm1:GxsbGxsbGxsbGxsbGxsbGw",
                 "displayText": "ยกเลิก"
               }
             }
           ]
         }
       }
+    }
+  ],
+  "no_seller_markets": [
+    {
+      "type": "text",
+      "text": "คนขายนี้ยังไม่มีตลาดที่พร้อมใช้งาน กรุณาติดต่อผู้ดูแล"
     }
   ],
   "confirm_placeholder": [

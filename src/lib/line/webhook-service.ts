@@ -28,6 +28,7 @@ import {
   guardGuidedWhiteSheetSubmission,
   isExactGuidedMenuTrigger,
   isExactGuidedCloseTrigger,
+  isExactGuidedCancelTrigger,
   isGuidedMenuPostbackCandidate,
   isGuidedMenuPostbackData,
   guardGuidedSlipOpen,
@@ -465,6 +466,27 @@ export class WebhookService {
     // ── 3.0. Guided Menu exact trigger "เมนู" ────────────────────────────────
     if (isExactGuidedMenuTrigger(text)) {
       return this.processGuidedMenuOpen(msgEvent, eventId, log);
+    }
+
+    // ── 3.0b. Guided plain-text cancel "ยกเลิก" / "ออกจากเมนู" ────────────────
+    // Typed equivalent of the cancel Flex button. Must be intercepted before
+    // the structured pending-session append below — this control text must
+    // never become a produce document line (see STRUCTURED_TEXT_CLOSE_REFUSED_REPLY
+    // for the same guarding pattern on "จบรายการ").
+    if (isExactGuidedCancelTrigger(text)) {
+      const guidedCancelKey = getPendingSessionKey(msgEvent.source);
+      if (guidedCancelKey !== null) {
+        const guidedCancelLookup = await new PendingSessionService(this.supabase).lookup(
+          guidedCancelKey,
+        );
+        if (
+          guidedCancelLookup.session
+          && (guidedCancelLookup.session as StructuredPendingSession).entry_origin
+            === "structured_menu"
+        ) {
+          return this.processGuidedTextCancel(msgEvent, eventId, log);
+        }
+      }
     }
 
     // ── 3.0b. Guided round close "ปิดรอบ" (3D) ──────────────────────────────
@@ -2153,6 +2175,35 @@ export class WebhookService {
       );
     }
     log.info("guided text close handled", { screen: outcome.screen });
+    return { eventId, eventType: event.type, status: "saved", parsed: false };
+  }
+
+  private async processGuidedTextCancel(
+    event: LineMessageEvent,
+    eventId: string,
+    log: ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const replyToken = event.replyToken;
+    const identity = buildGuidedMenuIdentity({
+      lineUserId: getUserId(event.source),
+      sourceType: event.source.type,
+      sourceId: getSourceId(event.source),
+      sessionKey: getPendingSessionKey(event.source),
+    });
+
+    if (!identity) {
+      log.info("guided text cancel refused — missing identity binding");
+      return { eventId, eventType: event.type, status: "saved", parsed: false };
+    }
+
+    const outcome = await this.guidedMenuHandler.handleTextCancelRequest({ identity });
+    if (replyToken) {
+      await this.replyApiMessages(
+        replyToken,
+        outcome.messages as LineApiMessage[],
+      );
+    }
+    log.info("guided text cancel handled", { screen: outcome.screen });
     return { eventId, eventType: event.type, status: "saved", parsed: false };
   }
 

@@ -100,6 +100,16 @@ export function isExactGuidedCloseTrigger(text: string): boolean {
   return text.trim() === "จบรายการ";
 }
 
+/**
+ * Exact plain-text equivalents of the "ออกจากเมนู" / cancel Flex button.
+ * Must be intercepted before pending-session append: typed control text is
+ * never produce data, even when no button was pressed.
+ */
+export function isExactGuidedCancelTrigger(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed === "ยกเลิก" || trimmed === "ออกจากเมนู";
+}
+
 /** True when postback data carries a well-formed opaque gpm1 token. */
 export function isGuidedMenuPostbackData(data: string): boolean {
   return parseMenuToken(data).ok;
@@ -231,6 +241,25 @@ export class GuidedMenuUxHandler {
     lineTimestampMs: number;
   }): Promise<GuidedMenuUxResult> {
     return this.requestClose(input);
+  }
+
+  /**
+   * Plain-text "ยกเลิก" / "ออกจากเมนู" — the typed equivalent of the cancel
+   * Flex button. Dismisses the menu only: there is no authoritative
+   * cancel-open-session contract, so an open round is never voided and the
+   * text itself is never appended as produce data (see dispatchConsumed's
+   * menu_root cancel branch, which this mirrors for typed input).
+   */
+  async handleTextCancelRequest(input: {
+    identity: GuidedMenuIdentity;
+  }): Promise<GuidedMenuUxResult> {
+    const open = await this.capture.snapshot(input.identity);
+    if (open.status === "ok") {
+      return resultEnvelope("session_menu_dismissed", [
+        buildMenuDismissedSessionOpenMessage(),
+      ]);
+    }
+    return resultEnvelope("cancelled", [buildCancelledMessage()]);
   }
 
   /** After a captured item append, acknowledge and refresh Flex controls. */

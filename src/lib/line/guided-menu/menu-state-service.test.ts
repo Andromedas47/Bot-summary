@@ -86,6 +86,9 @@ describe("0051 action-specific payload validation", () => {
       validateMenuPayloadForAction("menu_root", { intent: "cancel" }),
     ).toEqual({ intent: "cancel" });
     expect(() =>
+      validateMenuPayloadForAction("menu_root", { intent: "resume_edit" } as never),
+    ).toThrow();
+    expect(() =>
       validateMenuPayloadForAction("menu_root", { intent: "nope" } as never),
     ).toThrow();
 

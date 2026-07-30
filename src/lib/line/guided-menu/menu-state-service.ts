@@ -96,7 +96,9 @@ export function validateMenuPayloadForAction<A extends MenuActionType>(
         keysEqual(keys, ["intent"]) &&
         (MENU_ROOT_INTENTS as readonly string[]).includes(String(raw.intent))
       ) {
-        return { intent: raw.intent as "cancel" } as MenuPayloadByAction[A];
+        return {
+          intent: raw.intent as MenuPayloadByAction["menu_root"]["intent"],
+        } as MenuPayloadByAction[A];
       }
       throw new Error("invalid menu_root payload");
     }

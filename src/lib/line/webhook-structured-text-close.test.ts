@@ -134,7 +134,7 @@ function basePending(overrides: Row = {}): Row {
   };
 }
 
-function structuredPending(): Row {
+function structuredPending(overrides: Row = {}): Row {
   return basePending({
     entry_origin: "structured_menu",
     command_contract_version: COMMAND_CONTRACT_VERSION,
@@ -148,6 +148,7 @@ function structuredPending(): Row {
     declared_transaction_type: null,
     additional_opener: null,
     opened_line_event_id: "evt-open",
+    ...overrides,
   });
 }
 
@@ -164,18 +165,54 @@ function textEvent(text: string, timestamp = 5_000): LineMessageEvent {
   } as LineMessageEvent;
 }
 
-describe("0050 — executable webhook structured text close refusal", () => {
-  it("refuses จบรายการ on a structured session without append/admit/ingest/close", async () => {
+describe("0050 — executable webhook structured text close", () => {
+  it("routes exact จบรายการ only when entry_origin is structured_menu", async () => {
     const db = new StructuredCloseDatabase(structuredPending());
-    const replies: string[] = [];
+    const apiReplies: unknown[] = [];
     const rawBefore = db.rows("raw_messages").length;
     const service = new WebhookService(db as never, {
-      replyMessage: async (_token, text) => { replies.push(text); },
+      replyApiMessages: async (_token, messages) => {
+        apiReplies.push(...messages);
+      },
+      guidedMenuHandler: {
+        handleTextCloseRequest: async () => ({
+          screen: "session_close_requested",
+          messages: [
+            { type: "text", text: "summary" },
+            {
+              type: "flex",
+              altText: "ยืนยันจบรายการ",
+              contents: {
+                type: "bubble",
+                body: { type: "box", layout: "vertical", contents: [] },
+                footer: {
+                  type: "box",
+                  layout: "vertical",
+                  contents: [
+                    {
+                      type: "button",
+                      action: {
+                        type: "postback",
+                        label: "ยืนยันจบรายการ",
+                        data: "gpm1:token",
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          ],
+          result: { close_reason: "first_close" },
+        }),
+      } as never,
     });
 
     await service.processEvents([textEvent("จบรายการ")], "destination");
 
-    expect(replies).toEqual([STRUCTURED_TEXT_CLOSE_REFUSED_REPLY]);
+    expect(apiReplies.length).toBeGreaterThan(0);
+    expect(apiReplies.some((m) => (m as { type?: string }).type === "flex")).toBe(
+      true,
+    );
     expect(db.appendCalls).toBe(0);
     expect(db.admitCalls).toBe(0);
     expect(db.ingestCalls).toBe(0);
@@ -187,11 +224,65 @@ describe("0050 — executable webhook structured text close refusal", () => {
     expect(session.close_requested_at).toBeNull();
     expect(session.finalize_hold_until ?? null).toBeNull();
     expect(session.accumulated_text).toBe("");
-    // Webhook may persist the inbound LINE event, but must not invent a synthetic header.
     expect(db.rows("raw_messages").length).toBeGreaterThanOrEqual(rawBefore);
     for (const raw of db.rows("raw_messages")) {
-      expect(String(raw.raw_text ?? raw.message_text ?? "จบรายการ")).not.toMatch(/พี่ดำ-วิหาร/);
+      expect(String(raw.raw_text ?? raw.message_text ?? "จบรายการ")).not.toMatch(
+        /พี่ดำ-วิหาร/,
+      );
     }
+  });
+
+  it("still refuses non-exact close phrases on structured sessions", async () => {
+    const db = new StructuredCloseDatabase(structuredPending());
+    const replies: string[] = [];
+    const service = new WebhookService(db as never, {
+      replyMessage: async (_token, text) => {
+        replies.push(text);
+      },
+    });
+
+    await service.processEvents([textEvent("จบรายการ 1 รายการ")], "destination");
+
+    expect(replies).toEqual([STRUCTURED_TEXT_CLOSE_REFUSED_REPLY]);
+    expect(db.appendCalls).toBe(0);
+  });
+
+  it("does not route exact จบรายการ into Guided close for a non-menu structured origin", async () => {
+    const db = new StructuredCloseDatabase(
+      structuredPending({ entry_origin: "other_structured" }),
+    );
+    let guidedCloseCalls = 0;
+    const replies: string[] = [];
+    const service = new WebhookService(db as never, {
+      replyMessage: async (_token, text) => {
+        replies.push(text);
+      },
+      guidedMenuHandler: {
+        handleTextCloseRequest: async () => {
+          guidedCloseCalls += 1;
+          return {
+            screen: "session_close_requested",
+            messages: [{ type: "text", text: "should-not-send" }],
+            result: {},
+          };
+        },
+      } as never,
+    });
+
+    await service.processEvents([textEvent("จบรายการ")], "destination");
+
+    expect(guidedCloseCalls).toBe(0);
+    expect(replies).toEqual([STRUCTURED_TEXT_CLOSE_REFUSED_REPLY]);
+    expect(db.appendCalls).toBe(0);
+  });
+
+  it("capture acknowledgement routing requires entry_origin structured_menu", async () => {
+    const source = await Bun.file(new URL("./webhook-service.ts", import.meta.url)).text();
+    const ackIdx = source.indexOf("guided capture acknowledgement sent");
+    expect(ackIdx).toBeGreaterThan(-1);
+    const window = source.slice(Math.max(0, ackIdx - 800), ackIdx);
+    expect(window).toContain('entry_origin === "structured_menu"');
+    expect(window).not.toContain("entry_origin != null");
   });
 
   it("keeps legacy plain-text จบรายการ close behavior unchanged", async () => {

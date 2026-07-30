@@ -104,10 +104,14 @@ function row(db: GuidedMenuFakeDatabase): Record<string, unknown> {
   return found;
 }
 
-function quickReplyLabels(message: unknown): string[] {
-  const qr = (message as { quickReply?: { items: Array<{ action: { label: string } }> } })
-    .quickReply;
-  return qr ? qr.items.map((item) => item.action.label) : [];
+import { guidedControlLabels } from "./messages";
+
+function controlLabels(messages: unknown[]): string[] {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const labels = guidedControlLabels(messages[i]);
+    if (labels.length > 0) return labels;
+  }
+  return [];
 }
 
 describe("จบรายการ validates before it writes the close boundary", () => {
@@ -285,7 +289,7 @@ describe("the refusal screen keeps the operator in capture", () => {
       .join("\n");
     expect(body).toContain(GUIDED_MENU_COPY.produceCloseValidationFailed.split("\n")[0]!);
     expect(body).not.toContain("กรอกใบขาว");
-    expect(quickReplyLabels(result.messages[result.messages.length - 1])).toContain(
+    expect(controlLabels(result.messages)).toContain(
       "จบรายการ",
     );
     expect(result.result).toMatchObject({ close_requested: false, saved: false });

@@ -9,7 +9,7 @@ import { describe, expect, it } from "bun:test";
 import { GuidedMenuUxHandler } from "./ux-handler";
 import { GuidedMenuFakeDatabase } from "./test-fake-db";
 import { GUIDED_MENU_COPY, LINE_REPLY_MESSAGE_MAX } from "./ux-types";
-import { splitTextForLineReply } from "./messages";
+import { splitTextForLineReply, guidedControlLabels } from "./messages";
 import { GuidedSessionCaptureService } from "./session-capture";
 import type { MenuActionType } from "./menu-state-types";
 
@@ -114,10 +114,12 @@ async function mintActionToken(
   return created.wireToken;
 }
 
-function quickReplyLabels(message: unknown): string[] {
-  const qr = (message as { quickReply?: { items: Array<{ action: { label: string } }> } })
-    .quickReply;
-  return qr ? qr.items.map((item) => item.action.label) : [];
+function controlLabels(messages: unknown[]): string[] {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const labels = guidedControlLabels(messages[i]);
+    if (labels.length > 0) return labels;
+  }
+  return [];
 }
 
 describe("Slice 3B — the open round carries its own next actions", () => {
@@ -173,7 +175,7 @@ describe("Slice 3B — the open round carries its own next actions", () => {
     });
 
     expect(opened.screen).toBe("session_opened");
-    expect(quickReplyLabels(opened.messages[0])).toEqual([
+    expect(controlLabels(opened.messages)).toEqual([
       "ดูรายการ",
       "จบรายการ",
       "ออกจากเมนู",
@@ -315,15 +317,21 @@ describe("Slice 3B — จบรายการ sets the close barrier", () => {
 
     expect(closed.screen).toBe("session_close_requested");
     expect(closed.result).toMatchObject({ close_reason: "first_close" });
-    const last = closed.messages[closed.messages.length - 1]!;
-    expect(quickReplyLabels(last)).toEqual([
+    expect(controlLabels(closed.messages)).toEqual([
       "ดูรายการ",
       "ยืนยันจบรายการ",
       "ออกจากเมนู",
     ]);
-    expect((last as { text: string }).text).toContain(
-      GUIDED_MENU_COPY.closeRequested,
-    );
+    expect(controlLabels(closed.messages)).not.toContain("กลับไปแก้ไข");
+    expect(
+      closed.messages.some((m) => (m as { type?: string }).type === "flex"),
+    ).toBe(true);
+    const summaryText = (
+      closed.messages.find((m) => (m as { type?: string }).type === "text") as {
+        text: string;
+      }
+    ).text;
+    expect(summaryText).toContain(GUIDED_MENU_COPY.closeRequested);
     const row = db.tables.pending_sessions[0]!;
     expect(row.close_event_timestamp_ms).toBe(TS);
     expect(row.close_line_event_id).toBe("evt-close");
@@ -465,7 +473,7 @@ describe("Slice 3B — ยืนยันจบรายการ releases the h
       GUIDED_MENU_COPY.finalizeNotReady,
     );
     // Confirm stays reachable; nothing was released.
-    expect(quickReplyLabels(outcome.messages[0])).toContain("ยืนยันจบรายการ");
+    expect(controlLabels(outcome.messages)).toContain("ยืนยันจบรายการ");
     expect(db.tables.pending_sessions[0]!.finalize_confirmed_at).toBeUndefined();
   });
 

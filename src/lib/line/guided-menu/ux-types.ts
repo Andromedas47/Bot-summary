@@ -33,7 +33,7 @@ export const LINE_REPLY_MESSAGE_MAX = 5;
 export const GUIDED_MENU_COPY = {
   unmapped:
     "บัญชีไลน์นี้ยังไม่ได้รับสิทธิ์ใช้งานเมนู กรุณาติดต่อผู้ดูแล",
-  invalidOrExpired: "เมนูหมดอายุหรือไม่ถูกต้อง กรุณาพิมพ์ เมนู ใหม่",
+  invalidOrExpired: "เมนูนี้หมดอายุ กรุณาใช้เมนูล่าสุด",
   cancelled: "ยกเลิกแล้ว",
   noActiveSellers:
     "ยังไม่มีคนขายที่พร้อมใช้งาน กรุณาติดต่อผู้ดูแล",

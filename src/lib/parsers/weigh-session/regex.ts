@@ -17,9 +17,12 @@ export const RE = {
   // Item line — dot after item number is optional per real examples:
   //   "1.หมอนทอง119บาท"  (with dot)
   //   "2หมอนทอง119บาท"   (no dot)
-  // Lazy Thai match stops naturally before the trailing digits+บาท.
+  //   "1. หมอนทอง 119 บาท" (typed with spaces around dot/name/price)
+  // Optional whitespace after the dot so a typed, spaced-out item line matches
+  // the same as the compact scale-output form. Lazy Thai match stops
+  // naturally before the trailing digits+บาท.
   // Captures: [1]=item_number, [2]=product_name, [3]=price
-  ITEM: new RegExp(`^(\\d+)\\.?([${TH}][${TH}\\s]*?)(\\d+(?:\\.\\d+)?)\\s*บาท\\s*$`),
+  ITEM: new RegExp(`^(\\d+)\\.?\\s*([${TH}][${TH}\\s]*?)(\\d+(?:\\.\\d+)?)\\s*บาท\\s*$`),
 
   // Item line without an item number. Used for short correction messages.
   // Captures: [1]=product_name, [2]=price
@@ -34,7 +37,7 @@ export const RE = {
   // only one digit run before บาท, not two).
   // Captures: [1]=item_number, [2]=product_name, [3]=basis_quantity, [4]=basis_unit, [5]=basis_price
   ITEM_WITH_BASIS: new RegExp(
-    `^(\\d+)\\.?([${TH}][${TH}\\s]*?)(\\d+(?:\\.\\d+)?)\\.?\\s*([${TH}]+?)\\s*(\\d+(?:\\.\\d+)?)\\s*บาท\\s*$`,
+    `^(\\d+)\\.?\\s*([${TH}][${TH}\\s]*?)(\\d+(?:\\.\\d+)?)\\.?\\s*([${TH}]+?)\\s*(\\d+(?:\\.\\d+)?)\\s*บาท\\s*$`,
   ),
 
   // Quantity with unit — trailing dot before unit is optional (scale output format):

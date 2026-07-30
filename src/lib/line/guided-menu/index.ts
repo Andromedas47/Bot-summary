@@ -10,6 +10,8 @@ export * from "./evidence";
 export * from "./session-opener";
 export * from "./session-capture";
 export * from "./produce-finalization";
+export * from "./provenance";
+export * from "./round-owner";
 export * from "./journey";
 export * from "./ownership-guard";
 export * from "./slip-open-guard";

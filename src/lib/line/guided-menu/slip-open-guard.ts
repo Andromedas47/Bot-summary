@@ -40,22 +40,34 @@ export async function guardGuidedSlipOpen(input: {
   catalog: GuidedSellerMarketCatalog;
   identity: GuidedMenuIdentity;
   header: SlipSessionHeader;
+  /** Signed provenance marker the message carried, if any. */
+  marker?: string | null;
 }): Promise<GuidedSlipOpenGuard> {
   const marketLabelNormalized = normalizedMarketLabel(input.header.marketName);
+
+  // A RECOGNIZED slip header whose date cannot be read is refused, not handed to
+  // the legacy open. `parseSlipSessionHeader` has already decided this text is a
+  // slip header; without a readable date nothing can tell whether it belongs to a
+  // guided round, and opening a batch under a date we could not parse is how a
+  // slip ends up counted against the wrong day. Zero rows either way.
   const businessDate = input.header.slipDate
     ? parseBusinessDate(input.header.slipDate)
     : null;
+  if (!businessDate) {
+    return { verdict: "refused", message: refusal(GUIDED_MENU_COPY.slipOpenBadDate) };
+  }
 
-  // An undated or unreadable header can never be matched to a round. It is only
-  // the guided flow's business if someone in this source owns a round at all,
-  // which cannot be determined without a date — so leave it to the legacy path,
-  // exactly as before this guard existed.
-  if (!marketLabelNormalized || !businessDate) return { verdict: "not_guided" };
+  // The market label is a different matter: the date is what scopes the round, so
+  // an unidentifiable market cannot be matched to one and the pre-existing open
+  // stays in charge of it, exactly as before this guard existed.
+  if (!marketLabelNormalized) return { verdict: "not_guided" };
 
   const ownership = await resolveGuidedOwnership({
     journey: input.journey,
     identity: input.identity,
     target: { marketLabelNormalized, businessDate },
+    purpose: "slip_open",
+    marker: input.marker,
   });
   if (ownership.verdict !== "allowed") return ownership;
 

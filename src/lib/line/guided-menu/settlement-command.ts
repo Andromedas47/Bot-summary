@@ -27,6 +27,8 @@ import {
 } from "@/lib/settlement/submit-entry";
 import { thaiDateFromIso, type GuidedJourneyContext } from "./journey";
 import type { GuidedJourneyService } from "./journey";
+import { resolveGuidedOwnership } from "./ownership-guard";
+import { withGuidedMarker } from "./provenance";
 import type { GuidedRoundService } from "./round-close";
 import { GUIDED_ROUND_BLOCKER_LABEL, summarizeSlipStatuses } from "./round-close";
 import { buildRoundStatusMessage, buildSettlementSavedMessage } from "./messages";
@@ -201,14 +203,16 @@ export function parseGuidedSettlementCommand(
  * different money (see docs/guided-operations-end-to-end.md §2.7), and no
  * value is carried across without an existing rule saying it may be.
  */
-export function buildSettlementTemplate(context: {
-  sellerLabel: string;
-  marketLabel: string;
-  businessDate: string;
-}): string | null {
+export function buildSettlementTemplate(
+  context: {
+    sellerLabel: string;
+    marketLabel: string;
+    businessDate: string;
+  } & Partial<GuidedJourneyContext>,
+): string | null {
   const thaiDate = thaiDateFromIso(context.businessDate);
   if (!thaiDate) return null;
-  return [
+  const template = [
     `${context.sellerLabel} ${context.marketLabel} ส่งยอด ${thaiDate}`,
     "ยอดโอน 0",
     "เงินสด 0",
@@ -216,6 +220,24 @@ export function buildSettlementTemplate(context: {
     "ค่าแรง 0",
     CLOSE_LINE,
   ].join("\n");
+  // Signed provenance, appended only when the full round context is available;
+  // stripped before the parser above ever sees it.
+  if (
+    !context.sourceId ||
+    !context.lineUserId ||
+    !context.marketLabelNormalized ||
+    !context.sessionGeneration
+  ) {
+    return template;
+  }
+  return withGuidedMarker(template, {
+    purpose: "settlement",
+    sourceId: context.sourceId,
+    lineUserId: context.lineUserId,
+    marketLabelNormalized: context.marketLabelNormalized,
+    businessDate: context.businessDate,
+    sessionGeneration: context.sessionGeneration,
+  });
 }
 
 /** The identity the LINE submission writes, mirroring the Dashboard form. */
@@ -240,6 +262,8 @@ export async function processGuidedSettlementSubmission(input: {
   rounds: GuidedRoundService;
   identity: GuidedMenuIdentity;
   text: string;
+  /** Signed provenance marker the message carried, if any. */
+  marker?: string | null;
   submit?: SubmitFn;
 }): Promise<GuidedSettlementReply> {
   const parsed = parseGuidedSettlementCommand(input.text);
@@ -287,6 +311,28 @@ export async function processGuidedSettlementSubmission(input: {
   }
   if (command.businessDate !== context.businessDate) {
     return { messages: [mismatchMessage(context)], saved: false };
+  }
+
+  // The same gate the White Sheet and slip open use: source-wide ownership of
+  // this market/date, plus the signed marker when the message carries one. A
+  // template copied by another member, or edited off this round, stops here.
+  const ownership = await resolveGuidedOwnership({
+    journey: input.journey,
+    identity: input.identity,
+    target: {
+      marketLabelNormalized: context.marketLabelNormalized,
+      businessDate: context.businessDate,
+    },
+    purpose: "settlement",
+    marker: input.marker,
+  });
+  if (ownership.verdict === "refused") {
+    return { messages: [ownership.message], saved: false };
+  }
+  if (ownership.verdict !== "allowed") {
+    // The caller's own journey resolved to this round but the source-wide query
+    // cannot confirm it. Never write money into that gap.
+    return { messages: [refusal(GUIDED_MENU_COPY.ownershipUnknown)], saved: false };
   }
 
   // A round whose settlement message already went out is never rewritten from

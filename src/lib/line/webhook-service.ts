@@ -33,6 +33,7 @@ import {
   GuidedMenuStateService,
   isGuidedRoundCloseCommand,
   isGuidedSettlementCommandText,
+  extractGuidedMarker,
   processGuidedRoundClose,
   processGuidedSettlementSubmission,
   LINE_REPLY_MESSAGE_MAX,
@@ -426,7 +427,12 @@ export class WebhookService {
     }
 
     // ── 3. Test-message shortcut (before any parser) ──────────────────────────
-    const text           = (message as LineTextMessage).text;
+    // The guided provenance marker is removed BEFORE any parser runs, so every
+    // existing command keeps its exact syntax and its exact error messages. An
+    // ordinary message has no marker and comes through untouched.
+    const { text, marker: guidedMarker } = extractGuidedMarker(
+      (message as LineTextMessage).text,
+    );
     const normalizedText = normalizeText(text);
     const replyToken     = msgEvent.replyToken;
     const sourceId       = getSourceId(msgEvent.source);
@@ -455,7 +461,7 @@ export class WebhookService {
     // line, so no existing command loses its text. The write itself is the
     // existing POST /api/settlement boundary.
     if (isGuidedSettlementCommandText(text)) {
-      return this.processGuidedSettlementCommand(msgEvent, text, eventId, log);
+      return this.processGuidedSettlementCommand(msgEvent, text, guidedMarker, eventId, log);
     }
 
     // ── 3.1. P2A Physical Inventory (allowlisted LINE groups only) ───────────
@@ -481,6 +487,7 @@ export class WebhookService {
       return this.processWhiteSheetClose(
         msgEvent,
         closeParse,
+        guidedMarker,
         eventId,
         event.type,
         log,
@@ -536,7 +543,7 @@ export class WebhookService {
 
     const slipOpenHeader = parseSlipSessionHeader(text);
     if (slipOpenHeader !== null) {
-      return this.processSlipOpen(msgEvent, slipOpenHeader, eventId, event.type, log);
+      return this.processSlipOpen(msgEvent, slipOpenHeader, guidedMarker, eventId, event.type, log);
     }
 
     // ── 4. Pending session flow ───────────────────────────────────────────────
@@ -1331,6 +1338,8 @@ export class WebhookService {
       ReturnType<typeof parseWhiteSheetCloseCommandFromMessage>,
       { kind: "not_command" }
     >,
+    /** Signed guided provenance marker, stripped from the message text. */
+    guidedMarker: string | null,
     eventId: string,
     eventType: string,
     log: ChildLogger,
@@ -1364,6 +1373,7 @@ export class WebhookService {
         journey: this.guidedJourney,
         identity,
         command: parseResult.command,
+        marker: guidedMarker,
       });
       if (guard.verdict === "refused") {
         log.info("white sheet close refused — journey mismatch", { sourceId });
@@ -1752,6 +1762,8 @@ export class WebhookService {
   private async processSlipOpen(
     event:     LineMessageEvent,
     header:    SlipSessionHeader,
+    /** Signed guided provenance marker, stripped from the message text. */
+    guidedMarker: string | null,
     eventId:   string,
     eventType: string,
     log:       ChildLogger,
@@ -1782,6 +1794,7 @@ export class WebhookService {
         catalog:  this.guidedCatalog,
         identity: guidedIdentity,
         header,
+        marker: guidedMarker,
       });
       if (guard.verdict === "refused") {
         log.info("slip open refused — guided round mismatch", { sourceId });
@@ -2172,6 +2185,8 @@ export class WebhookService {
   private async processGuidedSettlementCommand(
     event: LineMessageEvent,
     text: string,
+    /** Signed guided provenance marker, stripped from the message text. */
+    guidedMarker: string | null,
     eventId: string,
     log: ChildLogger,
   ): Promise<WebhookProcessResult> {
@@ -2194,6 +2209,7 @@ export class WebhookService {
         rounds: this.guidedRounds,
         identity,
         text,
+        marker: guidedMarker,
       });
       if (replyToken && outcome.messages.length > 0) {
         await this.replyMessages(

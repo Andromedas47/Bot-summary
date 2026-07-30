@@ -159,6 +159,33 @@ export const GUIDED_MENU_COPY = {
   /** Ownership guard: submitted market/date is not the caller's own round. */
   ownershipRoundMismatch: "ข้อความนี้ไม่ตรงกับรอบที่เปิดอยู่",
   ownershipUseTemplate: "กรุณาใช้แบบฟอร์มที่ระบบส่งให้ และแก้เฉพาะตัวเลข",
+  /**
+   * Ownership guard: more than one operator owns a matching round, so nothing
+   * can decide which one this message belongs to. Fail closed.
+   */
+  ownershipAmbiguous: [
+    "พบรอบของตลาด/วันที่นี้มากกว่าหนึ่งรอบในกลุ่ม",
+    "ระบบไม่สามารถระบุได้ว่าข้อความนี้เป็นของรอบไหน",
+    "กรุณาให้ผู้ดูแลตรวจก่อน",
+  ].join("\n"),
+  /**
+   * Ownership guard: the message carries a guided form marker that does not
+   * match this operator and this round — a copied or edited template.
+   */
+  ownershipMarkerRejected: [
+    "แบบฟอร์มนี้ไม่ใช่ของรอบที่ท่านเปิดอยู่",
+    "กรุณากดปุ่มในเมนูเพื่อขอแบบฟอร์มใหม่ และแก้เฉพาะตัวเลข",
+  ].join("\n"),
+  /** 3A: another operator already owns this market/date in this group. */
+  sessionRoundOwnedByOther: [
+    "มีคนเปิดรอบของตลาดและวันที่นี้ไว้แล้วในกลุ่ม",
+    "ยังเปิดรอบซ้ำไม่ได้ กรุณาให้เจ้าของรอบทำต่อ หรือเลือกตลาด/วันที่อื่น",
+  ].join("\n"),
+  /** Slip guard: the header's date cannot be read — refuse before opening. */
+  slipOpenBadDate: [
+    "วันที่ในหัวข้อสลิปไม่ถูกต้อง ยังเปิดชุดสลิปไม่ได้",
+    "กรุณาใช้รูปแบบ วว/ดด/พ.ศ. เช่น 29/07/2569",
+  ].join("\n"),
   /** Slip guard: the white sheet has to be in before the slip batch opens. */
   slipOpenWhiteSheetMissing: [
     "ยังเปิดชุดสลิปไม่ได้ ยังไม่ได้บันทึกใบขาวของรอบนี้",

@@ -1,17 +1,26 @@
 /**
- * PR #10 review findings #2 and #3 — the two legacy writers a guided operator is
- * handed a template for must be bound to the round that owns the market/date.
+ * PR #10 review findings #2, #3 and #5 — one guided owner per round, and a
+ * message's provenance decides how strictly it is judged.
  *
- * Both templates are plain text in a shared LINE group. Asking only "does the
- * sender have a round?" let a second member copy the first member's message and
- * fall through to the shared legacy writer, so the question here is source-wide
- * and it fails closed.
+ * The templates are plain text in a shared LINE group, so three questions have
+ * to be kept apart:
+ *
+ *   1. does anyone in this SOURCE own the market/date the message names?
+ *   2. is the sender that owner?
+ *   3. is this message our generated form, or a hand-typed legacy command?
+ *
+ * (1) and (2) are the source-wide ownership query; (3) is the signed marker.
+ * Answering (3) is what lets a legitimate legacy command for an unowned target
+ * keep working even while the sender has a guided round open for something else.
  */
+
+process.env.LINE_CHANNEL_SECRET ??= "test-channel-secret";
 
 import { describe, expect, it } from "bun:test";
 import { GuidedJourneyService } from "./journey";
 import type { GuidedJourneyContext, GuidedJourneyState } from "./journey";
 import { resolveGuidedOwnership } from "./ownership-guard";
+import { signGuidedMarker } from "./provenance";
 import { guardGuidedSlipOpen } from "./slip-open-guard";
 import { guardGuidedWhiteSheetSubmission } from "./journey-bridge";
 import { GuidedMenuFakeDatabase } from "./test-fake-db";
@@ -24,7 +33,9 @@ import type { WhiteSheetCashEntryState } from "@/lib/white-sheet/persist";
 
 const SOURCE = "G-1";
 const DATE = "2026-07-29";
+const OTHER_DATE = "2026-07-28";
 const MARKET = "วัดทุ่งลานนา";
+const OTHER_MARKET = "หน้าเซเวน";
 const SELLER = "กี้";
 
 const OWNER: GuidedMenuIdentity = {
@@ -68,14 +79,47 @@ const SUBMITTED: WhiteSheetCashEntryState = {
 type FakeOwner =
   | { kind: "none" }
   | { kind: "unknown" }
+  | { kind: "ambiguous"; lineUserIds: string[] }
   | { kind: "owned"; lineUserId: string; sessionKey: string };
 
-function fakeJourney(state: GuidedJourneyState, owner: FakeOwner = { kind: "none" }) {
+type OwnerQuery = { marketLabelNormalized: string; businessDate: string };
+
+/**
+ * A journey double whose ownership answer is a FUNCTION of the query, the way
+ * the real source-wide lookup is. By default the caller's own round owns its own
+ * market/date and nothing else — a query for another target answers "nobody".
+ */
+function fakeJourney(
+  state: GuidedJourneyState,
+  owner: FakeOwner | ((q: OwnerQuery) => FakeOwner) = defaultOwner(state),
+) {
   return {
     resolve: async () => state,
-    findRoundOwner: async () => owner,
+    findRoundOwner: async (q: OwnerQuery) =>
+      typeof owner === "function" ? owner(q) : owner,
   } as never;
 }
+
+function defaultOwner(state: GuidedJourneyState): (q: OwnerQuery) => FakeOwner {
+  if (state.stage === "idle") return () => ({ kind: "none" });
+  const context = state.context;
+  return (q) =>
+    q.marketLabelNormalized === context.marketLabelNormalized &&
+    q.businessDate === context.businessDate
+      ? {
+          kind: "owned",
+          lineUserId: context.lineUserId,
+          sessionKey: context.sessionKey,
+        }
+      : { kind: "none" };
+}
+
+/** Answers "the round's owner" for every tuple — an edited target is still theirs. */
+const OWNED_BY_ROUND_OWNER: FakeOwner = {
+  kind: "owned",
+  lineUserId: OWNER.lineUserId,
+  sessionKey: OWNER.sessionKey!,
+};
 
 function stageState(
   stage: Exclude<GuidedJourneyState["stage"], "idle">,
@@ -112,6 +156,30 @@ function header(overrides: Partial<SlipSessionHeader> = {}): SlipSessionHeader {
   };
 }
 
+/** The marker the bot would have put on the owner's own template. */
+function ownerMarker(
+  purpose: "white_sheet" | "slip_open" | "settlement",
+  overrides: Partial<{
+    lineUserId: string;
+    sourceId: string;
+    marketLabelNormalized: string;
+    businessDate: string;
+    sessionGeneration: string;
+  }> = {},
+): string {
+  const marker = signGuidedMarker({
+    purpose,
+    sourceId: SOURCE,
+    lineUserId: OWNER.lineUserId,
+    marketLabelNormalized: MARKET,
+    businessDate: DATE,
+    sessionGeneration: CONTEXT.sessionGeneration,
+    ...overrides,
+  });
+  if (!marker) throw new Error("test setup: marker could not be signed");
+  return marker;
+}
+
 /** Always-assigned catalog, unless a test says otherwise. */
 const CATALOG_OK = { isActiveSellerMarket: async () => true };
 const CATALOG_REVOKED = { isActiveSellerMarket: async () => false };
@@ -126,18 +194,20 @@ describe("source-wide guided ownership", () => {
       journey: fakeJourney(stageState("slips")),
       identity: OWNER,
       target,
+      purpose: "white_sheet",
     });
     expect(verdict.verdict).toBe("allowed");
   });
 
-  it("refuses another operator who owns nothing but the round exists", async () => {
+  it("refuses another operator when the round exists", async () => {
     const verdict = await resolveGuidedOwnership({
       journey: fakeJourney(
         { stage: "idle", reason: "no_session" },
-        { kind: "owned", lineUserId: OWNER.lineUserId, sessionKey: OWNER.sessionKey! },
+        OWNED_BY_ROUND_OWNER,
       ),
       identity: OTHER_OPERATOR,
       target,
+      purpose: "white_sheet",
     });
     expect(verdict.verdict).toBe("refused");
     if (verdict.verdict !== "refused") return;
@@ -145,24 +215,52 @@ describe("source-wide guided ownership", () => {
     expect(verdict.message).toContain("เป็นของผู้ใช้อีกคน");
   });
 
-  it("refuses an ownership conflict rather than calling it not_guided", async () => {
+  it("fails closed when two operators own a matching round", async () => {
     const verdict = await resolveGuidedOwnership({
-      journey: fakeJourney({ stage: "idle", reason: "ownership_conflict" }),
-      identity: OTHER_OPERATOR,
+      journey: fakeJourney({ stage: "idle", reason: "no_session" }, {
+        kind: "ambiguous",
+        lineUserIds: [OWNER.lineUserId, OTHER_OPERATOR.lineUserId],
+      }),
+      identity: OWNER,
       target,
+      purpose: "white_sheet",
+    });
+    expect(verdict.verdict).toBe("refused");
+    if (verdict.verdict !== "refused") return;
+    expect(verdict.message).toContain("มากกว่าหนึ่งรอบ");
+  });
+
+  it("refuses the caller even when their own row also matches an ambiguous round", async () => {
+    // B has a round of their own AND A owns the same tuple: still refused.
+    const verdict = await resolveGuidedOwnership({
+      journey: fakeJourney(stageState("slips"), {
+        kind: "ambiguous",
+        lineUserIds: [OWNER.lineUserId, OTHER_OPERATOR.lineUserId],
+      }),
+      identity: OWNER,
+      target,
+      purpose: "white_sheet",
     });
     expect(verdict.verdict).toBe("refused");
   });
 
   it("refuses when the ownership question cannot be answered", async () => {
-    for (const journey of [
-      fakeJourney({ stage: "idle", reason: "lookup_failed" }),
-      fakeJourney({ stage: "idle", reason: "no_session" }, { kind: "unknown" }),
-    ]) {
+    const verdict = await resolveGuidedOwnership({
+      journey: fakeJourney({ stage: "idle", reason: "no_session" }, { kind: "unknown" }),
+      identity: OTHER_OPERATOR,
+      target,
+      purpose: "white_sheet",
+    });
+    expect(verdict.verdict).toBe("refused");
+  });
+
+  it("refuses when the owner's own journey will not resolve", async () => {
+    for (const reason of ["lookup_failed", "ownership_conflict"] as const) {
       const verdict = await resolveGuidedOwnership({
-        journey,
-        identity: OTHER_OPERATOR,
+        journey: fakeJourney({ stage: "idle", reason }, OWNED_BY_ROUND_OWNER),
+        identity: OWNER,
         target,
+        purpose: "white_sheet",
       });
       expect(verdict.verdict).toBe("refused");
     }
@@ -173,6 +271,7 @@ describe("source-wide guided ownership", () => {
       journey: fakeJourney({ stage: "idle", reason: "no_session" }, { kind: "none" }),
       identity: OTHER_OPERATOR,
       target,
+      purpose: "white_sheet",
     });
     expect(verdict.verdict).toBe("not_guided");
   });
@@ -183,6 +282,7 @@ describe("source-wide guided ownership", () => {
         journey: fakeJourney(stageState(stage, { status: "not_submitted" })),
         identity: OWNER,
         target,
+        purpose: "white_sheet",
       });
       expect(verdict.verdict).toBe("refused");
     }
@@ -197,6 +297,7 @@ describe("source-wide guided ownership", () => {
         journey: fakeJourney(stageState(stage, { status: "not_submitted" })),
         identity: OWNER,
         target,
+        purpose: "white_sheet",
       });
       expect(verdict.verdict).toBe("refused");
       if (verdict.verdict !== "refused") return;
@@ -204,18 +305,131 @@ describe("source-wide guided ownership", () => {
     }
   });
 
-  it("refuses a market or date that is not the caller's round", async () => {
-    for (const other of [
-      { marketLabelNormalized: "หน้าเซเวน", businessDate: DATE },
-      { marketLabelNormalized: MARKET, businessDate: "2026-07-28" },
+  it("refuses when the caller owns the target but their key resolves elsewhere", async () => {
+    // Source-wide says this is their round; their own key says another one.
+    const verdict = await resolveGuidedOwnership({
+      journey: fakeJourney(stageState("slips"), OWNED_BY_ROUND_OWNER),
+      identity: OWNER,
+      target: { marketLabelNormalized: OTHER_MARKET, businessDate: DATE },
+      purpose: "white_sheet",
+    });
+    expect(verdict.verdict).toBe("refused");
+  });
+});
+
+// ── Finding #5: provenance ─────────────────────────────────────────────────
+
+describe("guided provenance decides how strictly a message is judged", () => {
+  const target = { marketLabelNormalized: MARKET, businessDate: DATE };
+
+  it("accepts the owner's own marked template", async () => {
+    const verdict = await resolveGuidedOwnership({
+      journey: fakeJourney(stageState("slips")),
+      identity: OWNER,
+      target,
+      purpose: "white_sheet",
+      marker: ownerMarker("white_sheet"),
+    });
+    expect(verdict.verdict).toBe("allowed");
+  });
+
+  it("rejects the owner's marked template copied by another operator", async () => {
+    const verdict = await resolveGuidedOwnership({
+      journey: fakeJourney(stageState("slips"), OWNED_BY_ROUND_OWNER),
+      identity: OTHER_OPERATOR,
+      target,
+      purpose: "white_sheet",
+      marker: ownerMarker("white_sheet"),
+    });
+    expect(verdict.verdict).toBe("refused");
+  });
+
+  it("rejects a marker minted for another operator, market, date or generation", async () => {
+    for (const overrides of [
+      { lineUserId: OTHER_OPERATOR.lineUserId },
+      { marketLabelNormalized: OTHER_MARKET },
+      { businessDate: OTHER_DATE },
+      { sessionGeneration: "gen-2" },
+      { sourceId: "G-2" },
     ]) {
       const verdict = await resolveGuidedOwnership({
         journey: fakeJourney(stageState("slips")),
         identity: OWNER,
-        target: other,
+        target,
+        purpose: "white_sheet",
+        marker: ownerMarker("white_sheet", overrides),
       });
       expect(verdict.verdict).toBe("refused");
+      if (verdict.verdict !== "refused") continue;
+      expect(verdict.message).toContain(GUIDED_MENU_COPY.ownershipNothingRecorded);
     }
+  });
+
+  it("rejects a marker minted for a different purpose", async () => {
+    const verdict = await resolveGuidedOwnership({
+      journey: fakeJourney(stageState("slips")),
+      identity: OWNER,
+      target,
+      purpose: "white_sheet",
+      marker: ownerMarker("slip_open"),
+    });
+    expect(verdict.verdict).toBe("refused");
+  });
+
+  it("rejects a tampered signature", async () => {
+    const real = ownerMarker("white_sheet");
+    const flipped = `${real.slice(0, -1)}${real.endsWith("A") ? "B" : "A"}`;
+    const verdict = await resolveGuidedOwnership({
+      journey: fakeJourney(stageState("slips")),
+      identity: OWNER,
+      target,
+      purpose: "white_sheet",
+      marker: flipped,
+    });
+    expect(verdict.verdict).toBe("refused");
+  });
+
+  it("rejects a marked message aimed at a market/date nobody owns", async () => {
+    const verdict = await resolveGuidedOwnership({
+      journey: fakeJourney({ stage: "idle", reason: "no_session" }, { kind: "none" }),
+      identity: OWNER,
+      target,
+      purpose: "white_sheet",
+      marker: ownerMarker("white_sheet"),
+    });
+    expect(verdict.verdict).toBe("refused");
+  });
+
+  it("does not let the caller's own round A block a legacy command for target B", async () => {
+    // The whole point of the marker: an unmarked, hand-typed command for a
+    // market/date no guided round owns runs exactly as it always did.
+    const verdict = await resolveGuidedOwnership({
+      journey: fakeJourney(stageState("slips")),
+      identity: OWNER,
+      target: { marketLabelNormalized: OTHER_MARKET, businessDate: DATE },
+      purpose: "white_sheet",
+    });
+    expect(verdict.verdict).toBe("not_guided");
+  });
+
+  it("still refuses an unmarked command aimed at an owned tuple", async () => {
+    const verdict = await resolveGuidedOwnership({
+      journey: fakeJourney({ stage: "idle", reason: "no_session" }, OWNED_BY_ROUND_OWNER),
+      identity: OTHER_OPERATOR,
+      target,
+      purpose: "white_sheet",
+    });
+    expect(verdict.verdict).toBe("refused");
+  });
+
+  it("leaves a later business date unaffected", async () => {
+    const verdict = await resolveGuidedOwnership({
+      journey: fakeJourney(stageState("slips")),
+      identity: OWNER,
+      target: { marketLabelNormalized: MARKET, businessDate: "2026-07-30" },
+      purpose: "white_sheet",
+    });
+    expect(verdict.verdict).toBe("not_guided");
   });
 });
 
@@ -250,13 +464,51 @@ describe("findRoundOwner reads the source, not the caller", () => {
     expect(owner).toMatchObject({ kind: "owned", lineUserId: OWNER.lineUserId });
   });
 
+  it("canonicalizes a messy raw market label before matching", async () => {
+    const db = new GuidedMenuFakeDatabase();
+    seedRound(db, { market_label: `  ${MARKET}  ` });
+    const owner = await new GuidedJourneyService(db.asClient()).findRoundOwner({
+      sourceId: SOURCE,
+      marketLabelNormalized: MARKET,
+      businessDate: DATE,
+    });
+    expect(owner).toMatchObject({ kind: "owned" });
+  });
+
+  it("reports ambiguous when two operators own the same tuple", async () => {
+    const db = new GuidedMenuFakeDatabase();
+    seedRound(db);
+    seedRound(db, {
+      session_key: OTHER_OPERATOR.sessionKey,
+      line_user_id: OTHER_OPERATOR.lineUserId,
+    });
+    const owner = await new GuidedJourneyService(db.asClient()).findRoundOwner({
+      sourceId: SOURCE,
+      marketLabelNormalized: MARKET,
+      businessDate: DATE,
+    });
+    expect(owner.kind).toBe("ambiguous");
+  });
+
+  it("stays 'owned' for the same operator's rotated rounds", async () => {
+    const db = new GuidedMenuFakeDatabase();
+    seedRound(db);
+    seedRound(db, { session_generation: "gen-2" });
+    const owner = await new GuidedJourneyService(db.asClient()).findRoundOwner({
+      sourceId: SOURCE,
+      marketLabelNormalized: MARKET,
+      businessDate: DATE,
+    });
+    expect(owner).toMatchObject({ kind: "owned", lineUserId: OWNER.lineUserId });
+  });
+
   it("reports nobody for another market, another date or another source", async () => {
     const db = new GuidedMenuFakeDatabase();
     seedRound(db);
     const journey = new GuidedJourneyService(db.asClient());
     for (const query of [
-      { sourceId: SOURCE, marketLabelNormalized: "หน้าเซเวน", businessDate: DATE },
-      { sourceId: SOURCE, marketLabelNormalized: MARKET, businessDate: "2026-07-28" },
+      { sourceId: SOURCE, marketLabelNormalized: OTHER_MARKET, businessDate: DATE },
+      { sourceId: SOURCE, marketLabelNormalized: MARKET, businessDate: OTHER_DATE },
       { sourceId: "G-2", marketLabelNormalized: MARKET, businessDate: DATE },
     ]) {
       expect(await journey.findRoundOwner(query)).toEqual({ kind: "none" });
@@ -283,6 +535,7 @@ describe("white sheet cannot be filed by a stranger", () => {
       journey: fakeJourney(stageState("white_sheet", { status: "not_submitted" })),
       identity: OWNER,
       command: COMMAND,
+      marker: ownerMarker("white_sheet"),
     });
     expect(guard.verdict).toBe("allowed");
   });
@@ -291,10 +544,11 @@ describe("white sheet cannot be filed by a stranger", () => {
     const guard = await guardGuidedWhiteSheetSubmission({
       journey: fakeJourney(
         { stage: "idle", reason: "no_session" },
-        { kind: "owned", lineUserId: OWNER.lineUserId, sessionKey: OWNER.sessionKey! },
+        OWNED_BY_ROUND_OWNER,
       ),
       identity: OTHER_OPERATOR,
       command: COMMAND,
+      marker: ownerMarker("white_sheet"),
     });
     expect(guard.verdict).toBe("refused");
   });
@@ -303,10 +557,11 @@ describe("white sheet cannot be filed by a stranger", () => {
     const guard = await guardGuidedWhiteSheetSubmission({
       journey: fakeJourney(
         { stage: "idle", reason: "ownership_conflict" },
-        { kind: "owned", lineUserId: OWNER.lineUserId, sessionKey: OWNER.sessionKey! },
+        OWNED_BY_ROUND_OWNER,
       ),
       identity: OTHER_GROUP,
       command: COMMAND,
+      marker: ownerMarker("white_sheet"),
     });
     expect(guard.verdict).toBe("refused");
   });
@@ -320,32 +575,39 @@ describe("white sheet cannot be filed by a stranger", () => {
     expect(guard.verdict).toBe("not_guided");
   });
 
-  it("refuses a wrong market/date for the owner too", async () => {
+  it("refuses a marked sheet edited onto another date", async () => {
     const guard = await guardGuidedWhiteSheetSubmission({
-      journey: fakeJourney(stageState("white_sheet", { status: "not_submitted" })),
+      journey: fakeJourney(
+        stageState("white_sheet", { status: "not_submitted" }),
+        OWNED_BY_ROUND_OWNER,
+      ),
       identity: OWNER,
-      command: { ...COMMAND, businessDate: "2026-07-28" },
+      command: { ...COMMAND, businessDate: OTHER_DATE },
+      marker: ownerMarker("white_sheet"),
     });
     expect(guard.verdict).toBe("refused");
   });
 
   it("gives the same verdict for a replayed identical submission", async () => {
     const journey = fakeJourney(stageState("white_sheet", { status: "not_submitted" }));
+    const marker = ownerMarker("white_sheet");
     const first = await guardGuidedWhiteSheetSubmission({
       journey,
       identity: OWNER,
       command: COMMAND,
+      marker,
     });
     const second = await guardGuidedWhiteSheetSubmission({
       journey,
       identity: OWNER,
       command: COMMAND,
+      marker,
     });
     expect(second.verdict).toBe(first.verdict);
   });
 });
 
-// ── Finding #3: opening the slip batch ─────────────────────────────────────
+// ── Finding #3 / #4: opening the slip batch ────────────────────────────────
 
 describe("guided slip open is bound to the round", () => {
   it("lets the owner open the batch from the generated header", async () => {
@@ -354,6 +616,7 @@ describe("guided slip open is bound to the round", () => {
       catalog: CATALOG_OK,
       identity: OWNER,
       header: header(),
+      marker: ownerMarker("slip_open"),
     });
     expect(guard.verdict).toBe("allowed");
   });
@@ -364,6 +627,7 @@ describe("guided slip open is bound to the round", () => {
       catalog: CATALOG_OK,
       identity: OWNER,
       header: header({ sellerName: "คนอื่น" }),
+      marker: ownerMarker("slip_open"),
     });
     expect(guard.verdict).toBe("refused");
     if (guard.verdict !== "refused") return;
@@ -372,33 +636,51 @@ describe("guided slip open is bound to the round", () => {
 
   it("rejects an edited market", async () => {
     const guard = await guardGuidedSlipOpen({
-      journey: fakeJourney(stageState("slips")),
+      journey: fakeJourney(stageState("slips"), OWNED_BY_ROUND_OWNER),
       catalog: CATALOG_OK,
-      identity: OWNER,
-      header: header({ marketName: "หน้าเซเวน" }),
+      identity: OTHER_OPERATOR,
+      header: header({ marketName: OTHER_MARKET }),
+      marker: ownerMarker("slip_open"),
     });
     expect(guard.verdict).toBe("refused");
   });
 
-  it("rejects an edited date", async () => {
+  it("rejects an edited date on a marked header", async () => {
     const guard = await guardGuidedSlipOpen({
-      journey: fakeJourney(stageState("slips")),
+      journey: fakeJourney(stageState("slips"), OWNED_BY_ROUND_OWNER),
       catalog: CATALOG_OK,
       identity: OWNER,
       header: header({ slipDate: "28/07/2569" }),
+      marker: ownerMarker("slip_open"),
     });
     expect(guard.verdict).toBe("refused");
+  });
+
+  it("rejects a header whose date cannot be read at all", async () => {
+    // Finding #4: recognized header, unreadable date — refuse, never legacy.
+    for (const bad of ["32/13/2569", "29-07-2569", "ไม่ระบุ", null]) {
+      const guard = await guardGuidedSlipOpen({
+        journey: fakeJourney({ stage: "idle", reason: "no_session" }, { kind: "none" }),
+        catalog: CATALOG_OK,
+        identity: OTHER_OPERATOR,
+        header: header({ slipDate: bad }),
+      });
+      expect(guard.verdict).toBe("refused");
+      if (guard.verdict !== "refused") continue;
+      expect(guard.message).toContain("วันที่ในหัวข้อสลิปไม่ถูกต้อง");
+    }
   });
 
   it("rejects a header copied by another operator in the group", async () => {
     const guard = await guardGuidedSlipOpen({
       journey: fakeJourney(
         { stage: "idle", reason: "no_session" },
-        { kind: "owned", lineUserId: OWNER.lineUserId, sessionKey: OWNER.sessionKey! },
+        OWNED_BY_ROUND_OWNER,
       ),
       catalog: CATALOG_OK,
       identity: OTHER_OPERATOR,
       header: header(),
+      marker: ownerMarker("slip_open"),
     });
     expect(guard.verdict).toBe("refused");
   });
@@ -407,11 +689,12 @@ describe("guided slip open is bound to the round", () => {
     const guard = await guardGuidedSlipOpen({
       journey: fakeJourney(
         { stage: "idle", reason: "ownership_conflict" },
-        { kind: "owned", lineUserId: OWNER.lineUserId, sessionKey: OWNER.sessionKey! },
+        OWNED_BY_ROUND_OWNER,
       ),
       catalog: CATALOG_OK,
       identity: OTHER_GROUP,
       header: header(),
+      marker: ownerMarker("slip_open"),
     });
     expect(guard.verdict).toBe("refused");
   });
@@ -422,6 +705,7 @@ describe("guided slip open is bound to the round", () => {
       catalog: CATALOG_REVOKED,
       identity: OWNER,
       header: header(),
+      marker: ownerMarker("slip_open"),
     });
     expect(guard.verdict).toBe("refused");
     if (guard.verdict !== "refused") return;
@@ -434,6 +718,7 @@ describe("guided slip open is bound to the round", () => {
       catalog: CATALOG_OK,
       identity: OWNER,
       header: header(),
+      marker: ownerMarker("slip_open"),
     });
     expect(guard.verdict).toBe("refused");
     if (guard.verdict !== "refused") return;
@@ -447,6 +732,7 @@ describe("guided slip open is bound to the round", () => {
         catalog: CATALOG_OK,
         identity: OWNER,
         header: header(),
+        marker: ownerMarker("slip_open"),
       });
       expect(guard.verdict).toBe("refused");
     }
@@ -462,6 +748,7 @@ describe("guided slip open is bound to the round", () => {
       },
       identity: OWNER,
       header: header(),
+      marker: ownerMarker("slip_open"),
     });
     expect(guard.verdict).toBe("refused");
     if (guard.verdict !== "refused") return;
@@ -478,31 +765,32 @@ describe("guided slip open is bound to the round", () => {
     expect(guard.verdict).toBe("not_guided");
   });
 
-  it("leaves an undated or unreadable header to the legacy path", async () => {
-    for (const bad of [{ slipDate: null }, { slipDate: "ไม่ระบุ" }, { marketName: "  " }]) {
-      const guard = await guardGuidedSlipOpen({
-        journey: fakeJourney(stageState("slips")),
-        catalog: CATALOG_OK,
-        identity: OWNER,
-        header: header(bad),
-      });
-      expect(guard.verdict).toBe("not_guided");
-    }
+  it("leaves an unidentifiable market to the legacy path", async () => {
+    const guard = await guardGuidedSlipOpen({
+      journey: fakeJourney(stageState("slips")),
+      catalog: CATALOG_OK,
+      identity: OWNER,
+      header: header({ marketName: "  " }),
+    });
+    expect(guard.verdict).toBe("not_guided");
   });
 
   it("gives the same verdict for a duplicate delivery of the same header", async () => {
     const journey = fakeJourney(stageState("slips"));
+    const marker = ownerMarker("slip_open");
     const first = await guardGuidedSlipOpen({
       journey,
       catalog: CATALOG_OK,
       identity: OWNER,
       header: header(),
+      marker,
     });
     const second = await guardGuidedSlipOpen({
       journey,
       catalog: CATALOG_OK,
       identity: OWNER,
       header: header(),
+      marker,
     });
     expect(second.verdict).toBe(first.verdict);
   });

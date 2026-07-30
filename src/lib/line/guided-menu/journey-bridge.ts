@@ -56,12 +56,15 @@ export type GuidedWhiteSheetGuard =
  * because degrading to `not_guided` is exactly how that hole appeared.
  *
  * Legacy behaviour is preserved where it is genuinely legacy: a market/date no
- * guided round owns still runs the pre-existing direct command untouched.
+ * guided round owns still runs the pre-existing direct command untouched, even
+ * when the sender happens to have a guided round open for something else. The
+ * signed marker on generated templates is what makes that distinction safe.
  */
 export async function guardGuidedWhiteSheetSubmission(input: {
   journey: GuidedJourneyService;
   identity: GuidedMenuIdentity;
   command: WhiteSheetCloseCommand;
+  marker?: string | null;
 }): Promise<GuidedWhiteSheetGuard> {
   const ownership = await resolveGuidedOwnership({
     journey: input.journey,
@@ -70,6 +73,8 @@ export async function guardGuidedWhiteSheetSubmission(input: {
       marketLabelNormalized: input.command.marketLabelNormalized,
       businessDate: input.command.businessDate,
     },
+    purpose: "white_sheet",
+    marker: input.marker,
   });
   if (ownership.verdict === "allowed") {
     return { verdict: "allowed", context: ownership.context };

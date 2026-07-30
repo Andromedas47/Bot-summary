@@ -24,7 +24,9 @@ import {
   type ProduceCommandSource,
 } from "@/lib/line/produce-session-commands";
 import type { BaseTransactionType } from "@/lib/parsers/weigh-session/types";
+import { normalizedMarketLabel } from "@/lib/market";
 import type { MenuTransactionTypeCode } from "./menu-state-types";
+import { checkGuidedRoundOwner } from "./round-owner";
 import type { GuidedMenuIdentity } from "./ux-types";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -63,6 +65,11 @@ export type GuidedSessionOpenOutcome =
     }
   /** A live session already exists for this operator — nothing was written. */
   | { status: "already_open"; sessionKey: string }
+  /**
+   * Another operator in this source already owns a guided round for the same
+   * market and business date — refused BEFORE open_or_rotate, zero writes.
+   */
+  | { status: "round_owned"; reason: "other_operator" | "ambiguous" | "unknown" }
   /** Ownership/generation/validation refusal from the authoritative RPC. */
   | { status: "conflict"; reason: string; detail?: string }
   /** Local fail-closed refusal — nothing reached the database. */
@@ -117,7 +124,7 @@ export class GuidedSessionOpener {
   private readonly commands: ProduceSessionCommandService;
 
   constructor(
-    supabase: AnyClient,
+    private readonly supabase: AnyClient,
     options: {
       pendingService?: PendingSessionService;
       commandService?: ProduceSessionCommandService;
@@ -143,6 +150,31 @@ export class GuidedSessionOpener {
     const transactionTime = bangkokTimeHhMm(input.lineTimestampMs);
     if (!transactionTime) {
       return { status: "refused", reason: "invalid_line_timestamp" };
+    }
+
+    // One guided owner per (source, market, business date), enforced BEFORE the
+    // open RPC. The session key is per operator, so open_or_rotate cannot see
+    // that a second member of the same LINE group is already standing on this
+    // round; without this check B could open a parallel round and then pass
+    // every per-operator guard on the way to the shared White Sheet and slips.
+    //
+    // Same-operator retry is unaffected: they are their own owner, and rotation
+    // remains the RPC's decision. A later business date or another market is a
+    // different tuple and stays independent.
+    const owner = await checkGuidedRoundOwner(this.supabase, {
+      sourceId: input.identity.sourceId,
+      marketLabelNormalized: normalizedMarketLabel(input.marketLabel),
+      businessDate: input.businessDateIso,
+      lineUserId: input.identity.lineUserId,
+    });
+    if (owner.kind === "other_operator") {
+      return { status: "round_owned", reason: "other_operator" };
+    }
+    if (owner.kind === "ambiguous") {
+      return { status: "round_owned", reason: "ambiguous" };
+    }
+    if (owner.kind === "unknown") {
+      return { status: "round_owned", reason: "unknown" };
     }
 
     const lookup = await this.pending.lookup(sessionKey);

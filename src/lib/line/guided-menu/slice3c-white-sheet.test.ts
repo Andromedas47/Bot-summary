@@ -6,10 +6,18 @@
  * untouched. These tests prove the template round-trips through that parser,
  * that a guided operator cannot file a sheet against another market or date,
  * and that the pre-existing direct command is unaffected.
+ *
+ * Generated templates carry a signed provenance marker on their last line
+ * (provenance.ts), which the webhook strips before any parser runs. `body()` does
+ * the same here, so the round-trip tests exercise exactly the text the existing
+ * parsers receive.
  */
+
+process.env.LINE_CHANNEL_SECRET ??= "test-channel-secret";
 
 import { describe, expect, it } from "bun:test";
 import { GuidedMenuUxHandler } from "./ux-handler";
+import { extractGuidedMarker, signGuidedMarker } from "./provenance";
 import { GuidedMenuFakeDatabase } from "./test-fake-db";
 import { GUIDED_MENU_COPY, LINE_REPLY_MESSAGE_MAX } from "./ux-types";
 import {
@@ -50,18 +58,61 @@ const CONTEXT: GuidedJourneyContext = {
 type FakeOwner =
   | { kind: "none" }
   | { kind: "unknown" }
+  | { kind: "ambiguous"; lineUserIds: string[] }
   | { kind: "owned"; lineUserId: string; sessionKey: string };
 
-/** A GuidedJourneyService stand-in that reports a fixed stage and owner. */
+type OwnerQuery = { marketLabelNormalized: string; businessDate: string };
+
+/**
+ * A GuidedJourneyService stand-in. By default the source-wide owner of the
+ * caller's OWN market/date is the caller, and no other tuple is owned — the shape
+ * the real query has.
+ */
 function fakeJourney(
   state: GuidedJourneyState,
-  /** Source-wide owner of the submitted market/date; nobody by default. */
-  owner: FakeOwner = { kind: "none" },
+  owner: FakeOwner | ((q: OwnerQuery) => FakeOwner) = defaultOwner(state),
 ) {
   return {
     resolve: async () => state,
-    findRoundOwner: async () => owner,
+    findRoundOwner: async (q: OwnerQuery) =>
+      typeof owner === "function" ? owner(q) : owner,
   } as never;
+}
+
+function defaultOwner(state: GuidedJourneyState): (q: OwnerQuery) => FakeOwner {
+  if (state.stage === "idle") return () => ({ kind: "none" });
+  const context = state.context;
+  return (q) =>
+    q.marketLabelNormalized === context.marketLabelNormalized &&
+    q.businessDate === context.businessDate
+      ? { kind: "owned", lineUserId: context.lineUserId, sessionKey: context.sessionKey }
+      : { kind: "none" };
+}
+
+/** Ownership answer for ANY tuple — used when the target was edited. */
+const OWNED_BY_CALLER: FakeOwner = {
+  kind: "owned",
+  lineUserId: CONTEXT.lineUserId,
+  sessionKey: CONTEXT.sessionKey,
+};
+
+/** A generated template as the existing parsers see it: marker line removed. */
+function body(text: string): string {
+  return extractGuidedMarker(text).text;
+}
+
+/** The marker the bot puts on the operator's own White Sheet template. */
+function whiteSheetMarker(): string {
+  const marker = signGuidedMarker({
+    purpose: "white_sheet",
+    sourceId: CONTEXT.sourceId,
+    lineUserId: CONTEXT.lineUserId,
+    marketLabelNormalized: CONTEXT.marketLabelNormalized,
+    businessDate: CONTEXT.businessDate,
+    sessionGeneration: CONTEXT.sessionGeneration,
+  });
+  if (!marker) throw new Error("test setup: marker could not be signed");
+  return marker;
 }
 
 function stageState(
@@ -139,7 +190,10 @@ function seededHandler(
 
 describe("Slice 3C — the template is the existing command", () => {
   it("round-trips through parseWhiteSheetCloseCommand with every field", () => {
-    const template = buildWhiteSheetTemplate(CONTEXT)!;
+    const generated = buildWhiteSheetTemplate(CONTEXT)!;
+    // The provenance marker is the last line and is stripped before parsing.
+    expect(extractGuidedMarker(generated).marker).not.toBeNull();
+    const template = body(generated);
     expect(template).toContain("วัดทุ่งลานนา ปิดยอด 29/07/2569");
     expect(template.endsWith("จบปิดยอด")).toBe(true);
 
@@ -158,7 +212,7 @@ describe("Slice 3C — the template is the existing command", () => {
   });
 
   it("accepts the template after the operator edits the numbers", () => {
-    const edited = buildWhiteSheetTemplate(CONTEXT)!
+    const edited = body(buildWhiteSheetTemplate(CONTEXT)!)
       .replace("ค่าแรง 0", "ค่าแรง 350")
       .replace("ค่าที่ 0", "ค่าที่ 120")
       .replace("เงินสด 0", "เงินสด 4,850.50");
@@ -172,7 +226,7 @@ describe("Slice 3C — the template is the existing command", () => {
   });
 
   it("rejects an edited template with a missing required field", () => {
-    const missingCash = buildWhiteSheetTemplate(CONTEXT)!
+    const missingCash = body(buildWhiteSheetTemplate(CONTEXT)!)
       .split("\n")
       .filter((line) => !line.startsWith("เงินสด"))
       .join("\n");
@@ -217,7 +271,9 @@ describe("Slice 3C — the guided white-sheet screen", () => {
     expect(instructions.text).toContain("ตลาด: วัดทุ่งลานนา");
     expect(instructions.text).toContain("วันที่: 29/07/2569");
     // The template arrives as its own message so it can be copied cleanly.
-    expect(parseWhiteSheetCloseCommandFromMessage(template.text).kind).toBe("ok");
+    expect(parseWhiteSheetCloseCommandFromMessage(body(template.text)).kind).toBe(
+      "ok",
+    );
     expect(outcome.result).toMatchObject({
       stage: "white_sheet",
       market_label_normalized: "วัดทุ่งลานนา",
@@ -272,7 +328,7 @@ describe("Slice 3C — the guided white-sheet screen", () => {
 
     expect(outcome.screen).toBe("slip_instructions");
     const [, header] = outcome.messages as Array<{ text: string }>;
-    expect(parseSlipSessionHeader(header.text)).toMatchObject({
+    expect(parseSlipSessionHeader(body(header.text))).toMatchObject({
       sellerName: "กี้",
       marketName: "วัดทุ่งลานนา",
       batchType: "TRANSFER_SLIPS",
@@ -338,9 +394,21 @@ describe("Slice 3C — the journey guard on submission", () => {
     expect(guard.verdict).toBe("allowed");
   });
 
-  it("refuses another market without writing anything", async () => {
+  it("allows the generated template's own signed marker", async () => {
     const guard = await guardGuidedWhiteSheetSubmission({
       journey: fakeJourney(stageState("white_sheet")),
+      identity: IDENTITY,
+      command,
+      marker: whiteSheetMarker(),
+    });
+    expect(guard.verdict).toBe("allowed");
+  });
+
+  it("refuses another market without writing anything", async () => {
+    const guard = await guardGuidedWhiteSheetSubmission({
+      // Source-wide ownership answers "the caller" for the edited tuple too, so
+      // the refusal is about the round, not about who asked.
+      journey: fakeJourney(stageState("white_sheet"), OWNED_BY_CALLER),
       identity: IDENTITY,
       command: {
         ...command,
@@ -357,7 +425,7 @@ describe("Slice 3C — the journey guard on submission", () => {
 
   it("refuses another business date without writing anything", async () => {
     const guard = await guardGuidedWhiteSheetSubmission({
-      journey: fakeJourney(stageState("white_sheet")),
+      journey: fakeJourney(stageState("white_sheet"), OWNED_BY_CALLER),
       identity: IDENTITY,
       command: { ...command, businessDate: "2026-07-28" },
     });
@@ -378,8 +446,9 @@ describe("Slice 3C — the journey guard on submission", () => {
   it("fails closed on an ownership conflict instead of falling back", async () => {
     for (const reason of ["ownership_conflict", "session_key_mismatch"] as const) {
       const guard = await guardGuidedWhiteSheetSubmission({
-        journey: fakeJourney({ stage: "idle", reason }),
-        identity: IDENTITY,
+        // The round exists and is someone else's; the caller's own key conflicts.
+        journey: fakeJourney({ stage: "idle", reason }, OWNED_BY_CALLER),
+        identity: { ...IDENTITY, lineUserId: "U-stranger" },
         command,
       });
       expect(guard.verdict).toBe("refused");
@@ -407,7 +476,7 @@ describe("Slice 3C → 3D handoff", () => {
   it("hands over the existing slip batch header", () => {
     const messages = buildSlipHandoffMessages(CONTEXT)!;
     expect(messages[0]).toContain(GUIDED_MENU_COPY.nextStepSlips);
-    expect(parseSlipSessionHeader(messages[1]!)).toMatchObject({
+    expect(parseSlipSessionHeader(body(messages[1]!))).toMatchObject({
       sellerName: "กี้",
       marketName: "วัดทุ่งลานนา",
     });

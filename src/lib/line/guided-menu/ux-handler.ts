@@ -491,6 +491,22 @@ export class GuidedMenuUxHandler {
         { opened: false, recorded: false, reason: "session_already_open" },
       );
     }
+    // Someone else in this group already owns this market and date, or ownership
+    // could not be established. Refused before open_or_rotate — zero writes.
+    if (opened.status === "round_owned") {
+      const message = buildPlainTextMessage(
+        opened.reason === "other_operator"
+          ? GUIDED_MENU_COPY.sessionRoundOwnedByOther
+          : opened.reason === "ambiguous"
+            ? GUIDED_MENU_COPY.ownershipAmbiguous
+            : GUIDED_MENU_COPY.ownershipUnknown,
+      );
+      return resultEnvelope("session_already_open", [message], {
+        opened: false,
+        recorded: false,
+        reason: `round_owned_${opened.reason}`,
+      });
+    }
     if (opened.status !== "opened") {
       return resultEnvelope(
         "session_open_conflict",

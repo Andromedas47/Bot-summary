@@ -32,6 +32,8 @@ import {
   guidedProduceHandedToFinalizer,
   resolveGuidedProduceFinalization,
 } from "./produce-finalization";
+import { findGuidedRoundOwner, type GuidedRoundOwnership } from "./round-owner";
+import { withGuidedMarker, type GuidedMarkerPurpose } from "./provenance";
 import type { GuidedMenuIdentity } from "./ux-types";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -93,12 +95,7 @@ export type GuidedJourneyIdleReason =
   | "ownership_conflict"
   | "incomplete_metadata";
 
-/** Source-wide ownership of the guided round for one market/business date. */
-export type GuidedRoundOwnership =
-  | { kind: "none" }
-  | { kind: "owned"; lineUserId: string; sessionKey: string }
-  /** The lookup itself failed — callers must fail closed, never fall back. */
-  | { kind: "unknown" };
+export type { GuidedRoundOwnership };
 
 export class GuidedJourneyService {
   private readonly pending: PendingSessionService;
@@ -179,8 +176,8 @@ export class GuidedJourneyService {
       };
     }
 
-    // The hold is released, but produce rows are only proven by the
-    // authoritative finalization status. Neither `finalizing` nor
+    // The hold is released, but produce rows are only proven by a
+    // current-generation produce_sessions row. Neither `finalizing` nor
     // `finalize_failed` may proceed to the White Sheet.
     const produce = await resolveGuidedProduceFinalization(this.supabase, row);
     if (produce !== "succeeded") {
@@ -215,53 +212,15 @@ export class GuidedJourneyService {
 
   /**
    * Who owns the guided round for one market and business date in this source.
-   *
-   * The journey key is per operator (`group:<source>:user:<user>`), so a second
-   * member of the same LINE group resolves `idle` and would otherwise fall
-   * through to the shared legacy writers. This is the source-wide question the
-   * guards ask before allowing any such fallback.
-   *
-   * Terminalized rounds are included on purpose: ownership of a market/date does
-   * not lapse when the produce session ends — the White Sheet and slip stages
-   * come afterwards.
+   * Delegates to round-owner.ts, which is also what the produce open path uses,
+   * so there is exactly one source-wide ownership query.
    */
-  async findRoundOwner(input: {
+  findRoundOwner(input: {
     sourceId: string;
     marketLabelNormalized: string;
     businessDate: string;
   }): Promise<GuidedRoundOwnership> {
-    const target = input.marketLabelNormalized.normalize("NFC").trim();
-    if (!target || !input.businessDate) return { kind: "none" };
-
-    let data: Array<Record<string, unknown>> | null;
-    try {
-      const result = await this.supabase
-        .from("pending_sessions")
-        .select("session_key, line_user_id, market_label, entry_origin, created_at")
-        .eq("source_id", input.sourceId)
-        .eq("business_date", input.businessDate)
-        .not("entry_origin", "is", null)
-        .order("created_at", { ascending: false });
-      if (result.error) return { kind: "unknown" };
-      data = result.data;
-    } catch {
-      // Unanswerable is not "nobody owns it" — callers must fail closed.
-      return { kind: "unknown" };
-    }
-
-    for (const row of data ?? []) {
-      const lineUserId = String(row.line_user_id ?? "").trim();
-      if (!lineUserId) continue;
-      if (normalizedMarketLabel(String(row.market_label ?? "")) !== target) {
-        continue;
-      }
-      return {
-        kind: "owned",
-        lineUserId,
-        sessionKey: String(row.session_key ?? ""),
-      };
-    }
-    return { kind: "none" };
+    return findGuidedRoundOwner(this.supabase, input);
   }
 
   /**
@@ -312,14 +271,20 @@ export function thaiDateFromIso(iso: string): string | null {
  *
  * No field is invented and no second parser exists — the operator edits the
  * numbers and the message goes through the existing close command path.
+ *
+ * A signed provenance marker is appended when the full round context is
+ * available, so the submission can be recognised as this operator's form for
+ * this round (provenance.ts). It is stripped before any parser sees the text.
  */
-export function buildWhiteSheetTemplate(context: {
-  marketLabel: string;
-  businessDate: string;
-}): string | null {
+export function buildWhiteSheetTemplate(
+  context: {
+    marketLabel: string;
+    businessDate: string;
+  } & Partial<GuidedJourneyContext>,
+): string | null {
   const thaiDate = thaiDateFromIso(context.businessDate);
   if (!thaiDate) return null;
-  return [
+  const template = [
     `${context.marketLabel} ปิดยอด ${thaiDate}`,
     "ค่าแรง 0",
     "ค่าที่ 0",
@@ -329,18 +294,52 @@ export function buildWhiteSheetTemplate(context: {
     "เงินสด 0",
     "จบปิดยอด",
   ].join("\n");
+  return markTemplate(template, "white_sheet", context);
+}
+
+/**
+ * Sign a generated template when the round context is complete.
+ *
+ * Returns the template unchanged when a field is missing or the deployment has
+ * no signing secret: an unmarked template is still ownership-checked, so the
+ * degraded path is safe rather than absent.
+ */
+function markTemplate(
+  template: string,
+  purpose: GuidedMarkerPurpose,
+  context: Partial<GuidedJourneyContext> & { businessDate: string },
+): string {
+  if (
+    !context.sourceId ||
+    !context.lineUserId ||
+    !context.marketLabelNormalized ||
+    !context.sessionGeneration
+  ) {
+    return template;
+  }
+  return withGuidedMarker(template, {
+    purpose,
+    sourceId: context.sourceId,
+    lineUserId: context.lineUserId,
+    marketLabelNormalized: context.marketLabelNormalized,
+    businessDate: context.businessDate,
+    sessionGeneration: context.sessionGeneration,
+  });
 }
 
 /**
  * The transfer-slip batch header, in the EXACT syntax parseSlipSessionHeader
  * already accepts: "<seller> <market> สลิปเงินโอน <D/M/BBBB>".
  */
-export function buildSlipHeaderTemplate(context: {
-  sellerLabel: string;
-  marketLabel: string;
-  businessDate: string;
-}): string | null {
+export function buildSlipHeaderTemplate(
+  context: {
+    sellerLabel: string;
+    marketLabel: string;
+    businessDate: string;
+  } & Partial<GuidedJourneyContext>,
+): string | null {
   const thaiDate = thaiDateFromIso(context.businessDate);
   if (!thaiDate) return null;
-  return `${context.sellerLabel} ${context.marketLabel} สลิปเงินโอน ${thaiDate}`;
+  const template = `${context.sellerLabel} ${context.marketLabel} สลิปเงินโอน ${thaiDate}`;
+  return markTemplate(template, "slip_open", context);
 }

@@ -320,8 +320,9 @@ describe("Slice 3B — จบรายการ sets the close barrier", () => {
     expect(controlLabels(closed.messages)).toEqual([
       "ดูรายการ",
       "ยืนยันจบรายการ",
-      "กลับไปแก้ไข",
+      "ออกจากเมนู",
     ]);
+    expect(controlLabels(closed.messages)).not.toContain("กลับไปแก้ไข");
     expect(
       closed.messages.some((m) => (m as { type?: string }).type === "flex"),
     ).toBe(true);

@@ -103,9 +103,7 @@ function payloadLooksValid(
   switch (action) {
     case "menu_root":
       if (keys.length === 0) return true;
-      return keys.length === 1 && keys[0] === "intent" && (
-        payload.intent === "cancel" || payload.intent === "resume_edit"
-      );
+      return keys.length === 1 && keys[0] === "intent" && payload.intent === "cancel";
     case "choose_transaction_type":
       return keys.length === 1 && keys[0] === "transaction_type" && validTx;
     case "choose_seller":

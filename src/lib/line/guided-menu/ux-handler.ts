@@ -100,10 +100,6 @@ export function isExactGuidedCloseTrigger(text: string): boolean {
   return text.trim() === "จบรายการ";
 }
 
-function isResumeEditPayload(payload: MenuPayload): boolean {
-  return payload.intent === "resume_edit";
-}
-
 /** True when postback data carries a well-formed opaque gpm1 token. */
 export function isGuidedMenuPostbackData(data: string): boolean {
   return parseMenuToken(data).ok;
@@ -347,9 +343,6 @@ export class GuidedMenuUxHandler {
           ]);
         }
         return resultEnvelope("cancelled", [buildCancelledMessage()]);
-      }
-      if (isResumeEditPayload(input.payload)) {
-        return this.renderResumeEdit(input.identity);
       }
       return this.buildTransactionTypeScreen(input.identity);
     }
@@ -621,39 +614,13 @@ export class GuidedMenuUxHandler {
     return this.viewStatus(identity);
   }
 
-  private async renderResumeEdit(
-    identity: GuidedMenuIdentity,
-  ): Promise<GuidedMenuUxResult> {
-    const snapshot = await this.capture.snapshot(identity);
-    if (snapshot.status !== "ok") return this.refusalEnvelope(snapshot.reason);
-    const controls = await this.buildCaptureStageControls(identity);
-    const summary =
-      snapshot.parsed.items.length > 0
-        ? buildWeighSessionSummary(snapshot.parsed)
-        : GUIDED_MENU_COPY.noCapturedItems;
-    return resultEnvelope(
-      "session_status",
-      buildCapturedItemsMessages({
-        summary: [summary, "", GUIDED_MENU_COPY.correctionHint].join("\n"),
-        stageControl: controls?.flex,
-        quickReply: controls?.quickReply,
-        maxMessages: LINE_REPLY_MESSAGE_MAX,
-      }),
-      {
-        item_count: snapshot.parsed.items.length,
-        resume_edit: true,
-        close_requested: snapshot.closeRequested,
-      },
-    );
-  }
-
   /**
    * Action buttons for an open round. Built fresh on every screen so each is
    * a single-use token bound to this operator, source and session key.
    */
   private async buildSessionActionButtons(
     identity: GuidedMenuIdentity,
-    include: { close: boolean; confirm: boolean; resumeEdit: boolean },
+    include: { close: boolean; confirm: boolean },
   ): Promise<BoundTokenButton[] | undefined> {
     try {
       const create = this.createTokenFn(identity);
@@ -683,29 +650,17 @@ export class GuidedMenuUxHandler {
           }),
         });
       }
-      if (include.resumeEdit) {
-        buttons.push({
-          label: "กลับไปแก้ไข",
-          actionType: "menu_root",
-          payload: { intent: "resume_edit" },
-          wireToken: await create({
-            actionType: "menu_root",
-            payload: { intent: "resume_edit" },
-          }),
-        });
-      } else {
-        buttons.push({
-          // Never "ยกเลิกรายการ": this dismisses the guided controls and leaves
-          // the produce session open. There is no cancel-open-session contract.
-          label: "ออกจากเมนู",
+      buttons.push({
+        // Never "ยกเลิกรายการ": this dismisses the guided controls and leaves
+        // the produce session open. There is no cancel-open-session contract.
+        label: "ออกจากเมนู",
+        actionType: "menu_root",
+        payload: { intent: "cancel" },
+        wireToken: await create({
           actionType: "menu_root",
           payload: { intent: "cancel" },
-          wireToken: await create({
-            actionType: "menu_root",
-            payload: { intent: "cancel" },
-          }),
-        });
-      }
+        }),
+      });
       return buttons;
     } catch {
       return undefined;
@@ -716,7 +671,6 @@ export class GuidedMenuUxHandler {
     const buttons = await this.buildSessionActionButtons(identity, {
       close: true,
       confirm: false,
-      resumeEdit: false,
     });
     return this.wrapStageControls(buttons, "จัดการรายการ");
   }
@@ -725,7 +679,6 @@ export class GuidedMenuUxHandler {
     const buttons = await this.buildSessionActionButtons(identity, {
       close: false,
       confirm: true,
-      resumeEdit: true,
     });
     return this.wrapStageControls(buttons, "ยืนยันจบรายการ");
   }
@@ -874,12 +827,11 @@ export class GuidedMenuUxHandler {
 
     const needsSettlement = report.blockers.includes("settlement_missing");
     const template = needsSettlement ? buildSettlementTemplate(context) : null;
-    const readyToClose = !template && report.blockers.length === 0;
+    // Never label a view_status button "ปิดรอบ" — closing stays the exact
+    // text command. Ready-to-close still shows ตรวจยอด plus the instruction.
     const stageLabels = template
       ? (["กรอกยอดส่ง", "ตรวจยอด"] as const)
-      : readyToClose
-        ? (["ปิดรอบ", "ตรวจยอด"] as const)
-        : (["ตรวจยอด"] as const);
+      : (["ตรวจยอด"] as const);
     const controls = await this.buildJourneyStageControls(
       identity,
       stageLabels,

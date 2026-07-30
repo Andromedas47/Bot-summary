@@ -119,8 +119,9 @@ describe("Flex stage controls — capture and recovery", () => {
     expect(controlLabels(closed.messages)).toEqual([
       "ดูรายการ",
       "ยืนยันจบรายการ",
-      "กลับไปแก้ไข",
+      "ออกจากเมนู",
     ]);
+    expect(controlLabels(closed.messages)).not.toContain("กลับไปแก้ไข");
   });
 
   it("เมนู during awaiting_confirm renders the confirm flex card", async () => {
@@ -138,8 +139,9 @@ describe("Flex stage controls — capture and recovery", () => {
     expect(controlLabels(menu.messages)).toEqual([
       "ดูรายการ",
       "ยืนยันจบรายการ",
-      "กลับไปแก้ไข",
+      "ออกจากเมนู",
     ]);
+    expect(controlLabels(menu.messages)).not.toContain("กลับไปแก้ไข");
   });
 
   it("capture acknowledgement includes a fresh flex control card", async () => {
@@ -198,5 +200,37 @@ describe("Flex stage controls — capture and recovery", () => {
       lineTimestampMs: TS,
     });
     expect(status.screen).toBe("invalid");
+  });
+
+  it("rejects resume_edit payloads and never ships กลับไปแก้ไข", async () => {
+    const { validateMenuPayloadForAction } = await import("./menu-state-service");
+    const { MENU_ROOT_INTENTS } = await import("./menu-state-types");
+    expect(MENU_ROOT_INTENTS).toEqual(["cancel"]);
+    expect(() =>
+      validateMenuPayloadForAction("menu_root", {
+        intent: "resume_edit",
+      } as never),
+    ).toThrow();
+  });
+
+  it("migration 0058 is absent", async () => {
+    const { existsSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    expect(
+      existsSync(
+        join(
+          process.cwd(),
+          "supabase/migrations/0058_guided_menu_resume_edit_intent.sql",
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it("never maps a Flex button labelled ปิดรอบ to view_status", async () => {
+    const source = await Bun.file(new URL("./ux-handler.ts", import.meta.url)).text();
+    // Ready-to-close must not mint a view_status token labelled ปิดรอบ.
+    expect(source).not.toMatch(/\["ปิดรอบ",\s*"ตรวจยอด"\]/);
+    expect(source).toContain('พิมพ์ "${GUIDED_MENU_COPY.roundCloseCommand}" เพื่อปิดรอบ');
+    expect(GUIDED_MENU_COPY.roundCloseCommand).toBe("ปิดรอบ");
   });
 });

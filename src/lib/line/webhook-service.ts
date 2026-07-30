@@ -454,7 +454,8 @@ export class WebhookService {
         );
         if (
           guidedCloseLookup.session
-          && (guidedCloseLookup.session as StructuredPendingSession).entry_origin != null
+          && (guidedCloseLookup.session as StructuredPendingSession).entry_origin
+            === "structured_menu"
         ) {
           return this.processGuidedTextClose(msgEvent, eventId, log);
         }
@@ -623,12 +624,11 @@ export class WebhookService {
         return { eventId, eventType: event.type, status: "saved", parsed: false };
       }
 
-      // 0050 H-1: legacy plain-text close patterns must not markClose a structured
-      // session. Exact "จบรายการ" is handled above via the guided requestClose
-      // contract; other close phrases keep the historical refusal.
+      // 0050 H-1: plain-text close must not markClose a structured session.
+      // Exact "จบรายการ" for entry_origin=structured_menu is handled above via
+      // the guided requestClose contract; any other non-null origin still refuses.
       if (
         markClose
-        && !isExactGuidedCloseTrigger(normalizedText)
         && (pending as StructuredPendingSession).entry_origin != null
       ) {
         log.warn("text close refused for structured produce session", {
@@ -787,7 +787,7 @@ export class WebhookService {
 
       if (!markClose) {
         const structured = pending as StructuredPendingSession;
-        if (structured.entry_origin != null && replyToken) {
+        if (structured.entry_origin === "structured_menu" && replyToken) {
           const identity = buildGuidedMenuIdentity({
             lineUserId: getUserId(msgEvent.source),
             sourceType: msgEvent.source.type,

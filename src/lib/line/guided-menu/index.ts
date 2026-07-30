@@ -11,6 +11,8 @@ export * from "./session-opener";
 export * from "./session-capture";
 export * from "./produce-finalization";
 export * from "./journey";
+export * from "./ownership-guard";
+export * from "./slip-open-guard";
 export * from "./journey-bridge";
 export * from "./round-close";
 export * from "./settlement-command";

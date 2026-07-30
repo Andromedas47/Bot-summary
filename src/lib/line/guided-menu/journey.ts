@@ -93,6 +93,12 @@ export type GuidedJourneyIdleReason =
   | "ownership_conflict"
   | "incomplete_metadata";
 
+/** Source-wide ownership of the guided round for one market/business date. */
+export type GuidedRoundOwnership =
+  | { kind: "none" }
+  | { kind: "owned"; lineUserId: string; sessionKey: string }
+  /** The lookup itself failed — callers must fail closed, never fall back. */
+  | { kind: "unknown" };
 
 export class GuidedJourneyService {
   private readonly pending: PendingSessionService;
@@ -205,6 +211,57 @@ export class GuidedJourneyService {
       session: row,
       whiteSheet,
     };
+  }
+
+  /**
+   * Who owns the guided round for one market and business date in this source.
+   *
+   * The journey key is per operator (`group:<source>:user:<user>`), so a second
+   * member of the same LINE group resolves `idle` and would otherwise fall
+   * through to the shared legacy writers. This is the source-wide question the
+   * guards ask before allowing any such fallback.
+   *
+   * Terminalized rounds are included on purpose: ownership of a market/date does
+   * not lapse when the produce session ends — the White Sheet and slip stages
+   * come afterwards.
+   */
+  async findRoundOwner(input: {
+    sourceId: string;
+    marketLabelNormalized: string;
+    businessDate: string;
+  }): Promise<GuidedRoundOwnership> {
+    const target = input.marketLabelNormalized.normalize("NFC").trim();
+    if (!target || !input.businessDate) return { kind: "none" };
+
+    let data: Array<Record<string, unknown>> | null;
+    try {
+      const result = await this.supabase
+        .from("pending_sessions")
+        .select("session_key, line_user_id, market_label, entry_origin, created_at")
+        .eq("source_id", input.sourceId)
+        .eq("business_date", input.businessDate)
+        .not("entry_origin", "is", null)
+        .order("created_at", { ascending: false });
+      if (result.error) return { kind: "unknown" };
+      data = result.data;
+    } catch {
+      // Unanswerable is not "nobody owns it" — callers must fail closed.
+      return { kind: "unknown" };
+    }
+
+    for (const row of data ?? []) {
+      const lineUserId = String(row.line_user_id ?? "").trim();
+      if (!lineUserId) continue;
+      if (normalizedMarketLabel(String(row.market_label ?? "")) !== target) {
+        continue;
+      }
+      return {
+        kind: "owned",
+        lineUserId,
+        sessionKey: String(row.session_key ?? ""),
+      };
+    }
+    return { kind: "none" };
   }
 
   /**

@@ -47,9 +47,21 @@ const CONTEXT: GuidedJourneyContext = {
   sessionGeneration: "gen-1",
 };
 
-/** A GuidedJourneyService stand-in that reports a fixed stage. */
-function fakeJourney(state: GuidedJourneyState) {
-  return { resolve: async () => state } as never;
+type FakeOwner =
+  | { kind: "none" }
+  | { kind: "unknown" }
+  | { kind: "owned"; lineUserId: string; sessionKey: string };
+
+/** A GuidedJourneyService stand-in that reports a fixed stage and owner. */
+function fakeJourney(
+  state: GuidedJourneyState,
+  /** Source-wide owner of the submitted market/date; nobody by default. */
+  owner: FakeOwner = { kind: "none" },
+) {
+  return {
+    resolve: async () => state,
+    findRoundOwner: async () => owner,
+  } as never;
 }
 
 function stageState(
@@ -352,8 +364,8 @@ describe("Slice 3C — the journey guard on submission", () => {
     expect(guard.verdict).toBe("refused");
   });
 
-  it("leaves the pre-existing direct command untouched when no round is guided", async () => {
-    for (const reason of ["no_session", "not_structured", "ownership_conflict"] as const) {
+  it("leaves the pre-existing direct command untouched when nobody owns the round", async () => {
+    for (const reason of ["no_session", "not_structured"] as const) {
       const guard = await guardGuidedWhiteSheetSubmission({
         journey: fakeJourney({ stage: "idle", reason }),
         identity: IDENTITY,
@@ -363,7 +375,20 @@ describe("Slice 3C — the journey guard on submission", () => {
     }
   });
 
-  it("degrades to not_guided when the journey lookup itself fails", async () => {
+  it("fails closed on an ownership conflict instead of falling back", async () => {
+    for (const reason of ["ownership_conflict", "session_key_mismatch"] as const) {
+      const guard = await guardGuidedWhiteSheetSubmission({
+        journey: fakeJourney({ stage: "idle", reason }),
+        identity: IDENTITY,
+        command,
+      });
+      expect(guard.verdict).toBe("refused");
+      if (guard.verdict !== "refused") throw new Error("expected refused");
+      expect(guard.message).toContain(GUIDED_MENU_COPY.ownershipNothingRecorded);
+    }
+  });
+
+  it("fails closed when the journey lookup itself fails", async () => {
     const guard = await guardGuidedWhiteSheetSubmission({
       journey: {
         resolve: async () => {
@@ -373,7 +398,8 @@ describe("Slice 3C — the journey guard on submission", () => {
       identity: IDENTITY,
       command,
     });
-    expect(guard.verdict).toBe("not_guided");
+    // Degrading to not_guided here is exactly what let a stranger through.
+    expect(guard.verdict).toBe("refused");
   });
 });
 

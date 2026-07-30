@@ -19,8 +19,8 @@ import {
   buildSlipHeaderTemplate,
   thaiDateFromIso,
   type GuidedJourneyContext,
-  type GuidedJourneyState,
 } from "./journey";
+import { resolveGuidedOwnership } from "./ownership-guard";
 import {
   GuidedRoundService,
   GUIDED_ROUND_BLOCKER_LABEL,
@@ -63,30 +63,18 @@ export async function guardGuidedWhiteSheetSubmission(input: {
   identity: GuidedMenuIdentity;
   command: WhiteSheetCloseCommand;
 }): Promise<GuidedWhiteSheetGuard> {
-  let state: GuidedJourneyState;
-  try {
-    state = await input.journey.resolve(input.identity);
-  } catch {
-    return { verdict: "not_guided" };
+  const ownership = await resolveGuidedOwnership({
+    journey: input.journey,
+    identity: input.identity,
+    target: {
+      marketLabelNormalized: input.command.marketLabelNormalized,
+      businessDate: input.command.businessDate,
+    },
+  });
+  if (ownership.verdict === "allowed") {
+    return { verdict: "allowed", context: ownership.context };
   }
-  if (state.stage === "idle") return { verdict: "not_guided" };
-
-  const { context } = state;
-  const marketMatches =
-    context.marketLabelNormalized === input.command.marketLabelNormalized;
-  const dateMatches = context.businessDate === input.command.businessDate;
-  if (marketMatches && dateMatches) return { verdict: "allowed", context };
-
-  const expectedDate =
-    thaiDateFromIso(context.businessDate) ?? context.businessDate;
-  return {
-    verdict: "refused",
-    message: [
-      "ใบขาวนี้ไม่ตรงกับรอบที่เปิดอยู่ ยังไม่ได้บันทึกอะไร",
-      `รอบที่เปิดอยู่: ${context.sellerLabel} — ${context.marketLabel} — ${expectedDate}`,
-      "กรุณาใช้แบบฟอร์มที่ระบบส่งให้ และแก้เฉพาะตัวเลข",
-    ].join("\n"),
-  };
+  return ownership;
 }
 
 /**

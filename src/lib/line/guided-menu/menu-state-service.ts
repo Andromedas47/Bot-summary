@@ -1,5 +1,6 @@
 import { randomBytes } from "crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { normalizedMarketLabel } from "@/lib/market";
 import {
   encodeMenuToken,
   generateRawMenuToken,
@@ -485,6 +486,37 @@ export class GuidedMenuStateService {
       );
 
     return { seller, markets };
+  }
+
+  /**
+   * Is this seller label still assigned to this market, right now?
+   *
+   * Labels, not codes, because that is all a round's frozen metadata carries.
+   * It answers purely by composing the existing active-catalog loaders, so the
+   * definition of "active" stays in one place.
+   */
+  async isActiveSellerMarket(input: {
+    sellerLabel: string;
+    marketLabelNormalized: string;
+  }): Promise<boolean> {
+    const wantedSeller = input.sellerLabel.normalize("NFC").trim();
+    const wantedMarket = normalizedMarketLabel(input.marketLabelNormalized);
+    if (!wantedSeller || !wantedMarket) return false;
+
+    const sellers = (await this.listActiveSellers()).filter(
+      (seller) => seller.label.normalize("NFC").trim() === wantedSeller,
+    );
+    for (const seller of sellers) {
+      const { markets } = await this.loadActiveSellerMarkets(seller.sellerCode);
+      if (
+        markets.some(
+          (market) => normalizedMarketLabel(market.marketLabel) === wantedMarket,
+        )
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** Load trusted market allowlist from DB (authoritative source). */

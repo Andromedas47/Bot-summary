@@ -29,6 +29,8 @@ import {
   isExactGuidedMenuTrigger,
   isGuidedMenuPostbackCandidate,
   isGuidedMenuPostbackData,
+  guardGuidedSlipOpen,
+  GuidedMenuStateService,
   isGuidedRoundCloseCommand,
   isGuidedSettlementCommandText,
   processGuidedRoundClose,
@@ -175,6 +177,7 @@ interface WebhookServiceDependencies {
   guidedMenuHandler?: GuidedMenuUxHandler;
   guidedJourneyService?: GuidedJourneyService;
   guidedRoundService?: GuidedRoundService;
+  guidedMenuStateService?: GuidedMenuStateService;
   scheduleBackgroundTask?: ScheduleBackgroundTask;
   physicalInventoryFinalizer?: PhysicalInventoryFinalizer;
   physicalInventoryService?: PhysicalInventorySessionGateway;
@@ -296,6 +299,7 @@ export class WebhookService {
   private readonly guidedMenuHandler: GuidedMenuUxHandler;
   private readonly guidedJourney: GuidedJourneyService;
   private readonly guidedRounds: GuidedRoundService;
+  private readonly guidedCatalog: GuidedMenuStateService;
   private readonly scheduleBackgroundTask: ScheduleBackgroundTask;
   private readonly physicalInventoryFinalizer: PhysicalInventoryFinalizer;
   private readonly physicalInventoryService: PhysicalInventorySessionGateway;
@@ -322,6 +326,8 @@ export class WebhookService {
       dependencies.guidedJourneyService ?? new GuidedJourneyService(supabase);
     this.guidedRounds =
       dependencies.guidedRoundService ?? new GuidedRoundService(supabase);
+    this.guidedCatalog =
+      dependencies.guidedMenuStateService ?? new GuidedMenuStateService(supabase);
     this.scheduleBackgroundTask =
       dependencies.scheduleBackgroundTask
       ?? ((task) => {
@@ -1760,6 +1766,29 @@ export class WebhookService {
       marketName: header.marketName,
       slipDate:   header.slipDate,
     });
+
+    // Guided binding is checked BEFORE the open, so an edited or copied header
+    // never creates a slip_batches row that images would then attach to. With no
+    // guided round owning the market/date, the legacy open runs unchanged.
+    const guidedIdentity = buildGuidedMenuIdentity({
+      lineUserId: senderId,
+      sourceType: event.source.type,
+      sourceId,
+      sessionKey: getPendingSessionKey(event.source),
+    });
+    if (guidedIdentity) {
+      const guard = await guardGuidedSlipOpen({
+        journey:  this.guidedJourney,
+        catalog:  this.guidedCatalog,
+        identity: guidedIdentity,
+        header,
+      });
+      if (guard.verdict === "refused") {
+        log.info("slip open refused — guided round mismatch", { sourceId });
+        if (replyToken) await this.replyMessage(replyToken, guard.message);
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+    }
 
     try {
       const result = await this.slipSessionService.openSession(

@@ -261,6 +261,16 @@ export async function processGuidedSettlementSubmission(input: {
       saved: false,
     };
   }
+  // Produce rows are not proven to exist yet, or provably do not.
+  if (state.stage === "finalizing") {
+    return { messages: [refusal(GUIDED_MENU_COPY.produceFinalizing)], saved: false };
+  }
+  if (state.stage === "finalize_failed") {
+    return {
+      messages: [refusal(GUIDED_MENU_COPY.produceFinalizeFailedShort)],
+      saved: false,
+    };
+  }
   if (state.whiteSheet.status === "not_submitted") {
     return {
       messages: [refusal(GUIDED_MENU_COPY.settlementWhiteSheetMissing)],

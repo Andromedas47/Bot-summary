@@ -45,15 +45,18 @@ export type GuidedWhiteSheetGuard =
   | { verdict: "refused"; message: string };
 
 /**
- * Verify a White Sheet closing command against the operator's active round.
+ * Verify a White Sheet closing command against the guided round that owns the
+ * submitted market and business date.
  *
- * A guided operator's sheet must land on the round they opened. Silently
- * accepting a different market or date would file real money against the wrong
- * round, so the mismatch is refused before anything is loaded or written.
+ * The question is deliberately source-wide, not per operator: the template is
+ * plain text in a shared group, so asking only "does the sender have a round?"
+ * let a second member copy the first member's sheet and fall through to the
+ * legacy group writer. `resolveGuidedOwnership` answers ownership for the
+ * market/date and fails closed when it cannot — including on a lookup error,
+ * because degrading to `not_guided` is exactly how that hole appeared.
  *
- * When there is no guided round (or the row belongs to someone else) the
- * verdict is `not_guided` and the existing direct command path runs unchanged
- * — this guard never blocks the pre-existing workflow.
+ * Legacy behaviour is preserved where it is genuinely legacy: a market/date no
+ * guided round owns still runs the pre-existing direct command untouched.
  */
 export async function guardGuidedWhiteSheetSubmission(input: {
   journey: GuidedJourneyService;
@@ -64,7 +67,6 @@ export async function guardGuidedWhiteSheetSubmission(input: {
   try {
     state = await input.journey.resolve(input.identity);
   } catch {
-    // A journey lookup failure must not take down the existing command path.
     return { verdict: "not_guided" };
   }
   if (state.stage === "idle") return { verdict: "not_guided" };
@@ -142,6 +144,16 @@ export async function processGuidedRoundClose(input: {
       closed: false,
     };
   }
+  // Produce rows are not proven to exist yet, or provably do not.
+  if (state.stage === "finalizing") {
+    return { messages: [GUIDED_MENU_COPY.produceFinalizing], closed: false };
+  }
+  if (state.stage === "finalize_failed") {
+    return {
+      messages: [GUIDED_MENU_COPY.produceFinalizeFailedShort],
+      closed: false,
+    };
+  }
 
   const whiteSheetSubmitted = state.whiteSheet.status !== "not_submitted";
   const outcome: GuidedRoundCloseOutcome = await input.rounds.close(
@@ -175,4 +187,3 @@ export async function processGuidedRoundClose(input: {
 
   return { messages: [receipt.text], closed: outcome.status === "closed" };
 }
-

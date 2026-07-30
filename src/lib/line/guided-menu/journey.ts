@@ -28,6 +28,10 @@ import { loadWhiteSheetCashEntry } from "@/lib/white-sheet";
 import type { WhiteSheetCashEntryState } from "@/lib/white-sheet/persist";
 import { normalizedMarketLabel } from "@/lib/market";
 import { produceCommandSourceFromIdentity } from "./session-opener";
+import {
+  classifyGuidedProduceFinalization,
+  guidedProduceHandedToFinalizer,
+} from "./produce-finalization";
 import type { GuidedMenuIdentity } from "./ux-types";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -40,7 +44,14 @@ export type GuidedJourneyStage =
   | "capture"
   /** Close boundary set, waiting for the operator's confirmation. */
   | "awaiting_confirm"
-  /** Produce confirmed; the white sheet has not been submitted yet. */
+  /**
+   * Hold released, deferred finalizer has not reported yet. NOT success: no
+   * later stage may be entered until produce rows are proven to exist.
+   */
+  | "finalizing"
+  /** Terminal without a successful finalization status — nothing was saved. */
+  | "finalize_failed"
+  /** Produce rows exist; the white sheet has not been submitted yet. */
   | "white_sheet"
   /** White sheet submitted; slip evidence is still being collected. */
   | "slips"
@@ -82,15 +93,6 @@ export type GuidedJourneyIdleReason =
   | "ownership_conflict"
   | "incomplete_metadata";
 
-/**
- * The produce round is done with when the operator confirmed finalization, or
- * when the deferred finalizer already terminalized the row. Both are read from
- * the row itself; neither is inferred from elapsed time.
- */
-function produceIsConfirmed(row: StructuredPendingSession): boolean {
-  if (row.finalize_confirmed_at != null) return true;
-  return row.terminalized === true;
-}
 
 export class GuidedJourneyService {
   private readonly pending: PendingSessionService;
@@ -160,11 +162,24 @@ export class GuidedJourneyService {
     };
 
     // Produce stages first — an unfinished round is never skipped past.
-    if (!produceIsConfirmed(row)) {
+    if (!guidedProduceHandedToFinalizer(row)) {
       const stage =
         row.close_event_timestamp_ms !== null ? "awaiting_confirm" : "capture";
       return {
         stage,
+        context,
+        session: row,
+        whiteSheet: { status: "not_submitted" },
+      };
+    }
+
+    // The hold is released, but produce rows are only proven by the
+    // authoritative finalization status. Neither `finalizing` nor
+    // `finalize_failed` may proceed to the White Sheet.
+    const produce = classifyGuidedProduceFinalization(row);
+    if (produce !== "succeeded") {
+      return {
+        stage: produce === "failed" ? "finalize_failed" : "finalizing",
         context,
         session: row,
         whiteSheet: { status: "not_submitted" },

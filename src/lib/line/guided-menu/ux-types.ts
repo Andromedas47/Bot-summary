@@ -105,6 +105,61 @@ export const GUIDED_MENU_COPY = {
     "ทำรายการไม่สำเร็จ ระบบยังไม่ได้บันทึกการเปลี่ยนแปลง",
     "กรุณาพิมพ์ เมนู แล้วลองใหม่อีกครั้ง",
   ].join("\n"),
+  /**
+   * 3B: the hold was released and the deferred finalizer has not reported yet.
+   * Must never read as saved — no produce row is proven to exist.
+   */
+  produceFinalizing: [
+    "กำลังบันทึกรายการสินค้า ยังไม่เสร็จ",
+    'กรุณารอสักครู่แล้วกด "ดูสถานะ" เพื่อตรวจผลอีกครั้ง',
+    "ยังไม่ต้องกรอกใบขาว จนกว่าจะขึ้นว่าบันทึกเรียบร้อย",
+  ].join("\n"),
+  /** 3B: shown beside the validation detail — the list was NOT saved. */
+  produceFinalizeFailed: [
+    "บันทึกรายการสินค้าไม่สำเร็จ ระบบไม่ได้บันทึกรายการนี้",
+    "กรุณาแจ้งผู้ดูแลเพื่อเปิดรอบใหม่ และส่งรายการอีกครั้ง",
+    "ยังกรอกใบขาวไม่ได้",
+  ].join("\n"),
+  /** 3B: one-line form of the failure, for guards on later steps. */
+  produceFinalizeFailedShort: [
+    "รายการสินค้าของรอบนี้บันทึกไม่สำเร็จ",
+    "กรุณาแจ้งผู้ดูแล ยังทำขั้นต่อไปไม่ได้",
+  ].join("\n"),
+  /** 3B: the session cannot finalize — refused before any write. */
+  produceValidationFailed: [
+    "ยังยืนยันไม่ได้ ระบบยังอ่านรายการไม่ครบ",
+    "ยังไม่ได้บันทึกอะไร กรุณาแก้บรรทัดด้านล่างแล้วส่งใหม่",
+  ].join("\n"),
+  /** Ownership guard: every refusal states plainly that nothing was written. */
+  ownershipNothingRecorded: "ระบบยังไม่ได้บันทึกอะไร",
+  /** Ownership guard: this market/date belongs to another operator's round. */
+  ownershipOtherOperator: [
+    "รอบนี้เป็นของผู้ใช้อีกคนในกลุ่ม",
+    "กรุณาให้เจ้าของรอบส่งเอง หรือเปิดรอบของตัวเองจากเมนู",
+  ].join("\n"),
+  /** Ownership guard: the produce round is not finished yet. */
+  ownershipProduceUnfinished: [
+    "รอบนี้ยังทำรายการสินค้าไม่จบ",
+    'กรุณากด "จบรายการ" และยืนยันให้เรียบร้อยก่อน',
+  ].join("\n"),
+  /** Ownership guard: the check could not be answered — fail closed. */
+  ownershipUnknown: [
+    "ตรวจสอบรอบไม่สำเร็จ",
+    "กรุณาลองใหม่อีกครั้ง หากยังไม่ได้ กรุณาแจ้งผู้ดูแล",
+  ].join("\n"),
+  /** Ownership guard: submitted market/date is not the caller's own round. */
+  ownershipRoundMismatch: "ข้อความนี้ไม่ตรงกับรอบที่เปิดอยู่",
+  ownershipUseTemplate: "กรุณาใช้แบบฟอร์มที่ระบบส่งให้ และแก้เฉพาะตัวเลข",
+  /** Slip guard: the white sheet has to be in before the slip batch opens. */
+  slipOpenWhiteSheetMissing: [
+    "ยังเปิดชุดสลิปไม่ได้ ยังไม่ได้บันทึกใบขาวของรอบนี้",
+    'กรุณากด "กรอกใบขาว" แล้วส่งใบขาวก่อน',
+  ].join("\n"),
+  /** Slip guard: the seller→market assignment is no longer active. */
+  slipOpenAssignmentRevoked: [
+    "คนขายกับตลาดนี้ไม่ได้ผูกกันในระบบแล้ว",
+    "กรุณาติดต่อผู้ดูแล",
+  ].join("\n"),
   /** 3B → 3C handoff. */
   nextStepWhiteSheet: "ขั้นต่อไป: กรอกใบขาว",
   /** 3C: how to use the white-sheet template. */
@@ -198,6 +253,9 @@ export type GuidedMenuScreen =
   | "session_close_requested"
   | "session_finalize_confirmed"
   | "session_finalize_not_ready"
+  | "session_finalizing"
+  | "session_finalize_failed"
+  | "session_validation_failed"
   | "session_action_conflict"
   | "session_menu_dismissed"
   | "no_open_session"

@@ -27,6 +27,7 @@ import {
 import { GuidedSessionOpener } from "./session-opener";
 import {
   GuidedSessionCaptureService,
+  type GuidedCaptureFinalizeOutcome,
   type GuidedCaptureRefusal,
 } from "./session-capture";
 import {
@@ -43,6 +44,7 @@ import {
 } from "./round-close";
 import { buildSettlementTemplate } from "./settlement-command";
 import { buildWeighSessionSummary } from "@/lib/line/reply";
+import { buildWeighSessionValidationReply } from "@/lib/parsers/weigh-session/parser";
 import {
   assertGuidedMenuMessageLimits,
   bindQuickReply,
@@ -57,6 +59,7 @@ import {
   buildFinalizeNotReadyMessage,
   buildMenuDismissedSessionOpenMessage,
   buildNoOpenSessionMessage,
+  buildPlainTextMessage,
   buildSessionActionConflictMessage,
   type BoundTokenButton,
   buildDateSelectMessage,
@@ -638,6 +641,11 @@ export class GuidedMenuUxHandler {
     if (journey.stage === "capture" || journey.stage === "awaiting_confirm") {
       return this.renderCaptureStatus(identity, journey.stage);
     }
+    // The produce outcome is re-read from the authoritative row on every press,
+    // so "ดูสถานะ" is how a pending finalization becomes a real answer.
+    if (journey.stage === "finalizing" || journey.stage === "finalize_failed") {
+      return this.renderProduceOutcome(identity);
+    }
     if (journey.stage === "white_sheet") {
       return this.renderWhiteSheetStage(identity, journey.context);
     }
@@ -912,6 +920,12 @@ export class GuidedMenuUxHandler {
       );
     }
 
+    // Releasing the hold is not the same as having produce rows. Only an
+    // explicitly successful finalization status earns the White Sheet handoff.
+    if (outcome.status !== "confirmed") {
+      return this.renderUnfinishedProduce(input.identity, outcome);
+    }
+
     // 3C handoff: the next stage is one button away — no command to remember.
     const quickReply = await this.buildJourneyActions(
       input.identity,
@@ -929,9 +943,102 @@ export class GuidedMenuUxHandler {
       }),
       {
         confirm_reason: outcome.reason,
+        produce_finalization: outcome.produce,
         item_count: outcome.parsed.items.length,
         next_step: "white_sheet",
       },
+    );
+  }
+
+  /**
+   * Everything short of a proven produce write.
+   *
+   * `validation_failed` refused before the confirm RPC; `finalizing` released
+   * the hold but has no result yet; `finalize_failed` is terminal without a
+   * successful status. None of them offer "กรอกใบขาว", and the failure copy says
+   * plainly that the item list was not saved. The validation detail comes from
+   * the existing `buildWeighSessionValidationReply`, so no internal error text
+   * reaches LINE, and no cancel or reopen RPC is invented — recovery is an
+   * administrator opening a fresh round.
+   */
+  private async renderUnfinishedProduce(
+    identity: GuidedMenuIdentity,
+    outcome: Extract<
+      GuidedCaptureFinalizeOutcome,
+      { status: "finalizing" | "finalize_failed" | "validation_failed" }
+    >,
+  ): Promise<GuidedMenuUxResult> {
+    // "ดูสถานะ" only — never a step that assumes the produce rows exist.
+    const quickReply = await this.buildJourneyActions(identity, "ดูสถานะ");
+
+    if (outcome.status === "finalizing") {
+      const message = buildPlainTextMessage(GUIDED_MENU_COPY.produceFinalizing);
+      return resultEnvelope(
+        "session_finalizing",
+        [quickReply ? { ...message, quickReply } : message],
+        { produce_finalization: "pending", saved: false },
+      );
+    }
+
+    const detail = buildWeighSessionValidationReply(outcome.parsed);
+    const screen =
+      outcome.status === "validation_failed"
+        ? ("session_validation_failed" as const)
+        : ("session_finalize_failed" as const);
+    const heading =
+      outcome.status === "validation_failed"
+        ? GUIDED_MENU_COPY.produceValidationFailed
+        : GUIDED_MENU_COPY.produceFinalizeFailed;
+
+    const messages = buildCapturedItemsMessages({
+      summary: [heading, "", detail].join("\n"),
+      quickReply,
+      maxMessages: LINE_REPLY_MESSAGE_MAX,
+    });
+    return resultEnvelope(screen, messages, {
+      produce_finalization: outcome.status === "validation_failed" ? null : "failed",
+      saved: false,
+      error_count: outcome.errors.length,
+    });
+  }
+
+  /** "ดูสถานะ" for a round whose hold is released — re-reads the real row. */
+  private async renderProduceOutcome(
+    identity: GuidedMenuIdentity,
+  ): Promise<GuidedMenuUxResult> {
+    const outcome = await this.capture.produceOutcome(identity);
+    if (outcome.status === "refused") return this.refusalEnvelope(outcome.reason);
+    if (outcome.status === "confirmed") {
+      // The finalizer completed between presses — hand over the White Sheet.
+      const quickReply = await this.buildJourneyActions(identity, "กรอกใบขาว");
+      return resultEnvelope(
+        "session_finalize_confirmed",
+        buildFinalizeConfirmedMessage({
+          summary:
+            outcome.parsed.items.length > 0
+              ? buildWeighSessionSummary(outcome.parsed)
+              : GUIDED_MENU_COPY.noCapturedItems,
+          maxMessages: LINE_REPLY_MESSAGE_MAX,
+          quickReply,
+        }),
+        {
+          confirm_reason: outcome.reason,
+          produce_finalization: outcome.produce,
+          next_step: "white_sheet",
+        },
+      );
+    }
+    if (
+      outcome.status === "finalizing" ||
+      outcome.status === "finalize_failed" ||
+      outcome.status === "validation_failed"
+    ) {
+      return this.renderUnfinishedProduce(identity, outcome);
+    }
+    return resultEnvelope(
+      "session_action_conflict",
+      [buildSessionActionConflictMessage()],
+      { reason: "unexpected_produce_outcome" },
     );
   }
 

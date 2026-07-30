@@ -22,6 +22,14 @@ const IDENTITY = {
 const SESSION_KEY = "group:G-1:user:U-op-1";
 const TS = Date.parse("2026-07-29T10:00:00+07:00");
 
+/**
+ * Two captured items that genuinely finalize: each product line is followed by
+ * its quantity+unit line, so getWeighSessionFinalizationErrors is empty. A
+ * price-only line parses into an item but can never finalize — see
+ * review-produce-finalization.test.ts for that path.
+ */
+const CAPTURED_TEXT = "1.ทุเรียน100บาท\n2โล\n2.มังคุด50บาท\n3โล";
+
 function collectPostbackData(value: unknown, out: string[] = []): string[] {
   if (!value || typeof value !== "object") return out;
   if (Array.isArray(value)) {
@@ -65,7 +73,7 @@ function seedOpenRound(
     source_id: "G-1",
     line_user_id: "U-op-1",
     session_generation: "gen-open",
-    accumulated_text: "1.ทุเรียน100บาท\n2.มังคุด50บาท",
+    accumulated_text: CAPTURED_TEXT,
     terminalized: false,
     close_event_timestamp_ms: null,
     opened_line_event_id: "evt-open",
@@ -202,9 +210,7 @@ describe("Slice 3B — ดูรายการที่บันทึกแล
     expect(body).toContain(GUIDED_MENU_COPY.correctionHint);
     expect(status.result).toMatchObject({ item_count: 2, close_requested: false });
     // Read-only: the round is untouched and still appendable.
-    expect(db.tables.pending_sessions[0]!.accumulated_text).toBe(
-      "1.ทุเรียน100บาท\n2.มังคุด50บาท",
-    );
+    expect(db.tables.pending_sessions[0]!.accumulated_text).toBe(CAPTURED_TEXT);
     expect(db.tables.pending_sessions[0]!.close_event_timestamp_ms).toBeNull();
   });
 
@@ -412,6 +418,9 @@ describe("Slice 3B — ยืนยันจบรายการ releases the h
       close_event_timestamp_ms: TS,
       close_line_event_id: "evt-close",
     });
+    // The deferred finalizer completes successfully; only then is the round
+    // allowed to read as saved.
+    db.deferredFinalizerOutcome = "finalized";
     const token = await mintActionToken(db, "confirm_finalize");
 
     const done = await handler.handlePostback({
@@ -428,6 +437,7 @@ describe("Slice 3B — ยืนยันจบรายการ releases the h
     expect(body).toContain(GUIDED_MENU_COPY.nextStepWhiteSheet);
     expect(done.result).toMatchObject({
       confirm_reason: "confirmed",
+      produce_finalization: "finalized",
       next_step: "white_sheet",
     });
     expect(db.tables.pending_sessions[0]!.finalize_confirmed_at).toBeTruthy();
@@ -483,6 +493,8 @@ describe("Slice 3B — ยืนยันจบรายการ releases the h
       close_event_timestamp_ms: TS,
       close_line_event_id: "evt-close",
     });
+
+    db.deferredFinalizerOutcome = "finalized";
 
     const first = await handler.handlePostback({
       wireToken: await mintActionToken(db, "confirm_finalize"),
@@ -540,9 +552,7 @@ describe("Slice 3B — ยกเลิก does not void an open round", () => {
     expect(text).not.toBe(GUIDED_MENU_COPY.cancelled);
     // And the round really is untouched.
     expect(db.tables.pending_sessions[0]!.terminalized).toBe(false);
-    expect(db.tables.pending_sessions[0]!.accumulated_text).toBe(
-      "1.ทุเรียน100บาท\n2.มังคุด50บาท",
-    );
+    expect(db.tables.pending_sessions[0]!.accumulated_text).toBe(CAPTURED_TEXT);
   });
 
   it("falls back to plain ยกเลิกแล้ว when no round is open", async () => {

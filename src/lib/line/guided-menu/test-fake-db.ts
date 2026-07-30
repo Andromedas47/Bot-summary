@@ -270,20 +270,19 @@ export class GuidedMenuFakeDatabase {
       },
       select: (cols?: string) => {
         void cols;
-        const eqChain = (column: string, value: unknown) => {
-          const filterRows = (): Row[] => {
+        // Filters accumulate, so eq/not can be chained in any order.
+        const chain = (filters: Array<(row: Row) => boolean>) => {
+          const source = (): Row[] => {
             if (table === "line_operator_identities") {
-              return this.operators.filter(
-                (o) => (o as Row)[column] === value,
-              ) as unknown as Row[];
+              return this.operators as unknown as Row[];
             }
             if (table === "line_guided_menu_markets") {
-              return this.markets.filter(
-                (m) => (m as Row)[column] === value,
-              ) as unknown as Row[];
+              return this.markets as unknown as Row[];
             }
-            return (this.tables[table] ?? []).filter((r) => r[column] === value);
+            return this.tables[table] ?? [];
           };
+          const filterRows = (): Row[] =>
+            source().filter((row) => filters.every((f) => f(row)));
           return {
             maybeSingle: async () => {
               const data = filterRows()[0] ?? null;
@@ -308,12 +307,22 @@ export class GuidedMenuFakeDatabase {
               );
               return { data, error: null };
             },
-            eq: (column2: string, value2: unknown) =>
-              eqChain(column2, value2),
+            eq: (column: string, value: unknown) =>
+              chain([...filters, (row) => row[column] === value]),
+            /** Only `.not(col, "is", null)` is used by the guided lookups. */
+            not: (column: string, _operator: string, _value: unknown) => {
+              void _operator;
+              void _value;
+              return chain([
+                ...filters,
+                (row) => row[column] !== null && row[column] !== undefined,
+              ]);
+            },
           };
         };
         return {
-          eq: eqChain,
+          eq: (column: string, value: unknown) =>
+            chain([(row) => row[column] === value]),
         };
       },
       update: (patch: Row) => ({
@@ -374,6 +383,39 @@ export class GuidedMenuFakeDatabase {
 
   /** Set when the fake close barrier should answer `not_ready`. */
   finalizeNotReady = false;
+
+  /**
+   * What the DEFERRED finalizer reports, if it has run at all.
+   *
+   * `null` (the default) is production's normal case right after the hold is
+   * released: `finalization_status` is still 'pending' and no produce row
+   * exists. Setting it simulates `try_finalize_pending_generation` having
+   * already reached a terminal state.
+   */
+  deferredFinalizerOutcome:
+    | null
+    | "finalized"
+    | "duplicate"
+    | "failed_closed"
+    | "validation_failed" = null;
+
+  /**
+   * Apply a deferred-finalizer outcome to the round, the way 0050's finalizer
+   * does: every terminal status also terminalizes the row.
+   */
+  runDeferredFinalizer(
+    outcome: "finalized" | "duplicate" | "failed_closed" | "validation_failed",
+    target?: Row,
+  ): void {
+    const row = target ?? (this.tables.pending_sessions ?? [])[0];
+    if (!row) return;
+    row.finalization_status = outcome;
+    row.finalized_at = new Date().toISOString();
+    row.terminalized = true;
+    if (outcome === "finalized" || outcome === "duplicate") {
+      row.finalized_produce_session_id = "produce-session-1";
+    }
+  }
 
   private structuredRow(args: Row): Row | undefined {
     return (this.tables.pending_sessions ?? []).find(
@@ -441,6 +483,12 @@ export class GuidedMenuFakeDatabase {
     row.finalize_confirmed_at = row.finalize_confirmed_at ?? new Date().toISOString();
     row.finalize_confirm_line_event_id =
       row.finalize_confirm_line_event_id ?? args.p_confirm_line_event_id;
+    // Releasing the hold does NOT write produce rows: the row stays
+    // finalization_status='pending' until the deferred finalizer reports. A test
+    // that needs a completed finalizer sets `deferredFinalizerOutcome`.
+    if (this.deferredFinalizerOutcome) {
+      this.runDeferredFinalizer(this.deferredFinalizerOutcome, row);
+    }
     return {
       accepted: true,
       reason: already ? "already_confirmed" : "confirmed",

@@ -19,7 +19,11 @@ import {
   type StructuredPendingSession,
 } from "@/lib/line/produce-session-commands";
 import { buildSeedFromStructuredMetadata } from "@/lib/parsers/weigh-session/seed";
-import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
+import {
+  getWeighSessionFinalizationErrors,
+  parseWeighSession,
+} from "@/lib/parsers/weigh-session/parser";
+import { classifyGuidedProduceFinalization } from "./produce-finalization";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 import { bangkokBusinessDateNow } from "@/lib/business-date";
 import { produceCommandSourceFromIdentity } from "./session-opener";
@@ -56,10 +60,24 @@ export type GuidedCaptureCloseOutcome =
   | { status: "conflict"; reason: string; detail?: string };
 
 export type GuidedCaptureFinalizeOutcome =
+  /** Produce rows exist — `finalization_status` says so. */
   | ({
       status: "confirmed";
       reason: "confirmed" | "already_confirmed";
+      produce: "finalized" | "duplicate";
     } & GuidedSessionSnapshot)
+  /**
+   * The hold was released and the deferred finalizer has not reported yet.
+   * NOT a success: no produce row is proven to exist.
+   */
+  | ({ status: "finalizing" } & GuidedSessionSnapshot)
+  /** Terminal, and not a successful status — the item list was not saved. */
+  | ({ status: "finalize_failed"; errors: string[] } & GuidedSessionSnapshot)
+  /**
+   * The session cannot finalize successfully, checked with the SAME validation
+   * the finalizer applies. Refused before the confirm RPC — zero writes.
+   */
+  | ({ status: "validation_failed"; errors: string[] } & GuidedSessionSnapshot)
   /** The close barrier says the round is not ready — nothing was released. */
   | {
       status: "not_ready";
@@ -157,16 +175,46 @@ export class GuidedSessionCaptureService {
   }
 
   /**
-   * Release the 0050 finalization hold. The produce rows are written later by
-   * the deferred finalizer through try_finalize_pending_generation; this is a
-   * control event only and persists nothing itself.
+   * Release the 0050 finalization hold.
+   *
+   * Two things this deliberately does NOT do:
+   *
+   *  - it does not release the hold for a session that cannot finalize. The
+   *    same validation the deferred finalizer runs
+   *    (`getWeighSessionFinalizationErrors`) is applied first, so a partial
+   *    parse or an invalid quantity/unit is refused with zero produce writes
+   *    instead of being confirmed and then silently failing;
+   *  - it does not report success because the RPC accepted. The produce rows
+   *    are written later by `try_finalize_pending_generation`, so the
+   *    authoritative row is re-read afterwards and only an explicitly
+   *    successful `finalization_status` counts as saved.
    */
   async confirmFinalize(input: {
     identity: GuidedMenuIdentity;
     lineEventId: string;
   }): Promise<GuidedCaptureFinalizeOutcome> {
     const current = await this.snapshot(input.identity);
-    if (current.status !== "ok") return current;
+    if (current.status !== "ok") {
+      // A terminalized round is not "no session": pressing confirm again after a
+      // successful finalization must report the SAME success, and after a failed
+      // one must report the failure — never a generic missing-round reply.
+      if (current.reason === "terminalized") {
+        return this.produceOutcome(input.identity);
+      }
+      return current;
+    }
+
+    // Pre-confirm gate — the finalizer's own validation, before any write.
+    const validationErrors = getWeighSessionFinalizationErrors(current.parsed);
+    if (validationErrors.length > 0) {
+      return {
+        status: "validation_failed",
+        errors: validationErrors,
+        session: current.session,
+        parsed: current.parsed,
+        closeRequested: current.closeRequested,
+      };
+    }
 
     const result = await this.commands.execute(
       {
@@ -192,11 +240,89 @@ export class GuidedSessionCaptureService {
     if (result.kind !== "confirm") {
       return { status: "conflict", reason: "unexpected_command_result" };
     }
-    return {
-      status: "confirmed",
-      reason: result.reason,
-      ...this.readSnapshot(result.session),
-    };
+
+    return this.classifyAfterConfirm(
+      input.identity,
+      result.session,
+      result.reason === "already_confirmed" ? "already_confirmed" : "confirmed",
+    );
+  }
+
+  /**
+   * Read the produce outcome from the authoritative row.
+   *
+   * The row returned by the confirm RPC is pre-finalization, so it is re-read
+   * once: a finalizer that already completed is reported honestly, and one that
+   * has not is reported as still processing rather than as saved.
+   */
+  private async classifyAfterConfirm(
+    identity: GuidedMenuIdentity,
+    confirmed: StructuredPendingSession,
+    /** The confirm RPC's own verdict; a status re-read reports already_confirmed. */
+    confirmReason: "confirmed" | "already_confirmed" = "already_confirmed",
+  ): Promise<GuidedCaptureFinalizeOutcome> {
+    let row = confirmed;
+    const sessionKey = produceSessionKey(
+      produceCommandSourceFromIdentity(identity),
+    );
+    if (sessionKey) {
+      const reread = await this.pending.lookup(sessionKey);
+      const fresh = reread.session as StructuredPendingSession | null;
+      // Only trust a re-read of the same round; a rotated key is not this one.
+      if (fresh && fresh.session_generation === confirmed.session_generation) {
+        row = fresh;
+      }
+    }
+
+    const snapshot = this.readSnapshot(row);
+    const outcome = classifyGuidedProduceFinalization(row);
+    if (outcome === "succeeded") {
+      return {
+        status: "confirmed",
+        reason: confirmReason,
+        produce: row.finalization_status === "duplicate" ? "duplicate" : "finalized",
+        ...snapshot,
+      };
+    }
+    if (outcome === "failed") {
+      return {
+        status: "finalize_failed",
+        // The operator-facing detail comes from the same parse validation, never
+        // from finalization_error — no internal detail reaches LINE.
+        errors: getWeighSessionFinalizationErrors(snapshot.parsed),
+        ...snapshot,
+      };
+    }
+    return { status: "finalizing", ...snapshot };
+  }
+
+  /**
+   * Re-read the produce outcome for a round whose hold was already released.
+   * Used by the status screen so "ดูสถานะ" always reflects the authoritative
+   * row rather than whatever the confirm reply happened to say.
+   */
+  async produceOutcome(
+    identity: GuidedMenuIdentity,
+  ): Promise<GuidedCaptureFinalizeOutcome> {
+    const source = produceCommandSourceFromIdentity(identity);
+    const sessionKey = produceSessionKey(source);
+    if (!sessionKey) return { status: "refused", reason: "missing_session_key" };
+    if (identity.sessionKey && identity.sessionKey !== sessionKey) {
+      return { status: "refused", reason: "session_key_mismatch" };
+    }
+    const lookup = await this.pending.lookup(sessionKey);
+    if (lookup.reason === "db_error") {
+      return { status: "refused", reason: "lookup_failed" };
+    }
+    const row = lookup.session as StructuredPendingSession | null;
+    if (!row) return { status: "refused", reason: "no_open_session" };
+    if (row.entry_origin == null) {
+      return { status: "refused", reason: "not_structured" };
+    }
+    if (row.line_user_id && row.line_user_id !== identity.lineUserId) {
+      return { status: "refused", reason: "ownership_conflict" };
+    }
+    return this.classifyAfterConfirm(identity, row);
   }
 
   /**

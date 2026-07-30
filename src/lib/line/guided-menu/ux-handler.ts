@@ -867,6 +867,34 @@ export class GuidedMenuUxHandler {
       );
     }
 
+    // The round cannot finalize, so NO close boundary was created. The operator
+    // stays in capture: "จบรายการ" is offered again and a corrected item line is
+    // still an ordinary append — no administrator, no reopen contract.
+    if (outcome.status === "validation_failed") {
+      const retry = await this.buildSessionActions(input.identity, {
+        close: true,
+        confirm: false,
+      });
+      return resultEnvelope(
+        "session_validation_failed",
+        buildCapturedItemsMessages({
+          summary: [
+            GUIDED_MENU_COPY.produceCloseValidationFailed,
+            "",
+            buildWeighSessionValidationReply(outcome.parsed),
+          ].join("\n"),
+          quickReply: retry,
+          maxMessages: LINE_REPLY_MESSAGE_MAX,
+        }),
+        {
+          close_reason: "validation_failed",
+          close_requested: false,
+          error_count: outcome.errors.length,
+          saved: false,
+        },
+      );
+    }
+
     const quickReply = await this.buildSessionActions(input.identity, {
       close: false,
       confirm: true,

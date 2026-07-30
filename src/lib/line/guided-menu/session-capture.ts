@@ -56,6 +56,12 @@ export type GuidedCaptureStatusOutcome =
 
 export type GuidedCaptureCloseOutcome =
   | ({ status: "closed"; reason: "first_close" | "close_already_requested" } & GuidedSessionSnapshot)
+  /**
+   * The accumulated items cannot finalize, checked with the SAME validation the
+   * finalizer applies. No close boundary was created, so the round stays in
+   * capture and corrections are still accepted.
+   */
+  | ({ status: "validation_failed"; errors: string[] } & GuidedSessionSnapshot)
   | { status: "refused"; reason: GuidedCaptureRefusal }
   | { status: "conflict"; reason: string; detail?: string };
 
@@ -140,7 +146,20 @@ export class GuidedSessionCaptureService {
     return { status: "ok", ...this.readSnapshot(row) };
   }
 
-  /** จบรายการ — set the immutable close boundary and arm the 0050 hold. */
+  /**
+   * จบรายการ — set the immutable close boundary and arm the 0050 hold.
+   *
+   * The boundary is IMMUTABLE: once `close_produce_structured_session` has run,
+   * the round no longer accepts item text, so a validation problem discovered
+   * after that point can only be resolved by an administrator. The finalizer's
+   * own validation therefore runs FIRST, and an invalid round is refused with no
+   * boundary created at all — leaving the operator in capture, where a correction
+   * line is still an ordinary append.
+   *
+   * The identical check at confirm time stays where it is: content can change
+   * between the two presses, and a straggler admitted after this call can still
+   * make the final parse differ from this one.
+   */
   async requestClose(input: {
     identity: GuidedMenuIdentity;
     lineEventId: string;
@@ -148,6 +167,22 @@ export class GuidedSessionCaptureService {
   }): Promise<GuidedCaptureCloseOutcome> {
     const current = await this.snapshot(input.identity);
     if (current.status !== "ok") return current;
+
+    // Already closed rounds are past this gate: the boundary exists, and
+    // re-answering the same press must stay idempotent rather than start
+    // refusing. confirmFinalize is what validates from here on.
+    if (!current.closeRequested) {
+      const validationErrors = getWeighSessionFinalizationErrors(current.parsed);
+      if (validationErrors.length > 0) {
+        return {
+          status: "validation_failed",
+          errors: validationErrors,
+          session: current.session,
+          parsed: current.parsed,
+          closeRequested: current.closeRequested,
+        };
+      }
+    }
 
     const result = await this.commands.execute(
       {

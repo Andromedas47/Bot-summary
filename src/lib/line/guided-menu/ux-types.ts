@@ -125,6 +125,15 @@ export const GUIDED_MENU_COPY = {
     "รายการสินค้าของรอบนี้บันทึกไม่สำเร็จ",
     "กรุณาแจ้งผู้ดูแล ยังทำขั้นต่อไปไม่ได้",
   ].join("\n"),
+  /**
+   * 3B: "จบรายการ" refused before the immutable close boundary was created.
+   * The round is still open, so corrections are still ordinary item messages.
+   */
+  produceCloseValidationFailed: [
+    "ยังจบรายการไม่ได้ ระบบอ่านรายการด้านล่างไม่ครบ",
+    "รายการยังเปิดอยู่ ยังไม่ได้บันทึกอะไร",
+    'กรุณาส่งบรรทัดที่ถูกต้องใหม่ แล้วกด "จบรายการ" อีกครั้ง',
+  ].join("\n"),
   /** 3B: the session cannot finalize — refused before any write. */
   produceValidationFailed: [
     "ยังยืนยันไม่ได้ ระบบยังอ่านรายการไม่ครบ",

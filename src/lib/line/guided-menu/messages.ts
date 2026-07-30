@@ -351,6 +351,292 @@ export function buildConfirmPlaceholderMessage(): LineTextMessage {
   return buildPlainTextMessage(GUIDED_MENU_COPY.confirmPlaceholder);
 }
 
+/**
+ * Slice 3A success receipt. Text rather than Flex so Slice 3B can attach the
+ * guided capture actions as a quickReply without re-laying out the bubble.
+ */
+export function buildSessionOpenedMessage(input: {
+  transactionType: MenuTransactionTypeCode;
+  sellerLabel: string;
+  marketLabel: string;
+  dateThaiShort: string;
+  /** Trailing instruction lines; 3A ships the send-items hint, 3B the close button hint. */
+  instructions: readonly string[];
+}): LineTextMessage {
+  const txLabel = TX_CODE_TO_LABEL[input.transactionType];
+  return buildPlainTextMessage(
+    [
+      `เปิดรายการ${txLabel}แล้ว ✅`,
+      `คนขาย: ${input.sellerLabel}`,
+      `ตลาด: ${input.marketLabel}`,
+      `วันที่: ${input.dateThaiShort}`,
+      "",
+      ...input.instructions,
+    ].join("\n"),
+  );
+}
+
+/** Safety margin under LINE's 5000-code-point text limit. */
+const TEXT_SPLIT_BUDGET = 4500;
+
+/**
+ * Split a long summary on line boundaries, deterministically and in order.
+ *
+ * A single line longer than the budget is emitted whole rather than cut
+ * mid-word; assertGuidedMenuMessageLimits still refuses anything that then
+ * exceeds the hard limit, so an unsplittable monster fails closed instead of
+ * being silently truncated.
+ */
+export function splitTextForLineReply(
+  text: string,
+  maxMessages: number,
+  budget: number = TEXT_SPLIT_BUDGET,
+): string[] {
+  if ([...text].length <= budget) return [text];
+
+  const chunks: string[] = [];
+  let current = "";
+  for (const line of text.split("\n")) {
+    const candidate = current ? `${current}\n${line}` : line;
+    if (current && [...candidate].length > budget) {
+      chunks.push(current);
+      current = line;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) chunks.push(current);
+
+  if (chunks.length <= maxMessages) return chunks;
+  // Keep the head and mark the truncation explicitly — never silently drop.
+  const head = chunks.slice(0, maxMessages - 1);
+  return [...head, "รายการยาวเกินกว่าจะแสดงครบในข้อความเดียว กรุณาดูในระบบหลังบ้าน"];
+}
+
+/** Slice 3B — captured-item review, split across at most `maxMessages`. */
+export function buildCapturedItemsMessages(input: {
+  summary: string;
+  quickReply?: LineQuickReply;
+  maxMessages: number;
+}): LineTextMessage[] {
+  const parts = splitTextForLineReply(input.summary, input.maxMessages);
+  return parts.map((text, index) => ({
+    type: "text" as const,
+    text,
+    // The action buttons ride on the last message so they stay reachable
+    // after the operator has scrolled through the whole summary.
+    ...(input.quickReply && index === parts.length - 1
+      ? { quickReply: input.quickReply }
+      : {}),
+  }));
+}
+
+export function buildNoOpenSessionMessage(): LineTextMessage {
+  return buildPlainTextMessage(GUIDED_MENU_COPY.noOpenSession);
+}
+
+export function buildMenuDismissedSessionOpenMessage(): LineTextMessage {
+  return buildPlainTextMessage(GUIDED_MENU_COPY.menuDismissedSessionOpen);
+}
+
+export function buildFinalizeNotReadyMessage(): LineTextMessage {
+  return buildPlainTextMessage(GUIDED_MENU_COPY.finalizeNotReady);
+}
+
+export function buildSessionActionConflictMessage(): LineTextMessage {
+  return buildPlainTextMessage(GUIDED_MENU_COPY.sessionActionConflict);
+}
+
+/** Slice 3B — finalization confirmed; the deferred finalizer persists it. */
+export function buildFinalizeConfirmedMessage(input: {
+  summary: string;
+  maxMessages: number;
+  quickReply?: LineQuickReply;
+}): LineTextMessage[] {
+  return buildCapturedItemsMessages({
+    summary: [
+      "บันทึกรายการสินค้าเรียบร้อย ✅",
+      "",
+      input.summary,
+      "",
+      GUIDED_MENU_COPY.nextStepWhiteSheet,
+    ].join("\n"),
+    quickReply: input.quickReply,
+    maxMessages: input.maxMessages,
+  });
+}
+
+/**
+ * Slice 3C — the White Sheet template, sent as its own message so the operator
+ * can long-press-copy it without dragging the instructions along.
+ */
+export function buildWhiteSheetTemplateMessages(input: {
+  template: string;
+  sellerLabel: string;
+  marketLabel: string;
+  dateThaiShort: string;
+  quickReply?: LineQuickReply;
+  note?: string;
+}): LineTextMessage[] {
+  const header = [
+    GUIDED_MENU_COPY.whiteSheetInstructions,
+    "",
+    `คนขาย: ${input.sellerLabel}`,
+    `ตลาด: ${input.marketLabel}`,
+    `วันที่: ${input.dateThaiShort}`,
+    ...(input.note ? ["", input.note] : []),
+  ].join("\n");
+  return [
+    { type: "text", text: header },
+    {
+      type: "text",
+      text: input.template,
+      ...(input.quickReply ? { quickReply: input.quickReply } : {}),
+    },
+  ];
+}
+
+/** Slice 3D — slip-stage instructions plus the ready-to-send batch header. */
+export function buildSlipInstructionMessages(input: {
+  header: string;
+  sellerLabel: string;
+  marketLabel: string;
+  dateThaiShort: string;
+  quickReply?: LineQuickReply;
+}): LineTextMessage[] {
+  return [
+    {
+      type: "text",
+      text: [
+        GUIDED_MENU_COPY.slipInstructions,
+        "",
+        `คนขาย: ${input.sellerLabel}`,
+        `ตลาด: ${input.marketLabel}`,
+        `วันที่: ${input.dateThaiShort}`,
+      ].join("\n"),
+    },
+    {
+      type: "text",
+      text: input.header,
+      ...(input.quickReply ? { quickReply: input.quickReply } : {}),
+    },
+  ];
+}
+
+/**
+ * Slice 3D.1 — the settlement template, sent as its own message so the operator
+ * can long-press-copy it, exactly like the White Sheet template.
+ */
+export function buildSettlementTemplateMessages(input: {
+  template: string;
+  sellerLabel: string;
+  marketLabel: string;
+  dateThaiShort: string;
+  quickReply?: LineQuickReply;
+}): LineTextMessage[] {
+  return [
+    {
+      type: "text",
+      text: [
+        GUIDED_MENU_COPY.settlementInstructions,
+        "",
+        `คนขาย: ${input.sellerLabel}`,
+        `ตลาด: ${input.marketLabel}`,
+        `วันที่: ${input.dateThaiShort}`,
+      ].join("\n"),
+    },
+    {
+      type: "text",
+      text: input.template,
+      ...(input.quickReply ? { quickReply: input.quickReply } : {}),
+    },
+  ];
+}
+
+/** Slice 3D.1 — the receipt for a settlement that actually persisted. */
+export function buildSettlementSavedMessage(input: {
+  moneyTransfer: number;
+  moneyCash: number;
+  expenses: number;
+  labor: number;
+}): LineTextMessage {
+  return {
+    type: "text",
+    text: [
+      "บันทึกยอดส่งเรียบร้อย ✅",
+      "",
+      `ยอดโอน: ${formatBaht(input.moneyTransfer)}`,
+      `เงินสด: ${formatBaht(input.moneyCash)}`,
+      `ค่าใช้จ่าย: ${formatBaht(input.expenses)}`,
+      `ค่าแรง: ${formatBaht(input.labor)}`,
+      "",
+      GUIDED_MENU_COPY.nextStepReconcile,
+    ].join("\n"),
+  };
+}
+
+function formatBaht(value: number | null): string {
+  if (value === null) return "—";
+  return `${value.toLocaleString("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  })} บาท`;
+}
+
+/**
+ * Slice 3D — the reconciliation view. Renders exactly what the authoritative
+ * loaders reported; a missing settlement shows "—", never a guessed zero.
+ */
+export function buildRoundStatusMessage(input: {
+  sellerLabel: string;
+  marketLabel: string;
+  dateThaiShort: string;
+  totals: {
+    checkedSlipTotal: number;
+    submittedTransferTotal: number | null;
+    difference: number | null;
+  };
+  slipCounts: ReadonlyArray<[string, number]>;
+  blockerLines: readonly string[];
+  closed: boolean;
+  quickReply?: LineQuickReply;
+}): LineTextMessage {
+  const lines: string[] = [];
+  lines.push(input.closed ? "ปิดรอบเรียบร้อย ✅" : "ตรวจยอดรอบขาย");
+  lines.push("");
+  lines.push(`คนขาย: ${input.sellerLabel}`);
+  lines.push(`ตลาด: ${input.marketLabel}`);
+  lines.push(`วันที่: ${input.dateThaiShort}`);
+  lines.push(`ยอดส่งตามใบขาว: ${formatBaht(input.totals.submittedTransferTotal)}`);
+  lines.push(`ยอดสลิปที่ตรวจแล้ว: ${formatBaht(input.totals.checkedSlipTotal)}`);
+  lines.push(`ผลต่าง: ${formatBaht(input.totals.difference)}`);
+
+  if (input.slipCounts.length > 0) {
+    lines.push("");
+    lines.push("สลิป:");
+    for (const [label, count] of input.slipCounts) {
+      lines.push(`- ${label}: ${count}`);
+    }
+  }
+
+  if (input.blockerLines.length > 0) {
+    lines.push("");
+    lines.push("ยังปิดรอบไม่ได้ เพราะ:");
+    for (const line of input.blockerLines) lines.push(`- ${line}`);
+  }
+
+  const message: LineTextMessage = { type: "text", text: lines.join("\n") };
+  return input.quickReply ? { ...message, quickReply: input.quickReply } : message;
+}
+
+export function buildSessionAlreadyOpenMessage(): LineTextMessage {
+  return buildPlainTextMessage(GUIDED_MENU_COPY.sessionAlreadyOpen);
+}
+
+export function buildSessionOpenConflictMessage(): LineTextMessage {
+  return buildPlainTextMessage(GUIDED_MENU_COPY.sessionOpenConflict);
+}
+
 
 export function buildNoActiveSellersMessage(): LineTextMessage {
   return buildPlainTextMessage(GUIDED_MENU_COPY.noActiveSellers);

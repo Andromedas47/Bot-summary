@@ -132,6 +132,24 @@ export function produceSessionKey(source: ProduceCommandSource): string | null {
 }
 
 /**
+ * The authoritative produce ingest identity: `<session_key>:<session_generation>`.
+ *
+ * 0036 makes `produce_sessions.ingest_idempotency_key` the idempotency identity,
+ * and the deferred finalizer writes exactly this value. Anything that needs to
+ * ask "were THIS generation's produce rows written?" must derive the key here
+ * rather than composing the string again — see produce-finalization.ts.
+ */
+export function produceIngestIdempotencyKey(
+  sessionKey: string,
+  sessionGeneration: string | null | undefined,
+): string | null {
+  const key = sessionKey.trim();
+  const generation = String(sessionGeneration ?? "").trim();
+  if (!key || !generation) return null;
+  return `${key}:${generation}`;
+}
+
+/**
  * True when the text carries a produce session header.
  *
  * Delegates to the webhook's findProduceSessionHeader so structured-append
@@ -161,6 +179,7 @@ export class ProduceSessionCommandService {
   async execute(
     command: ProduceSessionCommand,
     source: ProduceCommandSource,
+    guidedMarketLabelNormalized?: string,
   ): Promise<ProduceCommandResult> {
     // Fail closed before anything else: no identity, no session key, no write.
     const sessionKey = produceSessionKey(source);
@@ -180,7 +199,12 @@ export class ProduceSessionCommandService {
     if (badSource) return { ok: false, reason: "invalid_source", detail: badSource };
 
     switch (command.kind) {
-      case "open":    return this.open(command, source, sessionKey);
+      case "open":    return this.open(
+        command,
+        source,
+        sessionKey,
+        guidedMarketLabelNormalized,
+      );
       case "append":  return this.append(command, source, sessionKey);
       case "close":   return this.close(command, source, sessionKey);
       case "confirm": return this.confirm(command, source, sessionKey);
@@ -196,13 +220,23 @@ export class ProduceSessionCommandService {
     command: OpenProduceSessionCommand,
     source: ProduceCommandSource,
     sessionKey: string,
+    guidedMarketLabelNormalized?: string,
   ): Promise<ProduceCommandResult> {
     const invalid = validateOpenCommand(command);
     if (invalid) return { ok: false, reason: "invalid_command", detail: invalid };
+    if (guidedMarketLabelNormalized !== undefined && !guidedMarketLabelNormalized.trim()) {
+      return {
+        ok: false,
+        reason: "invalid_command",
+        detail: "guidedMarketLabelNormalized is required for a guided open",
+      };
+    }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data, error } = await (this.supabase as any).rpc(
-      "open_or_rotate_produce_structured_session",
+      guidedMarketLabelNormalized === undefined
+        ? "open_or_rotate_produce_structured_session"
+        : "open_or_rotate_guided_produce_structured_session",
       {
         p_session_key:               sessionKey,
         p_source_type:               source.type,
@@ -216,6 +250,9 @@ export class ProduceSessionCommandService {
         p_transaction_time_source:   command.transactionTimeSource,
         p_staff_label:               command.staffLabel,
         p_market_label:              command.marketLabel,
+        ...(guidedMarketLabelNormalized === undefined
+          ? {}
+          : { p_market_label_normalized: guidedMarketLabelNormalized }),
         p_session_kind:              command.sessionKind,
         p_initial_transaction_type:  command.initialTransactionType,
         p_declared_transaction_type: command.declaredTransactionType,

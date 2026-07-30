@@ -4,6 +4,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { normalizedMarketLabel } from "@/lib/market";
 import { hashMenuTokenWire } from "./menu-token";
 import {
   MUTATING_MENU_ACTIONS,
@@ -165,6 +166,7 @@ export class GuidedMenuFakeDatabase {
     line_guided_menu_markets: [],
     line_guided_menu_sellers: [],
     line_guided_menu_seller_markets: [],
+    produce_sessions: [],
   };
 
   seedOperator(row: OperatorRow): void {
@@ -270,20 +272,19 @@ export class GuidedMenuFakeDatabase {
       },
       select: (cols?: string) => {
         void cols;
-        const eqChain = (column: string, value: unknown) => {
-          const filterRows = (): Row[] => {
+        // Filters accumulate, so eq/not can be chained in any order.
+        const chain = (filters: Array<(row: Row) => boolean>) => {
+          const source = (): Row[] => {
             if (table === "line_operator_identities") {
-              return this.operators.filter(
-                (o) => (o as Row)[column] === value,
-              ) as unknown as Row[];
+              return this.operators as unknown as Row[];
             }
             if (table === "line_guided_menu_markets") {
-              return this.markets.filter(
-                (m) => (m as Row)[column] === value,
-              ) as unknown as Row[];
+              return this.markets as unknown as Row[];
             }
-            return (this.tables[table] ?? []).filter((r) => r[column] === value);
+            return this.tables[table] ?? [];
           };
+          const filterRows = (): Row[] =>
+            source().filter((row) => filters.every((f) => f(row)));
           return {
             maybeSingle: async () => {
               const data = filterRows()[0] ?? null;
@@ -308,12 +309,22 @@ export class GuidedMenuFakeDatabase {
               );
               return { data, error: null };
             },
-            eq: (column2: string, value2: unknown) =>
-              eqChain(column2, value2),
+            eq: (column: string, value: unknown) =>
+              chain([...filters, (row) => row[column] === value]),
+            /** Only `.not(col, "is", null)` is used by the guided lookups. */
+            not: (column: string, _operator: string, _value: unknown) => {
+              void _operator;
+              void _value;
+              return chain([
+                ...filters,
+                (row) => row[column] !== null && row[column] !== undefined,
+              ]);
+            },
           };
         };
         return {
-          eq: eqChain,
+          eq: (column: string, value: unknown) =>
+            chain([(row) => row[column] === value]),
         };
       },
       update: (patch: Row) => ({
@@ -360,8 +371,264 @@ export class GuidedMenuFakeDatabase {
     if (name === "record_line_menu_state_result") {
       return { data: this.record(args), error: null };
     }
+    if (name === "open_or_rotate_produce_structured_session") {
+      return { data: this.openOrRotate(args), error: null };
+    }
+    if (name === "open_or_rotate_guided_produce_structured_session") {
+      return { data: this.openGuided(args), error: null };
+    }
+    if (name === "close_produce_structured_session") {
+      return { data: this.closeStructured(args), error: null };
+    }
+    if (name === "confirm_produce_structured_finalization") {
+      return { data: this.confirmStructured(args), error: null };
+    }
     throw new Error(`Unexpected RPC: ${name}`);
   };
+
+  /** Set when the fake close barrier should answer `not_ready`. */
+  finalizeNotReady = false;
+
+  /**
+   * What the DEFERRED finalizer reports, if it has run at all.
+   *
+   * `null` (the default) is production's normal case right after the hold is
+   * released: `finalization_status` is still 'pending' and no produce row
+   * exists. Setting it simulates `try_finalize_pending_generation` having
+   * already reached a terminal state.
+   */
+  deferredFinalizerOutcome:
+    | null
+    | "finalized"
+    | "duplicate"
+    | "failed_closed"
+    | "validation_failed" = null;
+
+  /**
+   * Apply a deferred-finalizer outcome to the round, the way 0050's finalizer
+   * does: every terminal status also terminalizes the row, and a successful one
+   * leaves a produce_sessions row behind carrying the authoritative
+   * `ingest_idempotency_key` (0036) — `<session_key>:<session_generation>`.
+   *
+   * `options.ingestKey` overrides that identity so a test can reproduce 0050's
+   * OTHER duplicate route: a content-hash match whose produce row belongs to a
+   * different generation, which must NOT read as this round having been saved.
+   * `null` writes no produce row at all: a status that claims success with
+   * nothing behind it.
+   */
+  runDeferredFinalizer(
+    outcome: "finalized" | "duplicate" | "failed_closed" | "validation_failed",
+    target?: Row,
+    options: { ingestKey?: string | null } = {},
+  ): void {
+    const row = target ?? (this.tables.pending_sessions ?? [])[0];
+    if (!row) return;
+    row.finalization_status = outcome;
+    row.finalized_at = new Date().toISOString();
+    row.terminalized = true;
+    if (outcome !== "finalized" && outcome !== "duplicate") return;
+    row.finalized_produce_session_id = "produce-session-1";
+    const ingestKey =
+      options.ingestKey === undefined
+        ? `${row.session_key}:${row.session_generation}`
+        : options.ingestKey;
+    if (ingestKey === null) return;
+    const existing = this.tables.produce_sessions ?? [];
+    this.tables.produce_sessions = [
+      ...existing,
+      { id: `produce-session-${existing.length + 1}`, ingest_idempotency_key: ingestKey },
+    ];
+  }
+
+  private structuredRow(args: Row): Row | undefined {
+    return (this.tables.pending_sessions ?? []).find(
+      (r) => r.session_key === args.p_session_key,
+    );
+  }
+
+  /** Mirrors 0050 close_produce_structured_session. */
+  private closeStructured(args: Row): Record<string, unknown> {
+    const row = this.structuredRow(args);
+    if (!row) return { accepted: false, reason: "not_found" };
+    if (row.entry_origin == null) {
+      return { accepted: false, reason: "not_structured" };
+    }
+    if (row.line_user_id !== args.p_line_user_id) {
+      return { accepted: false, reason: "ownership_conflict" };
+    }
+    const expected = args.p_expected_session_generation ?? null;
+    if (expected != null && row.session_generation !== expected) {
+      return { accepted: false, reason: "generation_conflict" };
+    }
+    if (row.terminalized === true) {
+      return { accepted: false, reason: "terminalized", session: row };
+    }
+    // Repeat close is a status request; the first boundary is immutable.
+    if (row.close_event_timestamp_ms != null) {
+      return { accepted: true, reason: "close_already_requested", session: row };
+    }
+    row.close_event_timestamp_ms = args.p_line_timestamp_ms;
+    row.close_line_event_id = args.p_close_line_event_id;
+    row.close_session_generation = row.session_generation;
+    row.finalize_hold_until = new Date(Date.now() + 600_000).toISOString();
+    return { accepted: true, reason: "first_close", session: row };
+  }
+
+  /** Mirrors 0050 confirm_produce_structured_finalization. */
+  private confirmStructured(args: Row): Record<string, unknown> {
+    const row = this.structuredRow(args);
+    if (!row) return { accepted: false, reason: "not_found" };
+    if (row.entry_origin == null) {
+      return { accepted: false, reason: "not_structured" };
+    }
+    if (row.line_user_id !== args.p_line_user_id) {
+      return { accepted: false, reason: "ownership_conflict" };
+    }
+    const expected = args.p_expected_session_generation ?? null;
+    if (expected != null && row.session_generation !== expected) {
+      return { accepted: false, reason: "generation_conflict" };
+    }
+    if (row.close_event_timestamp_ms == null) {
+      return { accepted: false, reason: "not_closing" };
+    }
+    if (this.finalizeNotReady) {
+      return {
+        accepted: false,
+        reason: "not_ready",
+        readiness_reason: "ingest_admission_mismatch",
+        admission_count: 3,
+        ingest_count: 2,
+        straggler_count: 1,
+      };
+    }
+    // Redelivery of the same confirm postback is idempotent.
+    const already = row.finalize_confirm_line_event_id === args.p_confirm_line_event_id;
+    row.finalize_confirmed_at = row.finalize_confirmed_at ?? new Date().toISOString();
+    row.finalize_confirm_line_event_id =
+      row.finalize_confirm_line_event_id ?? args.p_confirm_line_event_id;
+    // Releasing the hold does NOT write produce rows: the row stays
+    // finalization_status='pending' until the deferred finalizer reports. A test
+    // that needs a completed finalizer sets `deferredFinalizerOutcome`.
+    if (this.deferredFinalizerOutcome) {
+      this.runDeferredFinalizer(this.deferredFinalizerOutcome, row);
+    }
+    return {
+      accepted: true,
+      reason: already ? "already_confirmed" : "confirmed",
+      session: row,
+    };
+  }
+
+  /**
+   * Mirrors 0049 open_or_rotate_produce_structured_session closely enough to
+   * exercise Slice 3A: canonical-key check, ownership refusal, same-event
+   * idempotency, optimistic concurrency, then insert-or-rotate.
+   */
+  private openOrRotate(args: Row): Record<string, unknown> {
+    this.openProduceCalls += 1;
+    const key = String(args.p_session_key ?? "");
+    const user = String(args.p_line_user_id ?? "");
+    const source = String(args.p_source_id ?? "");
+    const event = String(args.p_opened_line_event_id ?? "");
+    const expected = args.p_expected_session_generation ?? null;
+    const rows = this.tables.pending_sessions ?? [];
+    const existing = rows.find((r) => r.session_key === key);
+
+    if (existing) {
+      if (existing.source_id !== source) {
+        return { outcome: "ownership_conflict", reason: "source_mismatch" };
+      }
+      if (existing.line_user_id != null && existing.line_user_id !== user) {
+        return { outcome: "ownership_conflict", reason: "user_mismatch" };
+      }
+      if (existing.opened_line_event_id === event) {
+        return {
+          outcome: "idempotent",
+          reason: "duplicate_open_event",
+          session_key: key,
+          session_generation: String(existing.session_generation),
+        };
+      }
+      if (expected != null && existing.session_generation !== expected) {
+        return { outcome: "generation_conflict", reason: "stale_generation" };
+      }
+    }
+
+    const generation = `gen-${this.openProduceCalls}`;
+    const row: Row = {
+      session_key: key,
+      source_id: source,
+      line_user_id: user,
+      accumulated_text: "",
+      session_generation: generation,
+      terminalized: false,
+      close_event_timestamp_ms: null,
+      ingest_revision: 0,
+      finalization_status: "pending",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      entry_origin: "structured_menu",
+      business_date: args.p_business_date,
+      transaction_time: args.p_transaction_time,
+      transaction_time_source: args.p_transaction_time_source,
+      staff_label: args.p_staff_label,
+      market_label: args.p_market_label,
+      session_kind: args.p_session_kind,
+      initial_transaction_type: args.p_initial_transaction_type,
+      declared_transaction_type: args.p_declared_transaction_type ?? null,
+      additional_opener: args.p_additional_opener ?? null,
+      opened_line_event_id: event,
+    };
+    this.tables.pending_sessions = existing
+      ? rows.map((r) => (r.session_key === key ? row : r))
+      : [...rows, row];
+
+    return {
+      outcome: existing ? "rotated" : "opened",
+      reason: existing ? "rotated" : "opened",
+      session_key: key,
+      session_generation: generation,
+    };
+  }
+
+  /** Mirrors 0057's source-wide owner decision before delegating to 0049. */
+  private openGuided(args: Row): Record<string, unknown> {
+    const source = String(args.p_source_id ?? "").trim();
+    const user = String(args.p_line_user_id ?? "").trim();
+    const date = String(args.p_business_date ?? "");
+    const market = normalizedMarketLabel(
+      String(args.p_market_label_normalized ?? ""),
+    );
+    const owners = new Set(
+      (this.tables.pending_sessions ?? [])
+        .filter(
+          (row) =>
+            row.source_id === source
+            && row.business_date === date
+            && row.entry_origin === "structured_menu"
+            && normalizedMarketLabel(String(row.market_label ?? "")) === market,
+        )
+        .map((row) => String(row.line_user_id ?? "").trim()),
+    );
+
+    if (owners.has("") || owners.size > 1) {
+      return { outcome: "ownership_conflict", reason: "ambiguous" };
+    }
+    if (owners.size === 1 && !owners.has(user)) {
+      return { outcome: "ownership_conflict", reason: "other_operator" };
+    }
+    return this.openOrRotate(args);
+  }
+
+  /** Seed a pre-existing pending session row (e.g. an unfinished round). */
+  seedPendingSession(row: Row): void {
+    this.tables.pending_sessions = [
+      ...(this.tables.pending_sessions ?? []).filter(
+        (r) => r.session_key !== row.session_key,
+      ),
+      row,
+    ];
+  }
 
   private create(args: Row): Record<string, unknown> {
     const hash = String(args.p_token_hash ?? "");

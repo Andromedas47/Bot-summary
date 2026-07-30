@@ -24,11 +24,15 @@ function makeTextSupabase(rawId = "raw-txt") {
         };
       }
       if (table === "pending_sessions") {
-        return {
-          select() {
-            return { eq() { return { async maybeSingle() { return { data: null, error: null }; } }; } };
-          },
-        };
+        // No guided round exists here: the per-user lookup finds nothing and the
+        // source-wide ownership query returns no rows, so the guided slip guard
+        // answers not_guided and the legacy open runs exactly as before.
+        const empty: Record<string, unknown> = {};
+        empty.eq = () => empty;
+        empty.not = () => empty;
+        empty.order = async () => ({ data: [], error: null });
+        empty.maybeSingle = async () => ({ data: null, error: null });
+        return { select: () => empty };
       }
       if (table === "parse_errors") {
         return { async insert() { return { error: null }; } };

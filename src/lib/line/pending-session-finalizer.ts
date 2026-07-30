@@ -21,7 +21,10 @@ import {
   computeSessionHash,
 } from "@/lib/line/session-dedup-service";
 import { buildSeedFromStructuredMetadata } from "@/lib/parsers/weigh-session/seed";
-import type { StructuredPendingSession } from "@/lib/line/produce-session-commands";
+import {
+  produceIngestIdempotencyKey,
+  type StructuredPendingSession,
+} from "@/lib/line/produce-session-commands";
 import {
   bangkokTimeFromTimestamp,
   buildWeighSessionValidationReply,
@@ -212,7 +215,10 @@ export async function finalizePendingGeneration(
   push: PushMessage = defaultPush,
 ): Promise<TryFinalizeResult> {
   const finalizationStartedAt = new Date().toISOString();
-  const correlationId = `${snapshot.session_key}:${snapshot.session_generation}`;
+  // The authoritative ingest identity, derived in one place (0036).
+  const correlationId =
+    produceIngestIdempotencyKey(snapshot.session_key, snapshot.session_generation) ??
+    `${snapshot.session_key}:${snapshot.session_generation}`;
   const log = logger.child({
     correlationId,
     sessionKey: snapshot.session_key,

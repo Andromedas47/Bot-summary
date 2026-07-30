@@ -19,12 +19,24 @@ import {
   type LineApiMessage,
 } from "@/lib/line/reply";
 import {
+  GuidedJourneyService,
   GuidedMenuUxHandler,
+  GuidedRoundService,
   buildGuidedMenuIdentity,
   buildInvalidMenuMessage,
+  buildSlipHandoffMessages,
+  guardGuidedWhiteSheetSubmission,
   isExactGuidedMenuTrigger,
   isGuidedMenuPostbackCandidate,
   isGuidedMenuPostbackData,
+  guardGuidedSlipOpen,
+  GuidedMenuStateService,
+  isGuidedRoundCloseCommand,
+  isGuidedSettlementCommandText,
+  extractGuidedMarker,
+  processGuidedRoundClose,
+  processGuidedSettlementSubmission,
+  LINE_REPLY_MESSAGE_MAX,
 } from "@/lib/line/guided-menu";
 import {
   parseWeighSession,
@@ -164,6 +176,9 @@ interface WebhookServiceDependencies {
   replyMessages?: ReplyLineMessages;
   replyApiMessages?: ReplyLineApiMessages;
   guidedMenuHandler?: GuidedMenuUxHandler;
+  guidedJourneyService?: GuidedJourneyService;
+  guidedRoundService?: GuidedRoundService;
+  guidedMenuStateService?: GuidedMenuStateService;
   scheduleBackgroundTask?: ScheduleBackgroundTask;
   physicalInventoryFinalizer?: PhysicalInventoryFinalizer;
   physicalInventoryService?: PhysicalInventorySessionGateway;
@@ -283,6 +298,9 @@ export class WebhookService {
   private readonly replyMessages: ReplyLineMessages;
   private readonly replyApiMessages: ReplyLineApiMessages;
   private readonly guidedMenuHandler: GuidedMenuUxHandler;
+  private readonly guidedJourney: GuidedJourneyService;
+  private readonly guidedRounds: GuidedRoundService;
+  private readonly guidedCatalog: GuidedMenuStateService;
   private readonly scheduleBackgroundTask: ScheduleBackgroundTask;
   private readonly physicalInventoryFinalizer: PhysicalInventoryFinalizer;
   private readonly physicalInventoryService: PhysicalInventorySessionGateway;
@@ -305,6 +323,12 @@ export class WebhookService {
     this.replyApiMessages = dependencies.replyApiMessages ?? replyLineApiMessages;
     this.guidedMenuHandler =
       dependencies.guidedMenuHandler ?? new GuidedMenuUxHandler(supabase);
+    this.guidedJourney =
+      dependencies.guidedJourneyService ?? new GuidedJourneyService(supabase);
+    this.guidedRounds =
+      dependencies.guidedRoundService ?? new GuidedRoundService(supabase);
+    this.guidedCatalog =
+      dependencies.guidedMenuStateService ?? new GuidedMenuStateService(supabase);
     this.scheduleBackgroundTask =
       dependencies.scheduleBackgroundTask
       ?? ((task) => {
@@ -403,7 +427,12 @@ export class WebhookService {
     }
 
     // ── 3. Test-message shortcut (before any parser) ──────────────────────────
-    const text           = (message as LineTextMessage).text;
+    // The guided provenance marker is removed BEFORE any parser runs, so every
+    // existing command keeps its exact syntax and its exact error messages. An
+    // ordinary message has no marker and comes through untouched.
+    const { text, marker: guidedMarker } = extractGuidedMarker(
+      (message as LineTextMessage).text,
+    );
     const normalizedText = normalizeText(text);
     const replyToken     = msgEvent.replyToken;
     const sourceId       = getSourceId(msgEvent.source);
@@ -418,6 +447,21 @@ export class WebhookService {
     // ── 3.0. Guided Menu exact trigger "เมนู" ────────────────────────────────
     if (isExactGuidedMenuTrigger(text)) {
       return this.processGuidedMenuOpen(msgEvent, eventId, log);
+    }
+
+    // ── 3.0b. Guided round close "ปิดรอบ" (3D) ──────────────────────────────
+    // Exact-match only. It closes nothing by itself: the command routes to the
+    // existing settlement finalization, behind the existing lifecycle blockers.
+    if (isGuidedRoundCloseCommand(text)) {
+      return this.processGuidedRoundCloseCommand(msgEvent, eventId, log);
+    }
+
+    // ── 3.0c. Guided settlement submission "ส่งยอด" (3D.1) ───────────────────
+    // Only claims messages that carry the guided settlement header or closing
+    // line, so no existing command loses its text. The write itself is the
+    // existing POST /api/settlement boundary.
+    if (isGuidedSettlementCommandText(text)) {
+      return this.processGuidedSettlementCommand(msgEvent, text, guidedMarker, eventId, log);
     }
 
     // ── 3.1. P2A Physical Inventory (allowlisted LINE groups only) ───────────
@@ -443,6 +487,7 @@ export class WebhookService {
       return this.processWhiteSheetClose(
         msgEvent,
         closeParse,
+        guidedMarker,
         eventId,
         event.type,
         log,
@@ -498,7 +543,7 @@ export class WebhookService {
 
     const slipOpenHeader = parseSlipSessionHeader(text);
     if (slipOpenHeader !== null) {
-      return this.processSlipOpen(msgEvent, slipOpenHeader, eventId, event.type, log);
+      return this.processSlipOpen(msgEvent, slipOpenHeader, guidedMarker, eventId, event.type, log);
     }
 
     // ── 4. Pending session flow ───────────────────────────────────────────────
@@ -1293,6 +1338,8 @@ export class WebhookService {
       ReturnType<typeof parseWhiteSheetCloseCommandFromMessage>,
       { kind: "not_command" }
     >,
+    /** Signed guided provenance marker, stripped from the message text. */
+    guidedMarker: string | null,
     eventId: string,
     eventType: string,
     log: ChildLogger,
@@ -1312,12 +1359,44 @@ export class WebhookService {
       businessDate: parseResult.command.businessDate,
     });
 
+    // 3C: a guided operator's sheet must land on the round they opened. With no
+    // guided round the verdict is not_guided and the legacy path is unchanged.
+    const identity = buildGuidedMenuIdentity({
+      lineUserId: getUserId(event.source),
+      sourceType: event.source.type,
+      sourceId,
+      sessionKey: getPendingSessionKey(event.source),
+    });
+    let guidedContext = null;
+    if (identity) {
+      const guard = await guardGuidedWhiteSheetSubmission({
+        journey: this.guidedJourney,
+        identity,
+        command: parseResult.command,
+        marker: guidedMarker,
+      });
+      if (guard.verdict === "refused") {
+        log.info("white sheet close refused — journey mismatch", { sourceId });
+        if (replyToken) await this.replyMessage(replyToken, guard.message);
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+      if (guard.verdict === "allowed") guidedContext = guard.context;
+    }
+
     try {
       const outcome = await processWhiteSheetCloseCommand(this.supabase, {
         sourceId,
         command: parseResult.command,
       });
-      if (replyToken) await this.replyMessages(replyToken, outcome.replyMessages);
+      // 3C → 3D handoff, only when the sheet actually persisted.
+      const handoff =
+        guidedContext && outcome.persisted
+          ? buildSlipHandoffMessages(guidedContext)
+          : null;
+      const messages = handoff
+        ? [...outcome.replyMessages, ...handoff].slice(0, LINE_REPLY_MESSAGE_MAX)
+        : outcome.replyMessages;
+      if (replyToken) await this.replyMessages(replyToken, messages);
       return { eventId, eventType, status: "saved", parsed: true };
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -1683,6 +1762,8 @@ export class WebhookService {
   private async processSlipOpen(
     event:     LineMessageEvent,
     header:    SlipSessionHeader,
+    /** Signed guided provenance marker, stripped from the message text. */
+    guidedMarker: string | null,
     eventId:   string,
     eventType: string,
     log:       ChildLogger,
@@ -1697,6 +1778,30 @@ export class WebhookService {
       marketName: header.marketName,
       slipDate:   header.slipDate,
     });
+
+    // Guided binding is checked BEFORE the open, so an edited or copied header
+    // never creates a slip_batches row that images would then attach to. With no
+    // guided round owning the market/date, the legacy open runs unchanged.
+    const guidedIdentity = buildGuidedMenuIdentity({
+      lineUserId: senderId,
+      sourceType: event.source.type,
+      sourceId,
+      sessionKey: getPendingSessionKey(event.source),
+    });
+    if (guidedIdentity) {
+      const guard = await guardGuidedSlipOpen({
+        journey:  this.guidedJourney,
+        catalog:  this.guidedCatalog,
+        identity: guidedIdentity,
+        header,
+        marker: guidedMarker,
+      });
+      if (guard.verdict === "refused") {
+        log.info("slip open refused — guided round mismatch", { sourceId });
+        if (replyToken) await this.replyMessage(replyToken, guard.message);
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+    }
 
     try {
       const result = await this.slipSessionService.openSession(
@@ -2007,6 +2112,137 @@ export class WebhookService {
     }
     log.info("guided menu opened", { screen: outcome.screen });
     return { eventId, eventType: event.type, status: "saved", parsed: false };
+  }
+
+  /**
+   * Slice 3D — "ปิดรอบ".
+   *
+   * Closes nothing on its own: every blocker is an existing lifecycle state,
+   * and the close itself is tryFinalizeSettlement, which stays authoritative
+   * and idempotent on retry. The receipt is delivered in the reply the
+   * operator is already waiting on, so the finalizer's own push is suppressed
+   * rather than sending the same receipt twice.
+   */
+  private async processGuidedRoundCloseCommand(
+    event: LineMessageEvent,
+    eventId: string,
+    log: ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const replyToken = event.replyToken;
+    const identity = buildGuidedMenuIdentity({
+      lineUserId: getUserId(event.source),
+      sourceType: event.source.type,
+      sourceId: getSourceId(event.source),
+      sessionKey: getPendingSessionKey(event.source),
+    });
+    if (!identity) {
+      log.info("guided round close refused — missing identity binding");
+      return { eventId, eventType: event.type, status: "saved", parsed: false };
+    }
+
+    try {
+      const outcome = await processGuidedRoundClose({
+        journey: this.guidedJourney,
+        rounds: this.guidedRounds,
+        identity,
+      });
+      if (replyToken) {
+        await this.replyMessages(
+          replyToken,
+          outcome.messages.slice(0, LINE_REPLY_MESSAGE_MAX),
+        );
+      }
+      log.info("guided round close handled", { closed: outcome.closed });
+      return { eventId, eventType: event.type, status: "saved", parsed: false };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("guided round close failed", { error: errorMessage });
+      if (replyToken) {
+        try {
+          await this.replyMessage(
+            replyToken,
+            "ตรวจยอดปิดรอบไม่สำเร็จ ระบบยังไม่ได้ปิดรอบ กรุณาลองใหม่อีกครั้ง",
+          );
+        } catch { /* ignore reply error */ }
+      }
+      return {
+        eventId,
+        eventType: event.type,
+        status: "error",
+        parsed: false,
+        error: errorMessage,
+      };
+    }
+  }
+
+  /**
+   * Slice 3D.1 — "ส่งยอด".
+   *
+   * The adapter verifies the round binding and then calls the existing
+   * settlement boundary; every refusal happens before any write. Nothing about
+   * settlement accounting or reconciliation is decided here.
+   */
+  private async processGuidedSettlementCommand(
+    event: LineMessageEvent,
+    text: string,
+    /** Signed guided provenance marker, stripped from the message text. */
+    guidedMarker: string | null,
+    eventId: string,
+    log: ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const replyToken = event.replyToken;
+    const identity = buildGuidedMenuIdentity({
+      lineUserId: getUserId(event.source),
+      sourceType: event.source.type,
+      sourceId: getSourceId(event.source),
+      sessionKey: getPendingSessionKey(event.source),
+    });
+    if (!identity) {
+      log.info("guided settlement refused — missing identity binding");
+      return { eventId, eventType: event.type, status: "saved", parsed: false };
+    }
+
+    try {
+      const outcome = await processGuidedSettlementSubmission({
+        supabase: this.supabase,
+        journey: this.guidedJourney,
+        rounds: this.guidedRounds,
+        identity,
+        text,
+        marker: guidedMarker,
+      });
+      if (replyToken && outcome.messages.length > 0) {
+        await this.replyMessages(
+          replyToken,
+          outcome.messages.slice(0, LINE_REPLY_MESSAGE_MAX),
+        );
+      }
+      log.info("guided settlement handled", { saved: outcome.saved });
+      return {
+        eventId,
+        eventType: event.type,
+        status: "saved",
+        parsed: outcome.saved,
+      };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("guided settlement failed", { error: errorMessage });
+      if (replyToken) {
+        try {
+          await this.replyMessage(
+            replyToken,
+            "บันทึกยอดส่งไม่สำเร็จ ระบบยังไม่ได้บันทึกยอดส่งของรอบนี้ กรุณาลองใหม่อีกครั้ง",
+          );
+        } catch { /* ignore reply error */ }
+      }
+      return {
+        eventId,
+        eventType: event.type,
+        status: "error",
+        parsed: false,
+        error: errorMessage,
+      };
+    }
   }
 
   private async processGuidedMenuPostback(

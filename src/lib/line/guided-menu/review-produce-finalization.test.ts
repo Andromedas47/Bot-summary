@@ -125,16 +125,21 @@ async function mintStatus(db: GuidedMenuFakeDatabase): Promise<string> {
   return created.wireToken;
 }
 
+import { guidedControlLabels } from "./messages";
+
 function bodyOf(result: { messages: unknown[] }): string {
-  return result.messages.map((m) => (m as { text: string }).text).join("\n");
+  return result.messages
+    .filter((m) => (m as { type?: string }).type === "text")
+    .map((m) => (m as { text: string }).text)
+    .join("\n");
 }
 
-function quickReplyLabels(message: unknown): string[] {
-  const quickReply = (message as { quickReply?: { items?: unknown[] } })
-    ?.quickReply;
-  return (quickReply?.items ?? []).map(
-    (item) => (item as { action: { label: string } }).action.label,
-  );
+function controlLabels(messages: unknown[]): string[] {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const labels = guidedControlLabels(messages[i]);
+    if (labels.length > 0) return labels;
+  }
+  return [];
 }
 
 // ── The classifier itself ────────────────────────────────────────────────────
@@ -459,7 +464,7 @@ describe("ดูสถานะ re-reads the produce outcome", () => {
     });
     expect(after.screen).toBe("session_finalize_failed");
     // No action offers the white sheet; only "ดูสถานะ" and the exit remain.
-    expect(quickReplyLabels(after.messages[0])).toEqual(["ดูสถานะ", "ออกจากเมนู"]);
+    expect(controlLabels(after.messages)).toEqual(["ดูสถานะ", "ออกจากเมนู"]);
   });
 
   it("keeps a failed round out of every later stage", async () => {

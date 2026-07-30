@@ -351,6 +351,73 @@ export function buildConfirmPlaceholderMessage(): LineTextMessage {
   return buildPlainTextMessage(GUIDED_MENU_COPY.confirmPlaceholder);
 }
 
+/** Collect postback button labels from a flex or quick-reply message. */
+export function guidedControlLabels(message: unknown): string[] {
+  const flex = message as LineFlexMessage;
+  if (flex?.type === "flex") {
+    const labels: string[] = [];
+    walkPostbackActions(flex, (action) => labels.push(action.label));
+    return labels;
+  }
+  const qr = (message as { quickReply?: LineQuickReply }).quickReply;
+  return qr ? qr.items.map((item) => item.action.label) : [];
+}
+
+/** Primary Flex stage-control card for post-open guided operations. */
+export function buildStageControlFlexMessage(input: {
+  title: string;
+  bodyLines?: readonly string[];
+  buttons: ReadonlyArray<{ label: string; wireToken: string }>;
+  altText?: string;
+}): LineFlexMessage {
+  const labels = input.buttons.map((b) => b.label);
+  assertUniqueRenderedLabels(labels, "stage control");
+  const footerButtons = input.buttons.map((b, index) =>
+    bubbleButton(
+      b.label,
+      b.wireToken,
+      index === 0 ? "primary" : "secondary",
+    ),
+  );
+  return flexShell(
+    input.altText ?? input.title,
+    input.title,
+    [...(input.bodyLines ?? [])],
+    footerButtons,
+  );
+}
+
+export function buildCaptureAckMessage(itemCount: number): LineTextMessage {
+  return buildPlainTextMessage(
+    [
+      "บันทึกรายการแล้ว ✅",
+      `รายการทั้งหมด ${itemCount} รายการ`,
+    ].join("\n"),
+  );
+}
+
+/**
+ * Text segments plus a trailing Flex control card. Reserves one reply slot for
+ * the card so long summaries still fit within LINE's five-message cap.
+ */
+export function buildTextMessagesWithStageControl(input: {
+  summary: string;
+  maxMessages: number;
+  control: LineFlexMessage;
+  quickReply?: LineQuickReply;
+}): GuidedMenuLineMessage[] {
+  const textBudget = Math.max(1, input.maxMessages - 1);
+  const parts = splitTextForLineReply(input.summary, textBudget);
+  const textMessages = parts.map((text, index) => ({
+    type: "text" as const,
+    text,
+    ...(input.quickReply && index === parts.length - 1
+      ? { quickReply: input.quickReply }
+      : {}),
+  }));
+  return [...textMessages, input.control];
+}
+
 /**
  * Slice 3A success receipt. Text rather than Flex so Slice 3B can attach the
  * guided capture actions as a quickReply without re-laying out the bubble.
@@ -417,14 +484,22 @@ export function splitTextForLineReply(
 export function buildCapturedItemsMessages(input: {
   summary: string;
   quickReply?: LineQuickReply;
+  stageControl?: LineFlexMessage;
   maxMessages: number;
-}): LineTextMessage[] {
+}): GuidedMenuLineMessage[] {
+  if (input.stageControl) {
+    return buildTextMessagesWithStageControl({
+      summary: input.summary,
+      maxMessages: input.maxMessages,
+      control: input.stageControl,
+      quickReply: input.quickReply,
+    });
+  }
   const parts = splitTextForLineReply(input.summary, input.maxMessages);
   return parts.map((text, index) => ({
     type: "text" as const,
     text,
-    // The action buttons ride on the last message so they stay reachable
-    // after the operator has scrolled through the whole summary.
+    // Optional quick-reply fallback on the last text segment.
     ...(input.quickReply && index === parts.length - 1
       ? { quickReply: input.quickReply }
       : {}),
@@ -452,7 +527,8 @@ export function buildFinalizeConfirmedMessage(input: {
   summary: string;
   maxMessages: number;
   quickReply?: LineQuickReply;
-}): LineTextMessage[] {
+  stageControl?: LineFlexMessage;
+}): GuidedMenuLineMessage[] {
   return buildCapturedItemsMessages({
     summary: [
       "บันทึกรายการสินค้าเรียบร้อย ✅",
@@ -462,6 +538,7 @@ export function buildFinalizeConfirmedMessage(input: {
       GUIDED_MENU_COPY.nextStepWhiteSheet,
     ].join("\n"),
     quickReply: input.quickReply,
+    stageControl: input.stageControl,
     maxMessages: input.maxMessages,
   });
 }
@@ -476,8 +553,9 @@ export function buildWhiteSheetTemplateMessages(input: {
   marketLabel: string;
   dateThaiShort: string;
   quickReply?: LineQuickReply;
+  stageControl?: LineFlexMessage;
   note?: string;
-}): LineTextMessage[] {
+}): GuidedMenuLineMessage[] {
   const header = [
     GUIDED_MENU_COPY.whiteSheetInstructions,
     "",
@@ -486,14 +564,19 @@ export function buildWhiteSheetTemplateMessages(input: {
     `วันที่: ${input.dateThaiShort}`,
     ...(input.note ? ["", input.note] : []),
   ].join("\n");
-  return [
-    { type: "text", text: header },
-    {
-      type: "text",
-      text: input.template,
-      ...(input.quickReply ? { quickReply: input.quickReply } : {}),
-    },
-  ];
+  const templateMessage: LineTextMessage = {
+    type: "text",
+    text: input.template,
+    ...(input.quickReply ? { quickReply: input.quickReply } : {}),
+  };
+  if (input.stageControl) {
+    return [
+      { type: "text", text: header },
+      templateMessage,
+      input.stageControl,
+    ];
+  }
+  return [{ type: "text", text: header }, templateMessage];
 }
 
 /** Slice 3D — slip-stage instructions plus the ready-to-send batch header. */
@@ -503,24 +586,27 @@ export function buildSlipInstructionMessages(input: {
   marketLabel: string;
   dateThaiShort: string;
   quickReply?: LineQuickReply;
-}): LineTextMessage[] {
-  return [
-    {
-      type: "text",
-      text: [
-        GUIDED_MENU_COPY.slipInstructions,
-        "",
-        `คนขาย: ${input.sellerLabel}`,
-        `ตลาด: ${input.marketLabel}`,
-        `วันที่: ${input.dateThaiShort}`,
-      ].join("\n"),
-    },
-    {
-      type: "text",
-      text: input.header,
-      ...(input.quickReply ? { quickReply: input.quickReply } : {}),
-    },
-  ];
+  stageControl?: LineFlexMessage;
+}): GuidedMenuLineMessage[] {
+  const intro = {
+    type: "text" as const,
+    text: [
+      GUIDED_MENU_COPY.slipInstructions,
+      "",
+      `คนขาย: ${input.sellerLabel}`,
+      `ตลาด: ${input.marketLabel}`,
+      `วันที่: ${input.dateThaiShort}`,
+    ].join("\n"),
+  };
+  const headerMessage: LineTextMessage = {
+    type: "text",
+    text: input.header,
+    ...(input.quickReply ? { quickReply: input.quickReply } : {}),
+  };
+  if (input.stageControl) {
+    return [intro, headerMessage, input.stageControl];
+  }
+  return [intro, headerMessage];
 }
 
 /**
@@ -533,24 +619,27 @@ export function buildSettlementTemplateMessages(input: {
   marketLabel: string;
   dateThaiShort: string;
   quickReply?: LineQuickReply;
-}): LineTextMessage[] {
-  return [
-    {
-      type: "text",
-      text: [
-        GUIDED_MENU_COPY.settlementInstructions,
-        "",
-        `คนขาย: ${input.sellerLabel}`,
-        `ตลาด: ${input.marketLabel}`,
-        `วันที่: ${input.dateThaiShort}`,
-      ].join("\n"),
-    },
-    {
-      type: "text",
-      text: input.template,
-      ...(input.quickReply ? { quickReply: input.quickReply } : {}),
-    },
-  ];
+  stageControl?: LineFlexMessage;
+}): GuidedMenuLineMessage[] {
+  const intro = {
+    type: "text" as const,
+    text: [
+      GUIDED_MENU_COPY.settlementInstructions,
+      "",
+      `คนขาย: ${input.sellerLabel}`,
+      `ตลาด: ${input.marketLabel}`,
+      `วันที่: ${input.dateThaiShort}`,
+    ].join("\n"),
+  };
+  const templateMessage: LineTextMessage = {
+    type: "text",
+    text: input.template,
+    ...(input.quickReply ? { quickReply: input.quickReply } : {}),
+  };
+  if (input.stageControl) {
+    return [intro, templateMessage, input.stageControl];
+  }
+  return [intro, templateMessage];
 }
 
 /** Slice 3D.1 — the receipt for a settlement that actually persisted. */

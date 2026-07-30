@@ -28,7 +28,7 @@ export type MenuTransactionTypeCode =
 export const MENU_DATE_MODES = ["today", "yesterday", "iso"] as const;
 export type MenuDateMode = (typeof MENU_DATE_MODES)[number];
 
-export const MENU_ROOT_INTENTS = ["cancel"] as const;
+export const MENU_ROOT_INTENTS = ["cancel", "resume_edit"] as const;
 export type MenuRootIntent = (typeof MENU_ROOT_INTENTS)[number];
 
 /** Mutating confirmation actions use a shorter absolute TTL (DB-enforced). */

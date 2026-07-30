@@ -27,6 +27,7 @@ import {
   buildSlipHandoffMessages,
   guardGuidedWhiteSheetSubmission,
   isExactGuidedMenuTrigger,
+  isExactGuidedCloseTrigger,
   isGuidedMenuPostbackCandidate,
   isGuidedMenuPostbackData,
   guardGuidedSlipOpen,
@@ -444,6 +445,22 @@ export class WebhookService {
       return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
 
+    // ── 3.0a. Guided plain-text close "จบรายการ" ─────────────────────────────
+    if (isExactGuidedCloseTrigger(text)) {
+      const guidedCloseKey = getPendingSessionKey(msgEvent.source);
+      if (guidedCloseKey !== null) {
+        const guidedCloseLookup = await new PendingSessionService(this.supabase).lookup(
+          guidedCloseKey,
+        );
+        if (
+          guidedCloseLookup.session
+          && (guidedCloseLookup.session as StructuredPendingSession).entry_origin != null
+        ) {
+          return this.processGuidedTextClose(msgEvent, eventId, log);
+        }
+      }
+    }
+
     // ── 3.0. Guided Menu exact trigger "เมนู" ────────────────────────────────
     if (isExactGuidedMenuTrigger(text)) {
       return this.processGuidedMenuOpen(msgEvent, eventId, log);
@@ -606,11 +623,12 @@ export class WebhookService {
         return { eventId, eventType: event.type, status: "saved", parsed: false };
       }
 
-      // 0050 H-1: plain-text จบรายการ must not markClose a structured session.
-      // DB try_finalize also fail-closes unconfirmed structured closes; this
-      // refusal keeps the operator UX clear before Guided Menu wiring.
+      // 0050 H-1: legacy plain-text close patterns must not markClose a structured
+      // session. Exact "จบรายการ" is handled above via the guided requestClose
+      // contract; other close phrases keep the historical refusal.
       if (
         markClose
+        && !isExactGuidedCloseTrigger(normalizedText)
         && (pending as StructuredPendingSession).entry_origin != null
       ) {
         log.warn("text close refused for structured produce session", {
@@ -768,6 +786,31 @@ export class WebhookService {
       }
 
       if (!markClose) {
+        const structured = pending as StructuredPendingSession;
+        if (structured.entry_origin != null && replyToken) {
+          const identity = buildGuidedMenuIdentity({
+            lineUserId: getUserId(msgEvent.source),
+            sourceType: msgEvent.source.type,
+            sourceId: getSourceId(msgEvent.source),
+            sessionKey: pendingSessionKey,
+          });
+          if (identity) {
+            const ack = await this.guidedMenuHandler.renderCaptureAcknowledgement({
+              identity,
+            });
+            if (ack) {
+              await this.replyApiMessages(
+                replyToken,
+                ack.messages as LineApiMessage[],
+              );
+              log.info("guided capture acknowledgement sent", {
+                sessionKey,
+                itemCount: ack.result.item_count,
+              });
+              return { eventId, eventType: event.type, status: "saved", parsed: false };
+            }
+          }
+        }
         log.debug("message appended to pending session — waiting for session end", { sessionKey });
         return { eventId, eventType: event.type, status: "saved", parsed: false };
       }
@@ -2080,6 +2123,39 @@ export class WebhookService {
   }
 
   // ── Guided Menu Slice 2 ───────────────────────────────────────────────────
+  private async processGuidedTextClose(
+    event: LineMessageEvent,
+    eventId: string,
+    log: ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const replyToken = event.replyToken;
+    const identity = buildGuidedMenuIdentity({
+      lineUserId: getUserId(event.source),
+      sourceType: event.source.type,
+      sourceId: getSourceId(event.source),
+      sessionKey: getPendingSessionKey(event.source),
+    });
+
+    if (!identity) {
+      log.info("guided text close refused — missing identity binding");
+      return { eventId, eventType: event.type, status: "saved", parsed: false };
+    }
+
+    const outcome = await this.guidedMenuHandler.handleTextCloseRequest({
+      identity,
+      lineEventId: eventId,
+      lineTimestampMs: event.timestamp,
+    });
+    if (replyToken) {
+      await this.replyApiMessages(
+        replyToken,
+        outcome.messages as LineApiMessage[],
+      );
+    }
+    log.info("guided text close handled", { screen: outcome.screen });
+    return { eventId, eventType: event.type, status: "saved", parsed: false };
+  }
+
   private async processGuidedMenuOpen(
     event: LineMessageEvent,
     eventId: string,

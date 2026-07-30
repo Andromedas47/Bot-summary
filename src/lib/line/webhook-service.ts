@@ -30,7 +30,9 @@ import {
   isGuidedMenuPostbackCandidate,
   isGuidedMenuPostbackData,
   isGuidedRoundCloseCommand,
+  isGuidedSettlementCommandText,
   processGuidedRoundClose,
+  processGuidedSettlementSubmission,
   LINE_REPLY_MESSAGE_MAX,
 } from "@/lib/line/guided-menu";
 import {
@@ -440,6 +442,14 @@ export class WebhookService {
     // existing settlement finalization, behind the existing lifecycle blockers.
     if (isGuidedRoundCloseCommand(text)) {
       return this.processGuidedRoundCloseCommand(msgEvent, eventId, log);
+    }
+
+    // ── 3.0c. Guided settlement submission "ส่งยอด" (3D.1) ───────────────────
+    // Only claims messages that carry the guided settlement header or closing
+    // line, so no existing command loses its text. The write itself is the
+    // existing POST /api/settlement boundary.
+    if (isGuidedSettlementCommandText(text)) {
+      return this.processGuidedSettlementCommand(msgEvent, text, eventId, log);
     }
 
     // ── 3.1. P2A Physical Inventory (allowlisted LINE groups only) ───────────
@@ -2110,6 +2120,73 @@ export class WebhookService {
           await this.replyMessage(
             replyToken,
             "ตรวจยอดปิดรอบไม่สำเร็จ ระบบยังไม่ได้ปิดรอบ กรุณาลองใหม่อีกครั้ง",
+          );
+        } catch { /* ignore reply error */ }
+      }
+      return {
+        eventId,
+        eventType: event.type,
+        status: "error",
+        parsed: false,
+        error: errorMessage,
+      };
+    }
+  }
+
+  /**
+   * Slice 3D.1 — "ส่งยอด".
+   *
+   * The adapter verifies the round binding and then calls the existing
+   * settlement boundary; every refusal happens before any write. Nothing about
+   * settlement accounting or reconciliation is decided here.
+   */
+  private async processGuidedSettlementCommand(
+    event: LineMessageEvent,
+    text: string,
+    eventId: string,
+    log: ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const replyToken = event.replyToken;
+    const identity = buildGuidedMenuIdentity({
+      lineUserId: getUserId(event.source),
+      sourceType: event.source.type,
+      sourceId: getSourceId(event.source),
+      sessionKey: getPendingSessionKey(event.source),
+    });
+    if (!identity) {
+      log.info("guided settlement refused — missing identity binding");
+      return { eventId, eventType: event.type, status: "saved", parsed: false };
+    }
+
+    try {
+      const outcome = await processGuidedSettlementSubmission({
+        supabase: this.supabase,
+        journey: this.guidedJourney,
+        rounds: this.guidedRounds,
+        identity,
+        text,
+      });
+      if (replyToken && outcome.messages.length > 0) {
+        await this.replyMessages(
+          replyToken,
+          outcome.messages.slice(0, LINE_REPLY_MESSAGE_MAX),
+        );
+      }
+      log.info("guided settlement handled", { saved: outcome.saved });
+      return {
+        eventId,
+        eventType: event.type,
+        status: "saved",
+        parsed: outcome.saved,
+      };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("guided settlement failed", { error: errorMessage });
+      if (replyToken) {
+        try {
+          await this.replyMessage(
+            replyToken,
+            "บันทึกยอดส่งไม่สำเร็จ ระบบยังไม่ได้บันทึกยอดส่งของรอบนี้ กรุณาลองใหม่อีกครั้ง",
           );
         } catch { /* ignore reply error */ }
       }

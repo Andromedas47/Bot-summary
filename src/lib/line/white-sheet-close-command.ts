@@ -53,7 +53,8 @@ export type WhiteSheetCloseParseResult =
   | { kind: "invalid"; message: string }
   | { kind: "ok"; command: WhiteSheetCloseCommand };
 
-function stripExportPrefix(line: string): string {
+/** Shared with the guided settlement command so both strip transcripts alike. */
+export function stripExportPrefix(line: string): string {
   return line.replace(LINE_EXPORT_PREFIX, "").trim();
 }
 
@@ -91,7 +92,8 @@ export function parseCloseMoneyAmount(raw: string): number | null {
   return Math.round(cents) / 100;
 }
 
-function parseBusinessDate(dateStr: string): string | null {
+/** Shared with the guided settlement command — one Buddhist-date contract only. */
+export function parseBusinessDate(dateStr: string): string | null {
   const parts = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/((?:25)?\d{2})$/);
   if (!parts) return null;
 

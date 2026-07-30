@@ -116,6 +116,28 @@ operator upsert path.
   `loadMarketScopedManualSlipTotal` own the money definitions.
 * `tryFinalizeSettlement` + `settlement_finalizations`
   (`source_id`, `business_date`, `line_retry_key`) own settlement closure.
+* `settlement_entries` is written by exactly one contract, the `source_id`
+  branch of `POST /api/settlement`: **reconcile → upsert → finalize**.
+  * Required: `settlement_date`. Optional with defaults: `settlement_time`
+    (`""`), `staff_name`, `market_name`, `money_transfer`, `money_cash`,
+    `expenses`, `labor`, `notes`, `source_id`.
+  * Update rule: `upsert` on
+    `(settlement_date, settlement_time, staff_name, market_name)`. There is no
+    row-level finalized flag and no reject-on-duplicate — the conflict target
+    **is** the update rule. The Dashboard form writes `settlement_time = ""`.
+  * `reconcile()` runs first and refuses while a manual slip session is open,
+    so a blocked submission writes nothing.
+  * Money precision: `numeric(10,2)`; operator strings go through
+    `parseCloseMoneyAmount` (the White Sheet rule — no negatives, ≤ 2 decimals,
+    optional thousands commas) and reconciliation rounds to satang.
+  * `tryFinalizeSettlement` reads the result by `(source_id, settlement_date)`
+    and treats **more than one row as `ambiguous`** — permanently. Any second
+    writer must therefore land on the same upsert key or refuse.
+  * `labor` / `expenses` here do **not** overlap the White Sheet:
+    `digital_white_sheet_cash_entries` records the market's own
+    ค่าแรง/ค่าที่/ค่าถุง/ค่าขนม/ค่าอื่น/เงินสด, and its loader states
+    explicitly that the boundary never writes `settlement_entries`. No value is
+    carried between them — see §2.7.
 
 ### 1.7 LINE limits
 
@@ -235,11 +257,13 @@ which the bot hands the operator verbatim at the moment they need it:
 | Open the slip batch | `<seller> <market> สลิปเงินโอน <date>` | existing `parseSlipSessionHeader` |
 | Close the slip batch | `จบสลิป` | existing slip close |
 | Manual slips | existing `สลิปมือ` flow | existing manual slip session |
+| Submit the settlement | `<seller> <market> ส่งยอด <date>` … `จบส่งยอด` | **new application-only template**, routes to the existing `POST /api/settlement` boundary |
 | Close the round | `ปิดรอบ` | **new application-only command**, routes to `tryFinalizeSettlement` |
 
-`ปิดรอบ` is exact-match only and adds no schema. It is the one command in the
-journey the operator was not already typing, and the bot prints it in the slip
-handoff so it never has to be remembered.
+`ปิดรอบ` is exact-match only and adds no schema. `ส่งยอด` claims a message only
+when it carries the guided header or the `จบส่งยอด` line, so no existing command
+loses its text. Both are printed for the operator by the bot, so neither has to
+be remembered.
 
 ### 2.6 Cold subsystems
 
@@ -247,6 +271,28 @@ handoff so it never has to be remembered.
 `settlement_drafts` 2026-06-26, while `produce_sessions` is live
 (2026-07-29). Slice 3D is built against these pipelines on the repository
 owner's confirmation (2026-07-30) that they remain the operational route.
+
+### 2.7 The White Sheet cannot supply the settlement amounts
+
+`digital_white_sheet_cash_entries` and `settlement_entries` both carry money
+called ค่าแรง, and both carry a cash figure, but nothing in the codebase
+equates them: the White Sheet loader states outright that its boundary never
+writes `settlement_entries`, and no view, RPC or service derives one from the
+other. Slice 3D.1 therefore prefills every settlement amount as `0` rather
+than copying a White Sheet value across. Deriving them would be a new business
+rule, and this epic does not invent business rules.
+
+### 2.8 The guided settlement accepts a SUBMITTED white sheet
+
+The 3D.1 brief asks the settlement to be refused unless the white sheet is
+FINALIZED. `finalize_white_sheet_cash_entry` is **admin-only** (§1.5), so that
+reading would replace the Dashboard blocker this slice exists to remove with an
+admin blocker in the same position, and the journey would still not be
+LINE-only. The implemented rule is therefore: the sheet must be `submitted`
+**or** `finalized`, i.e. only `not_submitted` is refused — the same threshold
+the existing `white_sheet_not_submitted` close blocker already uses. Both
+states are covered by test. If FINALIZED must be mandatory, an admin
+finalization step has to enter the journey and the LINE-only property is lost.
 
 ---
 
@@ -324,7 +370,19 @@ stateDiagram-v2
     WhiteSheet --> Slips: handoff prints the slip header + "ปิดรอบ"
     Slips --> Slips: images → existing evidence / batch / OCR pipeline
     Slips --> Slips: "จบสลิป" closes the batch, "สลิปมือ" is the fallback
-    Slips --> Reconcile: [ตรวจยอด] view_status
+    Slips --> Settlement: [กรอกยอดส่ง] view_status — settlement still missing
+
+    state Settlement {
+        [*] --> SettlementTemplate
+        SettlementTemplate --> SettlementGuard: operator sends the edited template
+        SettlementGuard --> SettlementRefused: seller/market/date ≠ the open round — zero writes
+        SettlementGuard --> SettlementRefused: produce unfinished, sheet not submitted, round already closed, foreign entry key
+        SettlementGuard --> SettlementSaved: POST /api/settlement boundary (reconcile → upsert)
+        SettlementSaved --> SettlementSaved: resend → same row updated, never a second row
+    }
+
+    Settlement --> Reconcile: receipt + the ตรวจยอด report in the same reply
+    Slips --> Reconcile: [ตรวจยอด] view_status — settlement already recorded
 
     state Reconcile {
         [*] --> Report
@@ -376,6 +434,9 @@ difference               = submitted_transfer_total - checked_slip_total
 | No label leakage | payloads carry codes only; the `no_trusted_labels` CHECK enforces it; labels are re-read from the catalog server-side |
 | No silent data loss | live-session guard before the open-or-rotate RPC; optimistic generation on rotation |
 | No exception leakage | every refusal path returns Thai operator copy; internal reasons stay in the recorded result and logs |
+| One settlement row per round | the guided write uses the Dashboard's own upsert key (`settlement_time = ""`, seller, market); a resend updates it, and an entry stored under any other key is refused instead of added beside — `tryFinalizeSettlement` would otherwise be permanently `ambiguous` |
+| Settlement retry is safe | the same LINE message resubmitted returns the identical receipt and leaves one row; a round whose settlement message already went out (`status = 'sent'` / `message_sent_at`) is refused, never silently rewritten |
+| Settlement binding | seller, market and business date must equal the round's frozen metadata; `source_id` and operator come from the resolved journey, never from the message text |
 
 ---
 
@@ -387,10 +448,17 @@ difference               = submitted_transfer_total - checked_slip_total
 | 3B — guided capture and finalize | **delivered** |
 | 3C — digital white sheet | **delivered** (guided template through the existing close command) |
 | 3D — slips, reconciliation, close round | **delivered** |
+| 3D.1 — guided settlement submission | **delivered** (guided template through the existing `POST /api/settlement` boundary) |
+
+With 3D.1 the journey is LINE-only end to end:
+`ทำรายการ → รายการสินค้า → จบรายการ → ใบขาว → ส่งสลิป → กรอกยอดส่ง → ตรวจยอด → ปิดรอบ`.
+The Dashboard is no longer required at any step.
 
 **No migration.** `0054` remains reserved for P2D and untouched; `0055`/`0056`
-belong to PR #9. Nothing in slices 3A–3D changes SQL, so no PostgreSQL 17
-harness run was required.
+belong to PR #9. Nothing in slices 3A–3D.1 changes SQL, so no PostgreSQL 17
+harness run was required. 3D.1 needed no schema change because
+`settlement_entries` already carries every field the operator supplies, and the
+existing upsert key is enough to keep LINE and the Dashboard on one row.
 
 Production is untouched: no migration applied, no deployment, no LINE message
 sent and no Production data written by this work.
@@ -464,7 +532,73 @@ Buttons: `[กรอกใบขาว] [ออกจากเมนู]`
 เมื่อตรวจสลิปครบแล้ว พิมพ์ "ปิดรอบ" เพื่อปิดรอบ
 ```
 
-**5. Slips uploaded, `จบสลิป`, then `ปิดรอบ` with an exact match**
+**5. Slips uploaded, `จบสลิป`, then `[กรอกยอดส่ง]` — the round still has no settlement**
+
+```
+ตรวจยอดรอบขาย
+
+คนขาย: กี้
+ตลาด: วัดทุ่งลานนา
+วันที่: 29/07/2569
+ยอดส่งตามใบขาว: —
+ยอดสลิปที่ตรวจแล้ว: 1,250 บาท
+ผลต่าง: —
+
+สลิป:
+- อ่านสำเร็จ: 2
+
+ยังปิดรอบไม่ได้ เพราะ:
+- ยังไม่มียอดส่งเงินของรอบนี้ในระบบ
+- กรอกแบบฟอร์มยอดส่งด้านล่าง แก้เฉพาะตัวเลข แล้วส่งกลับมา
+```
+```
+กรอกยอดส่ง
+คัดลอกข้อความด้านล่าง แก้เฉพาะตัวเลข แล้วส่งกลับมา
+บรรทัดไหนไม่มียอด ใส่ 0 ไว้
+
+คนขาย: กี้
+ตลาด: วัดทุ่งลานนา
+วันที่: 29/07/2569
+```
+```
+กี้ วัดทุ่งลานนา ส่งยอด 29/07/2569
+ยอดโอน 0
+เงินสด 0
+ค่าใช้จ่าย 0
+ค่าแรง 0
+จบส่งยอด
+```
+
+**6. The edited `ส่งยอด` template is sent → receipt, then the ตรวจยอด report**
+
+```
+บันทึกยอดส่งเรียบร้อย ✅
+
+ยอดโอน: 1,250 บาท
+เงินสด: 0 บาท
+ค่าใช้จ่าย: 0 บาท
+ค่าแรง: 0 บาท
+
+ขั้นต่อไป: ตรวจยอด
+```
+```
+ตรวจยอดรอบขาย
+
+คนขาย: กี้
+ตลาด: วัดทุ่งลานนา
+วันที่: 29/07/2569
+ยอดส่งตามใบขาว: 1,250 บาท
+ยอดสลิปที่ตรวจแล้ว: 1,250 บาท
+ผลต่าง: 0 บาท
+
+สลิป:
+- อ่านสำเร็จ: 2
+
+ยังปิดรอบไม่ได้ เพราะ:
+- พิมพ์ "ปิดรอบ" เพื่อปิดรอบ
+```
+
+**7. `ปิดรอบ` with an exact match**
 
 ```
 ปิดรอบเรียบร้อย ✅
@@ -522,15 +656,21 @@ A missing settlement renders `—`, never a guessed `0`.
    users.
 3. Walk one real round in a pilot LINE group before widening —
    `เมนู` → confirm → items → `จบรายการ` → `ยืนยันจบรายการ` → `กรอกใบขาว` →
-   send the template → send slips → `จบสลิป` → `ปิดรอบ`.
+   send the template → send slips → `จบสลิป` → `กรอกยอดส่ง` → send the `ส่งยอด`
+   template → `ปิดรอบ`. The Dashboard is not needed at any point.
 4. Watch for `guided round close handled` in the logs: `closed: false` on the
    first attempt is the expected, correct outcome while any blocker remains.
+   `guided settlement handled` with `saved: false` is likewise the correct
+   outcome for a refused submission — nothing was written.
 
 **Rollback**
 
-* **Application-only rollback is sufficient for every slice.** 3A–3D add no
+* **Application-only rollback is sufficient for every slice.** 3A–3D.1 add no
   migration, no table and no column, so reverting the deploy is the complete
   rollback and no data migration is required in either direction.
+* Settlements submitted from LINE stay valid: they were written through the same
+  `POST /api/settlement` boundary on the same upsert key the Dashboard uses, so
+  after a rollback the Dashboard form loads and edits them normally.
 * Rounds already opened stay valid: they were opened through the same RPC the
   text flow uses and finalize identically.
 * White sheets already submitted stay valid: they were written by the existing
@@ -547,9 +687,21 @@ A missing settlement renders `—`, never a guessed `0`.
 1. **No cancel for an open round.** `ออกจากเมนู` dismisses the guided controls
    and says the round is still open. Recovering from a mistaken open needs an
    administrator — see §2.3.
-2. **`ปิดรอบ` needs a settlement entry that only the web API writes.** LINE can
-   report `settlement_missing` but cannot create it, so the round cannot be
-   closed from LINE alone until someone submits the settlement.
+2. ~~**`ปิดรอบ` needs a settlement entry that only the web API writes.**~~
+   **Closed by Slice 3D.1**: `กรอกยอดส่ง` hands the operator a `ส่งยอด` template
+   that writes `settlement_entries` through the existing `POST /api/settlement`
+   boundary, so the round can now be closed from LINE alone. What remains:
+   * the guided submission always writes `settlement_time = ""` with the round's
+     seller and market. A round whose settlement was already stored under a
+     different key (e.g. a Dashboard entry saved with a clock time) is refused
+     rather than duplicated, and needs an administrator;
+   * `notes` is not editable from LINE — the guided submission writes `""`;
+   * the guided submission deliberately does **not** finalize. `POST
+     /api/settlement` finalizes on submit; the guided path passes
+     `finalize: false` so closing stays with `ปิดรอบ`, which applies the guided
+     blockers (a non-zero difference among them) before calling the same
+     finalizer. Without this, submitting a settlement would close a round whose
+     slips do not add up.
 3. **The guided receipt suppresses the finalizer's push.** `closeGuidedRound`
    passes a no-op push so the receipt is not delivered twice; the record still
    moves to `sent`. A LINE-initiated close therefore notifies only the group

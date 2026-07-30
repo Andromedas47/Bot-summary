@@ -9,8 +9,7 @@ import {
   calculateSettlementTotals,
   emptyTransactionTotals,
 } from "@/lib/summary/transactions";
-import { reconcile } from "@/lib/reconciliation";
-import { tryFinalizeSettlement } from "@/lib/settlement-finalizer";
+import { submitSettlementEntryForSource } from "@/lib/settlement/submit-entry";
 
 function monthRange(month: string): { from: string; toExclusive: string } {
   const [y, m] = month.split("-").map(Number);
@@ -62,31 +61,25 @@ export async function POST(req: NextRequest) {
   const supabase = await createServiceClient();
 
   // If source_id provided, check for open manual slip sessions before saving.
+  // The reconcile → upsert → finalize contract lives in one place so the LINE
+  // guided flow submits through the SAME boundary (see settlement/submit-entry).
   if (source_id) {
-    const reconcileResult = await reconcile(supabase, source_id, settlement_date, money_transfer);
-    if (reconcileResult.blocked) {
-      return NextResponse.json({ error: reconcileResult.reason }, { status: 400 });
+    const submitted = await submitSettlementEntryForSource(supabase, source_id, {
+      settlement_date, settlement_time, staff_name, market_name,
+      money_transfer, money_cash, expenses, labor, notes,
+    });
+
+    if (submitted.status === "blocked") {
+      return NextResponse.json({ error: submitted.reason }, { status: 400 });
+    }
+    if (submitted.status === "failed") {
+      return NextResponse.json({ error: submitted.reason }, { status: 500 });
     }
 
-    const { data, error } = await supabase
-      .from("settlement_entries")
-      .upsert(
-        { settlement_date, settlement_time, staff_name, market_name,
-          money_transfer, money_cash, expenses, labor, notes, source_id,
-          updated_at: new Date().toISOString() },
-        { onConflict: "settlement_date,settlement_time,staff_name,market_name" },
-      )
-      .select()
-      .single();
-
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-
-    const finalizeStatus = await tryFinalizeSettlement(supabase, source_id, settlement_date);
-
     return NextResponse.json({
-      ...data,
-      finalizeStatus,
-      reconciliation: reconcileResult.result,
+      ...submitted.entry,
+      finalizeStatus: submitted.finalizeStatus,
+      reconciliation: submitted.reconciliation,
     });
   }
 

@@ -129,6 +129,46 @@ export const GUIDED_MENU_COPY = {
     'เมื่อส่งครบ พิมพ์ "จบสลิป"',
     'ถ้ามีสลิปที่ระบบอ่านไม่ได้ ใช้ "สลิปมือ" ตามวิธีเดิม',
   ].join("\n"),
+  /** 3D.1: how to use the settlement template. */
+  settlementInstructions: [
+    "กรอกยอดส่ง",
+    "คัดลอกข้อความด้านล่าง แก้เฉพาะตัวเลข แล้วส่งกลับมา",
+    "บรรทัดไหนไม่มียอด ใส่ 0 ไว้",
+  ].join("\n"),
+  /** 3D.1: every refusal must say plainly that no money was recorded. */
+  settlementNotRecorded: "ระบบยังไม่ได้บันทึกยอดส่งของรอบนี้",
+  /** 3D.1: no guided round to attach a settlement to. */
+  settlementNoJourney: [
+    "ยังไม่มีรอบที่พร้อมกรอกยอดส่ง",
+    "กรุณาพิมพ์ เมนู เพื่อเริ่มรายการใหม่",
+  ].join("\n"),
+  /** 3D.1: the produce round is still open. */
+  settlementProduceUnfinished: [
+    "ยังกรอกยอดส่งไม่ได้ รายการสินค้ายังไม่จบ",
+    'กรุณากด "จบรายการ" และยืนยันให้เรียบร้อยก่อน',
+  ].join("\n"),
+  /** 3D.1: the White Sheet must be in before the settlement. */
+  settlementWhiteSheetMissing: [
+    "ยังกรอกยอดส่งไม่ได้ ยังไม่ได้บันทึกใบขาวของรอบนี้",
+    'กรุณากด "กรอกใบขาว" แล้วส่งใบขาวก่อน',
+  ].join("\n"),
+  /** 3D.1: the round's settlement message already went out. */
+  settlementAlreadyClosed: [
+    "รอบนี้ปิดและส่งสรุปไปแล้ว",
+    "ไม่สามารถแก้ยอดส่งผ่านไลน์ได้ หากต้องการแก้ กรุณาติดต่อผู้ดูแล",
+  ].join("\n"),
+  /** 3D.1: another settlement row already exists under a different key. */
+  settlementAmbiguous: [
+    "พบยอดส่งของรอบนี้ที่บันทึกไว้ด้วยข้อมูลอื่นแล้ว",
+    "กรุณาให้ผู้ดูแลตรวจก่อน",
+  ].join("\n"),
+  /** 3D.1: the authoritative write failed — nothing changed. */
+  settlementWriteFailed: [
+    "บันทึกยอดส่งไม่สำเร็จ",
+    "กรุณาลองใหม่อีกครั้ง หากยังไม่ได้ กรุณาแจ้งผู้ดูแล",
+  ].join("\n"),
+  /** 3D.1 → ตรวจยอด handoff. */
+  nextStepReconcile: "ขั้นต่อไป: ตรวจยอด",
   /** 3D: the round-close text command the bot tells the operator to send. */
   roundCloseCommand: "ปิดรอบ",
   /** 3D: nothing to close yet. */
@@ -163,6 +203,7 @@ export type GuidedMenuScreen =
   | "no_open_session"
   | "white_sheet_template"
   | "slip_instructions"
+  | "settlement_template"
   | "round_status"
   | "unmapped"
   | "no_sellers"

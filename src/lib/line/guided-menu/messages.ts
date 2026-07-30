@@ -523,6 +523,58 @@ export function buildSlipInstructionMessages(input: {
   ];
 }
 
+/**
+ * Slice 3D.1 — the settlement template, sent as its own message so the operator
+ * can long-press-copy it, exactly like the White Sheet template.
+ */
+export function buildSettlementTemplateMessages(input: {
+  template: string;
+  sellerLabel: string;
+  marketLabel: string;
+  dateThaiShort: string;
+  quickReply?: LineQuickReply;
+}): LineTextMessage[] {
+  return [
+    {
+      type: "text",
+      text: [
+        GUIDED_MENU_COPY.settlementInstructions,
+        "",
+        `คนขาย: ${input.sellerLabel}`,
+        `ตลาด: ${input.marketLabel}`,
+        `วันที่: ${input.dateThaiShort}`,
+      ].join("\n"),
+    },
+    {
+      type: "text",
+      text: input.template,
+      ...(input.quickReply ? { quickReply: input.quickReply } : {}),
+    },
+  ];
+}
+
+/** Slice 3D.1 — the receipt for a settlement that actually persisted. */
+export function buildSettlementSavedMessage(input: {
+  moneyTransfer: number;
+  moneyCash: number;
+  expenses: number;
+  labor: number;
+}): LineTextMessage {
+  return {
+    type: "text",
+    text: [
+      "บันทึกยอดส่งเรียบร้อย ✅",
+      "",
+      `ยอดโอน: ${formatBaht(input.moneyTransfer)}`,
+      `เงินสด: ${formatBaht(input.moneyCash)}`,
+      `ค่าใช้จ่าย: ${formatBaht(input.expenses)}`,
+      `ค่าแรง: ${formatBaht(input.labor)}`,
+      "",
+      GUIDED_MENU_COPY.nextStepReconcile,
+    ].join("\n"),
+  };
+}
+
 function formatBaht(value: number | null): string {
   if (value === null) return "—";
   return `${value.toLocaleString("en-US", {

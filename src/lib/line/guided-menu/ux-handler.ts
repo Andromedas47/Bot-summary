@@ -41,6 +41,7 @@ import {
   GUIDED_ROUND_BLOCKER_LABEL,
   summarizeSlipStatuses,
 } from "./round-close";
+import { buildSettlementTemplate } from "./settlement-command";
 import { buildWeighSessionSummary } from "@/lib/line/reply";
 import {
   assertGuidedMenuMessageLimits,
@@ -49,6 +50,7 @@ import {
   buildCapturedItemsMessages,
   buildConfirmPreviewMessage,
   buildRoundStatusMessage,
+  buildSettlementTemplateMessages,
   buildSlipInstructionMessages,
   buildWhiteSheetTemplateMessages,
   buildFinalizeConfirmedMessage,
@@ -649,7 +651,14 @@ export class GuidedMenuUxHandler {
     );
   }
 
-  /** Slice 3D — read-only reconciliation with the remaining blockers spelled out. */
+  /**
+   * Slice 3D — read-only reconciliation with the remaining blockers spelled out.
+   *
+   * 3D.1: when the round has no settlement yet, the one step that used to
+   * require the Dashboard is handed over right here as a copyable template, so
+   * the operator never leaves LINE. The template is generated but nothing is
+   * written — the settlement is only recorded when they send it back.
+   */
   private async renderRoundStatus(
     identity: GuidedMenuIdentity,
     context: GuidedJourneyContext,
@@ -658,32 +667,54 @@ export class GuidedMenuUxHandler {
     const report = await this.rounds.report(context, whiteSheetSubmitted);
     const dateThaiShort =
       thaiDateFromIso(context.businessDate) ?? context.businessDate;
-    const quickReply = await this.buildJourneyActions(identity, "ตรวจยอด");
-    return resultEnvelope(
-      "round_status",
-      [
-        buildRoundStatusMessage({
-          sellerLabel: context.sellerLabel,
-          marketLabel: context.marketLabel,
-          dateThaiShort,
-          totals: report.totals,
-          slipCounts: summarizeSlipStatuses(report.slips),
-          blockerLines: [
-            ...report.blockers.map((b) => GUIDED_ROUND_BLOCKER_LABEL[b]),
-            ...(report.blockers.length === 0
-              ? [`พิมพ์ "${GUIDED_MENU_COPY.roundCloseCommand}" เพื่อปิดรอบ`]
-              : [
-                  `แก้ไขแล้วพิมพ์ "${GUIDED_MENU_COPY.roundCloseCommand}" อีกครั้ง`,
-                ]),
-          ],
-          closed: false,
-          quickReply,
-        }),
+
+    const needsSettlement = report.blockers.includes("settlement_missing");
+    const template = needsSettlement ? buildSettlementTemplate(context) : null;
+    const quickReply = await this.buildJourneyActions(
+      identity,
+      needsSettlement ? "กรอกยอดส่ง" : "ตรวจยอด",
+    );
+
+    const nextStepLine = template
+      ? "กรอกแบบฟอร์มยอดส่งด้านล่าง แก้เฉพาะตัวเลข แล้วส่งกลับมา"
+      : report.blockers.length === 0
+        ? `พิมพ์ "${GUIDED_MENU_COPY.roundCloseCommand}" เพื่อปิดรอบ`
+        : `แก้ไขแล้วพิมพ์ "${GUIDED_MENU_COPY.roundCloseCommand}" อีกครั้ง`;
+
+    const status = buildRoundStatusMessage({
+      sellerLabel: context.sellerLabel,
+      marketLabel: context.marketLabel,
+      dateThaiShort,
+      totals: report.totals,
+      slipCounts: summarizeSlipStatuses(report.slips),
+      blockerLines: [
+        ...report.blockers.map((b) => GUIDED_ROUND_BLOCKER_LABEL[b]),
+        nextStepLine,
       ],
+      closed: false,
+      // The quick reply rides on the LAST message so it is never buried.
+      ...(template ? {} : { quickReply }),
+    });
+
+    return resultEnvelope(
+      template ? "settlement_template" : "round_status",
+      template
+        ? [
+            status,
+            ...buildSettlementTemplateMessages({
+              template,
+              sellerLabel: context.sellerLabel,
+              marketLabel: context.marketLabel,
+              dateThaiShort,
+              quickReply,
+            }),
+          ]
+        : [status],
       {
         stage: "reconcile",
         blockers: report.blockers,
         difference: report.totals.difference,
+        settlement_template: template !== null,
       },
     );
   }

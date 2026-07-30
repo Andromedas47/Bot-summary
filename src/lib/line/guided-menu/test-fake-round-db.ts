@@ -203,6 +203,13 @@ export class RoundFakeDatabase {
   uniqueKeys: Record<string, string[]> = {
     settlement_finalizations: ["source_id", "business_date"],
     transfer_reconciliations: ["source_id", "business_date"],
+    // The real onConflict target of POST /api/settlement's upsert.
+    settlement_entries: [
+      "settlement_date",
+      "settlement_time",
+      "staff_name",
+      "market_name",
+    ],
   };
 
   from = (table: string) => {

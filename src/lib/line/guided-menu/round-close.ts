@@ -110,15 +110,27 @@ const round2 = (value: number): number => Math.round(value * 100) / 100;
 /**
  * Slip rows for the round, classified with existing evidence truth only.
  *
+ * The scope is deliberately identical to the reconciliation loader's, so a slip
+ * shown as อ่านสำเร็จ is one that actually contributes to checked_slip_total:
+ *
+ *   * the received_at window is half-open, `startUtc <= received_at < endUtc`,
+ *     the same range `businessDateToUtcRange` feeds the money loaders;
+ *   * evidence attributed to a DIFFERENT known produce market is another
+ *     round's and is omitted from this list entirely — the loader skips it too,
+ *     so calling it ตลาดไม่ชัด would invent a problem that does not exist.
+ *
  * Classification order matters and mirrors the reconciliation loader:
  *   1. a non-verified check status is manual review — never counted;
  *   2. a verified check with no reference id is BR-02 pending resolution,
  *      which is manual review, not a verified transfer;
  *   3. a verified check whose reference already has a global winner elsewhere
  *      is a duplicate;
- *   4. an evidence row whose market is missing or not a known produce market
- *      for this source/date is market_unclear;
- *   5. a transaction time outside the business-date window is date_mismatch;
+ *   4. an evidence row whose market is missing, or not a known produce market
+ *      for this source/date, is market_unclear (the loader calls it unresolved);
+ *   5. a transaction time outside `startUtc <= time < endUtc` is date_mismatch.
+ *      This one is informational: the money loaders scope by received_at, so
+ *      such a slip is still inside the round's total and the status only tells
+ *      the operator the bank timestamp looks wrong;
  *   6. only what survives all of that is verified.
  */
 export async function loadGuidedSlipRows(
@@ -133,7 +145,7 @@ export async function loadGuidedSlipRows(
     .select("id, market_label_normalized, received_at")
     .eq("source_id", context.sourceId)
     .gte("received_at", startUtc)
-    .lte("received_at", endUtc);
+    .lt("received_at", endUtc);
   if (evidenceError) {
     throw new Error(`slip evidence lookup failed: ${evidenceError.message}`);
   }
@@ -160,7 +172,13 @@ export async function loadGuidedSlipRows(
   // Global winner set — the same dedupe the reconciliation loader applies, so a
   // reference already counted under another check is reported as a duplicate
   // here rather than being silently double-counted.
+  //
+  // Only VERIFIED-status checks contribute references, exactly as the loader
+  // does: resolveGloballyAcceptedCheckIds throws when a reference has no
+  // verified winner, and passing a NEED_REVIEW reference in would fail that way
+  // and collapse every genuine winner into "duplicate".
   const references = checkRows
+    .filter((row) => isVerifiedSlipCheckStatus(row.status as SlipCheckStatus))
     .map((row) => normalizeTransactionId(row.reference_id as string | null))
     .filter((ref): ref is string => ref !== null);
   let winners: ReadonlySet<string>;
@@ -172,7 +190,7 @@ export async function loadGuidedSlipRows(
     winners = new Set();
   }
 
-  return checkRows.map((row) => {
+  return checkRows.flatMap((row): GuidedSlipRow[] => {
     const checkId = String(row.id);
     const amount =
       row.transfer_amount === null ? null : Number(row.transfer_amount);
@@ -180,27 +198,28 @@ export async function loadGuidedSlipRows(
     const base = { checkId, amount, referenceId };
 
     if (!isVerifiedSlipCheckStatus(row.status as SlipCheckStatus)) {
-      return { ...base, status: "manual_review" as const };
+      return [{ ...base, status: "manual_review" as const }];
     }
     if (!referenceId) {
-      return { ...base, status: "manual_review" as const };
+      return [{ ...base, status: "manual_review" as const }];
     }
     if (!winners.has(checkId)) {
-      return { ...base, status: "duplicate" as const };
+      return [{ ...base, status: "duplicate" as const }];
     }
     const market = evidenceMarket.get(String(row.evidence_id)) ?? null;
     if (!market || !knownMarkets.has(market)) {
-      return { ...base, status: "market_unclear" as const };
+      return [{ ...base, status: "market_unclear" as const }];
     }
     if (market !== context.marketLabelNormalized) {
-      // Another known market's slip — not this round's, and not an error.
-      return { ...base, status: "market_unclear" as const };
+      // Another known market's slip. The money loader skips it rather than
+      // treating it as unresolved, so this round does not list it at all.
+      return [];
     }
     const txTime = row.transaction_time as string | null;
-    if (txTime && (txTime < startUtc || txTime > endUtc)) {
-      return { ...base, status: "date_mismatch" as const };
+    if (txTime && (txTime < startUtc || txTime >= endUtc)) {
+      return [{ ...base, status: "date_mismatch" as const }];
     }
-    return { ...base, status: "verified" as const };
+    return [{ ...base, status: "verified" as const }];
   });
 }
 

@@ -272,6 +272,43 @@ be remembered.
 (2026-07-29). Slice 3D is built against these pipelines on the repository
 owner's confirmation (2026-07-30) that they remain the operational route.
 
+### 2.6b Releasing the 0050 hold is not proof that produce was saved
+
+`confirm_produce_structured_finalization` is a CONTROL event. The produce rows
+are written afterwards by the deferred `try_finalize_pending_generation`, which
+can still terminalize the round as `failed_closed` — a validation failure,
+missing items, an unconfirmed close. `pending_sessions.finalization_status` is
+therefore the only authority on whether the item list exists, and
+`terminalized` alone says nothing about success.
+
+Successful statuses, by allowlist
+(`SUCCESSFUL_PRODUCE_FINALIZATION_STATUSES`):
+
+| Status | Meaning | Guided outcome |
+|---|---|---|
+| `finalized` | produce session written | **succeeded** |
+| `duplicate` | same generation already written; rows exist | **succeeded** |
+| `pending` / `processing` | deferred finalizer has not reported | pending |
+| `failed_closed` | terminal, nothing saved | failed |
+| anything else | unrecognised | pending while live, **failed** once terminalized |
+
+The last row is the fail-closed rule: an unknown or future status (a
+`validation_failed`, say) is never read as success.
+
+### 2.6c Guided templates are plain text in a shared group
+
+Both the White Sheet closing message and the transfer-slip batch header are
+ordinary text the bot hands over for the operator to copy. Anyone else in the
+LINE group can copy them too, and the journey key is per operator
+(`group:<source>:user:<user>`), so a second member resolves `idle`.
+
+Asking only "does the sender have a round?" therefore let operator B file
+operator A's sheet and fall through to the shared legacy writer. The guards ask
+the source-wide question instead — *does anyone own the round for this market and
+business date?* — and legacy fallback survives only when the answer is nobody.
+An unanswerable lookup refuses; treating it as `not_guided` is precisely the
+hole that existed.
+
 ### 2.7 The White Sheet cannot supply the settlement amounts
 
 `digital_white_sheet_cash_entries` and `settlement_entries` both carry money
@@ -355,19 +392,30 @@ stateDiagram-v2
     SessionOpen --> Closing: [จบรายการ] request_close
     Closing --> Held: 0050 finalization hold armed
     Held --> Held: confirm_finalize → not_ready (barrier unsatisfied)
-    Held --> Finalized: [ยืนยันจบรายการ] confirm_finalize
+    Held --> ValidationFailed: confirm_finalize → session cannot finalize (refused BEFORE the RPC, zero writes)
+    ValidationFailed --> Held: operator resends the corrected line
+    Held --> Finalizing: [ยืนยันจบรายการ] confirm_finalize — hold released
+    Finalizing --> Finalizing: [ดูสถานะ] → finalization_status still pending/processing
+    Finalizing --> Finalized: finalization_status finalized / duplicate
+    Finalizing --> FinalizeFailed: terminal without a successful status
+    FinalizeFailed --> FinalizeFailed: [ดูสถานะ] — never offers กรอกใบขาว; recovery is an admin
     Finalized --> WhiteSheet: [กรอกใบขาว] view_status
 
     state WhiteSheet {
         [*] --> Template
         Template --> Guard: operator sends the edited template
         Guard --> Refused: market/date ≠ the open round — zero writes
+        Guard --> Refused: another operator in the source owns this market/date
+        Guard --> Refused: ownership cannot be determined (lookup failed)
+        Guard --> LegacyCommand: nobody owns this market/date — pre-existing path
         Guard --> ExistingCommand: matches the round
         ExistingCommand --> Submitted: processWhiteSheetCloseCommand
         ExistingCommand --> FinalizedSheet: already FINALIZED — never overwritten
     }
 
     WhiteSheet --> Slips: handoff prints the slip header + "ปิดรอบ"
+    Slips --> SlipOpenRefused: header edited / copied / wrong group / assignment revoked — no slip_batches row
+    SlipOpenRefused --> Slips: operator resends the header the bot gave them
     Slips --> Slips: images → existing evidence / batch / OCR pipeline
     Slips --> Slips: "จบสลิป" closes the batch, "สลิปมือ" is the fallback
     Slips --> Settlement: [กรอกยอดส่ง] view_status — settlement still missing
@@ -401,9 +449,17 @@ Per-slip status, from existing evidence truth only, in classification order:
 |---|---|
 | `รอตรวจมือ` | check status not EXTRACTED/PARTIAL_EXTRACTED, **or** verified with no reference id (BR-02) |
 | `สลิปซ้ำ` | verified, but its reference already has a global winner |
-| `ตลาดไม่ชัด` | evidence market missing, unknown for the source/date, or another market |
-| `วันที่ไม่ตรง` | transaction time outside the business-date window |
+| `ตลาดไม่ชัด` | evidence market missing, or not a known produce market for the source/date |
+| *(not listed)* | evidence attributed to a **different known** market — another round's; the money loader skips it, so this round omits it entirely |
+| `วันที่ไม่ตรง` | transaction time outside `startUtc <= t < endUtc`. Informational only: the money loaders scope by `received_at`, so the amount is still inside this round's total |
 | `อ่านสำเร็จ` | survives all of the above |
+
+The list has exactly the loaders' scope: `received_at` is half-open
+(`startUtc <= received_at < endUtc`), and only VERIFIED-status checks contribute
+references to the global-winner resolution — passing a `NEED_REVIEW` reference in
+makes `resolveGloballyAcceptedCheckIds` throw, which would collapse every genuine
+winner into `สลิปซ้ำ`. A slip shown as `อ่านสำเร็จ` is therefore always one that
+contributes to `checked_slip_total`.
 
 Close blockers, every one an existing lifecycle state:
 `white_sheet_not_submitted`, `slip_batch_open`, `ocr_pending`,
@@ -437,6 +493,12 @@ difference               = submitted_transfer_total - checked_slip_total
 | One settlement row per round | the guided write uses the Dashboard's own upsert key (`settlement_time = ""`, seller, market); a resend updates it, and an entry stored under any other key is refused instead of added beside — `tryFinalizeSettlement` would otherwise be permanently `ambiguous` |
 | Settlement retry is safe | the same LINE message resubmitted returns the identical receipt and leaves one row; a round whose settlement message already went out (`status = 'sent'` / `message_sent_at`) is refused, never silently rewritten |
 | Settlement binding | seller, market and business date must equal the round's frozen metadata; `source_id` and operator come from the resolved journey, never from the message text |
+| No success claimed before produce exists | `finalization_status` allowlist (§2.6b); the confirm reply re-reads the authoritative row, and `ดูสถานะ` re-reads it on every press |
+| No produce write on a session that cannot finalize | `getWeighSessionFinalizationErrors` runs BEFORE the confirm RPC; a partial parse or invalid quantity/unit is refused with the hold still armed |
+| Cross-operator template reuse | source-wide `findRoundOwner(source, market, business_date)`; a round owned by another operator refuses, and an unanswerable lookup refuses rather than falling back to legacy |
+| Cross-group template reuse | ownership is scoped by `source_id`; a copied template in another group finds no owner for its own source and cannot touch this one |
+| Guided slip batch cannot be opened for the wrong round | pre-write guard on source, operator, seller, market, business date, produce success, White Sheet submitted, and a still-active seller→market assignment — refusal creates no `slip_batches` row |
+| Legacy paths stay legacy | a market/date no guided round owns still runs the pre-existing White Sheet command and slip open, unchanged |
 
 ---
 
@@ -661,7 +723,53 @@ A missing settlement renders `—`, never a guessed `0`.
 4. Watch for `guided round close handled` in the logs: `closed: false` on the
    first attempt is the expected, correct outcome while any blocker remains.
    `guided settlement handled` with `saved: false` is likewise the correct
-   outcome for a refused submission — nothing was written.
+   outcome for a refused submission — nothing was written. `slip open refused —
+   guided round mismatch` and `white sheet close refused — journey mismatch` are
+   the guards doing their job.
+
+### 6.0 Production UAT checklist
+
+Run in a pilot group, with a second LINE account in the SAME group as
+"operator B". Every ✗ row must leave the database untouched — check the named
+table after each one.
+
+**Happy path (operator A)**
+
+| # | Step | Expect |
+|---|---|---|
+| 1 | `เมนู` → เบิก → seller → market → today → `[ยืนยัน]` | round opened, one `pending_sessions` row |
+| 2 | send product lines, each with its quantity/unit line | appended; `[ดูรายการ]` shows them |
+| 3 | `[จบรายการ]` | close boundary set, hold armed |
+| 4 | `[ยืนยันจบรายการ]` | either "กำลังบันทึกรายการสินค้า ยังไม่เสร็จ" or the saved receipt — **never** a saved receipt while `finalization_status` is `pending`/`processing` |
+| 5 | `[ดูสถานะ]` until it advances | when `finalization_status = finalized`, the White Sheet template appears |
+| 6 | send the edited White Sheet template | existing reply, then the slip handoff |
+| 7 | send the slip header the bot gave you | "เปิดชุดสลิปเงินโอนแล้ว", one `slip_batches` row |
+| 8 | send slip images, then `จบสลิป` | existing OCR/summary behaviour |
+| 9 | `[ตรวจยอด]` → `[กรอกยอดส่ง]` | reconciliation plus the `ส่งยอด` template |
+| 10 | send the edited `ส่งยอด` template | "บันทึกยอดส่งเรียบร้อย ✅" + the ตรวจยอด report; ONE `settlement_entries` row, `settlement_time = ''` |
+| 11 | `ปิดรอบ` | "ปิดรอบเรียบร้อย ✅", one `settlement_finalizations` row |
+| 12 | `ปิดรอบ` again | same receipt, still ONE finalization row |
+
+**Refusals — verify zero writes**
+
+| # | Step | Expect | Check |
+|---|---|---|---|
+| ✗1 | at step 2, send a product line with no quantity/unit, then `[ยืนยันจบรายการ]` | "ยังยืนยันไม่ได้ ระบบยังอ่านรายการไม่ครบ", no `กรอกใบขาว` offered | `finalize_confirmed_at` still NULL |
+| ✗2 | operator B copies A's White Sheet template | "รอบนี้เป็นของผู้ใช้อีกคนในกลุ่ม" | no new `digital_white_sheet_cash_entries` row |
+| ✗3 | operator B copies A's slip header | same refusal | no new `slip_batches` row |
+| ✗4 | A edits the seller, market or date in the slip header | "ไม่ตรงกับรอบที่เปิดอยู่" | no new `slip_batches` row |
+| ✗5 | A sends the slip header before the White Sheet | "ยังไม่ได้บันทึกใบขาวของรอบนี้" | no new `slip_batches` row |
+| ✗6 | A edits the market or date in the `ส่งยอด` template | "ไม่ตรงกับรอบที่เปิดอยู่" | no new `settlement_entries` row |
+| ✗7 | A resends `ส่งยอด` after `ปิดรอบ` succeeded | "รอบนี้ปิดและส่งสรุปไปแล้ว" | `money_transfer` unchanged |
+| ✗8 | revoke the seller→market assignment, then resend the slip header | "ไม่ได้ผูกกันในระบบแล้ว" | no new `slip_batches` row |
+
+**Legacy regression (a market/date with no guided round)**
+
+| # | Step | Expect |
+|---|---|---|
+| L1 | send a direct White Sheet closing message | behaves exactly as before |
+| L2 | send a direct slip header | opens as before |
+| L3 | `POST /api/settlement` from the Dashboard | unchanged response, still finalizes on submit |
 
 **Rollback**
 
@@ -714,3 +822,18 @@ A missing settlement renders `—`, never a guessed `0`.
    keyed `(source_id, market_label_normalized, business_date)` only (§2.2).
 6. **`produce_sessions.work_round_id` stays NULL**, as every row written since
    2026-06-27 already is (§2.1).
+7. **A failed produce finalization can only be recovered by an administrator.**
+   The reply says plainly that the item list was not saved and offers no
+   `กรอกใบขาว`; there is no cancel or reopen RPC to call and none was invented, so
+   the operator needs a fresh round opened for them (same root cause as §2.3).
+8. **Finalization is not awaited synchronously.** The webhook cannot block on the
+   deferred finalizer, so `[ยืนยันจบรายการ]` normally answers "กำลังบันทึก… ยังไม่
+   เสร็จ" and the operator presses `ดูสถานะ` once. The reply is honest rather than
+   optimistic; the alternative would be claiming a save that may not happen.
+9. **Ownership is by `(source_id, market, business_date)` and does not lapse.**
+   Once an operator opens a guided round for a market/date, nobody else in that
+   source can submit the White Sheet or open the slip batch for it — including
+   after the round closes. A genuine handover needs an administrator.
+10. **A `วันที่ไม่ตรง` slip is still inside the round's total.** The money loaders
+    scope by `received_at`, not by the bank's `transaction_time`, so the status is
+    a warning to check the slip, not a claim that it was excluded (§3.2).

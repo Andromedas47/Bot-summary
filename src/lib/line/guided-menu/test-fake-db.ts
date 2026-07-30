@@ -4,6 +4,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { normalizedMarketLabel } from "@/lib/market";
 import { hashMenuTokenWire } from "./menu-token";
 import {
   MUTATING_MENU_ACTIONS,
@@ -373,6 +374,9 @@ export class GuidedMenuFakeDatabase {
     if (name === "open_or_rotate_produce_structured_session") {
       return { data: this.openOrRotate(args), error: null };
     }
+    if (name === "open_or_rotate_guided_produce_structured_session") {
+      return { data: this.openGuided(args), error: null };
+    }
     if (name === "close_produce_structured_session") {
       return { data: this.closeStructured(args), error: null };
     }
@@ -585,6 +589,35 @@ export class GuidedMenuFakeDatabase {
       session_key: key,
       session_generation: generation,
     };
+  }
+
+  /** Mirrors 0057's source-wide owner decision before delegating to 0049. */
+  private openGuided(args: Row): Record<string, unknown> {
+    const source = String(args.p_source_id ?? "").trim();
+    const user = String(args.p_line_user_id ?? "").trim();
+    const date = String(args.p_business_date ?? "");
+    const market = normalizedMarketLabel(
+      String(args.p_market_label_normalized ?? ""),
+    );
+    const owners = new Set(
+      (this.tables.pending_sessions ?? [])
+        .filter(
+          (row) =>
+            row.source_id === source
+            && row.business_date === date
+            && row.entry_origin === "structured_menu"
+            && normalizedMarketLabel(String(row.market_label ?? "")) === market,
+        )
+        .map((row) => String(row.line_user_id ?? "").trim()),
+    );
+
+    if (owners.has("") || owners.size > 1) {
+      return { outcome: "ownership_conflict", reason: "ambiguous" };
+    }
+    if (owners.size === 1 && !owners.has(user)) {
+      return { outcome: "ownership_conflict", reason: "other_operator" };
+    }
+    return this.openOrRotate(args);
   }
 
   /** Seed a pre-existing pending session row (e.g. an unfinished round). */

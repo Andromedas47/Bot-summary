@@ -188,29 +188,4 @@ describe("only one operator may own a guided round", () => {
     expect(outcome.status).toBe("opened");
   });
 
-  it("refuses rather than opening when the ownership query fails", async () => {
-    const db = new GuidedMenuFakeDatabase();
-    const client = db.asClient() as { from: (t: string) => unknown };
-    const failing = {
-      from: (table: string) =>
-        table === "pending_sessions"
-          ? (() => {
-              const chain: Record<string, unknown> = {};
-              chain.select = () => chain;
-              chain.eq = () => chain;
-              chain.not = () => chain;
-              chain.order = async () => ({ data: null, error: { message: "down" } });
-              chain.maybeSingle = async () => ({ data: null, error: null });
-              return chain;
-            })()
-          : client.from(table),
-      rpc: (db.asClient() as unknown as { rpc: unknown }).rpc,
-    } as never;
-
-    const outcome = await new GuidedSessionOpener(failing).open(openInput(B));
-    expect(outcome.status).toBe("round_owned");
-    if (outcome.status !== "round_owned") return;
-    expect(outcome.reason).toBe("unknown");
-    expect(db.openProduceCalls).toBe(0);
-  });
 });

@@ -583,7 +583,7 @@ describe("Slice 3A — existing open session guard", () => {
     // have observed gen-stale: the optimistic generation no longer matches.
     const originalRpc = db.rpc.bind(db);
     db.rpc = (async (name: string, args: Record<string, unknown>) => {
-      if (name === "open_or_rotate_produce_structured_session") {
+      if (name === "open_or_rotate_guided_produce_structured_session") {
         db.seedPendingSession({
           session_key: SESSION_KEY,
           source_id: "G-1",

@@ -3,10 +3,10 @@
  * produce session.
  *
  * Every business rule here is delegated, never re-implemented:
- *   - opening/rotating goes through ProduceSessionCommandService, i.e.
- *     open_or_rotate_produce_structured_session (0049), which owns canonical
- *     session-key derivation, ownership checks, same-event idempotency and
- *     optimistic concurrency;
+ *   - opening/rotating goes through ProduceSessionCommandService and 0057's
+ *     atomic guided wrapper, which owns source-wide ownership before delegating
+ *     canonical session-key, same-event idempotency and optimistic concurrency
+ *     to open_or_rotate_produce_structured_session (0049);
  *   - "is a session still open" is answered by pending_sessions.terminalized,
  *     the same flag the legacy webhook text flow uses to decide rotation.
  *
@@ -26,7 +26,6 @@ import {
 import type { BaseTransactionType } from "@/lib/parsers/weigh-session/types";
 import { normalizedMarketLabel } from "@/lib/market";
 import type { MenuTransactionTypeCode } from "./menu-state-types";
-import { checkGuidedRoundOwner } from "./round-owner";
 import type { GuidedMenuIdentity } from "./ux-types";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -152,31 +151,6 @@ export class GuidedSessionOpener {
       return { status: "refused", reason: "invalid_line_timestamp" };
     }
 
-    // One guided owner per (source, market, business date), enforced BEFORE the
-    // open RPC. The session key is per operator, so open_or_rotate cannot see
-    // that a second member of the same LINE group is already standing on this
-    // round; without this check B could open a parallel round and then pass
-    // every per-operator guard on the way to the shared White Sheet and slips.
-    //
-    // Same-operator retry is unaffected: they are their own owner, and rotation
-    // remains the RPC's decision. A later business date or another market is a
-    // different tuple and stays independent.
-    const owner = await checkGuidedRoundOwner(this.supabase, {
-      sourceId: input.identity.sourceId,
-      marketLabelNormalized: normalizedMarketLabel(input.marketLabel),
-      businessDate: input.businessDateIso,
-      lineUserId: input.identity.lineUserId,
-    });
-    if (owner.kind === "other_operator") {
-      return { status: "round_owned", reason: "other_operator" };
-    }
-    if (owner.kind === "ambiguous") {
-      return { status: "round_owned", reason: "ambiguous" };
-    }
-    if (owner.kind === "unknown") {
-      return { status: "round_owned", reason: "unknown" };
-    }
-
     const lookup = await this.pending.lookup(sessionKey);
     if (lookup.reason === "db_error") {
       return { status: "refused", reason: "pending_lookup_failed" };
@@ -218,9 +192,16 @@ export class GuidedSessionOpener {
         expectedSessionGeneration: existing?.session_generation ?? null,
       },
       source,
+      normalizedMarketLabel(input.marketLabel),
     );
 
     if (!result.ok) {
+      if (
+        result.reason === "ownership_conflict"
+        && (result.detail === "other_operator" || result.detail === "ambiguous")
+      ) {
+        return { status: "round_owned", reason: result.detail };
+      }
       return {
         status: "conflict",
         reason: result.reason,

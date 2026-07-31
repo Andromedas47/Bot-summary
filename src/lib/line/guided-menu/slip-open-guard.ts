@@ -15,7 +15,11 @@
 import { normalizedMarketLabel } from "@/lib/market";
 import { parseBusinessDate } from "@/lib/line/white-sheet-close-command";
 import type { SlipSessionHeader } from "@/lib/slips/slip-session-service";
-import { resolveGuidedOwnership } from "./ownership-guard";
+import {
+  resolveGuidedOwnership,
+  type GuidedOwnershipDebugReason,
+} from "./ownership-guard";
+import type { GuidedMarkerPurpose } from "./provenance";
 import type { GuidedJourneyContext, GuidedJourneyService } from "./journey";
 import { GUIDED_MENU_COPY } from "./ux-types";
 import type { GuidedMenuIdentity } from "./ux-types";
@@ -33,7 +37,13 @@ export type GuidedSlipOpenGuard =
   | { verdict: "not_guided" }
   | { verdict: "allowed"; context: GuidedJourneyContext }
   /** Refuse before the open — zero rows. */
-  | { verdict: "refused"; message: string; reason?: "stale_form" };
+  | {
+      verdict: "refused";
+      message: string;
+      reason?: "stale_form";
+      regenerate?: { purpose: GuidedMarkerPurpose; context: GuidedJourneyContext };
+      debugReason?: GuidedOwnershipDebugReason;
+    };
 
 export async function guardGuidedSlipOpen(input: {
   journey: GuidedJourneyService;

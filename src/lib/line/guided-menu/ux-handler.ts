@@ -97,7 +97,6 @@ export function isExactGuidedMenuTrigger(text: string): boolean {
   return text.trim() === GUIDED_MENU_TRIGGER;
 }
 
-
 /** Exact plain-text close for the guided requestClose contract. */
 export function isExactGuidedCloseTrigger(text: string): boolean {
   return text.trim() === "จบรายการ";
@@ -930,59 +929,89 @@ export class GuidedMenuUxHandler {
       !settlementSubmitted || report.blockers.includes("difference_non_zero");
     const template = needsTemplate ? buildSettlementTemplate(context) : null;
 
+    // Slips are optional and never gate the round (round-close.ts never blocks
+    // on "no slips sent") — a fresh header is offered here too, not just while
+    // `stage === "slips"`, so a reconcile-stage operator who still wants to
+    // send transfer slips is never stuck. Same mechanism as stale-form
+    // regeneration: the fresh header is submitted AS the button press, through
+    // the existing slip-open guard and parser, unchanged.
+    const freshSlipHeader = buildSlipHeaderTemplate(context);
+
     // Every button is single-use, so each label mints its OWN token even when
     // several re-render the same view_status action — reusing one token across
-    // two visible buttons would make the second press "already consumed".
-    const create = this.createTokenFn(identity);
-    const quickReply = !settlementSubmitted
-      ? bindMixedQuickReply([
-          {
-            kind: "token",
-            label: "กรอกยอดส่ง",
-            wireToken: await create({ actionType: "view_status", payload: {} }),
-          },
-          {
-            kind: "token",
-            label: "ดูสถานะ",
-            wireToken: await create({ actionType: "view_status", payload: {} }),
-          },
-          {
-            kind: "token",
-            label: "ออกจากเมนู",
-            wireToken: await create({
-              actionType: "menu_root",
-              payload: { intent: "cancel" },
-            }),
-          },
-        ])
-      : // Never label a view_status button "ปิดรอบ" — closing stays the exact
-        // text command, only relabeled as "ตรวจและปิดรอบ". Whatever remains
-        // blocked, this is now the one authoritative next step.
-        bindMixedQuickReply([
-          {
-            kind: "message",
-            label: GUIDED_MENU_COPY.checkAndCloseLabel,
-            text: GUIDED_MENU_COPY.roundCloseCommand,
-          },
-          {
-            kind: "token",
-            label: GUIDED_MENU_COPY.editSettlementLabel,
-            wireToken: await create({ actionType: "view_status", payload: {} }),
-          },
-          {
-            kind: "token",
-            label: GUIDED_MENU_COPY.viewDetailLabel,
-            wireToken: await create({ actionType: "view_status", payload: {} }),
-          },
-          {
-            kind: "token",
-            label: "ออกจากเมนู",
-            wireToken: await create({
-              actionType: "menu_root",
-              payload: { intent: "cancel" },
-            }),
-          },
-        ]);
+    // two visible buttons would make the second press "already consumed". A
+    // token-mint failure (e.g. a transient state-write error) must not crash
+    // the whole screen — the same graceful-fallback pattern the session-action
+    // button builders already use (see buildSessionActionButtons).
+    let quickReply: LineQuickReply | undefined;
+    try {
+      const create = this.createTokenFn(identity);
+      quickReply = !settlementSubmitted
+        ? bindMixedQuickReply([
+            {
+              kind: "token",
+              label: "กรอกยอดส่ง",
+              wireToken: await create({ actionType: "view_status", payload: {} }),
+            },
+            {
+              kind: "token",
+              label: "ดูสถานะ",
+              wireToken: await create({ actionType: "view_status", payload: {} }),
+            },
+            ...(freshSlipHeader
+              ? [{
+                  kind: "message" as const,
+                  label: GUIDED_MENU_COPY.startSlipsLabel,
+                  text: freshSlipHeader,
+                }]
+              : []),
+            {
+              kind: "token",
+              label: "ออกจากเมนู",
+              wireToken: await create({
+                actionType: "menu_root",
+                payload: { intent: "cancel" },
+              }),
+            },
+          ])
+        : // Never label a view_status button "ปิดรอบ" — closing stays the exact
+          // text command, only relabeled as "ตรวจและปิดรอบ". Whatever remains
+          // blocked, this is now the one authoritative next step.
+          bindMixedQuickReply([
+            {
+              kind: "message",
+              label: GUIDED_MENU_COPY.checkAndCloseLabel,
+              text: GUIDED_MENU_COPY.roundCloseCommand,
+            },
+            {
+              kind: "token",
+              label: GUIDED_MENU_COPY.editSettlementLabel,
+              wireToken: await create({ actionType: "view_status", payload: {} }),
+            },
+            {
+              kind: "token",
+              label: GUIDED_MENU_COPY.viewDetailLabel,
+              wireToken: await create({ actionType: "view_status", payload: {} }),
+            },
+            ...(freshSlipHeader
+              ? [{
+                  kind: "message" as const,
+                  label: GUIDED_MENU_COPY.startSlipsLabel,
+                  text: freshSlipHeader,
+                }]
+              : []),
+            {
+              kind: "token",
+              label: "ออกจากเมนู",
+              wireToken: await create({
+                actionType: "menu_root",
+                payload: { intent: "cancel" },
+              }),
+            },
+          ]);
+    } catch {
+      quickReply = undefined;
+    }
 
     const nextStepLine = template
       ? "กรอกแบบฟอร์มยอดส่งด้านล่าง แก้เฉพาะตัวเลข แล้วส่งกลับมา"
@@ -1049,7 +1078,9 @@ export class GuidedMenuUxHandler {
       "session_status",
       buildCapturedItemsMessages({
         summary: [
-          GUIDED_MENU_COPY.stageHeaderCapture,
+          stage === "awaiting_confirm"
+            ? GUIDED_MENU_COPY.stageHeaderConfirm
+            : GUIDED_MENU_COPY.stageHeaderCapture,
           "",
           summary,
           "",

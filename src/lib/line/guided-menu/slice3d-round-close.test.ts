@@ -530,6 +530,134 @@ describe("Slice 3D — the ตรวจและปิดรอบ / ปิด�
     expect(text).not.toContain(GUIDED_MENU_COPY.roundNotReadyHeading);
   });
 
+  /** A stateService stub that actually mints tokens, to assert real Quick Reply contents. */
+  function mintingStateService(): { createState: () => Promise<{ status: "created"; wireToken: string }> } {
+    let n = 0;
+    return {
+      createState: async () => {
+        n += 1;
+        return { status: "created" as const, wireToken: `gpm1:stub-${n}` };
+      },
+    };
+  }
+
+  function quickReplyLabelsAndTypes(message: unknown): Array<[string, string]> {
+    const items =
+      (message as { quickReply?: { items?: unknown[] } }).quickReply?.items ?? [];
+    return items.map((item) => {
+      const action = (item as { action: { label: string; type: string } }).action;
+      return [action.label, action.type];
+    });
+  }
+
+  it("case 1 — settlement_missing becomes the primary Quick Reply action (กรอกยอดส่ง)", async () => {
+    const db = baseDb();
+    seedSlip(db, { id: "c1", amount: 1000 });
+    // No settlement entry seeded at all — settlement_missing is the only blocker.
+    const { GuidedRoundService } = await import("./round-close");
+
+    const reply = await processGuidedRoundClose({
+      journey: fakeJourney(reconcileState()),
+      rounds: new GuidedRoundService(db.asClient() as never),
+      identity: {
+        lineUserId: "U-op-1",
+        sourceType: "group",
+        sourceId: SOURCE,
+        sessionKey: CONTEXT.sessionKey,
+      },
+      stateService: mintingStateService() as never,
+    });
+
+    expect(reply.closed).toBe(false);
+    const text = textOf(reply.messages[0]!);
+    expect(text).toContain("กรอกยอดส่ง");
+    const message = reply.messages[0]! as { quickReply?: { items: unknown[] } };
+    // ONE primary action ("กรอกยอดส่ง") — no duplicate ดูสถานะ needed since
+    // it is not the primary label here, so it IS offered as secondary.
+    expect(quickReplyLabelsAndTypes(message)).toEqual([
+      ["กรอกยอดส่ง", "postback"],
+      ["ดูสถานะ", "postback"],
+    ]);
+  });
+
+  it("case 1 — a single ocr_pending blocker offers only ดูสถานะ, not a duplicate", async () => {
+    const db = baseDb();
+    seedSlip(db, { id: "c1", status: "NEED_REVIEW", amount: null, reference: null });
+    seedSettlement(db, 0);
+    const { GuidedRoundService } = await import("./round-close");
+
+    const reply = await processGuidedRoundClose({
+      journey: fakeJourney(reconcileState()),
+      rounds: new GuidedRoundService(db.asClient() as never),
+      identity: {
+        lineUserId: "U-op-1",
+        sourceType: "group",
+        sourceId: SOURCE,
+        sessionKey: CONTEXT.sessionKey,
+      },
+      stateService: mintingStateService() as never,
+    });
+
+    expect(reply.closed).toBe(false);
+    const message = reply.messages[0]! as { quickReply?: { items: unknown[] } };
+    expect(quickReplyLabelsAndTypes(message)).toEqual([["ดูสถานะ", "postback"]]);
+  });
+
+  it("case 2 — the mismatch screen's ONE Quick Reply is แก้ไขยอดส่ง, on the ONE message", async () => {
+    const db = baseDb();
+    seedSlip(db, { id: "c1", amount: 1000 });
+    seedSettlement(db, 900);
+    const { GuidedRoundService } = await import("./round-close");
+
+    const reply = await processGuidedRoundClose({
+      journey: fakeJourney(reconcileState()),
+      rounds: new GuidedRoundService(db.asClient() as never),
+      identity: {
+        lineUserId: "U-op-1",
+        sourceType: "group",
+        sourceId: SOURCE,
+        sessionKey: CONTEXT.sessionKey,
+      },
+      stateService: mintingStateService() as never,
+    });
+
+    expect(reply.closed).toBe(false);
+    expect(reply.messages).toHaveLength(1);
+    const message = reply.messages[0]! as { quickReply?: { items: unknown[] } };
+    // แก้ไขยอดส่ง is the PRIMARY (first) action; ดูสถานะ is offered as the
+    // only secondary — never a second, competing primary.
+    expect(quickReplyLabelsAndTypes(message)).toEqual([
+      [GUIDED_MENU_COPY.editSettlementLabel, "postback"],
+      ["ดูสถานะ", "postback"],
+    ]);
+  });
+
+  it("case 3 — the closed screen's ONE Quick Reply is เริ่มรายการใหม่", async () => {
+    const db = baseDb();
+    seedSlip(db, { id: "c1", amount: 1000 });
+    seedSettlement(db, 1000);
+    db.seed("line_groups", []);
+    const { GuidedRoundService } = await import("./round-close");
+
+    const reply = await processGuidedRoundClose({
+      journey: fakeJourney(reconcileState()),
+      rounds: new GuidedRoundService(db.asClient() as never),
+      identity: {
+        lineUserId: "U-op-1",
+        sourceType: "group",
+        sourceId: SOURCE,
+        sessionKey: CONTEXT.sessionKey,
+      },
+      stateService: mintingStateService() as never,
+    });
+
+    expect(reply.closed).toBe(true);
+    const message = reply.messages[0]! as { quickReply?: { items: unknown[] } };
+    expect(quickReplyLabelsAndTypes(message)).toEqual([
+      [GUIDED_MENU_COPY.startNewLabel, "postback"],
+    ]);
+  });
+
   it("case 3 — matched totals close the round and offer เริ่มรายการใหม่", async () => {
     const db = baseDb();
     seedSlip(db, { id: "c1", amount: 1000 });

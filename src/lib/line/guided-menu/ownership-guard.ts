@@ -34,9 +34,20 @@ import type {
   GuidedJourneyService,
   GuidedJourneyState,
 } from "./journey";
-import { verifyGuidedMarker, type GuidedMarkerPurpose } from "./provenance";
+import {
+  isGuidedMarker,
+  verifyGuidedMarker,
+  type GuidedMarkerPurpose,
+} from "./provenance";
 import type { GuidedMenuIdentity } from "./ux-types";
 import { GUIDED_MENU_COPY } from "./ux-types";
+
+/** Internal-only diagnostic for a refused marker — never shown to the operator. */
+export type GuidedOwnershipDebugReason =
+  | "stale_generation"
+  | "marker_invalid"
+  | "marker_purpose_mismatch"
+  | "round_not_owned";
 
 /**
  * Stages in which the produce round is proven saved and later steps may run.
@@ -52,6 +63,57 @@ const STAGES_AFTER_PRODUCE = new Set<GuidedJourneyState["stage"]>([
   "closed",
 ]);
 
+/**
+ * Does the form `purpose` still make sense for the caller's CURRENT stage?
+ * White Sheet and settlement are single-stage forms; the slip header is not
+ * — a batch may be (re)opened while collecting OR any time during reconcile,
+ * since slips are optional and never gate the round (see journey.ts
+ * hasOpenSlipWork / round-close.ts's blockers). `closed` matches no purpose:
+ * a finished round never regenerates a form for any of them.
+ */
+function purposeStillApplies(
+  purpose: GuidedMarkerPurpose,
+  stage: GuidedJourneyState["stage"],
+): boolean {
+  if (purpose === "white_sheet") return stage === "white_sheet";
+  if (purpose === "settlement") return stage === "reconcile";
+  return stage === "slips" || stage === "reconcile";
+}
+
+/**
+ * Best-effort, non-authoritative diagnosis of WHY a marker failed — for logs
+ * only, never for a decision. The HMAC is one-way, so a marker that simply
+ * does not match the current context cannot be proven "old" versus
+ * "tampered"; the only thing we CAN check cheaply is whether it verifies for
+ * one of the two other purposes with everything else held constant.
+ */
+function diagnoseMarkerRefusal(
+  marker: string,
+  purpose: GuidedMarkerPurpose,
+  identity: GuidedMenuIdentity,
+  context: GuidedJourneyContext,
+): GuidedOwnershipDebugReason {
+  if (!isGuidedMarker(marker)) return "marker_invalid";
+  const purposes: readonly GuidedMarkerPurpose[] = [
+    "white_sheet",
+    "slip_open",
+    "settlement",
+  ];
+  const mintedForOtherPurpose = purposes
+    .filter((p) => p !== purpose)
+    .some((p) =>
+      verifyGuidedMarker(marker, {
+        purpose: p,
+        sourceId: context.sourceId,
+        lineUserId: identity.lineUserId,
+        marketLabelNormalized: context.marketLabelNormalized,
+        businessDate: context.businessDate,
+        sessionGeneration: context.sessionGeneration,
+      }),
+    );
+  return mintedForOtherPurpose ? "marker_purpose_mismatch" : "stale_generation";
+}
+
 export type GuidedOwnershipVerdict =
   /** No guided round anywhere in this source for the market/date — legacy runs. */
   | { verdict: "not_guided" }
@@ -60,10 +122,20 @@ export type GuidedOwnershipVerdict =
   /**
    * Refuse and write nothing. `reason: "stale_form"` marks specifically the
    * signed-marker-present-but-invalid case — a copied, edited, or
-   * previous-generation template — so callers can offer the
-   * "สร้างแบบฟอร์มใหม่" recovery action without string-matching `message`.
+   * previous-generation template. `regenerate` is present only when the SAME
+   * purpose is still valid for the caller's CURRENT stage, so callers may
+   * offer a "สร้างแบบฟอร์มใหม่" action that regenerates that exact form; when
+   * absent, the form is no longer applicable at all (round moved on, or
+   * closed) and only a status check should be offered. `debugReason` is an
+   * internal diagnostic for logs only — never shown to the operator.
    */
-  | { verdict: "refused"; message: string; reason?: "stale_form" };
+  | {
+      verdict: "refused";
+      message: string;
+      reason?: "stale_form";
+      regenerate?: { purpose: GuidedMarkerPurpose; context: GuidedJourneyContext };
+      debugReason?: GuidedOwnershipDebugReason;
+    };
 
 export type GuidedOwnershipTarget = {
   marketLabelNormalized: string;
@@ -120,11 +192,12 @@ export async function resolveGuidedOwnership(input: {
       return { verdict: "not_guided" };
     }
     // A marker for a round that does not exist cannot be verified against
-    // anything. It is our form, aimed somewhere it does not belong.
+    // anything, and there is no round to regenerate a form for.
     return {
       verdict: "refused",
-      message: refusal(GUIDED_MENU_COPY.ownershipMarkerRejected),
+      message: GUIDED_MENU_COPY.staleFormNoLongerApplicable,
       reason: "stale_form",
+      debugReason: "round_not_owned",
     };
   }
 
@@ -183,6 +256,16 @@ export async function resolveGuidedOwnership(input: {
     };
   }
 
+  // A round whose settlement already went out is terminal: no write-adjacent
+  // guided operation (White Sheet close, slip open, settlement submit) may
+  // proceed against it, marked or not — see journey.ts's `closed` stage.
+  if (state.stage === "closed") {
+    return {
+      verdict: "refused",
+      message: refusal(GUIDED_MENU_COPY.ownershipRoundClosed),
+    };
+  }
+
   // ── 4. A marked message must be OUR form for THIS round ───────────────────
   if (
     marked &&
@@ -195,11 +278,27 @@ export async function resolveGuidedOwnership(input: {
       sessionGeneration: context.sessionGeneration,
     })
   ) {
-    return {
-      verdict: "refused",
-      message: refusal(GUIDED_MENU_COPY.ownershipMarkerRejected),
-      reason: "stale_form",
-    };
+    const canRegenerate = purposeStillApplies(input.purpose, state.stage);
+    const debugReason = diagnoseMarkerRefusal(
+      input.marker!,
+      input.purpose,
+      input.identity,
+      context,
+    );
+    return canRegenerate
+      ? {
+          verdict: "refused",
+          message: refusal(GUIDED_MENU_COPY.ownershipMarkerRejected),
+          reason: "stale_form",
+          regenerate: { purpose: input.purpose, context },
+          debugReason,
+        }
+      : {
+          verdict: "refused",
+          message: GUIDED_MENU_COPY.staleFormNoLongerApplicable,
+          reason: "stale_form",
+          debugReason,
+        };
   }
 
   return { verdict: "allowed", context, state };

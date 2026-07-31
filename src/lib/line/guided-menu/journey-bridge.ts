@@ -17,17 +17,27 @@ import type { WhiteSheetCloseCommand } from "@/lib/line/white-sheet-close-comman
 import {
   GuidedJourneyService,
   buildSlipHeaderTemplate,
+  buildWhiteSheetTemplate,
   type GuidedJourneyContext,
 } from "./journey";
-import { resolveGuidedOwnership } from "./ownership-guard";
+import {
+  resolveGuidedOwnership,
+  type GuidedOwnershipDebugReason,
+} from "./ownership-guard";
+import type { GuidedMarkerPurpose } from "./provenance";
+import { buildSettlementTemplate } from "./settlement-command";
 import {
   GuidedRoundService,
   GUIDED_ROUND_BLOCKER_ACTION_LABEL,
   classifyGuidedRoundBlockers,
   type GuidedRoundCloseOutcome,
 } from "./round-close";
-import { bindQuickReply, buildPlainTextMessage } from "./messages";
-import { GUIDED_MENU_COPY } from "./ux-types";
+import {
+  bindMixedQuickReply,
+  bindQuickReply,
+  buildPlainTextMessage,
+} from "./messages";
+import { GUIDED_MENU_COPY, GUIDED_MENU_TRIGGER } from "./ux-types";
 import type {
   GuidedMenuIdentity,
   GuidedMenuLineMessage,
@@ -74,6 +84,85 @@ export async function buildGuidedStartNewQuickReply(
   ]);
 }
 
+/**
+ * Mint a "ดูสถานะ" (`view_status`) token — the SAME re-render every "ดูสถานะ"
+ * button on every stage already uses (ux-handler.ts's viewStatus). It always
+ * re-resolves the journey server-side at press time, so it can never be
+ * stale: pressed early it shows the current stage, pressed after the round
+ * moved on (or closed) it shows THAT instead — never the old stage.
+ */
+async function mintGuidedViewStatusToken(
+  stateService: GuidedMenuStateService,
+  identity: GuidedMenuIdentity,
+): Promise<string | null> {
+  const created = await stateService.createState({
+    actionType: "view_status",
+    lineUserId: identity.lineUserId,
+    sourceType: identity.sourceType,
+    sourceId: identity.sourceId,
+    sessionKey: identity.sessionKey,
+    payload: {},
+  });
+  return created.status === "created" ? created.wireToken : null;
+}
+
+/**
+ * The purpose-specific template builder — the same pure function each
+ * stage's own renderer already calls. Regenerating a stale form means
+ * calling this again with the CURRENT context, never inventing a new path.
+ */
+function buildRegeneratedGuidedForm(
+  purpose: GuidedMarkerPurpose,
+  context: GuidedJourneyContext,
+): string | null {
+  if (purpose === "white_sheet") return buildWhiteSheetTemplate(context);
+  if (purpose === "slip_open") return buildSlipHeaderTemplate(context);
+  return buildSettlementTemplate(context);
+}
+
+/**
+ * Recovery Quick Reply for ownership-guard's `reason: "stale_form"`.
+ *
+ * `regenerate` present → the SAME purpose still applies to the caller's
+ * current stage: "สร้างแบบฟอร์มใหม่" resubmits a FRESH, purpose-specific
+ * template built from the live context (a brand-new marker, since a stale
+ * marker is only reachable via an older session generation or a tampered
+ * signature — never the one the fresh call produces), through the exact same
+ * text-command parser and guard every hand-typed submission already goes
+ * through. Nothing is written by pressing the button itself.
+ *
+ * `regenerate` absent → the form no longer applies at all (the round moved
+ * on, or closed): only a status check is offered, never a false promise of a
+ * new form.
+ */
+export function buildStaleFormRecoveryQuickReply(
+  regenerate?: { purpose: GuidedMarkerPurpose; context: GuidedJourneyContext },
+): LineQuickReply {
+  if (regenerate) {
+    const fresh = buildRegeneratedGuidedForm(regenerate.purpose, regenerate.context);
+    if (fresh) {
+      try {
+        return bindMixedQuickReply([
+          {
+            kind: "message",
+            label: GUIDED_MENU_COPY.generateNewFormLabel,
+            text: fresh,
+          },
+          { kind: "message", label: "ออกจากเมนู", text: "ออกจากเมนู" },
+        ]);
+      } catch {
+        // Graceful fallback: an unexpectedly long template (e.g. unusually
+        // long seller/market labels) never crashes the reply — it just falls
+        // back to the plain status-check recovery below.
+      }
+    }
+  }
+  return bindMixedQuickReply([
+    { kind: "message", label: "ดูสถานะ", text: GUIDED_MENU_TRIGGER },
+    { kind: "message", label: "ออกจากเมนู", text: "ออกจากเมนู" },
+  ]);
+}
+
 /** Exact text that asks the guided flow to close the round. */
 export function isGuidedRoundCloseCommand(text: string): boolean {
   return text.trim() === GUIDED_MENU_COPY.roundCloseCommand;
@@ -85,7 +174,13 @@ export type GuidedWhiteSheetGuard =
   /** Submission agrees with the round; let the existing command through. */
   | { verdict: "allowed"; context: GuidedJourneyContext }
   /** Submission targets another market/date — refuse, write nothing. */
-  | { verdict: "refused"; message: string; reason?: "stale_form" };
+  | {
+      verdict: "refused";
+      message: string;
+      reason?: "stale_form";
+      regenerate?: { purpose: GuidedMarkerPurpose; context: GuidedJourneyContext };
+      debugReason?: GuidedOwnershipDebugReason;
+    };
 
 /**
  * Verify a White Sheet closing command against the guided round that owns the
@@ -257,8 +352,19 @@ export async function processGuidedRoundClose(input: {
       "",
       GUIDED_MENU_COPY.roundMismatchNextStep,
     ].join("\n");
+    // ONE primary action, on this ONE message: "แก้ไขยอดส่ง" re-renders the
+    // reconcile screen, which (since difference_non_zero is the sole blocker)
+    // hands back a fresh settlement template on THAT next screen — never
+    // attached here too, so no message ever carries two competing Quick
+    // Replies for the same next step.
+    const quickReply = await buildRoundCloseActionQuickReply(
+      input.stateService,
+      input.identity,
+      GUIDED_MENU_COPY.editSettlementLabel,
+    );
+    const base = buildPlainTextMessage(text);
     return {
-      messages: [buildPlainTextMessage(text)],
+      messages: [quickReply ? { ...base, quickReply } : base],
       closed: false,
     };
   }
@@ -283,8 +389,57 @@ export async function processGuidedRoundClose(input: {
     GUIDED_MENU_COPY.roundNotReadyNextSteps,
     ...checklist,
   ].join("\n");
+  // The FIRST blocker in the report's own priority order is the one primary
+  // button — every other blocker stays a plain bullet above, per the required
+  // UX (one authoritative next step, not a wall of buttons).
+  const primaryLabel =
+    blockers.length > 0
+      ? GUIDED_ROUND_BLOCKER_ACTION_LABEL[blockers[0]!]
+      : "ดูสถานะ";
+  const quickReply = await buildRoundCloseActionQuickReply(
+    input.stateService,
+    input.identity,
+    primaryLabel,
+  );
+  const base = buildPlainTextMessage(text);
   return {
-    messages: [buildPlainTextMessage(text)],
+    messages: [quickReply ? { ...base, quickReply } : base],
     closed: false,
   };
+}
+
+/**
+ * ONE primary recovery action for a non-terminal ตรวจและปิดรอบ result, always
+ * bound to the SAME "ดูสถานะ" (`view_status`) re-render every stage screen
+ * already uses — it re-resolves the journey server-side at press time, so the
+ * button always lands on whatever is actually next (the White Sheet template,
+ * the still-open slip batch, the settlement template, …), never a stale
+ * screen. `ดูสถานะ` is added as a secondary button only when the primary
+ * label is itself something else, so the same action is never offered twice.
+ * A token-mint failure degrades to no Quick Reply — the checklist text alone
+ * still renders.
+ */
+async function buildRoundCloseActionQuickReply(
+  stateService: GuidedMenuStateService,
+  identity: GuidedMenuIdentity,
+  primaryLabel: string,
+): Promise<LineQuickReply | undefined> {
+  try {
+    const primaryToken = await mintGuidedViewStatusToken(stateService, identity);
+    if (!primaryToken) return undefined;
+    const buttons: Array<{
+      kind: "token";
+      label: string;
+      wireToken: string;
+    }> = [{ kind: "token", label: primaryLabel, wireToken: primaryToken }];
+    if (primaryLabel !== "ดูสถานะ") {
+      const statusToken = await mintGuidedViewStatusToken(stateService, identity);
+      if (statusToken) {
+        buttons.push({ kind: "token", label: "ดูสถานะ", wireToken: statusToken });
+      }
+    }
+    return bindMixedQuickReply(buttons);
+  } catch {
+    return undefined;
+  }
 }

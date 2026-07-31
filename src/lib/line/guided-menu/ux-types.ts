@@ -183,6 +183,21 @@ export const GUIDED_MENU_COPY = {
   ownershipMarkerRejected: [
     "แบบฟอร์มนี้หมดอายุแล้ว กรุณากด “สร้างแบบฟอร์มใหม่”",
   ].join("\n"),
+  /**
+   * Ownership guard: a stale/invalid form marker whose purpose no longer
+   * applies to the caller's CURRENT stage (round moved on, or closed).
+   * Regenerating would either do nothing useful or reopen a finished round,
+   * so no "สร้างแบบฟอร์มใหม่" action is offered — only a status check.
+   */
+  staleFormNoLongerApplicable: [
+    "แบบฟอร์มนี้หมดอายุแล้ว",
+    "กรุณาดูสถานะรอบปัจจุบัน",
+  ].join("\n"),
+  /** Ownership guard: the round's settlement already went out — terminal. */
+  ownershipRoundClosed: [
+    "รอบนี้ปิดและส่งสรุปไปแล้ว",
+    "ไม่สามารถแก้ไขผ่านไลน์ได้ หากต้องการแก้ไข กรุณาติดต่อผู้ดูแล",
+  ].join("\n"),
   /** 3A: another operator already owns this market/date in this group. */
   sessionRoundOwnedByOther: [
     "มีคนเปิดรอบของตลาดและวันที่นี้ไว้แล้วในกลุ่ม",
@@ -285,6 +300,8 @@ export const GUIDED_MENU_COPY = {
 
   // ── V2 UX — stage headers, one number per screen, never internal state ────
   stageHeaderCapture: "ขั้นตอน 1/4 — กรอกสินค้า",
+  /** V2: awaiting_confirm is a different moment than ordinary capture. */
+  stageHeaderConfirm: "ขั้นตอน 1/4 — ยืนยันรายการ",
 
   /** V2: the close-item button label. Legacy exact text "จบรายการ" is unchanged. */
   closeItemsLabel: "จบการกรอกสินค้า",

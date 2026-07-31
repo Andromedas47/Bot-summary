@@ -311,6 +311,10 @@ export class GuidedMenuFakeDatabase {
             },
             eq: (column: string, value: unknown) =>
               chain([...filters, (row) => row[column] === value]),
+            in: (column: string, values: unknown[]) => {
+              const set = new Set(values);
+              return chain([...filters, (row) => set.has(row[column])]);
+            },
             /** Only `.not(col, "is", null)` is used by the guided lookups. */
             not: (column: string, _operator: string, _value: unknown) => {
               void _operator;
@@ -320,6 +324,19 @@ export class GuidedMenuFakeDatabase {
                 (row) => row[column] !== null && row[column] !== undefined,
               ]);
             },
+            /**
+             * Some production call sites await the query directly with no
+             * terminal method (real Supabase query builders are themselves
+             * thenable) — support that here too.
+             */
+            then: (
+              onfulfilled?: ((value: { data: Row[]; error: null }) => unknown) | null,
+              onrejected?: ((reason: unknown) => unknown) | null,
+            ) =>
+              Promise.resolve({ data: filterRows(), error: null }).then(
+                onfulfilled,
+                onrejected,
+              ),
           };
         };
         return {

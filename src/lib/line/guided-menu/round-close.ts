@@ -93,9 +93,11 @@ export const GUIDED_ROUND_BLOCKER_LABEL: Record<GuidedRoundBlocker, string> = {
 
 /**
  * V2 UX — the ONE next action that resolves each blocker, for the
- * "ตรวจและปิดรอบ" combined check-and-close screen. Every label routes back
- * through the existing "ดูสถานะ" (view_status) re-render, which is already
- * stage-aware and safe to share across stages (see ux-handler.ts).
+ * "ตรวจและปิดรอบ" combined check-and-close screen. `processGuidedRoundClose`
+ * (journey-bridge.ts) attaches the FIRST blocker's label here as a REAL
+ * Quick Reply button bound to a fresh "ดูสถานะ" (view_status) token — not
+ * inert text — which re-resolves the journey server-side at press time and
+ * lands on whatever screen that blocker actually needs next.
  */
 export const GUIDED_ROUND_BLOCKER_ACTION_LABEL: Record<GuidedRoundBlocker, string> = {
   white_sheet_not_submitted: "กรอกใบขาว",

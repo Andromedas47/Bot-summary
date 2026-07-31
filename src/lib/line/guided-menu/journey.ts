@@ -201,19 +201,20 @@ export class GuidedJourneyService {
       return { stage: "white_sheet", context, session: row, whiteSheet };
     }
 
+    // A round whose settlement message already went out is done — checked
+    // BEFORE the slip batch, and unconditionally: a closed round must stay
+    // "closed" even if a NEW slip batch was opened afterward (slips are
+    // optional and never gated on the round being open), otherwise it would
+    // resolve back to "slips" and read as reopened. Same authoritative check
+    // settlement-command.ts uses before writing.
+    const closed = await this.isRoundClosed(context);
+    if (closed) {
+      return { stage: "closed", context, session: row, whiteSheet };
+    }
+
     // The white sheet is in. Whether the operator is still collecting slips or
     // ready to check the round is decided by the slip batch, not by this row.
     const collecting = await this.hasOpenSlipWork(context);
-    if (!collecting) {
-      // A round whose settlement message already went out is done — the same
-      // authoritative check settlement-command.ts uses before writing. Without
-      // this, resolve() would report "reconcile" forever after a real close,
-      // stranding the operator on a stale ready-to-close screen.
-      const closed = await this.isRoundClosed(context);
-      if (closed) {
-        return { stage: "closed", context, session: row, whiteSheet };
-      }
-    }
     return {
       stage: collecting ? "slips" : "reconcile",
       context,

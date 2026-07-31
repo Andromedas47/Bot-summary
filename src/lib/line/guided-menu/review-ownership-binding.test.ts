@@ -353,7 +353,7 @@ describe("guided provenance decides how strictly a message is judged", () => {
       { sourceId: "G-2" },
     ]) {
       const verdict = await resolveGuidedOwnership({
-        journey: fakeJourney(stageState("slips")),
+        journey: fakeJourney(stageState("white_sheet", { status: "not_submitted" })),
         identity: OWNER,
         target,
         purpose: "white_sheet",
@@ -362,6 +362,8 @@ describe("guided provenance decides how strictly a message is judged", () => {
       expect(verdict.verdict).toBe("refused");
       if (verdict.verdict !== "refused") continue;
       expect(verdict.message).toContain(GUIDED_MENU_COPY.ownershipNothingRecorded);
+      // Still in the white_sheet stage: regeneration is a real option.
+      expect(verdict.regenerate).toBeDefined();
     }
   });
 

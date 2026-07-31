@@ -1398,14 +1398,17 @@ export class WebhookService {
   }
 
   /**
-   * A guided-flow refusal reply. `staleForm` attaches the
-   * "สร้างแบบฟอร์มใหม่ / ดูสถานะ / ออกจากเมนู" recovery Quick Reply — used only
-   * for ownership-guard's `reason: "stale_form"`, never for other refusals.
+   * A guided-flow refusal reply. `staleForm` attaches the stale-form recovery
+   * Quick Reply — used only for ownership-guard's `reason: "stale_form"`,
+   * never for other refusals. `regenerate`, when present, lets the recovery
+   * button resubmit a genuinely fresh, purpose-specific template instead of a
+   * blind "เมนู"; when absent the recovery is a plain status check.
    */
   private async replyGuidedRefusal(
     replyToken: string,
     message: string,
     staleForm: boolean,
+    regenerate?: Parameters<typeof buildStaleFormRecoveryQuickReply>[0],
   ): Promise<void> {
     if (!staleForm) {
       await this.replyMessage(replyToken, message);
@@ -1415,7 +1418,7 @@ export class WebhookService {
       {
         type: "text",
         text: message,
-        quickReply: buildStaleFormRecoveryQuickReply(),
+        quickReply: buildStaleFormRecoveryQuickReply(regenerate),
       } as LineApiMessage,
     ]);
   }
@@ -1465,12 +1468,16 @@ export class WebhookService {
         marker: guidedMarker,
       });
       if (guard.verdict === "refused") {
-        log.info("white sheet close refused — journey mismatch", { sourceId });
+        log.info("white sheet close refused — journey mismatch", {
+          sourceId,
+          debugReason: guard.debugReason,
+        });
         if (replyToken) {
           await this.replyGuidedRefusal(
             replyToken,
             guard.message,
             guard.reason === "stale_form",
+            guard.regenerate,
           );
         }
         return { eventId, eventType, status: "saved", parsed: false };
@@ -1892,12 +1899,16 @@ export class WebhookService {
         marker: guidedMarker,
       });
       if (guard.verdict === "refused") {
-        log.info("slip open refused — guided round mismatch", { sourceId });
+        log.info("slip open refused — guided round mismatch", {
+          sourceId,
+          debugReason: guard.debugReason,
+        });
         if (replyToken) {
           await this.replyGuidedRefusal(
             replyToken,
             guard.message,
             guard.reason === "stale_form",
+            guard.regenerate,
           );
         }
         return { eventId, eventType, status: "saved", parsed: false };
@@ -2377,7 +2388,15 @@ export class WebhookService {
       });
       if (replyToken && outcome.messages.length > 0) {
         if (outcome.staleForm && outcome.messages[0]) {
-          await this.replyGuidedRefusal(replyToken, outcome.messages[0], true);
+          log.info("guided settlement refused — stale form", {
+            debugReason: outcome.debugReason,
+          });
+          await this.replyGuidedRefusal(
+            replyToken,
+            outcome.messages[0],
+            true,
+            outcome.regenerate,
+          );
         } else {
           await this.replyMessages(
             replyToken,

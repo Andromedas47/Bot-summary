@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
+import { RoundFakeDatabase } from "@/lib/line/guided-menu/test-fake-round-db";
 import { loadAiVerifiedTransferTotal, reconcile } from "./reconciliation";
+
+type UpsertCapture = {
+  row: Record<string, unknown>;
+  opts: { onConflict?: string } | undefined;
+};
 
 // ── Stub builder ──────────────────────────────────────────────────────────────
 function makeFullSupabase(cfg: {
@@ -14,6 +20,7 @@ function makeFullSupabase(cfg: {
   globalWinners?:  Array<{ id: string; reference_id: string; created_at: string }>;
   scopedOrder?:    number[];
   globalError?:    { message: string } | null;
+  upserts?:        UpsertCapture[];
 }) {
   let manualSessionCallCount = 0;
 
@@ -105,11 +112,17 @@ function makeFullSupabase(cfg: {
 
       if (table === "transfer_reconciliations") {
         return {
-          upsert: (row: unknown, _opts: unknown) => ({
-            select: () => ({
-              single: async () => ({ data: row, error: null }),
-            }),
-          }),
+          upsert: (row: unknown, opts: unknown) => {
+            cfg.upserts?.push({
+              row: row as Record<string, unknown>,
+              opts: opts as { onConflict?: string } | undefined,
+            });
+            return {
+              select: () => ({
+                single: async () => ({ data: row, error: null }),
+              }),
+            };
+          },
         };
       }
 
@@ -309,5 +322,62 @@ describe("reconcile", () => {
       expect(result.result.checked_slip_total).toBe(0);
       expect(result.result.matched).toBe(true);
     }
+  });
+
+  it("upserts on source_id,business_date and never writes work_round_id", async () => {
+    const upserts: UpsertCapture[] = [];
+    const db = makeFullSupabase({
+      openSession: false, transferAmounts: [], closedSessions: [], entryAmounts: [], upserts,
+    });
+    const emptyEvidences = {
+      select: () => ({ eq: () => ({ gte: () => ({ lt: async () => ({ data: [], error: null }) }) }) }),
+    };
+    const result = await reconcile(
+      { ...db, from: (t: string) => (t === "slip_evidences" ? emptyEvidences : db.from(t)) } as never,
+      "grp1",
+      "2026-07-30",
+      0,
+    );
+
+    expect(result.blocked).toBe(false);
+    expect(upserts).toHaveLength(1);
+    expect(upserts[0]!.opts).toEqual({ onConflict: "source_id,business_date" });
+    expect(upserts[0]!.opts?.onConflict).not.toBe("work_round_id");
+    expect(upserts[0]!.row).toMatchObject({
+      source_id: "grp1",
+      business_date: "2026-07-30",
+      submitted_transfer_total: 0,
+    });
+    expect(Object.prototype.hasOwnProperty.call(upserts[0]!.row, "work_round_id")).toBe(false);
+  });
+});
+
+describe("reconcile source/date uniqueness (fake db)", () => {
+  it("updates the same row on repeat and keeps distinct source/date pairs separate", async () => {
+    const db = new RoundFakeDatabase();
+
+    const first = await reconcile(db.asClient(), "G-1", "2026-07-30", 0);
+    expect(first.blocked).toBe(false);
+    expect(db.tables.transfer_reconciliations).toHaveLength(1);
+    expect(db.tables.transfer_reconciliations[0]).toMatchObject({
+      source_id: "G-1",
+      business_date: "2026-07-30",
+      submitted_transfer_total: 0,
+    });
+    expect(
+      Object.prototype.hasOwnProperty.call(db.tables.transfer_reconciliations[0], "work_round_id"),
+    ).toBe(false);
+
+    const second = await reconcile(db.asClient(), "G-1", "2026-07-30", 40);
+    expect(second.blocked).toBe(false);
+    expect(db.tables.transfer_reconciliations).toHaveLength(1);
+    expect(db.tables.transfer_reconciliations[0]!.submitted_transfer_total).toBe(40);
+
+    const other = await reconcile(db.asClient(), "G-2", "2026-07-30", 10);
+    expect(other.blocked).toBe(false);
+    expect(db.tables.transfer_reconciliations).toHaveLength(2);
+    expect(
+      db.tables.transfer_reconciliations.map((r) => `${r.source_id}|${r.business_date}`).sort(),
+    ).toEqual(["G-1|2026-07-30", "G-2|2026-07-30"]);
   });
 });

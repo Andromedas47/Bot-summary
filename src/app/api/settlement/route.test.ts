@@ -134,6 +134,19 @@ describe("POST /api/settlement", () => {
 
     expect(currentDb.tables.settlement_entries).toHaveLength(1);
     expect(currentDb.tables.settlement_entries[0]!.money_transfer).toBe(11000);
+    // reconcile() also upserts on (source_id, business_date) — no duplicate recon rows.
+    expect(currentDb.tables.transfer_reconciliations).toHaveLength(1);
+    expect(currentDb.tables.transfer_reconciliations[0]).toMatchObject({
+      source_id: SOURCE,
+      business_date: DATE,
+      submitted_transfer_total: 11000,
+    });
+    expect(
+      Object.prototype.hasOwnProperty.call(
+        currentDb.tables.transfer_reconciliations[0],
+        "work_round_id",
+      ),
+    ).toBe(false);
   });
 
   it("keeps the legacy no-source_id path free of reconciliation", async () => {

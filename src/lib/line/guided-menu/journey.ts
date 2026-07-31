@@ -58,7 +58,9 @@ export type GuidedJourneyStage =
   /** White sheet submitted; slip evidence is still being collected. */
   | "slips"
   /** Slips collected; the round is ready to be checked and closed. */
-  | "reconcile";
+  | "reconcile"
+  /** Settlement finalized and sent — nothing further to do on this round. */
+  | "closed";
 
 /** The tuple every stage of the journey is bound to. */
 export type GuidedJourneyContext = {
@@ -202,12 +204,34 @@ export class GuidedJourneyService {
     // The white sheet is in. Whether the operator is still collecting slips or
     // ready to check the round is decided by the slip batch, not by this row.
     const collecting = await this.hasOpenSlipWork(context);
+    if (!collecting) {
+      // A round whose settlement message already went out is done — the same
+      // authoritative check settlement-command.ts uses before writing. Without
+      // this, resolve() would report "reconcile" forever after a real close,
+      // stranding the operator on a stale ready-to-close screen.
+      const closed = await this.isRoundClosed(context);
+      if (closed) {
+        return { stage: "closed", context, session: row, whiteSheet };
+      }
+    }
     return {
       stage: collecting ? "slips" : "reconcile",
       context,
       session: row,
       whiteSheet,
     };
+  }
+
+  /** True once the round's settlement has actually been sent — see 0029. */
+  private async isRoundClosed(context: GuidedJourneyContext): Promise<boolean> {
+    const { data, error } = await this.supabase
+      .from("settlement_finalizations")
+      .select("status, message_sent_at")
+      .eq("source_id", context.sourceId)
+      .eq("business_date", context.businessDate)
+      .maybeSingle();
+    if (error) return false;
+    return data?.status === "sent" || Boolean(data?.message_sent_at);
   }
 
   /**

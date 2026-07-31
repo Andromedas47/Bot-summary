@@ -38,6 +38,7 @@ import {
   extractGuidedMarker,
   processGuidedRoundClose,
   processGuidedSettlementSubmission,
+  buildStaleFormRecoveryQuickReply,
   LINE_REPLY_MESSAGE_MAX,
 } from "@/lib/line/guided-menu";
 import {
@@ -1396,6 +1397,29 @@ export class WebhookService {
     }
   }
 
+  /**
+   * A guided-flow refusal reply. `staleForm` attaches the
+   * "สร้างแบบฟอร์มใหม่ / ดูสถานะ / ออกจากเมนู" recovery Quick Reply — used only
+   * for ownership-guard's `reason: "stale_form"`, never for other refusals.
+   */
+  private async replyGuidedRefusal(
+    replyToken: string,
+    message: string,
+    staleForm: boolean,
+  ): Promise<void> {
+    if (!staleForm) {
+      await this.replyMessage(replyToken, message);
+      return;
+    }
+    await this.replyApiMessages(replyToken, [
+      {
+        type: "text",
+        text: message,
+        quickReply: buildStaleFormRecoveryQuickReply(),
+      } as LineApiMessage,
+    ]);
+  }
+
   // ── White Sheet closing command ───────────────────────────────────────────
   private async processWhiteSheetClose(
     event: LineMessageEvent,
@@ -1442,7 +1466,13 @@ export class WebhookService {
       });
       if (guard.verdict === "refused") {
         log.info("white sheet close refused — journey mismatch", { sourceId });
-        if (replyToken) await this.replyMessage(replyToken, guard.message);
+        if (replyToken) {
+          await this.replyGuidedRefusal(
+            replyToken,
+            guard.message,
+            guard.reason === "stale_form",
+          );
+        }
         return { eventId, eventType, status: "saved", parsed: false };
       }
       if (guard.verdict === "allowed") guidedContext = guard.context;
@@ -1863,7 +1893,13 @@ export class WebhookService {
       });
       if (guard.verdict === "refused") {
         log.info("slip open refused — guided round mismatch", { sourceId });
-        if (replyToken) await this.replyMessage(replyToken, guard.message);
+        if (replyToken) {
+          await this.replyGuidedRefusal(
+            replyToken,
+            guard.message,
+            guard.reason === "stale_form",
+          );
+        }
         return { eventId, eventType, status: "saved", parsed: false };
       }
     }
@@ -2272,11 +2308,12 @@ export class WebhookService {
         journey: this.guidedJourney,
         rounds: this.guidedRounds,
         identity,
+        stateService: this.guidedCatalog,
       });
       if (replyToken) {
-        await this.replyMessages(
+        await this.replyApiMessages(
           replyToken,
-          outcome.messages.slice(0, LINE_REPLY_MESSAGE_MAX),
+          outcome.messages.slice(0, LINE_REPLY_MESSAGE_MAX) as LineApiMessage[],
         );
       }
       log.info("guided round close handled", { closed: outcome.closed });
@@ -2339,10 +2376,14 @@ export class WebhookService {
         marker: guidedMarker,
       });
       if (replyToken && outcome.messages.length > 0) {
-        await this.replyMessages(
-          replyToken,
-          outcome.messages.slice(0, LINE_REPLY_MESSAGE_MAX),
-        );
+        if (outcome.staleForm && outcome.messages[0]) {
+          await this.replyGuidedRefusal(replyToken, outcome.messages[0], true);
+        } else {
+          await this.replyMessages(
+            replyToken,
+            outcome.messages.slice(0, LINE_REPLY_MESSAGE_MAX),
+          );
+        }
       }
       log.info("guided settlement handled", { saved: outcome.saved });
       return {

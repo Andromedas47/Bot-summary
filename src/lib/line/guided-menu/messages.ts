@@ -22,6 +22,7 @@ import {
   type GuidedMenuLineMessage,
   type LineFlexBubble,
   type LineFlexMessage,
+  type LineMessageAction,
   type LinePostbackAction,
   type LineQuickReply,
   type LineTemplateButtonsMessage,
@@ -76,6 +77,43 @@ function quickReplyFromTokens(
         displayText: b.displayText,
       }),
     })),
+  };
+}
+
+/**
+ * A Quick Reply item that resubmits fixed text — only ever used to relabel an
+ * ALREADY-recognized exact-text command (e.g. legacy "ปิดรอบ" / "เมนู" /
+ * "ออกจากเมนู"). No token, no new action type, no new parser: the plain-text
+ * router this resubmits into must already accept `text` verbatim.
+ */
+export function messageAction(label: string, text: string): LineMessageAction {
+  assertLabelLength(label, TEMPLATE_ACTION_LABEL_MAX, "message action");
+  return { type: "message", label, text };
+}
+
+export type QuickReplyButtonSpec =
+  | { kind: "token"; label: string; wireToken: string; displayText?: string }
+  | { kind: "message"; label: string; text: string };
+
+/** Quick Reply mixing token-bound postback buttons and fixed-text buttons. */
+export function bindMixedQuickReply(
+  buttons: QuickReplyButtonSpec[],
+): LineQuickReply {
+  return {
+    items: buttons.slice(0, 13).map((b) =>
+      b.kind === "token"
+        ? {
+            type: "action" as const,
+            action: postbackAction(b.label, b.wireToken, {
+              maxLabelChars: TEMPLATE_ACTION_LABEL_MAX,
+              displayText: b.displayText,
+            }),
+          }
+        : {
+            type: "action" as const,
+            action: messageAction(b.label, b.text),
+          },
+    ),
   };
 }
 
@@ -756,7 +794,7 @@ export function assertGuidedMenuMessageLimits(
       }
       if (msg.quickReply) {
         for (const item of msg.quickReply.items) {
-          if (item.action.data.length > 300) {
+          if (item.action.type === "postback" && item.action.data.length > 300) {
             throw new Error("quickReply postback data exceeds 300 chars");
           }
           assertLabelLength(
@@ -828,6 +866,27 @@ function walkPostbackActions(
   for (const child of Object.values(obj)) {
     walkPostbackActions(child, visit);
   }
+}
+
+/**
+ * Recovery Quick Reply for a stale/expired form (ownership-guard's
+ * `reason: "stale_form"`). Every item resubmits an ALREADY-recognized exact
+ * text — "เมนู" re-resolves the journey and hands back whatever template is
+ * current for the live stage, which is exactly "generate a fresh form"
+ * without a new action type or any token. No internal token/generation
+ * details are ever surfaced to the operator.
+ */
+export function buildStaleFormRecoveryQuickReply(): LineQuickReply {
+  return {
+    items: [
+      {
+        type: "action",
+        action: messageAction(GUIDED_MENU_COPY.generateNewFormLabel, "เมนู"),
+      },
+      { type: "action", action: messageAction("ดูสถานะ", "เมนู") },
+      { type: "action", action: messageAction("ออกจากเมนู", "ออกจากเมนู") },
+    ],
+  };
 }
 
 export type BoundTokenButton = TokenButtonSpec & { wireToken: string };

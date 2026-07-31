@@ -246,6 +246,8 @@ export const GUIDED_SETTLEMENT_TIME = "";
 export type GuidedSettlementReply = {
   messages: string[];
   saved: boolean;
+  /** The refusal was a stale/expired form marker — offer "สร้างแบบฟอร์มใหม่". */
+  staleForm?: boolean;
 };
 
 type SubmitFn = typeof submitSettlementEntryForSource;
@@ -327,7 +329,11 @@ export async function processGuidedSettlementSubmission(input: {
     marker: input.marker,
   });
   if (ownership.verdict === "refused") {
-    return { messages: [ownership.message], saved: false };
+    return {
+      messages: [ownership.message],
+      saved: false,
+      staleForm: ownership.reason === "stale_form",
+    };
   }
   if (ownership.verdict !== "allowed") {
     // The caller's own journey resolved to this round but the source-wide query

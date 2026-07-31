@@ -44,6 +44,8 @@ import {
   summarizeSlipStatuses,
 } from "./round-close";
 import { buildSettlementTemplate } from "./settlement-command";
+import { bindMixedQuickReply } from "./messages";
+import { buildGuidedStartNewQuickReply } from "./journey-bridge";
 import { buildWeighSessionSummary } from "@/lib/line/reply";
 import { buildWeighSessionValidationReply } from "@/lib/parsers/weigh-session/parser";
 import {
@@ -94,6 +96,7 @@ import {
 export function isExactGuidedMenuTrigger(text: string): boolean {
   return text.trim() === GUIDED_MENU_TRIGGER;
 }
+
 
 /** Exact plain-text close for the guided requestClose contract. */
 export function isExactGuidedCloseTrigger(text: string): boolean {
@@ -684,7 +687,8 @@ export class GuidedMenuUxHandler {
       });
       if (include.close) {
         buttons.push({
-          label: "จบรายการ",
+          label: GUIDED_MENU_COPY.closeItemsLabel,
+          displayText: "จบรายการ",
           actionType: "request_close",
           payload: {},
           wireToken: await create({ actionType: "request_close", payload: {} }),
@@ -789,6 +793,35 @@ export class GuidedMenuUxHandler {
     }
   }
 
+  /**
+   * "เริ่มรายการใหม่" — offered wherever a journey is terminal (a produce
+   * finalization that proved nothing was saved, or a round that already
+   * closed). Bound to the SAME `menu_root` action (empty payload, no cancel
+   * intent) the seller screen's "back" button already uses: it renders the
+   * Stage 1 transaction-type screen unconditionally, never re-resolving the
+   * dead journey, so it can never revive a terminalized round.
+   */
+  private async buildStartNewControls(identity: GuidedMenuIdentity) {
+    try {
+      const quickReply = await buildGuidedStartNewQuickReply(this.state, identity);
+      return quickReply ? { quickReply } : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Stage "closed" — the round's settlement already sent. Nothing left to do. */
+  private async renderClosedRound(
+    identity: GuidedMenuIdentity,
+  ): Promise<GuidedMenuUxResult> {
+    const controls = await this.buildStartNewControls(identity);
+    const base = buildPlainTextMessage(GUIDED_MENU_COPY.roundClosed);
+    const message = controls?.quickReply
+      ? { ...base, quickReply: controls.quickReply }
+      : base;
+    return resultEnvelope("round_closed", [message], { stage: "closed" });
+  }
+
   private async buildJourneyStageControls(
     identity: GuidedMenuIdentity,
     labels: readonly string[],
@@ -862,6 +895,9 @@ export class GuidedMenuUxHandler {
     if (journey.stage === "slips") {
       return this.renderSlipStage(identity, journey.context);
     }
+    if (journey.stage === "closed") {
+      return this.renderClosedRound(identity);
+    }
     return this.renderRoundStatus(
       identity,
       journey.context,
@@ -886,26 +922,73 @@ export class GuidedMenuUxHandler {
     const dateThaiShort =
       thaiDateFromIso(context.businessDate) ?? context.businessDate;
 
-    const needsSettlement = report.blockers.includes("settlement_missing");
-    const template = needsSettlement ? buildSettlementTemplate(context) : null;
-    // Never label a view_status button "ปิดรอบ" — closing stays the exact
-    // text command. Ready-to-close still shows ตรวจยอด plus the instruction.
-    const stageLabels = template
-      ? (["กรอกยอดส่ง", "ตรวจยอด"] as const)
-      : (["ตรวจยอด"] as const);
-    // Routine reconcile/settlement status: Quick Reply only, no persistent Flex.
-    const controls = await this.buildJourneyStageControls(
-      identity,
-      stageLabels,
-      "จัดการรอบขาย",
-      false,
-    );
+    // Settlement missing OR mismatched still needs the editable template — a
+    // mismatch is corrected by resubmitting the same template with the right
+    // numbers, so "แก้ไขยอดส่ง" and "กรอกยอดส่ง" share this one regeneration path.
+    const settlementSubmitted = !report.blockers.includes("settlement_missing");
+    const needsTemplate =
+      !settlementSubmitted || report.blockers.includes("difference_non_zero");
+    const template = needsTemplate ? buildSettlementTemplate(context) : null;
+
+    // Every button is single-use, so each label mints its OWN token even when
+    // several re-render the same view_status action — reusing one token across
+    // two visible buttons would make the second press "already consumed".
+    const create = this.createTokenFn(identity);
+    const quickReply = !settlementSubmitted
+      ? bindMixedQuickReply([
+          {
+            kind: "token",
+            label: "กรอกยอดส่ง",
+            wireToken: await create({ actionType: "view_status", payload: {} }),
+          },
+          {
+            kind: "token",
+            label: "ดูสถานะ",
+            wireToken: await create({ actionType: "view_status", payload: {} }),
+          },
+          {
+            kind: "token",
+            label: "ออกจากเมนู",
+            wireToken: await create({
+              actionType: "menu_root",
+              payload: { intent: "cancel" },
+            }),
+          },
+        ])
+      : // Never label a view_status button "ปิดรอบ" — closing stays the exact
+        // text command, only relabeled as "ตรวจและปิดรอบ". Whatever remains
+        // blocked, this is now the one authoritative next step.
+        bindMixedQuickReply([
+          {
+            kind: "message",
+            label: GUIDED_MENU_COPY.checkAndCloseLabel,
+            text: GUIDED_MENU_COPY.roundCloseCommand,
+          },
+          {
+            kind: "token",
+            label: GUIDED_MENU_COPY.editSettlementLabel,
+            wireToken: await create({ actionType: "view_status", payload: {} }),
+          },
+          {
+            kind: "token",
+            label: GUIDED_MENU_COPY.viewDetailLabel,
+            wireToken: await create({ actionType: "view_status", payload: {} }),
+          },
+          {
+            kind: "token",
+            label: "ออกจากเมนู",
+            wireToken: await create({
+              actionType: "menu_root",
+              payload: { intent: "cancel" },
+            }),
+          },
+        ]);
 
     const nextStepLine = template
       ? "กรอกแบบฟอร์มยอดส่งด้านล่าง แก้เฉพาะตัวเลข แล้วส่งกลับมา"
       : report.blockers.length === 0
-        ? `พิมพ์ "${GUIDED_MENU_COPY.roundCloseCommand}" เพื่อปิดรอบ`
-        : `แก้ไขแล้วพิมพ์ "${GUIDED_MENU_COPY.roundCloseCommand}" อีกครั้ง`;
+        ? `กด "${GUIDED_MENU_COPY.checkAndCloseLabel}" เพื่อปิดรอบ`
+        : `แก้ไขแล้วกด "${GUIDED_MENU_COPY.checkAndCloseLabel}" อีกครั้ง`;
 
     const status = buildRoundStatusMessage({
       sellerLabel: context.sellerLabel,
@@ -918,7 +1001,7 @@ export class GuidedMenuUxHandler {
         nextStepLine,
       ],
       closed: false,
-      quickReply: controls?.quickReply,
+      quickReply,
     });
 
     const messages: GuidedMenuLineMessage[] = [status];
@@ -929,12 +1012,9 @@ export class GuidedMenuUxHandler {
           sellerLabel: context.sellerLabel,
           marketLabel: context.marketLabel,
           dateThaiShort,
-          quickReply: controls?.quickReply,
-          stageControl: controls?.flex,
+          quickReply,
         }),
       );
-    } else if (controls?.flex) {
-      messages.push(controls.flex);
     }
 
     return resultEnvelope(
@@ -968,7 +1048,13 @@ export class GuidedMenuUxHandler {
     return resultEnvelope(
       "session_status",
       buildCapturedItemsMessages({
-        summary: [summary, "", GUIDED_MENU_COPY.correctionHint].join("\n"),
+        summary: [
+          GUIDED_MENU_COPY.stageHeaderCapture,
+          "",
+          summary,
+          "",
+          GUIDED_MENU_COPY.correctionHint,
+        ].join("\n"),
         stageControl: controls?.flex,
         quickReply: controls?.quickReply,
         maxMessages: LINE_REPLY_MESSAGE_MAX,
@@ -1034,12 +1120,11 @@ export class GuidedMenuUxHandler {
       });
     }
     // Routine slip-stage navigation: Quick Reply only, no persistent Flex.
-    const controls = await this.buildJourneyStageControls(
-      identity,
-      ["ตรวจยอด", "ดูสถานะ"],
-      "ส่งสลิป",
-      false,
-    );
+    // A journey resolves to "slips" only while a batch is actually open (see
+    // journey.ts hasOpenSlipWork), so "จบการส่งสลิป" is always the correct
+    // primary action here — it resubmits the existing exact-text "จบสลิป"
+    // close command, unchanged.
+    const quickReply = await this.buildSlipStageQuickReply(identity);
     return resultEnvelope(
       "slip_instructions",
       buildSlipInstructionMessages({
@@ -1047,11 +1132,33 @@ export class GuidedMenuUxHandler {
         sellerLabel: context.sellerLabel,
         marketLabel: context.marketLabel,
         dateThaiShort,
-        quickReply: controls?.quickReply,
-        stageControl: controls?.flex,
+        quickReply,
       }),
       { stage: "slips", business_date: context.businessDate },
     );
+  }
+
+  private async buildSlipStageQuickReply(
+    identity: GuidedMenuIdentity,
+  ): Promise<LineQuickReply | undefined> {
+    try {
+      const create = this.createTokenFn(identity);
+      const [statusToken, exitToken] = await Promise.all([
+        create({ actionType: "view_status", payload: {} }),
+        create({ actionType: "menu_root", payload: { intent: "cancel" } }),
+      ]);
+      return bindMixedQuickReply([
+        {
+          kind: "message",
+          label: GUIDED_MENU_COPY.closeSlipsLabel,
+          text: "จบสลิป",
+        },
+        { kind: "token", label: "ดูสถานะ", wireToken: statusToken },
+        { kind: "token", label: "ออกจากเมนู", wireToken: exitToken },
+      ]);
+    } catch {
+      return undefined;
+    }
   }
 
   private async requestClose(input: {
@@ -1216,24 +1323,31 @@ export class GuidedMenuUxHandler {
       );
     }
 
-    const detail = buildWeighSessionValidationReply(outcome.parsed);
-    const screen =
-      outcome.status === "validation_failed"
-        ? ("session_validation_failed" as const)
-        : ("session_finalize_failed" as const);
-    const heading =
-      outcome.status === "validation_failed"
-        ? GUIDED_MENU_COPY.produceValidationFailed
-        : GUIDED_MENU_COPY.produceFinalizeFailed;
+    // Terminal, zero produce writes: never poll again — offer a fresh round.
+    if (outcome.status === "finalize_failed") {
+      const detail = buildWeighSessionValidationReply(outcome.parsed);
+      const startNew = await this.buildStartNewControls(identity);
+      const messages = buildCapturedItemsMessages({
+        summary: [GUIDED_MENU_COPY.produceFailedZeroWrites, "", detail].join("\n"),
+        quickReply: startNew?.quickReply,
+        maxMessages: LINE_REPLY_MESSAGE_MAX,
+      });
+      return resultEnvelope("produce_failed_terminal", messages, {
+        produce_finalization: "failed",
+        saved: false,
+        error_count: outcome.errors.length,
+      });
+    }
 
+    const detail = buildWeighSessionValidationReply(outcome.parsed);
     const messages = buildCapturedItemsMessages({
-      summary: [heading, "", detail].join("\n"),
+      summary: [GUIDED_MENU_COPY.produceValidationFailed, "", detail].join("\n"),
       stageControl: controls?.flex,
       quickReply: controls?.quickReply,
       maxMessages: LINE_REPLY_MESSAGE_MAX,
     });
-    return resultEnvelope(screen, messages, {
-      produce_finalization: outcome.status === "validation_failed" ? null : "failed",
+    return resultEnvelope("session_validation_failed", messages, {
+      produce_finalization: null,
       saved: false,
       error_count: outcome.errors.length,
     });

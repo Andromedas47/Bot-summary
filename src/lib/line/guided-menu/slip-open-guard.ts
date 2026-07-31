@@ -33,7 +33,7 @@ export type GuidedSlipOpenGuard =
   | { verdict: "not_guided" }
   | { verdict: "allowed"; context: GuidedJourneyContext }
   /** Refuse before the open — zero rows. */
-  | { verdict: "refused"; message: string };
+  | { verdict: "refused"; message: string; reason?: "stale_form" };
 
 export async function guardGuidedSlipOpen(input: {
   journey: GuidedJourneyService;

@@ -34,7 +34,14 @@ export const GUIDED_MENU_COPY = {
   unmapped:
     "บัญชีไลน์นี้ยังไม่ได้รับสิทธิ์ใช้งานเมนู กรุณาติดต่อผู้ดูแล",
   invalidOrExpired: "เมนูนี้หมดอายุ กรุณาใช้เมนูล่าสุด",
-  cancelled: "ยกเลิกแล้ว",
+  /**
+   * Exit-menu with no round open. Never "ยกเลิกแล้ว": there was nothing to
+   * cancel, so the copy must not claim a cancellation happened — see §Copy.
+   */
+  cancelled: [
+    "ปิดเมนูแล้ว ไม่มีรายการที่เปิดอยู่",
+    'พิมพ์ "เมนู" เพื่อเริ่มรายการใหม่',
+  ].join("\n"),
   noActiveSellers:
     "ยังไม่มีคนขายที่พร้อมใช้งาน กรุณาติดต่อผู้ดูแล",
   sellerUnavailable:
@@ -83,12 +90,11 @@ export const GUIDED_MENU_COPY = {
   /**
    * 3B: dismissing the menu does NOT void an open round. There is no
    * authoritative cancel-open-session contract to call, so the copy must not
-   * imply one — see §2.3.
+   * imply one — see §2.3. Never "ยกเลิกแล้ว": nothing was cancelled.
    */
   menuDismissedSessionOpen: [
-    "ปิดเมนูแล้ว",
-    "รายการที่เปิดไว้ยังอยู่ ส่งรายการสินค้าต่อได้",
-    "หากต้องการยกเลิกรายการ กรุณาแจ้งผู้ดูแล",
+    "ปิดเมนูแล้ว รายการยังเปิดอยู่",
+    'พิมพ์ "เมนู" เพื่อทำต่อ',
   ].join("\n"),
   /** 3B: close accepted, waiting for the operator's final confirmation. */
   closeRequested: [
@@ -170,11 +176,12 @@ export const GUIDED_MENU_COPY = {
   ].join("\n"),
   /**
    * Ownership guard: the message carries a guided form marker that does not
-   * match this operator and this round — a copied or edited template.
+   * match this operator and this round — a copied, edited, or stale-generation
+   * template. Framed as expiry, not internals: the operator never needs to
+   * understand tokens or session generations, only to ask for a new form.
    */
   ownershipMarkerRejected: [
-    "แบบฟอร์มนี้ไม่ใช่ของรอบที่ท่านเปิดอยู่",
-    "กรุณากดปุ่มในเมนูเพื่อขอแบบฟอร์มใหม่ และแก้เฉพาะตัวเลข",
+    "แบบฟอร์มนี้หมดอายุแล้ว กรุณากด “สร้างแบบฟอร์มใหม่”",
   ].join("\n"),
   /** 3A: another operator already owns this market/date in this group. */
   sessionRoundOwnedByOther: [
@@ -200,7 +207,8 @@ export const GUIDED_MENU_COPY = {
   nextStepWhiteSheet: "ขั้นต่อไป: กรอกใบขาว",
   /** 3C: how to use the white-sheet template. */
   whiteSheetInstructions: [
-    "กรอกใบขาว",
+    "ขั้นตอน 2/4 — กรอกใบขาว",
+    "",
     "คัดลอกข้อความด้านล่าง แก้เฉพาะตัวเลข แล้วส่งกลับมา",
     "บรรทัดไหนไม่มีค่าใช้จ่าย ใส่ 0 ไว้",
   ].join("\n"),
@@ -215,14 +223,16 @@ export const GUIDED_MENU_COPY = {
   nextStepSlips: "ขั้นต่อไป: ส่งสลิป",
   /** 3D: how to open the transfer-slip batch. */
   slipInstructions: [
-    "ส่งสลิปเงินโอน",
+    "ขั้นตอน 3/4 — ส่งสลิป",
+    "",
     "ส่งข้อความด้านล่างก่อน แล้วส่งรูปสลิปตามได้เลย",
-    'เมื่อส่งครบ พิมพ์ "จบสลิป"',
+    'เมื่อส่งครบ กด "จบการส่งสลิป"',
     'ถ้ามีสลิปที่ระบบอ่านไม่ได้ ใช้ "สลิปมือ" ตามวิธีเดิม',
   ].join("\n"),
   /** 3D.1: how to use the settlement template. */
   settlementInstructions: [
-    "กรอกยอดส่ง",
+    "ขั้นตอน 4/4 — กรอกยอดส่ง",
+    "",
     "คัดลอกข้อความด้านล่าง แก้เฉพาะตัวเลข แล้วส่งกลับมา",
     "บรรทัดไหนไม่มียอด ใส่ 0 ไว้",
   ].join("\n"),
@@ -272,6 +282,34 @@ export const GUIDED_MENU_COPY = {
   sellerPrompt: "เลือกคนขาย",
   datePrompt: "เลือกวันที่",
   confirmHeading: "กำลังจะเปิดรายการ",
+
+  // ── V2 UX — stage headers, one number per screen, never internal state ────
+  stageHeaderCapture: "ขั้นตอน 1/4 — กรอกสินค้า",
+
+  /** V2: the close-item button label. Legacy exact text "จบรายการ" is unchanged. */
+  closeItemsLabel: "จบการกรอกสินค้า",
+  /** V2: the slip-batch-close button label. Legacy exact text "จบสลิป" is unchanged. */
+  closeSlipsLabel: "จบการส่งสลิป",
+  startSlipsLabel: "เริ่มส่งสลิป",
+  /** V2: one authoritative check-and-close action; reuses the "ปิดรอบ" contract. */
+  checkAndCloseLabel: "ตรวจและปิดรอบ",
+  editSettlementLabel: "แก้ไขยอดส่ง",
+  viewDetailLabel: "ดูรายละเอียด",
+  /** V2: offered wherever a journey is terminal — never revives it, only opens a new one. */
+  startNewLabel: "เริ่มรายการใหม่",
+  generateNewFormLabel: "สร้างแบบฟอร์มใหม่",
+
+  /** V2: round closed successfully — kept minimal, no report recap. */
+  roundClosed: "ปิดรอบแล้ว ✅",
+  /** V2: blockers exist beyond a plain amount mismatch — one actionable list. */
+  roundNotReadyHeading: "ยังปิดรอบไม่ได้",
+  roundNotReadyNextSteps: "ต้องทำต่อ:",
+  /** V2: totals exist but do not match — the one recommended next action. */
+  roundMismatchHeading: "ยอดยังไม่ตรง",
+  roundMismatchNextStep: "กรุณาตรวจสอบยอดส่งอีกครั้ง",
+
+  /** V2: the produce round is terminally failed with nothing saved. */
+  produceFailedZeroWrites: "รอบนี้บันทึกไม่สำเร็จ",
 } as const;
 
 export type GuidedMenuScreen =
@@ -299,6 +337,9 @@ export type GuidedMenuScreen =
   | "slip_instructions"
   | "settlement_template"
   | "round_status"
+  | "round_closed"
+  | "round_check_blocked"
+  | "produce_failed_terminal"
   | "unmapped"
   | "no_sellers"
   | "seller_unavailable"
@@ -313,10 +354,23 @@ export type LinePostbackAction = {
   displayText?: string;
 };
 
+/**
+ * A Quick Reply item that resubmits fixed text, exactly as if the operator had
+ * typed it — used only to relabel an EXISTING exact-text command (e.g. the
+ * legacy "ปิดรอบ"/"เมนู" triggers) with friendlier UX copy. Never a new
+ * command: whatever `text` names must already be handled by the plain-text
+ * router, so this never becomes a second parser or a second contract.
+ */
+export type LineMessageAction = {
+  type: "message";
+  label: string;
+  text: string;
+};
+
 export type LineQuickReply = {
   items: Array<{
     type: "action";
-    action: LinePostbackAction;
+    action: LinePostbackAction | LineMessageAction;
   }>;
 };
 

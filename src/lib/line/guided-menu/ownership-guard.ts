@@ -38,11 +38,18 @@ import { verifyGuidedMarker, type GuidedMarkerPurpose } from "./provenance";
 import type { GuidedMenuIdentity } from "./ux-types";
 import { GUIDED_MENU_COPY } from "./ux-types";
 
-/** Stages in which the produce round is proven saved and later steps may run. */
+/**
+ * Stages in which the produce round is proven saved and later steps may run.
+ * `closed` is included on purpose: before it existed as its own stage these
+ * rounds resolved to `reconcile`, which was already in this set, so keeping
+ * it here preserves the exact same ownership/marker behavior — only the
+ * journey-stage UX rendering changed, not what this guard allows through.
+ */
 const STAGES_AFTER_PRODUCE = new Set<GuidedJourneyState["stage"]>([
   "white_sheet",
   "slips",
   "reconcile",
+  "closed",
 ]);
 
 export type GuidedOwnershipVerdict =
@@ -50,8 +57,13 @@ export type GuidedOwnershipVerdict =
   | { verdict: "not_guided" }
   /** The caller owns the round and it is past produce. */
   | { verdict: "allowed"; context: GuidedJourneyContext; state: GuidedJourneyState }
-  /** Refuse and write nothing. */
-  | { verdict: "refused"; message: string };
+  /**
+   * Refuse and write nothing. `reason: "stale_form"` marks specifically the
+   * signed-marker-present-but-invalid case — a copied, edited, or
+   * previous-generation template — so callers can offer the
+   * "สร้างแบบฟอร์มใหม่" recovery action without string-matching `message`.
+   */
+  | { verdict: "refused"; message: string; reason?: "stale_form" };
 
 export type GuidedOwnershipTarget = {
   marketLabelNormalized: string;
@@ -112,6 +124,7 @@ export async function resolveGuidedOwnership(input: {
     return {
       verdict: "refused",
       message: refusal(GUIDED_MENU_COPY.ownershipMarkerRejected),
+      reason: "stale_form",
     };
   }
 
@@ -185,6 +198,7 @@ export async function resolveGuidedOwnership(input: {
     return {
       verdict: "refused",
       message: refusal(GUIDED_MENU_COPY.ownershipMarkerRejected),
+      reason: "stale_form",
     };
   }
 

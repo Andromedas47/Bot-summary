@@ -460,7 +460,10 @@ describe("0049 — structured finalization path", () => {
     );
     // Both ledgers are loaded and intersected — not the ingest ledger alone.
     expect(seedBranch).toContain("service.loadAdmissionRows(");
-    expect(seedBranch).toContain("buildAdmittedStructuredText(admissionRows, ingestRows)");
+    expect(seedBranch).toContain("buildAdmittedStructuredText(");
+    expect(seedBranch).toContain("admissionRows,");
+    expect(seedBranch).toContain("ingestRows,");
+    expect(seedBranch).toContain("snapshot.accumulated_text,");
     // No header authority, no reconstruction, no synthesis in the seeded branch.
     expect(seedBranch).not.toContain("hasHeaderInLedger");
     expect(seedBranch).not.toContain("rebuildForFinalization");

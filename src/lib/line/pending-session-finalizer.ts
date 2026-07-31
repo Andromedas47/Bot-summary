@@ -106,24 +106,34 @@ function hasHeaderInLedger(session: PendingSession, rows: Array<{ raw_text: stri
 }
 
 /**
- * Structured-only: the admitted item text, joined in ledger order.
+ * Structured-only: verifies the admitted event set was fully and consistently
+ * ingested, then returns the session's own accumulated_text — the SAME
+ * document เมนู, จบรายการ and ยืนยันจบรายการ already validated before this call
+ * (GuidedSessionCaptureService.readSnapshot). Finalization no longer replays
+ * raw ledger text as the parsed document: a stale ingest row — for example a
+ * typed control command recorded before the webhook-level interception
+ * existed, or before it fires for a given trigger — can never reach the
+ * parser through this path, and an administrator's out-of-band repair of
+ * accumulated_text takes effect on the very next finalize attempt instead of
+ * being silently overridden by replaying the untouched ledger.
  *
  * check_pending_close_ready proves admission_count = ingest_count, which is NOT
  * the same as proving the two ledgers describe the same events: admission {A,B}
- * with ingest {A,C} has equal counts, and joining every ingest row would parse C
- * — an event that was never admitted — while silently dropping admitted B.
- * Structured finalization therefore compares the exact generation-scoped
- * line_event_id sets and fails closed on any asymmetry, duplicate id, blank
- * ingest text, or admission/ingest timestamp disagreement.
+ * with ingest {A,C} has equal counts but describes different sets. The
+ * admission/ingest comparison below is kept as a pure integrity gate — it
+ * still fails closed on any asymmetry, duplicate id, blank ingest text, or
+ * admission/ingest timestamp disagreement, exactly the concurrency races 0049
+ * built it to catch — it just no longer supplies the parsed text itself.
  *
  * Throws rather than degrading: the caller records the message as a
  * reconstruction error, leaves finalText at the structured row's empty
  * accumulated_text, and the session fails validation instead of persisting
- * unadmitted items.
+ * over an unresolved admission/ingest asymmetry.
  */
 export function buildAdmittedStructuredText(
   admissionRows: Array<{ line_event_id: string; line_timestamp_ms: number }>,
   ingestRows: Array<{ line_event_id: string; line_timestamp_ms: number; raw_text: string }>,
+  accumulatedText: string,
 ): string {
   const admitted = new Map<string, number>();
   for (const row of admissionRows) {
@@ -157,7 +167,7 @@ export function buildAdmittedStructuredText(
     }
   }
 
-  return ingestRows.map((row) => row.raw_text).join("\n");
+  return accumulatedText;
 }
 
 // Day context for the addition reply: cumulative total for the exact
@@ -257,15 +267,21 @@ export async function finalizePendingGeneration(
     if (seed) {
       // A structured session has no text header to find and none to invent.
       // Only the rows present in BOTH generation-scoped ledgers through the
-      // immutable close boundary are parsed — count parity from the close
-      // barrier is not treated as set identity. No ledger-header authority is
-      // consulted and no header is synthesized.
+      // immutable close boundary are trusted to have arrived intact — count
+      // parity from the close barrier is not treated as set identity. Once
+      // that integrity gate passes, the parsed document is accumulated_text
+      // itself — the same field readSnapshot already validated at every
+      // review/close/confirm step — not a replay of the raw ledger text.
       const admissionRows = await service.loadAdmissionRows(
         snapshot.session_key,
         snapshot.session_generation,
         closeTimestamp,
       );
-      finalText = buildAdmittedStructuredText(admissionRows, ingestRows);
+      finalText = buildAdmittedStructuredText(
+        admissionRows,
+        ingestRows,
+        snapshot.accumulated_text,
+      );
     } else if (hasHeaderInLedger(snapshot, ingestRows)) {
       finalText = ingestRows.map((row) => row.raw_text).join("\n");
     } else {

@@ -24,6 +24,7 @@ process.env.LINE_CHANNEL_SECRET ??= "test-channel-secret";
 
 import { describe, expect, it } from "bun:test";
 import type { GuidedJourneyContext, GuidedJourneyState } from "./journey";
+import { buildSlipHeaderTemplate, buildWhiteSheetTemplate } from "./journey";
 import { resolveGuidedOwnership } from "./ownership-guard";
 import {
   buildStaleFormRecoveryMessages,
@@ -31,6 +32,7 @@ import {
 } from "./journey-bridge";
 import { guardGuidedSlipOpen } from "./slip-open-guard";
 import {
+  buildSettlementTemplate,
   parseGuidedSettlementCommand,
   processGuidedSettlementSubmission,
 } from "./settlement-command";
@@ -316,14 +318,37 @@ describe("stale-form recovery — marker diagnostics are distinguishable (logs o
 describe("blocker fix — press-level: recovery buttons never write data, manual resend does", () => {
   const CATALOG_OK = { isActiveSellerMarket: async () => true };
 
-  /** True if ANY of the three money-writing command parsers recognize `text`. */
+  /**
+   * True if ANY of the three money-writing command parsers recognize `text`,
+   * mirroring the REAL router: Production strips the `#gp1` marker via
+   * `extractGuidedMarker` before ever handing text to a parser (see
+   * webhook-service.ts's `guidedMarker` param). Running parsers against the
+   * raw, still-marked text would falsely report "safe" for a regression where
+   * a full marked template got placed inside a Quick Reply button — the
+   * marker line breaks these parsers' regexes, hiding exactly the bug this
+   * guard exists to catch.
+   */
   function moneyParsersRecognize(text: string): boolean {
+    const stripped = extractGuidedMarker(text).text;
     return (
-      parseWhiteSheetCloseCommandFromMessage(text).kind !== "not_command" ||
-      parseGuidedSettlementCommand(text).kind !== "not_command" ||
-      parseSlipSessionHeader(text) !== null
+      parseWhiteSheetCloseCommandFromMessage(stripped).kind !== "not_command" ||
+      parseGuidedSettlementCommand(stripped).kind !== "not_command" ||
+      parseSlipSessionHeader(stripped) !== null
     );
   }
+
+  it("self-check: moneyParsersRecognize actually mirrors the router — a full marked template is recognized, not hidden by the marker line", () => {
+    const whiteSheet = buildWhiteSheetTemplate(CONTEXT);
+    const slipHeader = buildSlipHeaderTemplate(CONTEXT);
+    const settlement = buildSettlementTemplate(CONTEXT);
+    expect(whiteSheet).toContain("#gp1.");
+    expect(slipHeader).toContain("#gp1.");
+    expect(settlement).toContain("#gp1.");
+
+    expect(moneyParsersRecognize(whiteSheet!)).toBe(true);
+    expect(moneyParsersRecognize(slipHeader!)).toBe(true);
+    expect(moneyParsersRecognize(settlement!)).toBe(true);
+  });
 
   it("White Sheet: pressing every recovery button is a dead end; a manually edited resend is guard-approved exactly as before", async () => {
     const marker = signGuidedMarker({

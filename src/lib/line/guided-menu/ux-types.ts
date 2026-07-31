@@ -324,6 +324,18 @@ export const GUIDED_MENU_COPY = {
   /** V2: totals exist but do not match — the one recommended next action. */
   roundMismatchHeading: "ยอดยังไม่ตรง",
   roundMismatchNextStep: "กรุณาตรวจสอบยอดส่งอีกครั้ง",
+  /** V2: the reconcile screen's own mismatch copy — must agree with its primary action (แก้ไขยอดส่ง), never ตรวจและปิดรอบ. */
+  roundMismatchSubmittedNextStep: "กรุณาแก้ไขยอดส่งด้านล่าง แล้วส่งกลับมา",
+  /**
+   * V2 blocker fix: a regenerated form is a LINE `message` action, which
+   * SUBMITS its text on press — it must never carry the template itself (that
+   * would auto-submit zero-filled money data). The fresh template is sent as
+   * a plain Bot message instead; this notice explains why a new one appeared.
+   */
+  regenerateFormNotice: [
+    "แบบฟอร์มเดิมหมดอายุแล้ว",
+    "สร้างแบบฟอร์มใหม่ให้แล้ว กรุณาแก้เฉพาะตัวเลขและส่งกลับมา",
+  ].join("\n"),
 
   /** V2: the produce round is terminally failed with nothing saved. */
   produceFailedZeroWrites: "รอบนี้บันทึกไม่สำเร็จ",

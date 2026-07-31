@@ -197,6 +197,27 @@ describe("LineMessageAction — label vs resubmitted text", () => {
     expect(() => messageAction(long, "เมนู")).toThrow(/exceeds 20/);
   });
 
+  it("throws instead of silently truncating a Quick Reply over 13 items", () => {
+    const buttons = Array.from({ length: 14 }, (_, i) => ({
+      kind: "message" as const,
+      label: `L${i}`,
+      text: `T${i}`,
+    }));
+    expect(() => bindMixedQuickReply(buttons)).toThrow(/at most 13/);
+  });
+
+  it("assertGuidedMenuMessageLimits also rejects a Quick Reply over 13 items", () => {
+    const items = Array.from({ length: 14 }, (_, i) => ({
+      type: "action" as const,
+      action: messageAction(`L${i}`, `T${i}`),
+    }));
+    expect(() =>
+      assertGuidedMenuMessageLimits([
+        { ...buildPlainTextMessage("status"), quickReply: { items } },
+      ]),
+    ).toThrow(/at most 13/);
+  });
+
   it("mixes token (postback) and message actions in one Quick Reply", () => {
     const qr = bindMixedQuickReply([
       { kind: "token", label: "ดูสถานะ", wireToken: fixedEvidenceToken(50) },

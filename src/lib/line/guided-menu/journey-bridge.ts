@@ -120,36 +120,43 @@ function buildRegeneratedGuidedForm(
   return buildSettlementTemplate(context);
 }
 
+function buildStatusOnlyRecoveryQuickReply(): LineQuickReply {
+  return bindMixedQuickReply([
+    { kind: "message", label: "ดูสถานะ", text: GUIDED_MENU_TRIGGER },
+    { kind: "message", label: "ออกจากเมนู", text: "ออกจากเมนู" },
+  ]);
+}
+
 /**
- * Recovery Quick Reply for ownership-guard's `reason: "stale_form"`.
+ * Recovery messages for ownership-guard's `reason: "stale_form"`.
  *
- * `regenerate` present → the SAME purpose still applies to the caller's
- * current stage: "สร้างแบบฟอร์มใหม่" resubmits a FRESH, purpose-specific
- * template built from the live context (a brand-new marker, since a stale
- * marker is only reachable via an older session generation or a tampered
- * signature — never the one the fresh call produces), through the exact same
- * text-command parser and guard every hand-typed submission already goes
- * through. Nothing is written by pressing the button itself.
+ * A LINE `message` action SUBMITS its `text` on press — it is not an editable
+ * draft. Earlier this put the entire regenerated template (a real White Sheet
+ * or settlement form, complete with zero-filled amounts and a valid marker)
+ * inside a "สร้างแบบฟอร์มใหม่" button's text, so pressing it silently
+ * submitted a zero-value close/settlement. That is fixed here: when
+ * `regenerate` is still valid for the caller's current stage, the fresh
+ * template is sent as an ordinary Bot message the operator must copy, edit,
+ * and resend by hand — never as text a button can auto-submit. No button in
+ * this reply ever carries the template.
  *
- * `regenerate` absent → the form no longer applies at all (the round moved
- * on, or closed): only a status check is offered, never a false promise of a
+ * `regenerate` absent (or the template failed to build) → the form no longer
+ * applies at all: only a status check is offered, never a false promise of a
  * new form.
  */
-export function buildStaleFormRecoveryQuickReply(
+export function buildStaleFormRecoveryMessages(
+  fallbackMessage: string,
   regenerate?: { purpose: GuidedMarkerPurpose; context: GuidedJourneyContext },
-): LineQuickReply {
+): GuidedMenuLineMessage[] {
   if (regenerate) {
     const fresh = buildRegeneratedGuidedForm(regenerate.purpose, regenerate.context);
     if (fresh) {
       try {
-        return bindMixedQuickReply([
-          {
-            kind: "message",
-            label: GUIDED_MENU_COPY.generateNewFormLabel,
-            text: fresh,
-          },
-          { kind: "message", label: "ออกจากเมนู", text: "ออกจากเมนู" },
-        ]);
+        const quickReply = buildStatusOnlyRecoveryQuickReply();
+        return [
+          buildPlainTextMessage(GUIDED_MENU_COPY.regenerateFormNotice),
+          { ...buildPlainTextMessage(fresh), quickReply },
+        ];
       } catch {
         // Graceful fallback: an unexpectedly long template (e.g. unusually
         // long seller/market labels) never crashes the reply — it just falls
@@ -157,10 +164,9 @@ export function buildStaleFormRecoveryQuickReply(
       }
     }
   }
-  return bindMixedQuickReply([
-    { kind: "message", label: "ดูสถานะ", text: GUIDED_MENU_TRIGGER },
-    { kind: "message", label: "ออกจากเมนู", text: "ออกจากเมนู" },
-  ]);
+  return [
+    { ...buildPlainTextMessage(fallbackMessage), quickReply: buildStatusOnlyRecoveryQuickReply() },
+  ];
 }
 
 /** Exact text that asks the guided flow to close the round. */

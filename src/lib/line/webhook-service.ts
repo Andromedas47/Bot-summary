@@ -38,7 +38,7 @@ import {
   extractGuidedMarker,
   processGuidedRoundClose,
   processGuidedSettlementSubmission,
-  buildStaleFormRecoveryQuickReply,
+  buildStaleFormRecoveryMessages,
   LINE_REPLY_MESSAGE_MAX,
 } from "@/lib/line/guided-menu";
 import {
@@ -1399,28 +1399,26 @@ export class WebhookService {
 
   /**
    * A guided-flow refusal reply. `staleForm` attaches the stale-form recovery
-   * Quick Reply — used only for ownership-guard's `reason: "stale_form"`,
-   * never for other refusals. `regenerate`, when present, lets the recovery
-   * button resubmit a genuinely fresh, purpose-specific template instead of a
-   * blind "เมนู"; when absent the recovery is a plain status check.
+   * messages — used only for ownership-guard's `reason: "stale_form"`, never
+   * for other refusals. `regenerate`, when present, hands back a genuinely
+   * fresh, purpose-specific template as its OWN plain Bot message (never
+   * inside a Quick Reply button, which would auto-submit it on press); when
+   * absent the recovery is a plain status check.
    */
   private async replyGuidedRefusal(
     replyToken: string,
     message: string,
     staleForm: boolean,
-    regenerate?: Parameters<typeof buildStaleFormRecoveryQuickReply>[0],
+    regenerate?: Parameters<typeof buildStaleFormRecoveryMessages>[1],
   ): Promise<void> {
     if (!staleForm) {
       await this.replyMessage(replyToken, message);
       return;
     }
-    await this.replyApiMessages(replyToken, [
-      {
-        type: "text",
-        text: message,
-        quickReply: buildStaleFormRecoveryQuickReply(regenerate),
-      } as LineApiMessage,
-    ]);
+    await this.replyApiMessages(
+      replyToken,
+      buildStaleFormRecoveryMessages(message, regenerate) as LineApiMessage[],
+    );
   }
 
   // ── White Sheet closing command ───────────────────────────────────────────

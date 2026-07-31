@@ -925,8 +925,9 @@ export class GuidedMenuUxHandler {
     // mismatch is corrected by resubmitting the same template with the right
     // numbers, so "แก้ไขยอดส่ง" and "กรอกยอดส่ง" share this one regeneration path.
     const settlementSubmitted = !report.blockers.includes("settlement_missing");
-    const needsTemplate =
-      !settlementSubmitted || report.blockers.includes("difference_non_zero");
+    const mismatched =
+      settlementSubmitted && report.blockers.includes("difference_non_zero");
+    const needsTemplate = !settlementSubmitted || mismatched;
     const template = needsTemplate ? buildSettlementTemplate(context) : null;
 
     // Slips are optional and never gate the round (round-close.ts never blocks
@@ -974,51 +975,88 @@ export class GuidedMenuUxHandler {
               }),
             },
           ])
-        : // Never label a view_status button "ปิดรอบ" — closing stays the exact
-          // text command, only relabeled as "ตรวจและปิดรอบ". Whatever remains
-          // blocked, this is now the one authoritative next step.
-          bindMixedQuickReply([
-            {
-              kind: "message",
-              label: GUIDED_MENU_COPY.checkAndCloseLabel,
-              text: GUIDED_MENU_COPY.roundCloseCommand,
-            },
-            {
-              kind: "token",
-              label: GUIDED_MENU_COPY.editSettlementLabel,
-              wireToken: await create({ actionType: "view_status", payload: {} }),
-            },
-            {
-              kind: "token",
-              label: GUIDED_MENU_COPY.viewDetailLabel,
-              wireToken: await create({ actionType: "view_status", payload: {} }),
-            },
-            ...(freshSlipHeader
-              ? [{
-                  kind: "message" as const,
-                  label: GUIDED_MENU_COPY.startSlipsLabel,
-                  text: freshSlipHeader,
-                }]
-              : []),
-            {
-              kind: "token",
-              label: "ออกจากเมนู",
-              wireToken: await create({
-                actionType: "menu_root",
-                payload: { intent: "cancel" },
-              }),
-            },
-          ]);
+        : mismatched
+          ? // A submitted-but-mismatched settlement must never offer
+            // "ตรวจและปิดรอบ" as the primary action while the text tells the
+            // operator to correct the numbers instead — closing would only be
+            // blocked again by the same difference. "แก้ไขยอดส่ง" is primary.
+            bindMixedQuickReply([
+              {
+                kind: "token",
+                label: GUIDED_MENU_COPY.editSettlementLabel,
+                wireToken: await create({ actionType: "view_status", payload: {} }),
+              },
+              {
+                kind: "token",
+                label: "ดูสถานะ",
+                wireToken: await create({ actionType: "view_status", payload: {} }),
+              },
+              ...(freshSlipHeader
+                ? [{
+                    kind: "message" as const,
+                    label: GUIDED_MENU_COPY.startSlipsLabel,
+                    text: freshSlipHeader,
+                  }]
+                : []),
+              {
+                kind: "token",
+                label: "ออกจากเมนู",
+                wireToken: await create({
+                  actionType: "menu_root",
+                  payload: { intent: "cancel" },
+                }),
+              },
+            ])
+          : // Never label a view_status button "ปิดรอบ" — closing stays the exact
+            // text command, only relabeled as "ตรวจและปิดรอบ". Nothing is
+            // blocked, so this is now the one authoritative next step.
+            bindMixedQuickReply([
+              {
+                kind: "message",
+                label: GUIDED_MENU_COPY.checkAndCloseLabel,
+                text: GUIDED_MENU_COPY.roundCloseCommand,
+              },
+              {
+                kind: "token",
+                label: GUIDED_MENU_COPY.editSettlementLabel,
+                wireToken: await create({ actionType: "view_status", payload: {} }),
+              },
+              {
+                kind: "token",
+                label: GUIDED_MENU_COPY.viewDetailLabel,
+                wireToken: await create({ actionType: "view_status", payload: {} }),
+              },
+              ...(freshSlipHeader
+                ? [{
+                    kind: "message" as const,
+                    label: GUIDED_MENU_COPY.startSlipsLabel,
+                    text: freshSlipHeader,
+                  }]
+                : []),
+              {
+                kind: "token",
+                label: "ออกจากเมนู",
+                wireToken: await create({
+                  actionType: "menu_root",
+                  payload: { intent: "cancel" },
+                }),
+              },
+            ]);
     } catch {
       quickReply = undefined;
     }
 
-    const nextStepLine = template
-      ? "กรอกแบบฟอร์มยอดส่งด้านล่าง แก้เฉพาะตัวเลข แล้วส่งกลับมา"
-      : report.blockers.length === 0
-        ? `กด "${GUIDED_MENU_COPY.checkAndCloseLabel}" เพื่อปิดรอบ`
-        : `แก้ไขแล้วกด "${GUIDED_MENU_COPY.checkAndCloseLabel}" อีกครั้ง`;
+    const nextStepLine = mismatched
+      ? [GUIDED_MENU_COPY.roundMismatchHeading, GUIDED_MENU_COPY.roundMismatchSubmittedNextStep].join("\n")
+      : template
+        ? "กรอกแบบฟอร์มยอดส่งด้านล่าง แก้เฉพาะตัวเลข แล้วส่งกลับมา"
+        : report.blockers.length === 0
+          ? `กด "${GUIDED_MENU_COPY.checkAndCloseLabel}" เพื่อปิดรอบ`
+          : `แก้ไขแล้วกด "${GUIDED_MENU_COPY.checkAndCloseLabel}" อีกครั้ง`;
 
+    // Only the LAST message in the reply ever carries the Quick Reply — never
+    // both the status recap and the template, which would offer the same
+    // buttons twice.
     const status = buildRoundStatusMessage({
       sellerLabel: context.sellerLabel,
       marketLabel: context.marketLabel,
@@ -1030,7 +1068,7 @@ export class GuidedMenuUxHandler {
         nextStepLine,
       ],
       closed: false,
-      quickReply,
+      quickReply: template ? undefined : quickReply,
     });
 
     const messages: GuidedMenuLineMessage[] = [status];

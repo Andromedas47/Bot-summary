@@ -108,8 +108,11 @@ export type QuickReplyButtonSpec =
 export function bindMixedQuickReply(
   buttons: QuickReplyButtonSpec[],
 ): LineQuickReply {
+  if (buttons.length > 13) {
+    throw new Error(`Quick Reply allows at most 13 items, got ${buttons.length}`);
+  }
   return {
-    items: buttons.slice(0, 13).map((b) =>
+    items: buttons.map((b) =>
       b.kind === "token"
         ? {
             type: "action" as const,
@@ -802,6 +805,11 @@ export function assertGuidedMenuMessageLimits(
         throw new Error("text message exceeds 5000 code points");
       }
       if (msg.quickReply) {
+        if (msg.quickReply.items.length > 13) {
+          throw new Error(
+            `Quick Reply allows at most 13 items, got ${msg.quickReply.items.length}`,
+          );
+        }
         for (const item of msg.quickReply.items) {
           if (item.action.type === "postback" && item.action.data.length > 300) {
             throw new Error("quickReply postback data exceeds 300 chars");

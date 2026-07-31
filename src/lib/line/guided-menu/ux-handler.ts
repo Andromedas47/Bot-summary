@@ -262,7 +262,12 @@ export class GuidedMenuUxHandler {
     return resultEnvelope("cancelled", [buildCancelledMessage()]);
   }
 
-  /** After a captured item append, acknowledge and refresh Flex controls. */
+  /**
+   * After a captured item append, acknowledge with text + Quick Reply.
+   * A line the parser could not read gets correction details instead of the
+   * saved-count receipt — same detail text and hint `renderCaptureStatus`
+   * shows on ดูรายการ, just surfaced immediately instead of on next look.
+   */
   async renderCaptureAcknowledgement(input: {
     identity: GuidedMenuIdentity;
   }): Promise<GuidedMenuUxResult | null> {
@@ -270,13 +275,27 @@ export class GuidedMenuUxHandler {
     if (snapshot.status !== "ok" || snapshot.closeRequested) return null;
     const controls = await this.buildCaptureStageControls(input.identity);
     if (!controls) return null;
+    const hasParseErrors = snapshot.parsed.parse_errors.length > 0;
+    const ackBase = hasParseErrors
+      ? buildPlainTextMessage(
+          [
+            buildWeighSessionValidationReply(snapshot.parsed),
+            "",
+            GUIDED_MENU_COPY.correctionHint,
+          ].join("\n"),
+        )
+      : buildCaptureAckMessage(snapshot.parsed.items.length);
+    const ack = controls.quickReply
+      ? { ...ackBase, quickReply: controls.quickReply }
+      : ackBase;
     return resultEnvelope(
       "session_status",
-      [
-        buildCaptureAckMessage(snapshot.parsed.items.length),
-        controls.flex,
-      ],
-      { item_count: snapshot.parsed.items.length, capture_ack: true },
+      [ack],
+      {
+        item_count: snapshot.parsed.items.length,
+        capture_ack: true,
+        parse_error_count: snapshot.parsed.parse_errors.length,
+      },
     );
   }
 
@@ -594,7 +613,7 @@ export class GuidedMenuUxHandler {
     }
 
     const controls = await this.buildCaptureStageControls(input.identity);
-    const openedMessage = buildSessionOpenedMessage({
+    const openedBase = buildSessionOpenedMessage({
       transactionType: tx,
       sellerLabel: selection.seller.label,
       marketLabel: assignment.marketLabel,
@@ -604,10 +623,13 @@ export class GuidedMenuUxHandler {
         GUIDED_MENU_COPY.closeWhenDoneHint,
       ],
     });
+    const openedMessage = controls?.quickReply
+      ? { ...openedBase, quickReply: controls.quickReply }
+      : openedBase;
 
     return resultEnvelope(
       "session_opened",
-      controls ? [openedMessage, controls.flex] : [openedMessage],
+      [openedMessage],
       {
         opened: true,
         transaction_type: tx,
@@ -701,7 +723,8 @@ export class GuidedMenuUxHandler {
       close: true,
       confirm: false,
     });
-    return this.wrapStageControls(buttons, "จัดการรายการ");
+    // Transient capture-stage controls: Quick Reply only, no persistent Flex.
+    return this.wrapStageControls(buttons, "จัดการรายการ", false);
   }
 
   private async buildConfirmStageControls(identity: GuidedMenuIdentity) {
@@ -712,18 +735,26 @@ export class GuidedMenuUxHandler {
     return this.wrapStageControls(buttons, "ยืนยันจบรายการ");
   }
 
+  /**
+   * Routine/transient controls stay Quick Reply only (`includeFlex: false`);
+   * a persistent Flex card is reserved for selection screens and the one
+   * close-confirmation / white-sheet-transition moment (default `true`).
+   */
   private wrapStageControls(
     buttons: BoundTokenButton[] | undefined,
     title: string,
-  ): { flex: LineFlexMessage; quickReply?: LineQuickReply } | undefined {
+    includeFlex = true,
+  ): { flex?: LineFlexMessage; quickReply?: LineQuickReply } | undefined {
     if (!buttons || buttons.length === 0) return undefined;
     const quickReply = bindQuickReply(buttons);
     return {
-      flex: buildStageControlFlexMessage({
-        title,
-        bodyLines: ["กดปุ่มด้านล่างเพื่อดำเนินการต่อ"],
-        buttons,
-      }),
+      flex: includeFlex
+        ? buildStageControlFlexMessage({
+            title,
+            bodyLines: ["กดปุ่มด้านล่างเพื่อดำเนินการต่อ"],
+            buttons,
+          })
+        : undefined,
       quickReply,
     };
   }
@@ -762,9 +793,10 @@ export class GuidedMenuUxHandler {
     identity: GuidedMenuIdentity,
     labels: readonly string[],
     title: string,
+    includeFlex = true,
   ) {
     const buttons = await this.buildJourneyActionButtons(identity, labels);
-    return this.wrapStageControls(buttons, title);
+    return this.wrapStageControls(buttons, title, includeFlex);
   }
 
   /** Map a capture refusal onto operator copy without leaking internals. */
@@ -861,10 +893,12 @@ export class GuidedMenuUxHandler {
     const stageLabels = template
       ? (["กรอกยอดส่ง", "ตรวจยอด"] as const)
       : (["ตรวจยอด"] as const);
+    // Routine reconcile/settlement status: Quick Reply only, no persistent Flex.
     const controls = await this.buildJourneyStageControls(
       identity,
       stageLabels,
       "จัดการรอบขาย",
+      false,
     );
 
     const nextStepLine = template
@@ -959,10 +993,15 @@ export class GuidedMenuUxHandler {
         reason: "invalid_business_date",
       });
     }
+    // Routine white-sheet-stage revisits: Quick Reply only. The template
+    // message itself already carries the "form"; the one persistent Flex
+    // card for this stage is sent once, at the finalize-confirmed transition
+    // (see confirmFinalize / renderProduceOutcome's "confirmed" branch).
     const controls = await this.buildJourneyStageControls(
       identity,
       ["กรอกใบขาว", "ดูสถานะ"],
       "กรอกใบขาว",
+      false,
     );
     return resultEnvelope(
       "white_sheet_template",
@@ -994,10 +1033,12 @@ export class GuidedMenuUxHandler {
         reason: "invalid_business_date",
       });
     }
+    // Routine slip-stage navigation: Quick Reply only, no persistent Flex.
     const controls = await this.buildJourneyStageControls(
       identity,
       ["ตรวจยอด", "ดูสถานะ"],
       "ส่งสลิป",
+      false,
     );
     return resultEnvelope(
       "slip_instructions",
@@ -1093,9 +1134,7 @@ export class GuidedMenuUxHandler {
       const message = buildFinalizeNotReadyMessage();
       return resultEnvelope(
         "session_finalize_not_ready",
-        controls
-          ? [message, controls.flex]
-          : [message],
+        controls?.flex ? [message, controls.flex] : [message],
         { reason: "not_ready", detail: outcome.detail ?? null },
       );
     }
@@ -1156,17 +1195,23 @@ export class GuidedMenuUxHandler {
       { status: "finalizing" | "finalize_failed" | "validation_failed" }
     >,
   ): Promise<GuidedMenuUxResult> {
+    // Finalizing/failed status is a transient poll target ("ดูสถานะ"), never a
+    // persistent Flex card — see message-economy rule in the UX spec.
     const controls = await this.buildJourneyStageControls(
       identity,
       ["ดูสถานะ"],
       "สถานะรายการ",
+      false,
     );
 
     if (outcome.status === "finalizing") {
-      const message = buildPlainTextMessage(GUIDED_MENU_COPY.produceFinalizing);
+      const base = buildPlainTextMessage(GUIDED_MENU_COPY.produceFinalizing);
+      const message = controls?.quickReply
+        ? { ...base, quickReply: controls.quickReply }
+        : base;
       return resultEnvelope(
         "session_finalizing",
-        controls ? [message, controls.flex] : [message],
+        [message],
         { produce_finalization: "pending", saved: false },
       );
     }

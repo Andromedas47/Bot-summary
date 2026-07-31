@@ -93,7 +93,7 @@ describe("Flex stage controls — capture and recovery", () => {
     expect(menu.screen).toBe("session_status");
     expect(controlLabels(menu.messages)).toEqual([
       "ดูรายการ",
-      "จบรายการ",
+      GUIDED_MENU_COPY.closeItemsLabel,
       "ออกจากเมนู",
     ]);
   });
@@ -157,7 +157,7 @@ describe("Flex stage controls — capture and recovery", () => {
     });
     expect(controlLabels(ack?.messages ?? [])).toEqual([
       "ดูรายการ",
-      "จบรายการ",
+      GUIDED_MENU_COPY.closeItemsLabel,
       "ออกจากเมนู",
     ]);
   });
@@ -230,7 +230,10 @@ describe("Flex stage controls — capture and recovery", () => {
     const source = await Bun.file(new URL("./ux-handler.ts", import.meta.url)).text();
     // Ready-to-close must not mint a view_status token labelled ปิดรอบ.
     expect(source).not.toMatch(/\["ปิดรอบ",\s*"ตรวจยอด"\]/);
-    expect(source).toContain('พิมพ์ "${GUIDED_MENU_COPY.roundCloseCommand}" เพื่อปิดรอบ');
+    expect(source).toContain('${GUIDED_MENU_COPY.checkAndCloseLabel}" เพื่อปิดรอบ');
     expect(GUIDED_MENU_COPY.roundCloseCommand).toBe("ปิดรอบ");
+    // The close command is only ever resubmitted via a "message" action
+    // (relabeled), never minted as a view_status postback button.
+    expect(source).not.toMatch(/label:\s*"ปิดรอบ"/);
   });
 });

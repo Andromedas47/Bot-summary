@@ -290,7 +290,7 @@ describe("the refusal screen keeps the operator in capture", () => {
     expect(body).toContain(GUIDED_MENU_COPY.produceCloseValidationFailed.split("\n")[0]!);
     expect(body).not.toContain("กรอกใบขาว");
     expect(controlLabels(result.messages)).toContain(
-      "จบรายการ",
+      GUIDED_MENU_COPY.closeItemsLabel,
     );
     expect(result.result).toMatchObject({ close_requested: false, saved: false });
   });

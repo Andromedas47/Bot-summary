@@ -565,12 +565,32 @@ describe("0049 — structured finalization parses only the admitted set", () => 
   const ingest = (id: string, ts: number, raw_text: string) =>
     ({ line_event_id: id, line_timestamp_ms: ts, raw_text });
 
-  it("joins the intersected rows in ledger order when the sets agree", () => {
+  it("returns accumulated_text — not the joined ledger text — once the sets agree", () => {
     const text = buildAdmittedStructuredText(
       [admission("A", 10), admission("B", 20)],
       [ingest("A", 10, "1.แตงโม10บาท"), ingest("B", 20, "1โล")],
+      "1.แตงโม10บาท\n1โล",
     );
     expect(text).toBe("1.แตงโม10บาท\n1โล");
+  });
+
+  it("a stale ingest row's text never reaches the returned document even when parity holds", () => {
+    // Regression: an admin repaired accumulated_text after a control command
+    // (e.g. a typed "ยกเลิก" recorded before webhook interception existed)
+    // had already been admitted and ingested. The ledger still has 3 rows —
+    // parity holds — but the returned document must be the REPAIRED text,
+    // never the stale ledger row's raw content.
+    const text = buildAdmittedStructuredText(
+      [admission("A", 10), admission("B", 20), admission("C", 30)],
+      [
+        ingest("A", 10, "1. แตงโม 40 บาท\n3 ลูก"),
+        ingest("B", 20, "2. มะละกอ 20 บาท\n5 ลูก"),
+        ingest("C", 30, "ยกเลิก"),
+      ],
+      "\n1. แตงโม 40 บาท\n3 ลูก\n2. มะละกอ 20 บาท\n5 ลูก",
+    );
+    expect(text).not.toContain("ยกเลิก");
+    expect(text).toBe("\n1. แตงโม 40 บาท\n3 ลูก\n2. มะละกอ 20 บาท\n5 ลูก");
   });
 
   it("fails closed on admission {A,B} / ingest {A,C} and never parses C", () => {
@@ -579,6 +599,7 @@ describe("0049 — structured finalization parses only the admitted set", () => 
       buildAdmittedStructuredText(
         [admission("A", 10), admission("B", 20)],
         [ingest("A", 10, "1.แตงโม10บาท"), ingest("C", 30, "99.ของแปลกปลอม999บาท")],
+        "1.แตงโม10บาท",
       );
     } catch (error) {
       thrown = error as Error;
@@ -596,6 +617,7 @@ describe("0049 — structured finalization parses only the admitted set", () => 
     expect(() => buildAdmittedStructuredText(
       [admission("A", 10), admission("B", 20)],
       [ingest("A", 10, "1.แตงโม10บาท")],
+      "1.แตงโม10บาท",
     )).toThrow(/B/);
   });
 
@@ -603,6 +625,7 @@ describe("0049 — structured finalization parses only the admitted set", () => 
     expect(() => buildAdmittedStructuredText(
       [admission("A", 10)],
       [ingest("A", 10, "   ")],
+      "",
     )).toThrow(/no ingest text/);
   });
 
@@ -610,10 +633,12 @@ describe("0049 — structured finalization parses only the admitted set", () => 
     expect(() => buildAdmittedStructuredText(
       [admission("A", 10), admission("A", 10)],
       [ingest("A", 10, "x")],
+      "x",
     )).toThrow(/duplicate admission/);
     expect(() => buildAdmittedStructuredText(
       [admission("A", 10)],
       [ingest("A", 10, "x"), ingest("A", 10, "x")],
+      "x",
     )).toThrow(/duplicate ingest/);
   });
 
@@ -621,11 +646,15 @@ describe("0049 — structured finalization parses only the admitted set", () => 
     expect(() => buildAdmittedStructuredText(
       [admission("A", 10)],
       [ingest("A", 11, "x")],
+      "x",
     )).toThrow(/timestamp conflict/);
   });
 
-  it("accepts an empty generation without inventing text", () => {
-    expect(buildAdmittedStructuredText([], [])).toBe("");
+  it("accepts an empty generation and returns accumulated_text unchanged", () => {
+    expect(buildAdmittedStructuredText([], [], "")).toBe("");
+    expect(buildAdmittedStructuredText([], [], "irrelevant text with no ledger rows")).toBe(
+      "irrelevant text with no ledger rows",
+    );
   });
 });
 

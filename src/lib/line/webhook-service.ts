@@ -64,6 +64,8 @@ import {
   WhiteSheetNoteSessionService,
   type ManualWhiteSheetNoteSessionRow,
 } from "@/lib/line/white-sheet-note-session-service";
+import { saveManualWhiteSheetEntryFromLine } from "@/lib/line/white-sheet-note-canonical-save";
+import { WhiteSheetPersistenceError } from "@/lib/white-sheet/persist";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 import { bangkokBusinessDateNow } from "@/lib/business-date";
 import { parseManualSlipAmounts } from "@/lib/parsers/manual-slip-amount";
@@ -219,8 +221,7 @@ function buildWhiteSheetNoteSummary(session: ManualWhiteSheetNoteSessionRow): st
   }
   if (session.actual_cash !== null) lines.push(`เงินสด: ${formatMoney(session.actual_cash)} บาท`);
   lines.push("");
-  lines.push("ข้อมูลนี้เป็นบันทึกใบขาวมือเท่านั้น");
-  lines.push("ยังไม่ได้ตรวจเทียบกับรายการสินค้า สลิป หรือยอดโอน");
+  lines.push("บันทึกข้อมูลใบขาวแล้ว");
   return lines.join("\n");
 }
 
@@ -1807,6 +1808,21 @@ export class WebhookService {
           if (replyToken) await this.replyMessage(replyToken, WHITE_SHEET_NOTE_CLOSE_EMPTY_REPLY);
           return { eventId, eventType, status: "saved", parsed: false };
         }
+
+        // Canonical save must succeed before the session is marked closed —
+        // a failure (e.g. the existing row is FINALIZED) leaves the LINE
+        // session open so the operator can retry or correct it.
+        try {
+          await saveManualWhiteSheetEntryFromLine(this.supabase, openSession);
+        } catch (err) {
+          if (err instanceof WhiteSheetPersistenceError) {
+            log.info("white sheet note canonical save rejected", { sourceId, reason: err.message });
+            if (replyToken) await this.replyMessage(replyToken, err.message);
+            return { eventId, eventType, status: "saved", parsed: false };
+          }
+          throw err;
+        }
+
         const closed = await svc.closeSession(openSession, { lineUserId, lineEventId: eventId });
         if (replyToken) await this.replyMessage(replyToken, buildWhiteSheetNoteSummary(closed));
         log.info("white sheet note closed", { sourceId, sessionId: closed.id });

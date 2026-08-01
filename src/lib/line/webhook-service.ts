@@ -59,6 +59,7 @@ import { SessionDedupService } from "@/lib/line/session-dedup-service";
 import {
   parseWhiteSheetNoteCommand,
   collapseWhiteSheetNoteFields,
+  isWhiteSheetNoteFieldShaped,
   type WhiteSheetNoteParseResult,
   type WhiteSheetNoteFieldValue,
 } from "@/lib/line/white-sheet-note-command";
@@ -754,6 +755,34 @@ export class WebhookService {
       );
       if (noteResult !== null) return noteResult;
       // field-shaped text with no open session — not this feature's message.
+    } else if (isWhiteSheetNoteFieldShaped(text)) {
+      // Open-session fail-closed: never silent-fallthrough to PendingSessionService
+      // for field-shaped text while a Manual White Sheet session is open.
+      const noteSvc = new WhiteSheetNoteSessionService(this.supabase);
+      let openSession: ManualWhiteSheetNoteSessionRow | null;
+      try {
+        openSession = await noteSvc.findOpenSession(sourceId);
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        log.error("white sheet note open-session lookup failed", { sourceId, error: errorMessage });
+        if (replyToken) {
+          try {
+            await replyMessage(replyToken, WHITE_SHEET_NOTE_LOOKUP_ERROR_REPLY);
+          } catch { /* ignore reply error */ }
+        }
+        return { eventId, eventType: event.type, status: "error", parsed: false, error: errorMessage };
+      }
+      if (openSession) {
+        const firstLine = text.trim().split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? text.trim();
+        const forcedInvalid: Exclude<WhiteSheetNoteParseResult, { kind: "not_command" }> = {
+          kind: "field_invalid",
+          message: `จำนวนเงินไม่ถูกต้องที่บรรทัด:\n${firstLine}`,
+        };
+        const noteResult = await this.tryProcessWhiteSheetNoteCommand(
+          msgEvent, forcedInvalid, eventId, event.type, log, replyMessage,
+        );
+        if (noteResult !== null) return noteResult;
+      }
     }
 
     // ── 3.3. Manual slip session commands ────────────────────────────────────
@@ -2934,21 +2963,53 @@ export class WebhookService {
     return data === true;
   }
 
+  private isOrderingSchemaCacheError(error: unknown): boolean {
+    const message = error instanceof Error
+      ? error.message
+      : typeof error === "object" && error !== null && "message" in error
+        ? String(error.message)
+        : String(error);
+    const code = typeof error === "object" && error !== null && "code" in error
+      ? String(error.code)
+      : "";
+    return code === "PGRST202"
+      || /schema cache/i.test(message)
+      || /could not find the function[\s\S]*schema cache/i.test(message);
+  }
+
   private isMissingOrderingInfrastructure(error: unknown): boolean {
     const message = error instanceof Error
       ? error.message
       : typeof error === "object" && error !== null && "message" in error
         ? String(error.message)
         : String(error);
-    return /unexpected(?: .*?)?rpc/i.test(message)
-      || (message.includes("claim_line_webhook_event") && message.includes("does not exist"))
+    const code = typeof error === "object" && error !== null && "code" in error
+      ? String(error.code)
+      : "";
+    // Schema-cache misses are transient — never treat them as "infra missing".
+    if (this.isOrderingSchemaCacheError(error)) return false;
+    const namesOrderingRpc =
+      message.includes("receive_line_webhook_event")
+      || message.includes("claim_line_webhook_event")
+      || message.includes("complete_line_webhook_event")
+      || message.includes("line_webhook_event_queue");
+    return code === "42883"
+      || code === "42P01"
       || message.includes("42883")
-      || message.includes("42P01");
+      || message.includes("42P01")
+      || (namesOrderingRpc && /does not exist/i.test(message))
+      // Unit-test doubles throw `unexpected rpc: <name>` when the queue RPCs
+      // are intentionally absent — that is genuine missing infra for doubles.
+      || (/unexpected(?: .*?)?rpc/i.test(message) && namesOrderingRpc);
   }
 
   private isWhiteSheetOrderingEvent(event: LineEvent): boolean {
     if (event.type !== "message" || event.message.type !== "text") return false;
-    return parseWhiteSheetNoteCommand(event.message.text).kind !== "not_command";
+    const text = event.message.text;
+    // Field-shaped text must stay on the ordered path even if classification
+    // regresses to not_command (the Production UAT failure mode).
+    return parseWhiteSheetNoteCommand(text).kind !== "not_command"
+      || isWhiteSheetNoteFieldShaped(text);
   }
 
   private async saveRawMessage(
@@ -2976,10 +3037,15 @@ export class WebhookService {
           p_payload: event,
         }));
       } catch (caught) {
-        error = { message: caught instanceof Error ? caught.message : String(caught) };
+        error = {
+          message: caught instanceof Error ? caught.message : String(caught),
+          code: typeof caught === "object" && caught !== null && "code" in caught
+            ? String((caught as { code: unknown }).code)
+            : undefined,
+        };
         if (this.isMissingOrderingInfrastructure(caught)) {
           this.orderedQueueAvailable = false;
-        } else {
+        } else if (!this.isOrderingSchemaCacheError(caught)) {
           throw caught;
         }
       }
@@ -2992,7 +3058,19 @@ export class WebhookService {
           duplicate: receipt.duplicate,
         };
       }
-      if (!this.isMissingOrderingInfrastructure(error)) {
+      if (this.isMissingOrderingInfrastructure(error)) {
+        // Pre-0060 databases only — permanently fall back for this instance.
+        this.orderedQueueAvailable = false;
+      } else if (this.isOrderingSchemaCacheError(error)) {
+        // Transient discovery failure: do not poison orderedQueueAvailable.
+        // Fall through to direct insert for this request only so LINE traffic
+        // is not dropped while PostgREST cache catches up.
+        logger.error("ordered webhook receive hit schema cache; retrying unordered once", {
+          code: error.code,
+          message: error.message,
+          eventId: event.webhookEventId,
+        });
+      } else {
         logger.error("failed to atomically receive ordered webhook event", {
           code: error.code,
           message: error.message,
@@ -3000,7 +3078,6 @@ export class WebhookService {
         });
         return "error";
       }
-      this.orderedQueueAvailable = false;
     }
 
     const { data, error } = await this.supabase

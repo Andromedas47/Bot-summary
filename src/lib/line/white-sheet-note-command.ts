@@ -16,10 +16,35 @@ export const FIELD_LABELS = {
   actualCash: "เงินสด",
 } as const;
 
-const FIELD_LINE_RE = /^(ค่าแรง|ค่าที่|ค่าถุง|ค่าขนม|ค่าอื่น|เงินสด)\s+(.+?)\s*$/;
+/** Longest-first so "ค่าอื่น" wins over shorter "ค่า" prefixes if added later. */
+const FIELD_LABELS_LONGEST_FIRST = Object.values(FIELD_LABELS)
+  .slice()
+  .sort((a, b) => b.length - a.length);
 
 const MONEY_WITH_COMMAS = /^\d{1,3}(,\d{3})*(\.\d{1,2})?$/;
 const MONEY_PLAIN = /^\d+(\.\d{1,2})?$/;
+
+/**
+ * Normalize only line endings proven in Production payloads (LF) plus CR/CRLF
+ * so split stays stable. Does not rewrite Thai labels or money text.
+ */
+export function normalizeWhiteSheetNoteFieldText(text: string): string {
+  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+/** True when every non-empty line starts with a Manual White Sheet field label. */
+export function isWhiteSheetNoteFieldShaped(text: string): boolean {
+  const lines = normalizeWhiteSheetNoteFieldText(text)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length === 0) return false;
+  return lines.every((line) =>
+    FIELD_LABELS_LONGEST_FIRST.some(
+      (label) => line === label || line.startsWith(`${label} `),
+    )
+  );
+}
 
 /** Accepts 300, 300.00, 1,250, 1,250.50. Rejects negatives, NaN, malformed input. */
 export function parseNoteMoneyAmount(raw: string): number | null {
@@ -111,11 +136,16 @@ type FieldLineParse =
 
 /** Parse one already-trimmed non-empty line as a White Sheet field. */
 function parseOneFieldLine(line: string): FieldLineParse {
-  const field = FIELD_LINE_RE.exec(line);
-  if (!field) return { kind: "not_field" };
+  // Prefix match against FIELD_LABELS — avoids Turbopack/SWC Unicode-alternation
+  // regex breakage that classified the Production multiline payload as not_command.
+  const label = FIELD_LABELS_LONGEST_FIRST.find(
+    (candidate) => line === candidate || line.startsWith(`${candidate} `),
+  );
+  if (!label) return { kind: "not_field" };
 
-  const key = FIELD_KEY_BY_LABEL[field[1]];
-  const rest = field[2];
+  const key = FIELD_KEY_BY_LABEL[label];
+  const rest = line.slice(label.length).trim();
+  if (!rest) return { kind: "invalid", line };
 
   if (key === "other") {
     const parsed = parseOtherField(rest);
@@ -147,7 +177,7 @@ export function collapseWhiteSheetNoteFields(
  * after this returns something other than not_command.
  */
 export function parseWhiteSheetNoteCommand(text: string): WhiteSheetNoteParseResult {
-  const trimmed = text.trim();
+  const trimmed = normalizeWhiteSheetNoteFieldText(text).trim();
   if (!trimmed) return { kind: "not_command" };
 
   if (trimmed === CLOSE_TEXT) return { kind: "close" };
@@ -177,7 +207,7 @@ export function parseWhiteSheetNoteCommand(text: string): WhiteSheetNoteParseRes
   // valid+invalid (or field + unrelated) rejects the whole message with zero
   // DB mutation. Completely unrelated text stays not_command.
   const lines = trimmed
-    .split(/\r?\n/)
+    .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
 

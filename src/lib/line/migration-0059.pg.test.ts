@@ -15,7 +15,34 @@ const PGHOST = process.env.PGHOST ?? "localhost";
 const PGUSER = process.env.PGUSER ?? "postgres";
 const PGPASSWORD = process.env.PGPASSWORD ?? "postgres";
 const PGPORT = process.env.PGPORT ?? "5432";
+const DB_NAME_PATTERN = /^wsn_0059_[a-f0-9]+$/;
 const DATABASE = `wsn_0059_${randomBytes(4).toString("hex")}`;
+
+// Disposable-DB safety guard: this harness runs CREATE DATABASE / DROP
+// DATABASE, so it must never trust an inherited PGHOST/credentials blindly —
+// require explicit opt-in and restrict which hosts are ever touched.
+const ALLOWED_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+if (process.env.GITHUB_ACTIONS === "true" && process.env.WSN_0059_CI_PGHOST) {
+  ALLOWED_HOSTS.add(process.env.WSN_0059_CI_PGHOST);
+}
+
+function assertSafeToRunAgainstDatabase(): void {
+  if (process.env.ALLOW_DISPOSABLE_POSTGRES_TESTS !== "1") {
+    throw new Error(
+      "migration-0059.pg.test.ts creates/drops a disposable database and requires " +
+        "ALLOW_DISPOSABLE_POSTGRES_TESTS=1 to run. Refusing to proceed.",
+    );
+  }
+  if (!ALLOWED_HOSTS.has(PGHOST)) {
+    throw new Error(
+      `migration-0059.pg.test.ts refuses to run against PGHOST="${PGHOST}". ` +
+        `Only ${[...ALLOWED_HOSTS].join(", ")} are permitted, to guarantee this never touches Production.`,
+    );
+  }
+  if (!DB_NAME_PATTERN.test(DATABASE)) {
+    throw new Error(`refusing to operate on database name "${DATABASE}": does not match ${DB_NAME_PATTERN}`);
+  }
+}
 const BOOTSTRAP = join(ROOT, "supabase", "tests", "manual_white_sheet_note_sessions_0059_bootstrap.sql");
 // Only 0038 (creates digital_white_sheet_cash_entries) and 0043 (adds the
 // finalized_at/finalized_by columns the RPC checks) are needed as
@@ -79,6 +106,7 @@ async function concurrent(sqlA: string, sqlB: string): Promise<[string, string]>
 }
 
 async function probe(): Promise<boolean> {
+  if (process.env.ALLOW_DISPOSABLE_POSTGRES_TESTS !== "1" || !ALLOWED_HOSTS.has(PGHOST)) return false;
   try {
     const result = await Bun.spawn([PSQL, "-X", "-tAc", "SHOW server_version_num"], {
       env: { ...process.env, PGHOST, PGUSER, PGPASSWORD, PGPORT, PGDATABASE: "postgres" },
@@ -95,6 +123,17 @@ async function probe(): Promise<boolean> {
 
 const pgAvailable = await probe();
 let databaseCreated = false;
+
+// The dedicated `bun run test:pg:0059` command sets WSN_0059_REQUIRE=1 and
+// must never silently skip — a plain `bun test` run keeps the normal
+// repo-wide skip behavior when opted out or when PostgreSQL isn't reachable.
+if (!pgAvailable && process.env.WSN_0059_REQUIRE === "1") {
+  throw new Error(
+    "WSN_0059_REQUIRE=1 but the PostgreSQL 17 harness is unavailable. " +
+      "Ensure ALLOW_DISPOSABLE_POSTGRES_TESTS=1, PGHOST is an allowed host " +
+      `(${[...ALLOWED_HOSTS].join(", ")}), and PostgreSQL 17 is reachable.`,
+  );
+}
 
 function insertSessionSql(overrides: Record<string, string> = {}): string {
   const defaults: Record<string, string> = {
@@ -124,6 +163,7 @@ function json(value: string): Record<string, unknown> {
 
 describe.skipIf(!pgAvailable)("0059 manual_white_sheet_note_sessions on real PostgreSQL 17", () => {
   beforeAll(async () => {
+    assertSafeToRunAgainstDatabase();
     const created = await psql(["-h", PGHOST, "-p", PGPORT, "-U", PGUSER, "-d", "postgres", "-c", `CREATE DATABASE ${DATABASE}`]);
     expect(created.code, created.stderr).toBe(0);
     databaseCreated = true;
@@ -132,7 +172,7 @@ describe.skipIf(!pgAvailable)("0059 manual_white_sheet_note_sessions on real Pos
   }, 60_000);
 
   afterAll(async () => {
-    if (!databaseCreated || !/^wsn_0059_[a-f0-9]+$/.test(DATABASE)) return;
+    if (!databaseCreated || !DB_NAME_PATTERN.test(DATABASE)) return;
     await psql(["-h", PGHOST, "-p", PGPORT, "-U", PGUSER, "-d", "postgres", "-c",
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${DATABASE}' AND pid <> pg_backend_pid()`]);
     await psql(["-h", PGHOST, "-p", PGPORT, "-U", PGUSER, "-d", "postgres", "-c", `DROP DATABASE IF EXISTS ${DATABASE}`]);

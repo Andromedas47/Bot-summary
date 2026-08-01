@@ -101,6 +101,7 @@ export interface Database {
           received_at: string;
           processing_started_at: string | null;
           processing_attempts: number;
+          claim_token: string | null;
           completed_at: string | null;
         };
         Insert: {
@@ -114,6 +115,7 @@ export interface Database {
           received_at?: string;
           processing_started_at?: string | null;
           processing_attempts?: number;
+          claim_token?: string | null;
           completed_at?: string | null;
         };
         Update: {
@@ -127,6 +129,7 @@ export interface Database {
           received_at?: string;
           processing_started_at?: string | null;
           processing_attempts?: number;
+          claim_token?: string | null;
           completed_at?: string | null;
         };
         Relationships: [];
@@ -1649,11 +1652,13 @@ export interface Database {
           source_id: string;
           raw_message_id: string;
           receive_order: number;
+          claim_token: string;
         } | null;
       };
       complete_line_webhook_event: {
         Args: {
           p_raw_message_id: string;
+          p_claim_token: string;
           p_status: "processed" | "failed";
           p_error_message?: string | null;
         };

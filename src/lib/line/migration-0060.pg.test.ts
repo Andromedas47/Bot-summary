@@ -118,11 +118,13 @@ describe.skipIf(!pgAvailable)("0060 separated webhook ordering on PostgreSQL 17"
     const openRaw = await receive("evt-b-open", source);
     const fieldRaw = await receive("evt-b-field", source);
     const closeRaw = await receive("evt-b-close", source);
-    expect(JSON.parse(await scalar("SELECT public.claim_line_webhook_event('S-barrier')"))).toMatchObject({ raw_message_id: openRaw });
-    await scalar(`SELECT public.complete_line_webhook_event('${openRaw}', 'processed')`);
-    expect(JSON.parse(await scalar("SELECT public.claim_line_webhook_event('S-barrier')"))).toMatchObject({ raw_message_id: fieldRaw });
+    const openClaim = JSON.parse(await scalar("SELECT public.claim_line_webhook_event('S-barrier')"));
+    expect(openClaim).toMatchObject({ raw_message_id: openRaw });
+    await scalar(`SELECT public.complete_line_webhook_event('${openRaw}', '${openClaim.claim_token}', 'processed')`);
+    const fieldClaim = JSON.parse(await scalar("SELECT public.claim_line_webhook_event('S-barrier')"));
+    expect(fieldClaim).toMatchObject({ raw_message_id: fieldRaw });
     expect(await scalar("SELECT public.claim_line_webhook_event('S-barrier')")).toBe("");
-    await scalar(`SELECT public.complete_line_webhook_event('${fieldRaw}', 'processed')`);
+    await scalar(`SELECT public.complete_line_webhook_event('${fieldRaw}', '${fieldClaim.claim_token}', 'processed')`);
     expect(JSON.parse(await scalar("SELECT public.claim_line_webhook_event('S-barrier')"))).toMatchObject({ raw_message_id: closeRaw });
   });
 
@@ -130,8 +132,8 @@ describe.skipIf(!pgAvailable)("0060 separated webhook ordering on PostgreSQL 17"
     const source = "S-failed";
     const first = await receive("evt-failed-1", source);
     const second = await receive("evt-failed-2", source);
-    await scalar("SELECT public.claim_line_webhook_event('S-failed')");
-    await scalar(`SELECT public.complete_line_webhook_event('${first}', 'failed', 'invalid field block')`);
+    const claim = JSON.parse(await scalar("SELECT public.claim_line_webhook_event('S-failed')"));
+    await scalar(`SELECT public.complete_line_webhook_event('${first}', '${claim.claim_token}', 'failed', 'invalid field block')`);
     expect(JSON.parse(await scalar("SELECT public.claim_line_webhook_event('S-failed')"))).toMatchObject({ raw_message_id: second });
   });
 
@@ -156,10 +158,12 @@ describe.skipIf(!pgAvailable)("0060 separated webhook ordering on PostgreSQL 17"
 
   test("a stale processing lease is reclaimed and refreshes its attempt metadata", async () => {
     const raw = await receive("evt-stale", "S-stale");
-    await scalar("SELECT public.claim_line_webhook_event('S-stale')");
+    const firstClaim = JSON.parse(await scalar("SELECT public.claim_line_webhook_event('S-stale')"));
     await scalar("UPDATE public.line_webhook_event_queue SET processing_started_at = now() - interval '6 minutes' WHERE source_id='S-stale' RETURNING id");
 
-    expect(JSON.parse(await scalar("SELECT public.claim_line_webhook_event('S-stale')"))).toMatchObject({ raw_message_id: raw });
+    const reclaimed = JSON.parse(await scalar("SELECT public.claim_line_webhook_event('S-stale')"));
+    expect(reclaimed).toMatchObject({ raw_message_id: raw });
+    expect(reclaimed.claim_token).not.toBe(firstClaim.claim_token);
     expect(await scalar("SELECT processing_attempts FROM public.line_webhook_event_queue WHERE source_id='S-stale'" )).toBe("2");
     expect(await scalar("SELECT processing_started_at > now() - interval '1 minute' FROM public.line_webhook_event_queue WHERE source_id='S-stale'" )).toBe("t");
   });
@@ -185,25 +189,40 @@ describe.skipIf(!pgAvailable)("0060 separated webhook ordering on PostgreSQL 17"
     await scalar("SELECT public.claim_line_webhook_event('S-stale-barrier')");
     await scalar("UPDATE public.line_webhook_event_queue SET processing_started_at = now() - interval '6 minutes' WHERE raw_message_id='" + first + "' RETURNING id");
 
-    expect(JSON.parse(await scalar("SELECT public.claim_line_webhook_event('S-stale-barrier')"))).toMatchObject({ raw_message_id: first });
-    await scalar(`SELECT public.complete_line_webhook_event('${first}', 'processed')`);
+    const reclaimed = JSON.parse(await scalar("SELECT public.claim_line_webhook_event('S-stale-barrier')"));
+    expect(reclaimed).toMatchObject({ raw_message_id: first });
+    await scalar(`SELECT public.complete_line_webhook_event('${first}', '${reclaimed.claim_token}', 'processed')`);
     expect(JSON.parse(await scalar("SELECT public.claim_line_webhook_event('S-stale-barrier')"))).toMatchObject({ raw_message_id: second });
   });
 
   test("processed and failed rows are never reclaimed", async () => {
     const processed = await receive("evt-terminal-processed", "S-terminal-processed");
-    await scalar("SELECT public.claim_line_webhook_event('S-terminal-processed')");
-    await scalar(`SELECT public.complete_line_webhook_event('${processed}', 'processed')`);
+    const processedClaim = JSON.parse(await scalar("SELECT public.claim_line_webhook_event('S-terminal-processed')"));
+    await scalar(`SELECT public.complete_line_webhook_event('${processed}', '${processedClaim.claim_token}', 'processed')`);
     await scalar("UPDATE public.line_webhook_event_queue SET processing_started_at = now() - interval '6 minutes' WHERE raw_message_id='" + processed + "' RETURNING id");
 
     const failed = await receive("evt-terminal-failed", "S-terminal-failed");
-    await scalar("SELECT public.claim_line_webhook_event('S-terminal-failed')");
-    await scalar(`SELECT public.complete_line_webhook_event('${failed}', 'failed', 'expected failure')`);
+    const failedClaim = JSON.parse(await scalar("SELECT public.claim_line_webhook_event('S-terminal-failed')"));
+    await scalar(`SELECT public.complete_line_webhook_event('${failed}', '${failedClaim.claim_token}', 'failed', 'expected failure')`);
     await scalar("UPDATE public.line_webhook_event_queue SET processing_started_at = now() - interval '6 minutes' WHERE raw_message_id='" + failed + "' RETURNING id");
 
     expect(await scalar("SELECT public.claim_line_webhook_event('S-terminal-processed')")).toBe("");
     expect(await scalar("SELECT public.claim_line_webhook_event('S-terminal-failed')")).toBe("");
     expect(await scalar("SELECT string_agg(status, ',' ORDER BY status) FROM public.line_webhook_event_queue WHERE raw_message_id IN ('" + processed + "','" + failed + "')" )).toBe("failed,processed");
+  });
+
+  test("only the current claim token can complete a reclaimed event", async () => {
+    const raw = await receive("evt-fenced", "S-fenced");
+    const workerA = JSON.parse(await scalar("SELECT public.claim_line_webhook_event('S-fenced')"));
+    await scalar("UPDATE public.line_webhook_event_queue SET processing_started_at = now() - interval '6 minutes' WHERE source_id='S-fenced' RETURNING id");
+    const workerB = JSON.parse(await scalar("SELECT public.claim_line_webhook_event('S-fenced')"));
+
+    expect(workerB.claim_token).not.toBe(workerA.claim_token);
+    expect(await scalar(`SELECT public.complete_line_webhook_event('${raw}', '${workerA.claim_token}', 'processed')`)).toBe("f");
+    expect(await scalar("SELECT status FROM public.line_webhook_event_queue WHERE raw_message_id='" + raw + "'")).toBe("processing");
+    expect(await scalar(`SELECT public.complete_line_webhook_event('${raw}', '${workerB.claim_token}', 'processed')`)).toBe("t");
+    expect(await scalar(`SELECT public.complete_line_webhook_event('${raw}', '${workerB.claim_token}', 'processed')`)).toBe("f");
+    expect(await scalar("SELECT status || ',' || (claim_token IS NULL)::text FROM public.line_webhook_event_queue WHERE raw_message_id='" + raw + "'")).toBe("processed,true");
   });
 });
 

@@ -21,12 +21,13 @@ CREATE TABLE public.line_webhook_event_queue (
   processing_started_at timestamptz,
   processing_attempts   integer NOT NULL DEFAULT 0
                         CHECK (processing_attempts >= 0),
+  claim_token      uuid,
   completed_at    timestamptz,
   CONSTRAINT line_webhook_event_queue_source_nonblank CHECK (btrim(source_id) <> ''),
   CONSTRAINT line_webhook_event_queue_order_positive CHECK (receive_order > 0),
   CONSTRAINT line_webhook_event_queue_processing_lease CHECK (
-    status <> 'processing'
-    OR (processing_started_at IS NOT NULL AND processing_attempts > 0)
+    (status = 'processing' AND processing_started_at IS NOT NULL AND processing_attempts > 0 AND claim_token IS NOT NULL)
+    OR (status <> 'processing' AND claim_token IS NULL)
   ),
   CONSTRAINT line_webhook_event_queue_terminal_error CHECK (
     status <> 'failed' OR (error_message IS NOT NULL AND completed_at IS NOT NULL)
@@ -132,7 +133,8 @@ BEGIN
   UPDATE public.line_webhook_event_queue
      SET status = 'processing',
          processing_started_at = now(),
-         processing_attempts = processing_attempts + 1
+         processing_attempts = processing_attempts + 1,
+         claim_token = gen_random_uuid()
    WHERE id = v_row.id
   RETURNING * INTO v_row;
 
@@ -141,13 +143,15 @@ BEGIN
     'line_event_id', v_row.line_event_id,
     'source_id', v_row.source_id,
     'raw_message_id', v_row.raw_message_id,
-    'receive_order', v_row.receive_order
+    'receive_order', v_row.receive_order,
+    'claim_token', v_row.claim_token
   );
 END;
 $fn$;
 
 CREATE OR REPLACE FUNCTION public.complete_line_webhook_event(
   p_raw_message_id uuid,
+  p_claim_token    uuid,
   p_status         text,
   p_error_message  text DEFAULT NULL
 ) RETURNS boolean
@@ -163,17 +167,19 @@ BEGIN
   UPDATE public.line_webhook_event_queue
      SET status = p_status,
          error_message = CASE WHEN p_status = 'failed' THEN COALESCE(NULLIF(btrim(p_error_message), ''), 'event processing failed') ELSE NULL END,
+         claim_token = NULL,
          completed_at = now()
    WHERE raw_message_id = p_raw_message_id
-     AND status = 'processing';
+     AND status = 'processing'
+     AND claim_token = p_claim_token;
 
   RETURN FOUND;
 END;
 $fn$;
 
 REVOKE ALL ON FUNCTION public.claim_line_webhook_event(text) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.complete_line_webhook_event(uuid, text, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.complete_line_webhook_event(uuid, uuid, text, text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.receive_line_webhook_event(text, text, text, text, text, text, text, text, text, jsonb) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.claim_line_webhook_event(text) TO service_role;
-GRANT EXECUTE ON FUNCTION public.complete_line_webhook_event(uuid, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.complete_line_webhook_event(uuid, uuid, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.receive_line_webhook_event(text, text, text, text, text, text, text, text, text, jsonb) TO service_role;

@@ -121,6 +121,7 @@ type QueueClaim = {
   source_id: string;
   raw_message_id: string;
   receive_order: number;
+  claim_token: string;
 };
 type EventReceipt = {
   event: LineEvent;
@@ -2848,6 +2849,7 @@ export class WebhookService {
 
       await this.completeOrderedEvent(
         claim.raw_message_id,
+        claim.claim_token,
         result.status === "error" || Boolean(result.error) ? "failed" : "processed",
         result.error,
       );
@@ -2875,11 +2877,13 @@ export class WebhookService {
 
   private async completeOrderedEvent(
     rawMessageId: string,
+    claimToken: string,
     status: "processed" | "failed",
     errorMessage?: string,
   ): Promise<void> {
     const { error } = await this.supabase.rpc("complete_line_webhook_event", {
       p_raw_message_id: rawMessageId,
+      p_claim_token: claimToken,
       p_status: status,
       p_error_message: errorMessage ?? null,
     });

@@ -1,7 +1,9 @@
--- Manual White Sheet note session: an independent LINE-only record of
--- operator-entered White Sheet figures. Not connected to produce, slips,
--- transfers, reconciliation, settlement, or the digital White Sheet.
--- One open session per LINE source at a time.
+-- LINE Manual White Sheet entry session: temporary session state for
+-- multi-message LINE entry of White Sheet figures. On close, the entered
+-- values are saved into digital_white_sheet_cash_entries (see
+-- src/lib/line/white-sheet-note-canonical-save.ts) — this table is not the
+-- final record. Not coupled to produce, slips, transfers, reconciliation,
+-- settlement, or work rounds. One open session per LINE source at a time.
 
 CREATE TABLE public.manual_white_sheet_note_sessions (
   id                       uuid        PRIMARY KEY DEFAULT gen_random_uuid(),

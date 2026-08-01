@@ -179,7 +179,11 @@ const PRODUCE_AFTER_BOUNDARY_REPLY =
 export const STRUCTURED_TEXT_CLOSE_REFUSED_REPLY =
   "รายการนี้เปิดจากเมนู กรุณากดตรวจและจบจากเมนู ไม่รับคำสั่งจบจากข้อความ";
 
-// ── Manual White Sheet note session (independent LINE-only record) ─────────
+// ── LINE Manual White Sheet entry session ───────────────────────────────────
+// Temporary session state for multi-message LINE entry. Saves entered
+// values into digital_white_sheet_cash_entries on close (see
+// white-sheet-note-canonical-save.ts) — not coupled to produce, slips,
+// transfers, reconciliation, settlement, or work rounds.
 const WHITE_SHEET_NOTE_FIELD_LABEL: Record<string, string> = {
   labor: "ค่าแรง",
   locationFee: "ค่าที่",
@@ -590,11 +594,13 @@ export class WebhookService {
       );
     }
 
-    // ── 3.25. Manual White Sheet note session (independent LINE-only record) ─
-    // Not connected to produce, slips, transfers, reconciliation, settlement,
-    // or the digital White Sheet. Text is classified first (pure, no I/O);
-    // a DB lookup only happens for candidate messages, and field-shaped text
-    // falls through unchanged when this source has no open note session.
+    // ── 3.25. LINE Manual White Sheet entry session ───────────────────────────
+    // Temporary session state for multi-message LINE entry; saves into
+    // digital_white_sheet_cash_entries on close. Not coupled to produce,
+    // slips, transfers, reconciliation, settlement, or work rounds. Text is
+    // classified first (pure, no I/O); a DB lookup only happens for
+    // candidate messages, and field-shaped text falls through unchanged
+    // when this source has no open entry session.
     const noteParse = parseWhiteSheetNoteCommand(text);
     if (noteParse.kind !== "not_command") {
       const noteResult = await this.tryProcessWhiteSheetNoteCommand(
@@ -1720,8 +1726,10 @@ export class WebhookService {
     }
   }
 
-  // ── Manual White Sheet note session ────────────────────────────────────────
-  // Independent LINE-only record of operator-entered White Sheet figures.
+  // ── LINE Manual White Sheet entry session ──────────────────────────────────
+  // Temporary session state for multi-message LINE entry of White Sheet
+  // figures; on close, saves the entered values into
+  // digital_white_sheet_cash_entries (see white-sheet-note-canonical-save.ts).
   // Returns null only for field-shaped text with no open session, so the
   // caller falls through to existing routing unchanged.
   private async tryProcessWhiteSheetNoteCommand(

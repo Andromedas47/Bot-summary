@@ -6,6 +6,11 @@ import {
 } from "./white-sheet-session-service";
 
 // ── In-memory Supabase stub for manual_white_sheet_sessions ────────────────
+// The claim RPC stub below mirrors claim_manual_white_sheet_session_close's
+// logic (open -> closing, stale closing reclaim, fresh closing blocked) so
+// the TS wrapper is exercised the same way the real RPC behaves. Real
+// atomicity/concurrency against actual PostgreSQL is proven separately in
+// supabase/migrations/0059's .pg.test.ts — this file proves the JS contract.
 
 type Row = Record<string, unknown>;
 
@@ -19,17 +24,35 @@ function makeDb(initial: Row[] = [], cashEntries: Row[] = []) {
     );
   }
 
-  function selectChain(filters: Array<{ op: "eq" | "in"; col: string; val: unknown }> = []) {
+  function selectChain(
+    filters: Array<{ op: "eq" | "in"; col: string; val: unknown }> = [],
+    order?: { col: string; ascending: boolean },
+    limit?: number,
+  ) {
     return {
       eq(col: string, val: unknown) {
-        return selectChain([...filters, { op: "eq" as const, col, val }]);
+        return selectChain([...filters, { op: "eq" as const, col, val }], order, limit);
       },
       in(col: string, val: unknown[]) {
-        return selectChain([...filters, { op: "in" as const, col, val }]);
+        return selectChain([...filters, { op: "in" as const, col, val }], order, limit);
+      },
+      order(col: string, opts?: { ascending?: boolean }) {
+        return selectChain(filters, { col, ascending: opts?.ascending ?? true }, limit);
+      },
+      limit(n: number) {
+        return selectChain(filters, order, n);
       },
       async maybeSingle() {
-        const found = rows.find((r) => matches(r, filters));
-        return { data: found ?? null, error: null };
+        let found = rows.filter((r) => matches(r, filters));
+        if (order) {
+          found = [...found].sort((a, b) => {
+            const av = String(a[order.col] ?? "");
+            const bv = String(b[order.col] ?? "");
+            return order.ascending ? av.localeCompare(bv) : bv.localeCompare(av);
+          });
+        }
+        if (limit !== undefined) found = found.slice(0, limit);
+        return { data: found[0] ?? null, error: null };
       },
       async single() {
         const found = rows.find((r) => matches(r, filters));
@@ -107,6 +130,8 @@ function makeDb(initial: Row[] = [], cashEntries: Row[] = []) {
                   other_amount: null,
                   other_note: null,
                   actual_cash_submitted: null,
+                  edited_fields: [],
+                  closing_started_at: null,
                   closed_at: null,
                   closed_by_line_user_id: null,
                   closed_line_event_id: null,
@@ -145,12 +170,38 @@ function makeDb(initial: Row[] = [], cashEntries: Row[] = []) {
     };
   }
 
+  /** Mirrors claim_manual_white_sheet_session_close (see 0059). */
+  async function rpc(fnName: string, args: Record<string, unknown>) {
+    if (fnName !== "claim_manual_white_sheet_session_close") {
+      throw new Error(`unexpected rpc: ${fnName}`);
+    }
+    const sourceId = args.p_source_id as string;
+    const leaseSeconds = (args.p_lease_seconds as number | undefined) ?? 120;
+    const row = rows.find((r) => r.source_id === sourceId && (r.status === "open" || r.status === "closing"));
+    if (!row) {
+      return { data: { claimed: false, reason: "not_found", session: null }, error: null };
+    }
+    if (row.status === "closing") {
+      const startedAt = row.closing_started_at ? new Date(row.closing_started_at as string).getTime() : null;
+      const stale = startedAt !== null && startedAt <= Date.now() - leaseSeconds * 1000;
+      if (stale) {
+        row.closing_started_at = new Date().toISOString();
+        return { data: { claimed: true, reason: null, session: { ...row } }, error: null };
+      }
+      return { data: { claimed: false, reason: "closing_in_progress", session: { ...row } }, error: null };
+    }
+    row.status = "closing";
+    row.closing_started_at = new Date().toISOString();
+    return { data: { claimed: true, reason: null, session: { ...row } }, error: null };
+  }
+
   return {
     from(table: string) {
       if (table === "manual_white_sheet_sessions") return stub();
       if (table === "digital_white_sheet_cash_entries") return cashEntryStub();
       throw new Error(`unexpected table: ${table}`);
     },
+    rpc,
     _rows: rows,
   };
 }
@@ -278,7 +329,7 @@ describe("WhiteSheetSessionService.openSession", () => {
     expect(res.reason).toBe("finalized_locked");
   });
 
-  it("reopens a closed SUBMITTED session, seeding entered values from the canonical entry", async () => {
+  it("reopens a closed SUBMITTED session, seeding entered values from the canonical entry, with edited_fields reset", async () => {
     const existing = {
       id: "s1",
       source_id: SOURCE,
@@ -288,6 +339,7 @@ describe("WhiteSheetSessionService.openSession", () => {
       business_date_display: "31/07/2569",
       status: "closed",
       labor: 999, // stale session value — must be overwritten by the seed, not trusted
+      edited_fields: ["labor"], // stale from before close — must reset
     };
     const cashEntry = {
       source_id: SOURCE,
@@ -325,6 +377,8 @@ describe("WhiteSheetSessionService.openSession", () => {
     expect(res.session.other_note).toBe("ค่าน้ำ");
     expect(res.session.actual_cash_submitted).toBe(4850);
     expect(res.session.closed_at).toBeNull();
+    expect(res.session.closing_started_at).toBeNull();
+    expect(res.session.edited_fields).toEqual([]);
   });
 
   it("reopens a closed session with no canonical row (edge case) with nulled values, same identity row", async () => {
@@ -383,7 +437,7 @@ describe("WhiteSheetSessionService.openSession", () => {
 });
 
 describe("WhiteSheetSessionService.applyFields", () => {
-  it("only updates provided fields, preserving the rest", async () => {
+  it("only updates provided fields, preserving the rest, and tracks edited_fields", async () => {
     const existing = {
       id: "s1",
       source_id: SOURCE,
@@ -395,9 +449,10 @@ describe("WhiteSheetSessionService.applyFields", () => {
       other_amount: null,
       other_note: null,
       actual_cash_submitted: null,
+      edited_fields: [],
     };
     const { svc, db } = makeSvc([existing]);
-    await svc.applyFields("s1", {
+    await svc.applyFields(existing as unknown as WhiteSheetSessionRow, {
       labor: undefined,
       locationFee: 200,
       bag: undefined,
@@ -407,12 +462,13 @@ describe("WhiteSheetSessionService.applyFields", () => {
     });
     expect(db._rows[0].labor).toBe(500);
     expect(db._rows[0].location_fee).toBe(200);
+    expect(db._rows[0].edited_fields).toEqual(["location_fee"]);
   });
 
-  it("replaces a repeated field with the latest value", async () => {
-    const existing = { id: "s1", source_id: SOURCE, status: "open", labor: 500 };
+  it("replaces a repeated field with the latest value and does not duplicate edited_fields entries", async () => {
+    const existing = { id: "s1", source_id: SOURCE, status: "open", labor: 500, edited_fields: ["labor"] };
     const { svc, db } = makeSvc([existing]);
-    await svc.applyFields("s1", {
+    await svc.applyFields(existing as unknown as WhiteSheetSessionRow, {
       labor: 700,
       locationFee: undefined,
       bag: undefined,
@@ -421,12 +477,20 @@ describe("WhiteSheetSessionService.applyFields", () => {
       actualCashSubmitted: undefined,
     });
     expect(db._rows[0].labor).toBe(700);
+    expect(db._rows[0].edited_fields).toEqual(["labor"]);
   });
 
   it("ค่าอื่น 0 with no note clears an old note", async () => {
-    const existing = { id: "s1", source_id: SOURCE, status: "open", other_amount: 30, other_note: "เก่า" };
+    const existing = {
+      id: "s1",
+      source_id: SOURCE,
+      status: "open",
+      other_amount: 30,
+      other_note: "เก่า",
+      edited_fields: [],
+    };
     const { svc, db } = makeSvc([existing]);
-    await svc.applyFields("s1", {
+    await svc.applyFields(existing as unknown as WhiteSheetSessionRow, {
       labor: undefined,
       locationFee: undefined,
       bag: undefined,
@@ -436,15 +500,31 @@ describe("WhiteSheetSessionService.applyFields", () => {
     });
     expect(db._rows[0].other_amount).toBe(0);
     expect(db._rows[0].other_note).toBeNull();
+    expect(db._rows[0].edited_fields).toEqual(["other"]);
+  });
+
+  it("accumulates edited_fields across multiple messages", async () => {
+    const existing = { id: "s1", source_id: SOURCE, status: "open", edited_fields: ["labor"] };
+    const { svc, db } = makeSvc([existing]);
+    await svc.applyFields(existing as unknown as WhiteSheetSessionRow, {
+      labor: undefined,
+      locationFee: 200,
+      bag: undefined,
+      snack: undefined,
+      other: undefined,
+      actualCashSubmitted: undefined,
+    });
+    expect(db._rows[0].edited_fields).toEqual(["labor", "location_fee"]);
   });
 });
 
-describe("WhiteSheetSessionService close lifecycle", () => {
-  it("claims an open session atomically, and a second claim sees closing_in_progress", async () => {
+describe("WhiteSheetSessionService close lifecycle (lease)", () => {
+  it("claims an open session atomically, and a fresh second claim sees closing_in_progress (cannot be stolen)", async () => {
     const existing = { id: "s1", source_id: SOURCE, status: "open" };
-    const { svc } = makeSvc([existing]);
+    const { svc, db } = makeSvc([existing]);
     const first = await svc.claimForClose(SOURCE);
     expect(first.claimed).toBe(true);
+    expect(db._rows[0].closing_started_at).not.toBeNull();
 
     const second = await svc.claimForClose(SOURCE);
     expect(second.claimed).toBe(false);
@@ -452,18 +532,67 @@ describe("WhiteSheetSessionService close lifecycle", () => {
     expect(second.reason).toBe("closing_in_progress");
   });
 
-  it("finalizeClosed transitions closing -> closed", async () => {
-    const existing = { id: "s1", source_id: SOURCE, status: "closing" };
+  it("reclaims a stale closing lease (process-death recovery)", async () => {
+    const staleStart = new Date(Date.now() - 200_000).toISOString(); // 200s ago
+    const existing = { id: "s1", source_id: SOURCE, status: "closing", closing_started_at: staleStart };
+    const { svc, db } = makeSvc([existing]);
+    const claim = await svc.claimForClose(SOURCE, 120); // 120s lease, 200s old -> stale
+    expect(claim.claimed).toBe(true);
+    expect(db._rows[0].closing_started_at).not.toBe(staleStart);
+  });
+
+  it("does not reclaim a closing lease that has not expired yet", async () => {
+    const freshStart = new Date(Date.now() - 5_000).toISOString(); // 5s ago
+    const existing = { id: "s1", source_id: SOURCE, status: "closing", closing_started_at: freshStart };
+    const { svc } = makeSvc([existing]);
+    const claim = await svc.claimForClose(SOURCE, 120);
+    expect(claim.claimed).toBe(false);
+    if (claim.claimed) throw new Error("expected not claimed");
+    expect(claim.reason).toBe("closing_in_progress");
+  });
+
+  it("claimForClose on a not_found source with a closed history returns already_closed", async () => {
+    const existing = {
+      id: "s1",
+      source_id: SOURCE,
+      status: "closed",
+      opened_at: new Date().toISOString(),
+    };
+    const { svc } = makeSvc([existing]);
+    const claim = await svc.claimForClose(SOURCE);
+    expect(claim.claimed).toBe(false);
+    if (claim.claimed) throw new Error("expected not claimed");
+    expect(claim.reason).toBe("already_closed");
+  });
+
+  it("claimForClose on a not_found source with a cancelled history returns cancelled", async () => {
+    const existing = {
+      id: "s1",
+      source_id: SOURCE,
+      status: "cancelled",
+      opened_at: new Date().toISOString(),
+    };
+    const { svc } = makeSvc([existing]);
+    const claim = await svc.claimForClose(SOURCE);
+    expect(claim.claimed).toBe(false);
+    if (claim.claimed) throw new Error("expected not claimed");
+    expect(claim.reason).toBe("cancelled");
+  });
+
+  it("finalizeClosed transitions closing -> closed and clears the closing lease", async () => {
+    const existing = { id: "s1", source_id: SOURCE, status: "closing", closing_started_at: new Date().toISOString() };
     const { svc, db } = makeSvc([existing]);
     await svc.finalizeClosed("s1", { lineUserId: "u1", lineEventId: "evt-close" });
     expect(db._rows[0].status).toBe("closed");
+    expect(db._rows[0].closing_started_at).toBeNull();
   });
 
-  it("revertToOpen transitions closing -> open", async () => {
-    const existing = { id: "s1", source_id: SOURCE, status: "closing" };
+  it("revertToOpen transitions closing -> open and clears the closing lease", async () => {
+    const existing = { id: "s1", source_id: SOURCE, status: "closing", closing_started_at: new Date().toISOString() };
     const { svc, db } = makeSvc([existing]);
     await svc.revertToOpen("s1");
     expect(db._rows[0].status).toBe("open");
+    expect(db._rows[0].closing_started_at).toBeNull();
   });
 });
 
@@ -476,42 +605,82 @@ describe("WhiteSheetSessionService.cancelSession", () => {
     expect(db._rows[0].status).toBe("cancelled");
   });
 
-  it("no open session -> not_found", async () => {
+  it("no session at all -> not_found", async () => {
     const { svc } = makeSvc([]);
     const res = await svc.cancelSession(SOURCE, { lineUserId: "u1", lineEventId: "evt-cancel" });
     expect(res.cancelled).toBe(false);
     if (res.cancelled) throw new Error("expected not cancelled");
     expect(res.reason).toBe("not_found");
   });
+
+  it("repeated cancel after a prior cancel returns a deterministic already_cancelled reply", async () => {
+    const existing = {
+      id: "s1",
+      source_id: SOURCE,
+      status: "cancelled",
+      opened_at: new Date().toISOString(),
+    };
+    const { svc } = makeSvc([existing]);
+    const res = await svc.cancelSession(SOURCE, { lineUserId: "u1", lineEventId: "evt-cancel-2" });
+    expect(res.cancelled).toBe(false);
+    if (res.cancelled) throw new Error("expected not cancelled");
+    expect(res.reason).toBe("already_cancelled");
+  });
+
+  it("cancel after the session already closed returns a deterministic already_closed reply", async () => {
+    const existing = {
+      id: "s1",
+      source_id: SOURCE,
+      status: "closed",
+      opened_at: new Date().toISOString(),
+    };
+    const { svc } = makeSvc([existing]);
+    const res = await svc.cancelSession(SOURCE, { lineUserId: "u1", lineEventId: "evt-cancel-3" });
+    expect(res.cancelled).toBe(false);
+    if (res.cancelled) throw new Error("expected not cancelled");
+    expect(res.reason).toBe("already_closed");
+  });
 });
 
 describe("buildWhiteSheetCloseCommandFromSession", () => {
-  it("returns null when cash was never submitted", () => {
+  it("never returns null; with nothing edited this window, every field is undefined even if the row has seeded values", () => {
     const session = {
       market_label_normalized: MARKET_NORM,
       business_date: DATE,
-      labor: null,
+      labor: 999, // seeded/displayed, but never edited this window
       location_fee: null,
       bag: null,
       snack: null,
       other_amount: null,
       other_note: null,
-      actual_cash_submitted: null,
+      actual_cash_submitted: 4850, // seeded, but never edited
+      edited_fields: [],
     } as unknown as WhiteSheetSessionRow;
-    expect(buildWhiteSheetCloseCommandFromSession(session)).toBeNull();
+    expect(buildWhiteSheetCloseCommandFromSession(session)).toEqual({
+      marketLabel: MARKET_NORM,
+      marketLabelNormalized: MARKET_NORM,
+      businessDate: DATE,
+      labor: undefined,
+      locationFee: undefined,
+      bag: undefined,
+      snack: undefined,
+      other: undefined,
+      actualCashSubmitted: undefined,
+    });
   });
 
-  it("maps null expense fields to undefined (first-submit semantics) and passes explicit values through", () => {
+  it("only overlays fields present in edited_fields; unedited fields stay undefined regardless of their stored value", () => {
     const session = {
       market_label_normalized: MARKET_NORM,
       business_date: DATE,
       labor: 500,
-      location_fee: null,
+      location_fee: 200, // stored but not edited this window
       bag: 0,
       snack: null,
       other_amount: 30,
       other_note: "ค่าน้ำ",
       actual_cash_submitted: 4850,
+      edited_fields: ["labor", "bag", "actual_cash_submitted"],
     } as unknown as WhiteSheetSessionRow;
     const command = buildWhiteSheetCloseCommandFromSession(session);
     expect(command).toEqual({
@@ -519,9 +688,36 @@ describe("buildWhiteSheetCloseCommandFromSession", () => {
       marketLabelNormalized: MARKET_NORM,
       businessDate: DATE,
       labor: 500,
-      locationFee: undefined,
+      locationFee: undefined, // stored value 200 not sent — was not edited this window
       bag: 0,
       snack: undefined,
+      other: undefined, // "other" not in edited_fields even though other_amount is set
+      actualCashSubmitted: 4850,
+    });
+  });
+
+  it("first-submit (fresh session, everything edited) passes every entered value through", () => {
+    const session = {
+      market_label_normalized: MARKET_NORM,
+      business_date: DATE,
+      labor: 500,
+      location_fee: 0,
+      bag: 100,
+      snack: 50,
+      other_amount: 30,
+      other_note: "ค่าน้ำ",
+      actual_cash_submitted: 4850,
+      edited_fields: ["labor", "location_fee", "bag", "snack", "other", "actual_cash_submitted"],
+    } as unknown as WhiteSheetSessionRow;
+    const command = buildWhiteSheetCloseCommandFromSession(session);
+    expect(command).toEqual({
+      marketLabel: MARKET_NORM,
+      marketLabelNormalized: MARKET_NORM,
+      businessDate: DATE,
+      labor: 500,
+      locationFee: 0,
+      bag: 100,
+      snack: 50,
       other: { amount: 30, note: "ค่าน้ำ" },
       actualCashSubmitted: 4850,
     });

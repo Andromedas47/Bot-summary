@@ -50,8 +50,15 @@ export interface WhiteSheetCloseCommand {
    * Present = replace both amount and note from this submission.
    */
   other: { amount: number; note: string | null } | undefined;
-  /** Always required — every closing message must include เงินสด. */
-  actualCashSubmitted: number;
+  /**
+   * `undefined` = เงินสด omitted this window. Every one-message LINE close
+   * always supplies it (its own parser requires เงินสด). The Manual White
+   * Sheet session close path may omit it on an unedited reopen — the merge
+   * step (mergeWhiteSheetCloseInput) falls back to the latest canonical cash
+   * for a SUBMITTED entry, and still requires it outright for a first
+   * submission (not_submitted).
+   */
+  actualCashSubmitted: number | undefined;
 }
 
 export type WhiteSheetCloseParseResult =

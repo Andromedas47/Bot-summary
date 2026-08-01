@@ -83,6 +83,24 @@ export class WhiteSheetSessionService {
   }
 
   /**
+   * Most recently opened session for this source regardless of status. Used
+   * only to turn a "nothing to claim" outcome into a deterministic terminal
+   * reply (already closed / already cancelled) instead of always claiming
+   * "no session is open", which is misleading on a repeated close/cancel.
+   */
+  async findLatestSessionForSource(sourceId: string): Promise<WhiteSheetSessionRow | null> {
+    const { data, error } = await this.supabase
+      .from("manual_white_sheet_sessions")
+      .select("*")
+      .eq("source_id", sourceId)
+      .order("opened_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw new Error(`findLatestSessionForSource failed: ${error.message}`);
+    return data;
+  }
+
+  /**
    * Read-only precheck so the caller can skip an expensive produce-market
    * lookup for every blocked case (resume / other-market-open / closing /
    * finalized-locked) and only spend it on a genuinely fresh-or-reopenable
@@ -248,9 +266,16 @@ export class WhiteSheetSessionService {
         other_amount: seedExpenses?.other ?? null,
         other_note: seedExpenses?.otherNote ?? null,
         actual_cash_submitted: seedCash,
+        // Fresh open window — nothing has been explicitly edited yet, even
+        // though values above may be seeded/displayed from the canonical
+        // entry. Only fields the operator actually types this window count
+        // as "edited" for the close-time overlay (see buildWhiteSheetClose
+        // CommandFromSession / applyFields).
+        edited_fields: [],
         opened_by_line_user_id: params.lineUserId,
         opened_line_event_id: params.lineEventId,
         opened_at: new Date().toISOString(),
+        closing_started_at: null,
         closed_by_line_user_id: null,
         closed_line_event_id: null,
         closed_at: null,
@@ -274,29 +299,37 @@ export class WhiteSheetSessionService {
       : { opened: false, reason: "resumed", session: existing };
   }
 
-  /** Applies only the fields present in this message (others left untouched). */
+  /**
+   * Applies only the fields present in this message (others left untouched),
+   * unioning them into `edited_fields` so the close path knows which values
+   * were actually typed this open window vs merely seeded/displayed.
+   */
   async applyFields(
-    sessionId: string,
+    session: WhiteSheetSessionRow,
     fields: WhiteSheetSessionFieldSet,
   ): Promise<WhiteSheetSessionRow | null> {
     const patch: Database["public"]["Tables"]["manual_white_sheet_sessions"]["Update"] = {};
-    if (fields.labor !== undefined) patch.labor = fields.labor;
-    if (fields.locationFee !== undefined) patch.location_fee = fields.locationFee;
-    if (fields.bag !== undefined) patch.bag = fields.bag;
-    if (fields.snack !== undefined) patch.snack = fields.snack;
+    const edited = new Set(session.edited_fields ?? []);
+    if (fields.labor !== undefined) { patch.labor = fields.labor; edited.add("labor"); }
+    if (fields.locationFee !== undefined) { patch.location_fee = fields.locationFee; edited.add("location_fee"); }
+    if (fields.bag !== undefined) { patch.bag = fields.bag; edited.add("bag"); }
+    if (fields.snack !== undefined) { patch.snack = fields.snack; edited.add("snack"); }
     if (fields.other !== undefined) {
       patch.other_amount = fields.other.amount;
       patch.other_note = fields.other.note;
+      edited.add("other");
     }
     if (fields.actualCashSubmitted !== undefined) {
       patch.actual_cash_submitted = fields.actualCashSubmitted;
+      edited.add("actual_cash_submitted");
     }
     if (Object.keys(patch).length === 0) return null;
+    patch.edited_fields = Array.from(edited);
 
     const { data, error } = await this.supabase
       .from("manual_white_sheet_sessions")
       .update(patch)
-      .eq("id", sessionId)
+      .eq("id", session.id)
       .eq("status", "open")
       .select()
       .maybeSingle();
@@ -304,31 +337,41 @@ export class WhiteSheetSessionService {
     return data;
   }
 
-  /** Atomically claims an open session for closing (open → closing). */
-  async claimForClose(sourceId: string): Promise<WhiteSheetSessionCloseClaim> {
-    const session = await this.findOpenSession(sourceId);
-    if (!session) return { claimed: false, reason: "not_found" };
-    if (session.status === "closing") {
-      return { claimed: false, reason: "closing_in_progress", session };
+  /**
+   * Atomically claims an open session for closing (open → closing), or
+   * reclaims a closing session whose lease has expired — a bounded,
+   * database-backed lease (via claim_manual_white_sheet_session_close), so a
+   * process that dies mid-close never leaves the source permanently stuck.
+   * Never depends solely on an application catch block to recover.
+   */
+  async claimForClose(
+    sourceId: string,
+    leaseSeconds = 120,
+  ): Promise<WhiteSheetSessionCloseClaim> {
+    const { data, error } = await this.supabase.rpc("claim_manual_white_sheet_session_close", {
+      p_source_id: sourceId,
+      p_lease_seconds: leaseSeconds,
+    });
+    if (error) throw new Error(`claimForClose failed: ${error.message}`);
+
+    const result = data as unknown as {
+      claimed: boolean;
+      reason: "not_found" | "closing_in_progress" | null;
+      session: WhiteSheetSessionRow | null;
+    };
+
+    if (result.claimed) return { claimed: true, session: result.session! };
+    if (result.reason === "closing_in_progress") {
+      return { claimed: false, reason: "closing_in_progress", session: result.session! };
     }
 
-    const { data, error } = await this.supabase
-      .from("manual_white_sheet_sessions")
-      .update({ status: "closing" })
-      .eq("id", session.id)
-      .eq("status", "open")
-      .select()
-      .maybeSingle();
-    if (error) throw new Error(`claimForClose failed: ${error.message}`);
-    if (!data) {
-      // Someone else claimed it first — resolve current state deterministically.
-      const current = await this.getById(session.id);
-      if (!current) return { claimed: false, reason: "not_found" };
-      if (current.status === "closed") return { claimed: false, reason: "already_closed", session: current };
-      if (current.status === "cancelled") return { claimed: false, reason: "cancelled", session: current };
-      return { claimed: false, reason: "closing_in_progress", session: current };
-    }
-    return { claimed: true, session: data };
+    // Nothing open/closing for this source — check terminal history so a
+    // repeated close after success gets a deterministic accurate reply
+    // instead of always "no session is open".
+    const latest = await this.findLatestSessionForSource(sourceId);
+    if (latest?.status === "closed") return { claimed: false, reason: "already_closed", session: latest };
+    if (latest?.status === "cancelled") return { claimed: false, reason: "cancelled", session: latest };
+    return { claimed: false, reason: "not_found" };
   }
 
   async getById(sessionId: string): Promise<WhiteSheetSessionRow | null> {
@@ -350,6 +393,7 @@ export class WhiteSheetSessionService {
       .from("manual_white_sheet_sessions")
       .update({
         status: "closed",
+        closing_started_at: null,
         closed_by_line_user_id: params.lineUserId,
         closed_line_event_id: params.lineEventId,
         closed_at: new Date().toISOString(),
@@ -366,7 +410,7 @@ export class WhiteSheetSessionService {
   async revertToOpen(sessionId: string): Promise<void> {
     const { error } = await this.supabase
       .from("manual_white_sheet_sessions")
-      .update({ status: "open" })
+      .update({ status: "open", closing_started_at: null })
       .eq("id", sessionId)
       .eq("status", "closing");
     if (error) throw new Error(`revertToOpen failed: ${error.message}`);
@@ -378,6 +422,15 @@ export class WhiteSheetSessionService {
   ): Promise<WhiteSheetSessionCancelResult> {
     const session = await this.findOpenSession(sourceId);
     if (!session) {
+      // Check terminal history so a repeated cancel gets a deterministic
+      // accurate reply instead of always "no session is open".
+      const latest = await this.findLatestSessionForSource(sourceId);
+      if (latest?.status === "cancelled") {
+        return { cancelled: false, reason: "already_cancelled", session: latest };
+      }
+      if (latest?.status === "closed") {
+        return { cancelled: false, reason: "already_closed", session: latest };
+      }
       return { cancelled: false, reason: "not_found" };
     }
 
@@ -408,26 +461,34 @@ export class WhiteSheetSessionService {
 
 /**
  * Builds the canonical WhiteSheetCloseCommand directly from a claimed session
- * row. No arithmetic here — undefined means "operator never sent this field",
- * which lets the existing mergeWhiteSheetCloseInput apply its own
- * first-submit/resubmit defaulting rules unchanged.
+ * row. No arithmetic here — undefined means "operator never sent this field
+ * during the current open window", which lets the existing
+ * mergeWhiteSheetCloseInput preserve whatever the *latest* canonical White
+ * Sheet holds for that field (reloaded fresh at close time) instead of
+ * blindly resending a value that was only ever displayed/seeded on reopen.
+ * Only fields present in `edited_fields` (see applyFields) are sent as
+ * explicit; เงินสด is the one field that is still required overall, but that
+ * requirement is enforced downstream against the latest canonical entry
+ * (mergeWhiteSheetCloseInput), not here — an unedited เงินสด on a reopened
+ * SUBMITTED session can be satisfied by the latest canonical cash.
  */
 export function buildWhiteSheetCloseCommandFromSession(
   session: WhiteSheetSessionRow,
-): WhiteSheetCloseCommand | null {
-  if (session.actual_cash_submitted === null) return null;
+): WhiteSheetCloseCommand {
+  const edited = new Set(session.edited_fields ?? []);
   return {
     marketLabel: session.market_label_normalized,
     marketLabelNormalized: session.market_label_normalized,
     businessDate: session.business_date,
-    labor: session.labor ?? undefined,
-    locationFee: session.location_fee ?? undefined,
-    bag: session.bag ?? undefined,
-    snack: session.snack ?? undefined,
+    labor: edited.has("labor") ? session.labor ?? undefined : undefined,
+    locationFee: edited.has("location_fee") ? session.location_fee ?? undefined : undefined,
+    bag: edited.has("bag") ? session.bag ?? undefined : undefined,
+    snack: edited.has("snack") ? session.snack ?? undefined : undefined,
     other:
-      session.other_amount !== null
+      edited.has("other") && session.other_amount !== null
         ? { amount: session.other_amount, note: session.other_note }
         : undefined,
-    actualCashSubmitted: session.actual_cash_submitted,
+    actualCashSubmitted:
+      edited.has("actual_cash_submitted") ? session.actual_cash_submitted ?? undefined : undefined,
   };
 }

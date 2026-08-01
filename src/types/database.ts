@@ -676,9 +676,11 @@ export interface Database {
           other_amount:             number | null;
           other_note:               string | null;
           actual_cash_submitted:    number | null;
+          edited_fields:            string[];
           opened_by_line_user_id:   string | null;
           opened_line_event_id:     string;
           opened_at:                string;
+          closing_started_at:       string | null;
           closed_by_line_user_id:   string | null;
           closed_line_event_id:     string | null;
           closed_at:                string | null;
@@ -700,9 +702,11 @@ export interface Database {
           other_amount?:            number | null;
           other_note?:              string | null;
           actual_cash_submitted?:   number | null;
+          edited_fields?:           string[];
           opened_by_line_user_id?:  string | null;
           opened_line_event_id:     string;
           opened_at?:               string;
+          closing_started_at?:      string | null;
           closed_by_line_user_id?:  string | null;
           closed_line_event_id?:    string | null;
           closed_at?:               string | null;
@@ -724,9 +728,11 @@ export interface Database {
           other_amount?:            number | null;
           other_note?:              string | null;
           actual_cash_submitted?:   number | null;
+          edited_fields?:           string[];
           opened_by_line_user_id?:  string | null;
           opened_line_event_id?:    string;
           opened_at?:               string;
+          closing_started_at?:      string | null;
           closed_by_line_user_id?:  string | null;
           closed_line_event_id?:    string | null;
           closed_at?:               string | null;
@@ -1588,6 +1594,14 @@ export interface Database {
       };
     };
     Functions: {
+      claim_manual_white_sheet_session_close: {
+        Args: { p_source_id: string; p_lease_seconds?: number };
+        Returns: {
+          claimed: boolean;
+          reason: "not_found" | "closing_in_progress" | null;
+          session: Database["public"]["Tables"]["manual_white_sheet_sessions"]["Row"] | null;
+        };
+      };
       attach_evidence_to_slip_batch: {
         Args: { p_batch_id: string; p_evidence_id: string };
         Returns: number;

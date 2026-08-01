@@ -43,7 +43,8 @@ export type WhiteSheetCloseOutcomeReason =
   | "success"
   | "finalized"
   | "validation_failure"
-  | "retryable_failure";
+  | "retryable_failure"
+  | "stale_conflict";
 
 export type WhiteSheetCloseOutcome = {
   replyMessages: string[];
@@ -52,11 +53,23 @@ export type WhiteSheetCloseOutcome = {
   reason: WhiteSheetCloseOutcomeReason;
 };
 
+/** Operator-facing text unchanged from before the typed-reason refactor. */
+const CASH_REQUIRED_REPLY = 'ต้องระบุเงินสดที่ส่งจริงก่อนจบใบขาวมือ เช่น\nเงินสด 4850';
+
+const STALE_CONFLICT_REPLY = [
+  "ข้อมูลใบขาวมือถูกแก้ไขที่อื่นระหว่างที่คุณกรอกอยู่",
+  "กรุณาเปิดใบขาวมือใหม่เพื่อดูค่าล่าสุด แล้วลองปิดอีกครั้ง",
+].join("\n");
+
+/** Thrown by mergeWhiteSheetCloseInput when เงินสด cannot be resolved from either the command or the latest canonical entry. */
+class WhiteSheetCloseCashRequiredError extends Error {}
+
 function isFinalizedPersistenceError(error: unknown): boolean {
-  return (
-    error instanceof WhiteSheetPersistenceError &&
-    error.message.includes("finalized")
-  );
+  return error instanceof WhiteSheetPersistenceError && error.code === "finalized";
+}
+
+function isStaleConflictError(error: unknown): boolean {
+  return error instanceof WhiteSheetPersistenceError && error.code === "stale_conflict";
 }
 
 /**
@@ -80,6 +93,10 @@ export function mergeWhiteSheetCloseInput(
   };
 
   if (existing.status === "not_submitted") {
+    // Truly nothing to fall back to — เงินสด must come from this command.
+    if (command.actualCashSubmitted === undefined) {
+      throw new WhiteSheetCloseCashRequiredError();
+    }
     const other = command.other;
     return {
       ...identity,
@@ -107,6 +124,11 @@ export function mergeWhiteSheetCloseInput(
           note: prior.otherNote ?? null,
         };
 
+  // Omitted เงินสด on a resubmit is satisfied by the latest canonical cash
+  // (e.g. an unedited reopen of a SUBMITTED session) — never by defaulting
+  // to zero, and command.actualCashSubmitted (when present) always wins.
+  const actualCashSubmitted = command.actualCashSubmitted ?? existing.actualCashSubmitted;
+
   return {
     ...identity,
     labor: command.labor ?? prior.labor,
@@ -115,7 +137,7 @@ export function mergeWhiteSheetCloseInput(
     snack: command.snack ?? prior.snack,
     other: other.amount,
     otherNote: other.note,
-    actualCashSubmitted: command.actualCashSubmitted,
+    actualCashSubmitted,
   };
 }
 
@@ -131,9 +153,18 @@ export async function processWhiteSheetCloseCommand(
   input: {
     sourceId: string;
     command: WhiteSheetCloseCommand;
+    /**
+     * When true, the save is optimistic-concurrency guarded against the
+     * canonical entry's `updated_at` at the moment it was reloaded just
+     * below — a canonical change racing this close (e.g. a Backoffice edit)
+     * is detected as a typed stale conflict instead of silently overwritten.
+     * Used by the Manual White Sheet LINE session close path; the one-
+     * message LINE close command and Backoffice keep last-write-wins.
+     */
+    optimisticConcurrency?: boolean;
   },
 ): Promise<WhiteSheetCloseOutcome> {
-  const { sourceId, command } = input;
+  const { sourceId, command, optimisticConcurrency } = input;
   const log = logger.child({
     sourceId,
     market: command.marketLabelNormalized,
@@ -196,10 +227,29 @@ export async function processWhiteSheetCloseCommand(
     };
   }
 
-  const merged = mergeWhiteSheetCloseInput(sourceId, command, existing);
+  let merged;
+  try {
+    merged = mergeWhiteSheetCloseInput(sourceId, command, existing);
+  } catch (error) {
+    if (error instanceof WhiteSheetCloseCashRequiredError) {
+      return {
+        replyMessages: [CASH_REQUIRED_REPLY],
+        persisted: false,
+        trusted: false,
+        reason: "validation_failure",
+      };
+    }
+    throw error;
+  }
 
   try {
-    await saveWhiteSheetCashEntry(supabase, merged);
+    await saveWhiteSheetCashEntry(
+      supabase,
+      merged,
+      optimisticConcurrency && existing.status !== "not_submitted"
+        ? { expectedUpdatedAt: existing.updatedAt }
+        : undefined,
+    );
   } catch (error) {
     if (isFinalizedPersistenceError(error)) {
       log.info("white sheet close rejected — finalized");
@@ -208,6 +258,16 @@ export async function processWhiteSheetCloseCommand(
         persisted: false,
         trusted: false,
         reason: "finalized",
+      };
+    }
+
+    if (isStaleConflictError(error)) {
+      log.info("white sheet close rejected — stale conflict");
+      return {
+        replyMessages: [STALE_CONFLICT_REPLY],
+        persisted: false,
+        trusted: false,
+        reason: "stale_conflict",
       };
     }
 

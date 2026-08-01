@@ -76,16 +76,35 @@ function makeDb() {
     );
   }
 
-  function sessionSelectChain(filters: Array<{ op: string; col: string; val: unknown }> = []) {
+  function sessionSelectChain(
+    filters: Array<{ op: string; col: string; val: unknown }> = [],
+    order?: { col: string; ascending: boolean },
+    limit?: number,
+  ) {
     return {
       eq(col: string, val: unknown) {
-        return sessionSelectChain([...filters, { op: "eq", col, val }]);
+        return sessionSelectChain([...filters, { op: "eq", col, val }], order, limit);
       },
       in(col: string, val: unknown[]) {
-        return sessionSelectChain([...filters, { op: "in", col, val }]);
+        return sessionSelectChain([...filters, { op: "in", col, val }], order, limit);
+      },
+      order(col: string, opts?: { ascending?: boolean }) {
+        return sessionSelectChain(filters, { col, ascending: opts?.ascending ?? true }, limit);
+      },
+      limit(n: number) {
+        return sessionSelectChain(filters, order, n);
       },
       async maybeSingle() {
-        return { data: sessions.find((r) => sessionMatches(r, filters)) ?? null, error: null };
+        let found = sessions.filter((r) => sessionMatches(r, filters));
+        if (order) {
+          found = [...found].sort((a, b) => {
+            const av = String(a[order.col] ?? "");
+            const bv = String(b[order.col] ?? "");
+            return order.ascending ? av.localeCompare(bv) : bv.localeCompare(av);
+          });
+        }
+        if (limit !== undefined) found = found.slice(0, limit);
+        return { data: found[0] ?? null, error: null };
       },
     };
   }
@@ -162,6 +181,8 @@ function makeDb() {
                   other_amount: null,
                   other_note: null,
                   actual_cash_submitted: null,
+                  edited_fields: [],
+                  closing_started_at: null,
                   closed_at: null,
                   closed_by_line_user_id: null,
                   closed_line_event_id: null,
@@ -309,8 +330,34 @@ function makeDb() {
         update: () => noop,
       };
     },
-    rpc() {
-      return Promise.resolve({ data: null, error: { message: "unexpected rpc" } });
+    /** Mirrors claim_manual_white_sheet_session_close (see migration 0059). */
+    rpc(fnName: string, args: Record<string, unknown>) {
+      if (fnName !== "claim_manual_white_sheet_session_close") {
+        return Promise.resolve({ data: null, error: { message: `unexpected rpc: ${fnName}` } });
+      }
+      const sourceId = args.p_source_id as string;
+      const leaseSeconds = (args.p_lease_seconds as number | undefined) ?? 120;
+      const row = sessions.find(
+        (r) => r.source_id === sourceId && (r.status === "open" || r.status === "closing"),
+      );
+      if (!row) {
+        return Promise.resolve({ data: { claimed: false, reason: "not_found", session: null }, error: null });
+      }
+      if (row.status === "closing") {
+        const startedAt = row.closing_started_at ? new Date(row.closing_started_at as string).getTime() : null;
+        const stale = startedAt !== null && startedAt <= Date.now() - leaseSeconds * 1000;
+        if (stale) {
+          row.closing_started_at = new Date().toISOString();
+          return Promise.resolve({ data: { claimed: true, reason: null, session: { ...row } }, error: null });
+        }
+        return Promise.resolve({
+          data: { claimed: false, reason: "closing_in_progress", session: { ...row } },
+          error: null,
+        });
+      }
+      row.status = "closing";
+      row.closing_started_at = new Date().toISOString();
+      return Promise.resolve({ data: { claimed: true, reason: null, session: { ...row } }, error: null });
     },
   };
 
@@ -495,13 +542,15 @@ describe("Manual White Sheet LINE session — field accumulation", () => {
     expect(replies[1]).toContain("จบสลิปมือ");
   });
 
-  it("a field line without an open session gets a clear reply, no crash", async () => {
+  it("a field-shaped message with no open White Sheet session falls through unclaimed — no ยังไม่ได้เปิดใบขาวมือ reply, no DB query claimed it", async () => {
     const db = makeDb();
     const replies: string[] = [];
     const svc = makeService(db, replies);
-    await svc.processEvents([makeEvent("ค่าแรง 500")], "dest");
+    const [res] = await svc.processEvents([makeEvent("ค่าแรง 500")], "dest");
     expect(db._sessions).toHaveLength(0);
-    expect(replies[0]).toContain("ยังไม่ได้เปิดใบขาวมือ");
+    expect(res.status).toBe("saved");
+    // Must not be swallowed by the Manual White Sheet handler.
+    expect(replies.join("\n")).not.toContain("ยังไม่ได้เปิดใบขาวมือ");
   });
 
   it("a completely unrelated message falls through and is not swallowed", async () => {
@@ -557,7 +606,7 @@ describe("Manual White Sheet LINE session — close", () => {
     expect(db._cashEntries.size).toBe(1);
   });
 
-  it("closing again after already closed is a safe deterministic no-op", async () => {
+  it("closing again after already closed is a safe deterministic idempotent reply (terminal history, not a generic no-session message)", async () => {
     const db = makeDb();
     const replies: string[] = [];
     const svc = makeService(db, replies);
@@ -566,7 +615,7 @@ describe("Manual White Sheet LINE session — close", () => {
     await svc.processEvents([makeEvent("จบใบขาวมือ", { messageId: "c2" })], "dest");
 
     expect(db._cashEntries.size).toBe(1);
-    expect(replies[3]).toContain("ไม่มีใบขาวมือที่เปิดอยู่");
+    expect(replies[3]).toContain("จบไปแล้ว");
   });
 });
 

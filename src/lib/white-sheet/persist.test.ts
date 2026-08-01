@@ -70,6 +70,7 @@ function makeFakeSupabase(
 
   const lifecycleEvents: LifecycleEvent[] = [];
   const rpcCalls: Array<{ fn: string; args: Record<string, unknown> }> = [];
+  let updateSeq = 0;
 
   function findByIdentity(sourceId: string, market: string, businessDate: string): [string, Row] | null {
     const found = [...rows.entries()].find(
@@ -149,7 +150,14 @@ function makeFakeSupabase(
                 const found = [...rows.entries()].find(([, row]) => matches(row, filters));
                 if (!found) return { data: null, error: null };
                 const [id, existing] = found;
-                const merged: Row = { ...existing, ...values, updated_at: "2026-07-24T01:00:00Z" } as Row;
+                // Monotonically increasing, distinct per update call, so
+                // optimistic-concurrency tests can tell "this write" apart
+                // from "a write that happened since I read".
+                const merged: Row = {
+                  ...existing,
+                  ...values,
+                  updated_at: `2026-07-24T01:00:00.${String(++updateSeq).padStart(3, "0")}Z`,
+                } as Row;
                 rows.set(id, merged);
                 return { data: merged, error: null };
               },
@@ -505,6 +513,88 @@ describe("saveWhiteSheetCashEntry", () => {
     expect(result.status).toBe("submitted");
     if (result.status === "submitted") {
       expect(result.expenses.labor).toBe(20);
+    }
+  });
+
+  it("every validation-time throw carries code 'validation'", async () => {
+    const { database } = makeFakeSupabase();
+    try {
+      await saveWhiteSheetCashEntry(database, { ...VALID_SAVE_INPUT, bag: -1 });
+      throw new Error("expected throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(WhiteSheetPersistenceError);
+      expect((error as WhiteSheetPersistenceError).code).toBe("validation");
+    }
+  });
+});
+
+// ── Optimistic concurrency (expectedUpdatedAt) ──────────────────────────────
+// Existing callers (one-message LINE close, Backoffice) omit expectedUpdatedAt
+// and keep last-write-wins — see the "last-write-wins" test above, unchanged.
+
+describe("saveWhiteSheetCashEntry optimistic concurrency", () => {
+  it("succeeds when expectedUpdatedAt matches the row's current updated_at", async () => {
+    const { database } = makeFakeSupabase();
+    const first = await saveWhiteSheetCashEntry(database, VALID_SAVE_INPUT);
+    if (first.status !== "submitted") throw new Error("expected submitted");
+
+    const second = await saveWhiteSheetCashEntry(
+      database,
+      { ...VALID_SAVE_INPUT, labor: 300 },
+      { expectedUpdatedAt: first.updatedAt },
+    );
+    expect(second.status).toBe("submitted");
+    if (second.status === "submitted") {
+      expect(second.expenses.labor).toBe(300);
+    }
+  });
+
+  it("throws a typed stale_conflict when the canonical row changed since expectedUpdatedAt was read", async () => {
+    const { database } = makeFakeSupabase();
+    const first = await saveWhiteSheetCashEntry(database, VALID_SAVE_INPUT);
+    if (first.status !== "submitted") throw new Error("expected submitted");
+
+    // Someone else (e.g. Backoffice) writes in between — bumps updated_at.
+    await saveWhiteSheetCashEntry(database, { ...VALID_SAVE_INPUT, labor: 250 });
+
+    try {
+      await saveWhiteSheetCashEntry(
+        database,
+        { ...VALID_SAVE_INPUT, labor: 300 },
+        { expectedUpdatedAt: first.updatedAt }, // now stale
+      );
+      throw new Error("expected throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(WhiteSheetPersistenceError);
+      expect((error as WhiteSheetPersistenceError).code).toBe("stale_conflict");
+    }
+
+    // The concurrent writer's value must survive — no silent overwrite.
+    const reloaded = await loadWhiteSheetCashEntry(database, IDENTITY);
+    if (reloaded.status !== "submitted") throw new Error("expected submitted");
+    expect(reloaded.expenses.labor).toBe(250);
+  });
+
+  it("a FINALIZED row still reports code 'finalized' even with expectedUpdatedAt supplied", async () => {
+    const seed = {
+      source_id: IDENTITY.sourceId,
+      market_label_normalized: IDENTITY.marketLabelNormalized,
+      business_date: IDENTITY.businessDate,
+      finalized_at: "2026-07-24T02:00:00Z",
+      finalized_by: "admin1",
+      updated_at: "2026-07-24T02:00:00Z",
+    };
+    const { database } = makeFakeSupabase([seed]);
+    try {
+      await saveWhiteSheetCashEntry(
+        database,
+        { ...VALID_SAVE_INPUT, labor: 300 },
+        { expectedUpdatedAt: "2026-07-24T02:00:00Z" },
+      );
+      throw new Error("expected throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(WhiteSheetPersistenceError);
+      expect((error as WhiteSheetPersistenceError).code).toBe("finalized");
     }
   });
 });

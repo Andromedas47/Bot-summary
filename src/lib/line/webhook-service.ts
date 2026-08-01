@@ -571,9 +571,26 @@ export class WebhookService {
     // ── 3.2a. Manual White Sheet LINE session — recognized field messages ────
     // Runs after the old close command so a full "<market> ปิดยอด <date> /
     // fields / จบปิดยอด" message is never misclaimed by this looser matcher.
+    // Text is classified as a field candidate first (pure, no DB); only then
+    // do we spend one query checking for an open session — so ordinary/legacy
+    // traffic with no White Sheet field lines never touches this table, and a
+    // field-shaped message with no open session falls through unclaimed
+    // instead of being swallowed with "ยังไม่ได้เปิดใบขาวมือ".
     const sessionFields = parseWhiteSheetSessionFieldLines(text);
     if (sessionFields.kind !== "none") {
-      return this.processWhiteSheetSessionField(msgEvent, sessionFields, eventId, event.type, log);
+      const sessionSvc = new WhiteSheetSessionService(this.supabase);
+      const openSession = await sessionSvc.findOpenSession(sourceId);
+      if (openSession && openSession.status === "open") {
+        return this.processWhiteSheetSessionField(
+          msgEvent,
+          sessionFields,
+          openSession,
+          eventId,
+          event.type,
+          log,
+        );
+      }
+      // No open session — not this feature's message. Fall through unchanged.
     }
 
     // ── 3.3. Manual slip session commands ────────────────────────────────────
@@ -1673,6 +1690,7 @@ export class WebhookService {
   private async processWhiteSheetSessionField(
     event: LineMessageEvent,
     parseResult: Exclude<ReturnType<typeof parseWhiteSheetSessionFieldLines>, { kind: "none" }>,
+    open: WhiteSheetSessionRow,
     eventId: string,
     eventType: string,
     log: ChildLogger,
@@ -1687,18 +1705,7 @@ export class WebhookService {
 
     try {
       const svc = new WhiteSheetSessionService(this.supabase);
-      const open = await svc.findOpenSession(sourceId);
-      if (!open || open.status !== "open") {
-        if (replyToken) {
-          await this.replyMessage(
-            replyToken,
-            `ยังไม่ได้เปิดใบขาวมือ กรุณาพิมพ์ "<ตลาด> ส่งใบขาวมือ <วว/ดด/พ.ศ.>" ก่อน เช่น\nพาชิโอ้ผลไม้ ส่งใบขาวมือ 31/07/2569`,
-          );
-        }
-        return { eventId, eventType, status: "saved", parsed: false };
-      }
-
-      const updated = await svc.applyFields(open.id, parseResult.fields);
+      const updated = await svc.applyFields(open, parseResult.fields);
       const session = updated ?? open;
       log.info("white sheet session field applied", { sourceId, sessionId: session.id });
 
@@ -1759,16 +1766,6 @@ export class WebhookService {
 
       const { session } = claim;
       const command = buildWhiteSheetCloseCommandFromSession(session);
-      if (command === null) {
-        await svc.revertToOpen(session.id);
-        if (replyToken) {
-          await this.replyMessage(
-            replyToken,
-            'ต้องระบุเงินสดที่ส่งจริงก่อนจบใบขาวมือ เช่น\nเงินสด 4850',
-          );
-        }
-        return { eventId, eventType, status: "saved", parsed: false };
-      }
 
       // Everything from here on has claimed the session ("closing"). Any
       // unexpected throw below must still return it to "open" — never leave
@@ -1776,7 +1773,11 @@ export class WebhookService {
       // identity-keyed upsert: retrying "จบใบขาวมือ" after a reopen safely
       // resubmits the same values (no duplicate row) rather than double-saving.
       try {
-        const outcome = await processWhiteSheetCloseCommand(this.supabase, { sourceId, command });
+        const outcome = await processWhiteSheetCloseCommand(this.supabase, {
+          sourceId,
+          command,
+          optimisticConcurrency: true,
+        });
 
         if (outcome.persisted) {
           try {
@@ -1787,15 +1788,28 @@ export class WebhookService {
             });
             await svc.revertToOpen(session.id);
             if (replyToken) {
-              await this.replyMessage(
-                replyToken,
-                'บันทึกใบขาวมือสำเร็จแล้ว แต่ปิดสถานะไม่สำเร็จ กรุณาพิมพ์ "จบใบขาวมือ" อีกครั้ง',
-              );
+              try {
+                await this.replyMessage(
+                  replyToken,
+                  'บันทึกใบขาวมือสำเร็จแล้ว แต่ปิดสถานะไม่สำเร็จ กรุณาพิมพ์ "จบใบขาวมือ" อีกครั้ง',
+                );
+              } catch { /* reply failure does not change the DB outcome above */ }
             }
             return { eventId, eventType, status: "saved", parsed: true };
           }
+          // Persistence AND finalize both committed. A reply failure past
+          // this point must never be reported as if the close itself failed
+          // — the transaction already succeeded, and a retry would find an
+          // already-closed session and get the deterministic idempotent
+          // "จบไปแล้ว" reply, not a duplicate write.
           if (replyToken) {
-            await this.replyMessages(replyToken, ["จบใบขาวมือแล้ว ✅", ...outcome.replyMessages]);
+            try {
+              await this.replyMessages(replyToken, ["จบใบขาวมือแล้ว ✅", ...outcome.replyMessages]);
+            } catch (replyErr) {
+              log.error("white sheet session close reply failed after committed success", {
+                error: replyErr instanceof Error ? replyErr.message : String(replyErr),
+              });
+            }
           }
           return { eventId, eventType, status: "saved", parsed: true };
         }

@@ -264,3 +264,153 @@ describe("ordered White Sheet completion conflicts", () => {
     expect((await db.repeatCompletion()).data).toBe(false);
   });
 });
+
+describe("ordered White Sheet receive activation", () => {
+  it("successful receive creates and uses an ordered receipt", async () => {
+    const item = event("evt-receive-ok");
+    const db = makeQueueDb();
+    const replies: string[] = [];
+
+    const [result] = await service(db, replies).processEvents([item], "destination");
+
+    expect(db.receiveCalls).toBeGreaterThanOrEqual(1);
+    expect(db.queueCount).toBe(1);
+    expect(db.queue?.status).toBe("processed");
+    expect(db.rawCount).toBe(1);
+    expect(result.status).toBe("saved");
+    expect(replies).toHaveLength(1);
+  });
+
+  it("schema-cache error on receive does not silently disable ordering", async () => {
+    const first = event("evt-cache-1");
+    const second = event("evt-cache-2");
+    let failNextReceive = true;
+    const raws = new Map<string, { id: string; payload: LineEvent }>();
+    let queue: {
+      lineEventId: string;
+      rawMessageId: string;
+      sourceId: string;
+      status: QueueStatus;
+      stale: boolean;
+      claimToken: string | null;
+      attempts: number;
+    } | null = null;
+    let sequence = 0;
+    let receiveCalls = 0;
+
+    const db = {
+      async rpc(name: string, args: Record<string, unknown>) {
+        if (name === "receive_line_webhook_event") {
+          receiveCalls += 1;
+          if (failNextReceive) {
+            failNextReceive = false;
+            return {
+              data: null,
+              error: {
+                code: "PGRST202",
+                message: "Could not find the function public.receive_line_webhook_event in the schema cache",
+              },
+            };
+          }
+          const lineEventId = args.p_line_event_id as string;
+          const rawMessageId = `raw-${++sequence}`;
+          raws.set(lineEventId, { id: rawMessageId, payload: args.p_payload as LineEvent });
+          queue = {
+            lineEventId,
+            rawMessageId,
+            sourceId: args.p_source_id as string,
+            status: "pending",
+            stale: false,
+            claimToken: null,
+            attempts: 0,
+          };
+          return { data: { raw_message_id: rawMessageId, duplicate: false }, error: null };
+        }
+        if (name === "claim_line_webhook_event") {
+          if (!queue || queue.sourceId !== args.p_source_id) return { data: null, error: null };
+          if (queue.status !== "pending") return { data: null, error: null };
+          queue.status = "processing";
+          queue.claimToken = `token-${++sequence}`;
+          queue.attempts += 1;
+          return {
+            data: {
+              queue_id: "queue-1",
+              line_event_id: queue.lineEventId,
+              source_id: queue.sourceId,
+              raw_message_id: queue.rawMessageId,
+              receive_order: 1,
+              claim_token: queue.claimToken,
+            },
+            error: null,
+          };
+        }
+        if (name === "complete_line_webhook_event") {
+          const matches = queue?.status === "processing"
+            && queue.rawMessageId === args.p_raw_message_id
+            && queue.claimToken === args.p_claim_token;
+          if (!matches || !queue) return { data: false, error: null };
+          queue.status = args.p_status as QueueStatus;
+          queue.claimToken = null;
+          return { data: true, error: null };
+        }
+        throw new Error(`unexpected rpc: ${name}`);
+      },
+      from(table: string) {
+        if (table !== "raw_messages") throw new Error(`unexpected table: ${table}`);
+        return {
+          select() {
+            return {
+              eq(_column: string, rawMessageId: unknown) {
+                return {
+                  async maybeSingle() {
+                    const raw = [...raws.values()].find((row) => row.id === rawMessageId);
+                    return { data: raw ? { payload: raw.payload } : null, error: null };
+                  },
+                };
+              },
+            };
+          },
+          insert(payload: Record<string, unknown>) {
+            return {
+              select() {
+                return {
+                  async single() {
+                    const lineEventId = payload.line_event_id as string;
+                    if (raws.has(lineEventId)) {
+                      return { data: null, error: { code: "23505", message: "duplicate" } };
+                    }
+                    const id = `raw-${++sequence}`;
+                    raws.set(lineEventId, { id, payload: payload.payload as LineEvent });
+                    return { data: { id }, error: null };
+                  },
+                };
+              },
+            };
+          },
+        };
+      },
+      get receiveCalls() { return receiveCalls; },
+      get queue() { return queue; },
+      get queueCount() { return queue ? 1 : 0; },
+    };
+
+    const replies: string[] = [];
+    const svc = new WebhookService(db as unknown as SupabaseClient<Database>, {
+      replyMessage: async (_token, text) => { replies.push(text); },
+      scheduleBackgroundTask: () => {},
+    });
+
+    // First White Sheet event: schema-cache miss → one-shot unordered fallback.
+    await svc.processEvents([first], "destination");
+    expect(receiveCalls).toBe(1);
+    expect(db.queueCount).toBe(0);
+
+    // Second White Sheet event on the same service instance must still attempt
+    // receive — schema-cache must not poison orderedQueueAvailable.
+    await svc.processEvents([second], "destination");
+    expect(receiveCalls).toBe(2);
+    expect(db.queueCount).toBe(1);
+    expect(db.queue?.status).toBe("processed");
+    expect(replies.length).toBeGreaterThanOrEqual(1);
+  });
+});

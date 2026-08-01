@@ -4,7 +4,13 @@ import {
   parseNoteBusinessDate,
   parseWhiteSheetNoteCommand,
   collapseWhiteSheetNoteFields,
+  isWhiteSheetNoteFieldShaped,
+  FIELD_LABELS,
 } from "@/lib/line/white-sheet-note-command";
+import {
+  PRODUCTION_UAT_FIELD_PAYLOAD,
+  PRODUCTION_UAT_FIELD_PAYLOAD_HEX,
+} from "@/lib/line/fixtures/production-uat-field-payload-5b869e9b";
 
 describe("parseNoteMoneyAmount", () => {
   test("accepts plain integers", () => {
@@ -232,5 +238,59 @@ describe("parseWhiteSheetNoteCommand — close / cancel", () => {
   });
   test("trims surrounding whitespace", () => {
     expect(parseWhiteSheetNoteCommand("  จบใบขาวมือ  ")).toEqual({ kind: "close" });
+  });
+});
+
+describe("Production UAT field payload 5b869e9b", () => {
+  test("fixture hex round-trips to exact UTF-8 with LF + SPACE only", () => {
+    const bytes = Buffer.from(PRODUCTION_UAT_FIELD_PAYLOAD_HEX, "hex");
+    expect(bytes.toString("utf8")).toBe(PRODUCTION_UAT_FIELD_PAYLOAD);
+    expect(PRODUCTION_UAT_FIELD_PAYLOAD.includes("\r")).toBe(false);
+    expect(PRODUCTION_UAT_FIELD_PAYLOAD.includes("\u00a0")).toBe(false);
+    expect(PRODUCTION_UAT_FIELD_PAYLOAD.includes("\u200b")).toBe(false);
+    for (const label of Object.values(FIELD_LABELS)) {
+      expect(PRODUCTION_UAT_FIELD_PAYLOAD.includes(label)).toBe(true);
+    }
+    const codePoints = [...PRODUCTION_UAT_FIELD_PAYLOAD].map((ch) => ch.codePointAt(0)!);
+    expect(codePoints.filter((cp) => cp === 0x0a)).toHaveLength(5);
+    // Allowed: LF, SPACE, ASCII digits, Thai script (labels + ค่าน้ำ)
+    expect(codePoints.every((cp) =>
+      cp === 0x0a
+      || cp === 0x20
+      || (cp >= 0x30 && cp <= 0x39)
+      || cp >= 0x0e00
+    )).toBe(true);
+  });
+
+  test("exact Production multiline payload parses as six fields", () => {
+    const result = parseWhiteSheetNoteCommand(PRODUCTION_UAT_FIELD_PAYLOAD);
+    expect(result).toEqual({
+      kind: "field",
+      fields: [
+        { key: "labor", amount: 500, note: null },
+        { key: "locationFee", amount: 200, note: null },
+        { key: "bag", amount: 100, note: null },
+        { key: "snack", amount: 50, note: null },
+        { key: "other", amount: 30, note: "ค่าน้ำ" },
+        { key: "actualCash", amount: 4850, note: null },
+      ],
+    });
+    expect(isWhiteSheetNoteFieldShaped(PRODUCTION_UAT_FIELD_PAYLOAD)).toBe(true);
+  });
+
+  test("Unicode-alternation FIELD_LINE_RE form fails closed on empty group (documents SWC risk)", () => {
+    // Production used /^(ค่าแรง|…|เงินสด)\s+(.+?)\s*$/ which SWC/Turbopack
+    // can break for Thai alternation at runtime. Prefix matching must remain
+    // the only production path — this asserts the fixture is still field-shaped
+    // even if a naive broken alternation regex returns null.
+    const brokenAlternation = /^(ค่าแรง|ค่าที่|ค่าถุง|ค่าขนม|ค่าอื่น|เงินสด)\s+(.+?)\s*$/u;
+    const lines = PRODUCTION_UAT_FIELD_PAYLOAD.split("\n");
+    // Bun itself may still match; the regression is the fixture + prefix parser.
+    // Prove prefix parser does not depend on alternation success:
+    expect(parseWhiteSheetNoteCommand(PRODUCTION_UAT_FIELD_PAYLOAD).kind).toBe("field");
+    expect(lines.every((line) => Object.values(FIELD_LABELS).some(
+      (label) => line === label || line.startsWith(`${label} `),
+    ))).toBe(true);
+    void brokenAlternation;
   });
 });

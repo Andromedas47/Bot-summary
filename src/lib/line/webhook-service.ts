@@ -56,6 +56,14 @@ import {
 import type { StructuredPendingSession } from "@/lib/line/produce-session-commands";
 import { DailySummaryService } from "@/lib/line/daily-summary-service";
 import { SessionDedupService } from "@/lib/line/session-dedup-service";
+import {
+  parseWhiteSheetNoteCommand,
+  type WhiteSheetNoteParseResult,
+} from "@/lib/line/white-sheet-note-command";
+import {
+  WhiteSheetNoteSessionService,
+  type ManualWhiteSheetNoteSessionRow,
+} from "@/lib/line/white-sheet-note-session-service";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 import { bangkokBusinessDateNow } from "@/lib/business-date";
 import { parseManualSlipAmounts } from "@/lib/parsers/manual-slip-amount";
@@ -168,6 +176,53 @@ const PRODUCE_AFTER_BOUNDARY_REPLY =
 /** 0050: plain-text จบรายการ must not close a Guided/structured session. */
 export const STRUCTURED_TEXT_CLOSE_REFUSED_REPLY =
   "รายการนี้เปิดจากเมนู กรุณากดตรวจและจบจากเมนู ไม่รับคำสั่งจบจากข้อความ";
+
+// ── Manual White Sheet note session (independent LINE-only record) ─────────
+const WHITE_SHEET_NOTE_FIELD_LABEL: Record<string, string> = {
+  labor: "ค่าแรง",
+  locationFee: "ค่าที่",
+  bag: "ค่าถุง",
+  snack: "ค่าขนม",
+  other: "ค่าอื่น",
+  actualCash: "เงินสด",
+};
+
+const WHITE_SHEET_NOTE_NO_OPEN_SESSION_REPLY = "ยังไม่มีใบขาวมือที่เปิดอยู่";
+
+const WHITE_SHEET_NOTE_CLOSE_EMPTY_REPLY =
+  "กรุณาส่งค่าใช้จ่ายอย่างน้อย 1 รายการก่อนพิมพ์ จบใบขาวมือ";
+
+function isoDateToBuddhistDisplay(iso: string): string {
+  const [year, month, day] = iso.split("-");
+  return `${day}/${month}/${Number(year) + 543}`;
+}
+
+function formatMoney(value: number): string {
+  return value.toLocaleString("th-TH");
+}
+
+function buildWhiteSheetNoteSummary(session: ManualWhiteSheetNoteSessionRow): string {
+  const lines = [
+    "จบใบขาวมือแล้ว ✅",
+    "",
+    `ตลาด: ${session.market_label}`,
+    `วันที่: ${isoDateToBuddhistDisplay(session.business_date)}`,
+  ];
+  if (session.labor !== null) lines.push(`ค่าแรง: ${formatMoney(session.labor)} บาท`);
+  if (session.location_fee !== null) lines.push(`ค่าที่: ${formatMoney(session.location_fee)} บาท`);
+  if (session.bag !== null) lines.push(`ค่าถุง: ${formatMoney(session.bag)} บาท`);
+  if (session.snack !== null) lines.push(`ค่าขนม: ${formatMoney(session.snack)} บาท`);
+  if (session.other_amount !== null) {
+    lines.push(
+      `ค่าอื่น: ${formatMoney(session.other_amount)} บาท${session.other_note ? ` — ${session.other_note}` : ""}`,
+    );
+  }
+  if (session.actual_cash !== null) lines.push(`เงินสด: ${formatMoney(session.actual_cash)} บาท`);
+  lines.push("");
+  lines.push("ข้อมูลนี้เป็นบันทึกใบขาวมือเท่านั้น");
+  lines.push("ยังไม่ได้ตรวจเทียบกับรายการสินค้า สลิป หรือยอดโอน");
+  return lines.join("\n");
+}
 
 interface WebhookServiceDependencies {
   evidenceIngestor?: SlipEvidenceIngestor;
@@ -532,6 +587,20 @@ export class WebhookService {
         event.type,
         log,
       );
+    }
+
+    // ── 3.25. Manual White Sheet note session (independent LINE-only record) ─
+    // Not connected to produce, slips, transfers, reconciliation, settlement,
+    // or the digital White Sheet. Text is classified first (pure, no I/O);
+    // a DB lookup only happens for candidate messages, and field-shaped text
+    // falls through unchanged when this source has no open note session.
+    const noteParse = parseWhiteSheetNoteCommand(text);
+    if (noteParse.kind !== "not_command") {
+      const noteResult = await this.tryProcessWhiteSheetNoteCommand(
+        msgEvent, noteParse, eventId, event.type, log,
+      );
+      if (noteResult !== null) return noteResult;
+      // field-shaped text with no open session — not this feature's message.
     }
 
     // ── 3.3. Manual slip session commands ────────────────────────────────────
@@ -1646,6 +1715,112 @@ export class WebhookService {
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       log.error("manual slip entry append failed", { error: errorMessage });
+      return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
+    }
+  }
+
+  // ── Manual White Sheet note session ────────────────────────────────────────
+  // Independent LINE-only record of operator-entered White Sheet figures.
+  // Returns null only for field-shaped text with no open session, so the
+  // caller falls through to existing routing unchanged.
+  private async tryProcessWhiteSheetNoteCommand(
+    event:      LineMessageEvent,
+    parseResult: Exclude<WhiteSheetNoteParseResult, { kind: "not_command" }>,
+    eventId:    string,
+    eventType:  string,
+    log:        ChildLogger,
+  ): Promise<WebhookProcessResult | null> {
+    const sourceId   = getSourceId(event.source);
+    const lineUserId = getUserId(event.source);
+    const replyToken = event.replyToken;
+    const svc        = new WhiteSheetNoteSessionService(this.supabase);
+
+    if (parseResult.kind === "open_invalid") {
+      if (replyToken) await this.replyMessage(replyToken, parseResult.message);
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+
+    if (parseResult.kind === "open") {
+      const { marketLabel, marketLabelNormalized, businessDate } = parseResult.command;
+      try {
+        const result = await svc.openSession({
+          sourceId, marketLabel, marketLabelNormalized, businessDate,
+          lineUserId, lineEventId: eventId,
+        });
+        if (replyToken) {
+          if (result.opened) {
+            await this.replyMessage(
+              replyToken,
+              `เปิดใบขาวมือแล้ว\nตลาด: ${marketLabel}\nวันที่: ${isoDateToBuddhistDisplay(businessDate)}\nส่งค่าใช้จ่ายทีละรายการได้เลย เช่น\nค่าแรง 500\nพิมพ์ จบใบขาวมือ เมื่อส่งครบ`,
+            );
+          } else if (
+            result.session.market_label_normalized === marketLabelNormalized
+            && result.session.business_date === businessDate
+          ) {
+            await this.replyMessage(replyToken, buildWhiteSheetNoteSummary(result.session));
+          } else {
+            await this.replyMessage(
+              replyToken,
+              `ยังมีใบขาวมือของ ${result.session.market_label} วันที่ ${isoDateToBuddhistDisplay(result.session.business_date)} ที่ยังไม่จบ\nกรุณาพิมพ์ จบใบขาวมือ หรือ ยกเลิกใบขาวมือ ก่อนเปิดใบใหม่`,
+            );
+          }
+        }
+        log.info("white sheet note open", { sourceId, opened: result.opened });
+        return { eventId, eventType, status: "saved", parsed: false };
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        log.error("white sheet note open failed", { error: errorMessage });
+        return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
+      }
+    }
+
+    // field / close / cancel — all require an existing open session.
+    const openSession = await svc.findOpenSession(sourceId);
+    if (!openSession) {
+      if (parseResult.kind === "field") return null; // fall through unchanged
+      if (replyToken) await this.replyMessage(replyToken, WHITE_SHEET_NOTE_NO_OPEN_SESSION_REPLY);
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+
+    try {
+      if (parseResult.kind === "field_invalid") {
+        if (replyToken) await this.replyMessage(replyToken, parseResult.message);
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      if (parseResult.kind === "field") {
+        const updated = await svc.applyField(openSession, parseResult.field);
+        if (replyToken) {
+          const label = WHITE_SHEET_NOTE_FIELD_LABEL[parseResult.field.key];
+          const noteSuffix = parseResult.field.note ? ` — ${parseResult.field.note}` : "";
+          await this.replyMessage(
+            replyToken,
+            `บันทึกแล้ว: ${label} ${formatMoney(parseResult.field.amount)} บาท${noteSuffix}`,
+          );
+        }
+        log.info("white sheet note field applied", { sourceId, field: parseResult.field.key, sessionId: updated.id });
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      if (parseResult.kind === "close") {
+        if (!svc.hasAnyValue(openSession)) {
+          if (replyToken) await this.replyMessage(replyToken, WHITE_SHEET_NOTE_CLOSE_EMPTY_REPLY);
+          return { eventId, eventType, status: "saved", parsed: false };
+        }
+        const closed = await svc.closeSession(openSession, { lineUserId, lineEventId: eventId });
+        if (replyToken) await this.replyMessage(replyToken, buildWhiteSheetNoteSummary(closed));
+        log.info("white sheet note closed", { sourceId, sessionId: closed.id });
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      // parseResult.kind === "cancel"
+      const cancelled = await svc.cancelSession(openSession, { lineUserId, lineEventId: eventId });
+      if (replyToken) await this.replyMessage(replyToken, "ยกเลิกใบขาวมือแล้ว");
+      log.info("white sheet note cancelled", { sourceId, sessionId: cancelled.id });
+      return { eventId, eventType, status: "saved", parsed: false };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("white sheet note command failed", { error: errorMessage, kind: parseResult.kind });
       return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
     }
   }

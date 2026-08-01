@@ -1596,6 +1596,30 @@ export interface Database {
           cash_entry: Database["public"]["Tables"]["digital_white_sheet_cash_entries"]["Row"] | null;
         };
       };
+      submit_manual_white_sheet_note_all_in_one: {
+        Args: {
+          p_source_id:               string;
+          p_market_label:            string;
+          p_market_label_normalized: string;
+          p_business_date:           string;
+          p_labor:                   number | null;
+          p_location_fee:            number | null;
+          p_bag:                     number | null;
+          p_snack:                   number | null;
+          p_other_amount:            number | null;
+          p_other_note:              string | null;
+          p_actual_cash:             number | null;
+          p_opened_by_line_user_id:  string | null;
+          p_opened_line_event_id:    string;
+          p_closed_by_line_user_id:  string | null;
+          p_closed_line_event_id:    string;
+        };
+        Returns: {
+          outcome:    "closed" | "already_closed" | "open_conflict" | "empty" | "finalized";
+          session:    Database["public"]["Tables"]["manual_white_sheet_note_sessions"]["Row"] | null;
+          cash_entry: Database["public"]["Tables"]["digital_white_sheet_cash_entries"]["Row"] | null;
+        };
+      };
       attach_evidence_to_slip_batch: {
         Args: { p_batch_id: string; p_evidence_id: string };
         Returns: number;

@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "type-check": "tsc --noEmit",
-    "test:pg:0059": "node scripts/test-pg-0059.mjs"
+    "test:pg:0059": "node scripts/test-pg-0059.mjs",
+    "test:pg:0060": "node scripts/test-pg-0060.mjs"
   },
   "dependencies": {
     "@fontsource/sarabun": "^5.2.8",

@@ -348,9 +348,35 @@ describe.skipIf(!pgAvailable)("0059 manual_white_sheet_note_sessions on real Pos
     if (fieldSucceeded) {
       expect(canonicalLabor).toBe("900.00");
     } else {
+      // Close won the row lock first — the field UPDATE matched 0 open rows.
+      // This is the real-LINE failure mode when webhook events interleave.
       expect(canonicalLabor).toBe("0.00");
     }
   }, 20_000);
+
+  test("close-before-field (out-of-order webhooks): field UPDATE is lost from canonical", async () => {
+    // Deterministic proof — no sleep. Models two LINE webhook deliveries where
+    // จบใบขาวมือ is processed before an earlier field event finishes (or is
+    // delivered later). Ordered delivery is NOT guaranteed across concurrent
+    // serverless invocations; the all-in-one path (0060) is the atomic safe path.
+    const id = await insertSession({ source_id: "'S-close-first'", actual_cash: "100" });
+    await scalar(closeRpcSql(id, "S-close-first"));
+    const fieldCount = await scalar(
+      `WITH upd AS (
+         UPDATE public.manual_white_sheet_note_sessions
+            SET labor = 900
+          WHERE id = '${id}'::uuid AND source_id = 'S-close-first' AND status = 'open'
+      RETURNING id
+       ) SELECT count(*) FROM upd`,
+    );
+    expect(fieldCount).toBe("0");
+    expect(
+      await scalar(`SELECT labor FROM public.digital_white_sheet_cash_entries WHERE source_id = 'S-close-first'`),
+    ).toBe("0.00");
+    expect(
+      await scalar(`SELECT status FROM public.manual_white_sheet_note_sessions WHERE id = '${id}'::uuid`),
+    ).toBe("closed");
+  });
 
   test("concurrent close vs cancel: exactly one terminal state, canonical row only when close wins", async () => {
     const id = await insertSession({ source_id: "'S-race-close-cancel'", actual_cash: "1" });

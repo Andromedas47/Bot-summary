@@ -231,13 +231,30 @@ function buildWhiteSheetNoteFieldLines(session: ManualWhiteSheetNoteSessionRow):
   return lines;
 }
 
-function buildWhiteSheetNoteSummary(session: ManualWhiteSheetNoteSessionRow): string {
+type CashEntryForSummary = Database["public"]["Tables"]["digital_white_sheet_cash_entries"]["Row"];
+
+/**
+ * Close / all-in-one reply must reflect the final canonical cash row — not
+ * only fields touched in the current session. Omitted session fields that
+ * were preserved on correction (e.g. ค่าแรง 500) must still appear.
+ */
+function buildWhiteSheetNoteCanonicalSummary(
+  marketLabel: string,
+  businessDate: string,
+  cash: CashEntryForSummary,
+): string {
+  const otherNote = cash.other_note ? ` — ${cash.other_note}` : "";
   return [
     "จบใบขาวมือแล้ว ✅",
     "",
-    `ตลาด: ${session.market_label}`,
-    `วันที่: ${isoDateToBuddhistDisplay(session.business_date)}`,
-    ...buildWhiteSheetNoteFieldLines(session),
+    `ตลาด: ${marketLabel}`,
+    `วันที่: ${isoDateToBuddhistDisplay(businessDate)}`,
+    `ค่าแรง: ${formatMoney(Number(cash.labor))} บาท`,
+    `ค่าที่: ${formatMoney(Number(cash.location_fee))} บาท`,
+    `ค่าถุง: ${formatMoney(Number(cash.bag))} บาท`,
+    `ค่าขนม: ${formatMoney(Number(cash.snack))} บาท`,
+    `ค่าอื่น: ${formatMoney(Number(cash.other))} บาท${otherNote}`,
+    `เงินสด: ${formatMoney(Number(cash.actual_cash_submitted))} บาท`,
     "",
     "บันทึกข้อมูลใบขาวแล้ว",
   ].join("\n");
@@ -1794,6 +1811,67 @@ export class WebhookService {
       return { eventId, eventType, status: "saved", parsed: false };
     }
 
+    if (parseResult.kind === "all_in_one_invalid") {
+      if (replyToken) await this.replyMessage(replyToken, parseResult.message);
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+
+    if (parseResult.kind === "all_in_one") {
+      const { marketLabel, marketLabelNormalized, businessDate } = parseResult.command;
+      try {
+        const result = await svc.submitAllInOne({
+          sourceId,
+          marketLabel,
+          marketLabelNormalized,
+          businessDate,
+          fields: parseResult.fields,
+          lineUserId,
+          lineEventId: eventId,
+        });
+        switch (result.outcome) {
+          case "closed":
+          case "already_closed":
+            if (replyToken && result.cashEntry) {
+              await this.replyMessage(
+                replyToken,
+                buildWhiteSheetNoteCanonicalSummary(
+                  result.session.market_label,
+                  result.session.business_date,
+                  result.cashEntry,
+                ),
+              );
+            } else if (replyToken) {
+              await this.replyMessage(replyToken, WHITE_SHEET_NOTE_ALREADY_CLOSED_REPLY);
+            }
+            log.info("white sheet note all-in-one submitted", {
+              sourceId,
+              outcome: result.outcome,
+              sessionId: result.session.id,
+            });
+            break;
+          case "open_conflict":
+            if (replyToken) {
+              await this.replyMessage(
+                replyToken,
+                `ยังมีใบขาวมือของ ${result.session.market_label} วันที่ ${isoDateToBuddhistDisplay(result.session.business_date)} ที่ยังไม่จบ\nกรุณาพิมพ์ จบใบขาวมือ หรือ ยกเลิกใบขาวมือ ก่อนเปิดใบใหม่`,
+              );
+            }
+            break;
+          case "empty":
+            if (replyToken) await this.replyMessage(replyToken, WHITE_SHEET_NOTE_CLOSE_EMPTY_REPLY);
+            break;
+          case "finalized":
+            if (replyToken) await this.replyMessage(replyToken, WHITE_SHEET_NOTE_FINALIZED_REPLY);
+            break;
+        }
+        return { eventId, eventType, status: "saved", parsed: false };
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        log.error("white sheet note all-in-one failed", { error: errorMessage });
+        return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
+      }
+    }
+
     if (parseResult.kind === "open") {
       const { marketLabel, marketLabelNormalized, businessDate } = parseResult.command;
       try {
@@ -1904,7 +1982,16 @@ export class WebhookService {
         const result = await svc.closeSession(openSession, { lineUserId, lineEventId: eventId });
         switch (result.outcome) {
           case "closed":
-            if (replyToken) await this.replyMessage(replyToken, buildWhiteSheetNoteSummary(result.session));
+            if (replyToken) {
+              await this.replyMessage(
+                replyToken,
+                buildWhiteSheetNoteCanonicalSummary(
+                  result.session.market_label,
+                  result.session.business_date,
+                  result.cashEntry,
+                ),
+              );
+            }
             log.info("white sheet note closed", { sourceId, sessionId: result.session.id });
             break;
           case "already_closed":

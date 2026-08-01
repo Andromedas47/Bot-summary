@@ -1,6 +1,9 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, ManualWhiteSheetNoteSessionRow } from "@/types/database";
-import type { WhiteSheetNoteFieldValue } from "@/lib/line/white-sheet-note-command";
+import {
+  collapseWhiteSheetNoteFields,
+  type WhiteSheetNoteFieldValue,
+} from "@/lib/line/white-sheet-note-command";
 
 type Supabase = SupabaseClient<Database>;
 type CashEntryRow = Database["public"]["Tables"]["digital_white_sheet_cash_entries"]["Row"];
@@ -35,11 +38,18 @@ export type CancelResult =
 
 export type CloseOutcome =
   | { outcome: "closed"; session: ManualWhiteSheetNoteSessionRow; cashEntry: CashEntryRow }
-  | { outcome: "already_closed"; session: ManualWhiteSheetNoteSessionRow }
+  | { outcome: "already_closed"; session: ManualWhiteSheetNoteSessionRow; cashEntry?: CashEntryRow | null }
   | { outcome: "already_cancelled"; session: ManualWhiteSheetNoteSessionRow }
   | { outcome: "empty"; session: ManualWhiteSheetNoteSessionRow }
   | { outcome: "finalized"; session: ManualWhiteSheetNoteSessionRow }
   | { outcome: "not_found" };
+
+export type AllInOneOutcome =
+  | { outcome: "closed"; session: ManualWhiteSheetNoteSessionRow; cashEntry: CashEntryRow }
+  | { outcome: "already_closed"; session: ManualWhiteSheetNoteSessionRow; cashEntry: CashEntryRow | null }
+  | { outcome: "open_conflict"; session: ManualWhiteSheetNoteSessionRow }
+  | { outcome: "empty" }
+  | { outcome: "finalized"; session: ManualWhiteSheetNoteSessionRow | null };
 
 export class WhiteSheetNoteSessionService {
   constructor(private readonly supabase: Supabase) {}
@@ -210,6 +220,99 @@ export class WhiteSheetNoteSessionService {
       return { outcome: "closed", session: result.session!, cashEntry: result.cash_entry! };
     }
     return { outcome: result.outcome, session: result.session! };
+  }
+
+  /**
+   * Atomically submits a complete all-in-one White Sheet message via
+   * submit_manual_white_sheet_note_all_in_one (migration 0060). One RPC =
+   * one transaction: no open session left behind, FINALIZED rejected,
+   * omitted fields preserve existing canonical values on correction.
+   */
+  async submitAllInOne(params: {
+    sourceId: string;
+    marketLabel: string;
+    marketLabelNormalized: string;
+    businessDate: string;
+    fields: WhiteSheetNoteFieldValue[];
+    lineUserId: string | null;
+    lineEventId: string;
+  }): Promise<AllInOneOutcome> {
+    const collapsed = collapseWhiteSheetNoteFields(params.fields);
+
+    const amounts: {
+      labor: number | null;
+      locationFee: number | null;
+      bag: number | null;
+      snack: number | null;
+      otherAmount: number | null;
+      otherNote: string | null;
+      actualCash: number | null;
+    } = {
+      labor: null,
+      locationFee: null,
+      bag: null,
+      snack: null,
+      otherAmount: null,
+      otherNote: null,
+      actualCash: null,
+    };
+
+    for (const field of collapsed) {
+      if (field.key === "other") {
+        amounts.otherAmount = field.amount;
+        amounts.otherNote = field.note;
+      } else if (field.key === "labor") amounts.labor = field.amount;
+      else if (field.key === "locationFee") amounts.locationFee = field.amount;
+      else if (field.key === "bag") amounts.bag = field.amount;
+      else if (field.key === "snack") amounts.snack = field.amount;
+      else if (field.key === "actualCash") amounts.actualCash = field.amount;
+    }
+
+    const { data, error } = await this.supabase.rpc("submit_manual_white_sheet_note_all_in_one", {
+      p_source_id: params.sourceId,
+      p_market_label: params.marketLabel,
+      p_market_label_normalized: params.marketLabelNormalized,
+      p_business_date: params.businessDate,
+      p_labor: amounts.labor,
+      p_location_fee: amounts.locationFee,
+      p_bag: amounts.bag,
+      p_snack: amounts.snack,
+      p_other_amount: amounts.otherAmount,
+      p_other_note: amounts.otherNote,
+      p_actual_cash: amounts.actualCash,
+      p_opened_by_line_user_id: params.lineUserId,
+      p_opened_line_event_id: params.lineEventId,
+      p_closed_by_line_user_id: params.lineUserId,
+      p_closed_line_event_id: params.lineEventId,
+    });
+
+    if (error) throw new Error(`white sheet note all-in-one submit failed: ${error.message}`);
+
+    const result = data as unknown as {
+      outcome: AllInOneOutcome["outcome"];
+      session: ManualWhiteSheetNoteSessionRow | null;
+      cash_entry: CashEntryRow | null;
+    };
+
+    if (result.outcome === "empty") return { outcome: "empty" };
+    if (result.outcome === "open_conflict") {
+      return { outcome: "open_conflict", session: result.session! };
+    }
+    if (result.outcome === "finalized") {
+      return { outcome: "finalized", session: result.session };
+    }
+    if (result.outcome === "already_closed") {
+      return {
+        outcome: "already_closed",
+        session: result.session!,
+        cashEntry: result.cash_entry,
+      };
+    }
+    return {
+      outcome: "closed",
+      session: result.session!,
+      cashEntry: result.cash_entry!,
+    };
   }
 
   /**

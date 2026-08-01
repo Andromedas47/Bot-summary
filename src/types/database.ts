@@ -89,6 +89,46 @@ export interface Database {
         Relationships: [];
       };
 
+      line_webhook_event_queue: {
+        Row: {
+          id: string;
+          line_event_id: string;
+          source_id: string;
+          raw_message_id: string;
+          receive_order: number;
+          status: "pending" | "processing" | "processed" | "failed";
+          error_message: string | null;
+          received_at: string;
+          started_at: string | null;
+          completed_at: string | null;
+        };
+        Insert: {
+          id?: string;
+          line_event_id: string;
+          source_id: string;
+          raw_message_id: string;
+          receive_order?: number;
+          status?: "pending" | "processing" | "processed" | "failed";
+          error_message?: string | null;
+          received_at?: string;
+          started_at?: string | null;
+          completed_at?: string | null;
+        };
+        Update: {
+          id?: string;
+          line_event_id?: string;
+          source_id?: string;
+          raw_message_id?: string;
+          receive_order?: number;
+          status?: "pending" | "processing" | "processed" | "failed";
+          error_message?: string | null;
+          received_at?: string;
+          started_at?: string | null;
+          completed_at?: string | null;
+        };
+        Relationships: [];
+      };
+
       parse_errors: {
         Row: {
           id:               string;
@@ -1583,6 +1623,39 @@ export interface Database {
       };
     };
     Functions: {
+      receive_line_webhook_event: {
+        Args: {
+          p_line_event_id: string;
+          p_destination: string;
+          p_event_type: string;
+          p_source_type: string;
+          p_source_id: string;
+          p_user_id: string | null;
+          p_message_id: string | null;
+          p_message_type: string | null;
+          p_raw_text: string | null;
+          p_payload: Json;
+        };
+        Returns: { raw_message_id: string; duplicate: boolean };
+      };
+      claim_line_webhook_event: {
+        Args: { p_source_id: string };
+        Returns: {
+          queue_id: string;
+          line_event_id: string;
+          source_id: string;
+          raw_message_id: string;
+          receive_order: number;
+        } | null;
+      };
+      complete_line_webhook_event: {
+        Args: {
+          p_raw_message_id: string;
+          p_status: "processed" | "failed";
+          p_error_message?: string | null;
+        };
+        Returns: boolean;
+      };
       close_manual_white_sheet_note_session: {
         Args: {
           p_session_id:             string;
@@ -1592,30 +1665,6 @@ export interface Database {
         };
         Returns: {
           outcome:    "closed" | "already_closed" | "already_cancelled" | "empty" | "finalized" | "not_found";
-          session:    Database["public"]["Tables"]["manual_white_sheet_note_sessions"]["Row"] | null;
-          cash_entry: Database["public"]["Tables"]["digital_white_sheet_cash_entries"]["Row"] | null;
-        };
-      };
-      submit_manual_white_sheet_note_all_in_one: {
-        Args: {
-          p_source_id:               string;
-          p_market_label:            string;
-          p_market_label_normalized: string;
-          p_business_date:           string;
-          p_labor:                   number | null;
-          p_location_fee:            number | null;
-          p_bag:                     number | null;
-          p_snack:                   number | null;
-          p_other_amount:            number | null;
-          p_other_note:              string | null;
-          p_actual_cash:             number | null;
-          p_opened_by_line_user_id:  string | null;
-          p_opened_line_event_id:    string;
-          p_closed_by_line_user_id:  string | null;
-          p_closed_line_event_id:    string;
-        };
-        Returns: {
-          outcome:    "closed" | "already_closed" | "open_conflict" | "empty" | "finalized";
           session:    Database["public"]["Tables"]["manual_white_sheet_note_sessions"]["Row"] | null;
           cash_entry: Database["public"]["Tables"]["digital_white_sheet_cash_entries"]["Row"] | null;
         };

@@ -62,12 +62,6 @@ export type WhiteSheetNoteParseResult =
   | { kind: "not_command" }
   | { kind: "open"; command: WhiteSheetNoteOpenCommand }
   | { kind: "open_invalid"; message: string }
-  | {
-      kind: "all_in_one";
-      command: WhiteSheetNoteOpenCommand;
-      fields: WhiteSheetNoteFieldValue[];
-    }
-  | { kind: "all_in_one_invalid"; message: string }
   | { kind: "field"; fields: WhiteSheetNoteFieldValue[] }
   | { kind: "field_invalid"; message: string }
   | { kind: "close" }
@@ -134,27 +128,9 @@ function parseOneFieldLine(line: string): FieldLineParse {
   return { kind: "field", field: { key, amount, note: null } };
 }
 
-function parseOpenLine(line: string): WhiteSheetNoteOpenCommand | { invalid: string } | null {
-  const open = OPEN_RE.exec(line);
-  if (!open) return null;
-  const marketRaw = open[1].trim();
-  const businessDate = parseNoteBusinessDate(open[2]);
-  if (!businessDate) {
-    return {
-      invalid: `วันที่ไม่ถูกต้อง: ${open[2]}\nกรุณาใช้รูปแบบ วว/ดด/พ.ศ. เช่น 01/08/2569`,
-    };
-  }
-  return {
-    marketLabel: marketRaw,
-    marketLabelNormalized: normalizedMarketLabel(marketRaw),
-    businessDate,
-  };
-}
-
 /**
  * Collapse repeated keys so the last value wins, preserving first-seen key
- * order (Map insertion order). Used by the webhook reply builder and the
- * all-in-one submit path.
+ * order (Map insertion order). Used by the webhook reply builder.
  */
 export function collapseWhiteSheetNoteFields(
   fields: WhiteSheetNoteFieldValue[],
@@ -164,17 +140,11 @@ export function collapseWhiteSheetNoteFields(
   return [...byKey.values()];
 }
 
-function nonEmptyLines(text: string): string[] {
-  return text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-}
-
 /**
  * Pure classification of a LINE message for the manual White Sheet note
- * session. Supports multi-line field messages and a complete all-in-one
- * message (opener + fields + จบใบขาวมือ). Never touches the database.
+ * session. Supports multi-line field messages (CRLF/LF, blank lines ignored).
+ * Never touches the database — the webhook checks for an open session only
+ * after this returns something other than not_command.
  */
 export function parseWhiteSheetNoteCommand(text: string): WhiteSheetNoteParseResult {
   const trimmed = text.trim();
@@ -182,74 +152,6 @@ export function parseWhiteSheetNoteCommand(text: string): WhiteSheetNoteParseRes
 
   if (trimmed === CLOSE_TEXT) return { kind: "close" };
   if (trimmed === CANCEL_TEXT) return { kind: "cancel" };
-
-  const lines = nonEmptyLines(trimmed);
-  if (lines.length === 0) return { kind: "not_command" };
-
-  // All-in-one: first non-empty line is a valid opener, last is exactly
-  // จบใบขาวมือ, every middle line is a valid field line.
-  if (lines.length >= 2) {
-    const firstOpen = parseOpenLine(lines[0]);
-    const lastIsClose = lines[lines.length - 1] === CLOSE_TEXT;
-
-    if (firstOpen !== null && lastIsClose) {
-      if ("invalid" in firstOpen) {
-        return { kind: "open_invalid", message: firstOpen.invalid };
-      }
-
-      const middle = lines.slice(1, -1);
-      if (middle.length === 0) {
-        return {
-          kind: "all_in_one_invalid",
-          message: "กรุณาส่งค่าใช้จ่ายอย่างน้อย 1 รายการก่อนพิมพ์ จบใบขาวมือ",
-        };
-      }
-
-      for (const line of middle) {
-        if (line === CLOSE_TEXT) {
-          return {
-            kind: "all_in_one_invalid",
-            message: `จำนวนเงินไม่ถูกต้องที่บรรทัด:\n${line}`,
-          };
-        }
-        if (parseOpenLine(line) !== null) {
-          return {
-            kind: "all_in_one_invalid",
-            message: `จำนวนเงินไม่ถูกต้องที่บรรทัด:\n${line}`,
-          };
-        }
-        const parsed = parseOneFieldLine(line);
-        if (parsed.kind !== "field") {
-          return {
-            kind: "all_in_one_invalid",
-            message: `จำนวนเงินไม่ถูกต้องที่บรรทัด:\n${line}`,
-          };
-        }
-      }
-
-      return {
-        kind: "all_in_one",
-        command: firstOpen,
-        fields: middle.map((line) => {
-          const parsed = parseOneFieldLine(line) as Extract<FieldLineParse, { kind: "field" }>;
-          return parsed.field;
-        }),
-      };
-    }
-
-    // Opener-shaped first line without a closing line is not all-in-one and
-    // must not open a session (preserve single-line opener behavior only).
-    if (firstOpen !== null && !lastIsClose) {
-      if ("invalid" in firstOpen) {
-        return { kind: "open_invalid", message: firstOpen.invalid };
-      }
-      return {
-        kind: "all_in_one_invalid",
-        message:
-          "กรุณาพิมพ์ จบใบขาวมือ เป็นบรรทัดสุดท้ายเมื่อส่งใบขาวมือครบในข้อความเดียว",
-      };
-    }
-  }
 
   const open = OPEN_RE.exec(trimmed);
   if (open) {
@@ -274,6 +176,13 @@ export function parseWhiteSheetNoteCommand(text: string): WhiteSheetNoteParseRes
   // Field messages: every non-empty line must be a valid field line. Mixed
   // valid+invalid (or field + unrelated) rejects the whole message with zero
   // DB mutation. Completely unrelated text stays not_command.
+  const lines = trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  if (lines.length === 0) return { kind: "not_command" };
+
   const parsedLines = lines.map(parseOneFieldLine);
 
   if (parsedLines.every((p) => p.kind === "field")) {

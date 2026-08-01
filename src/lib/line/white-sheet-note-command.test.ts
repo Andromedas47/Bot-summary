@@ -29,7 +29,6 @@ describe("parseNoteMoneyAmount", () => {
     expect(parseNoteMoneyAmount("4,85")).toBeNull();
   });
 });
-
 describe("parseNoteBusinessDate", () => {
   test("converts Buddhist date to ISO", () => {
     expect(parseNoteBusinessDate("01/08/2569")).toBe("2026-08-01");
@@ -44,7 +43,6 @@ describe("parseNoteBusinessDate", () => {
     expect(parseNoteBusinessDate("not a date")).toBeNull();
   });
 });
-
 describe("parseWhiteSheetNoteCommand — not_command", () => {
   test("empty text", () => {
     expect(parseWhiteSheetNoteCommand("")).toEqual({ kind: "not_command" });
@@ -59,7 +57,6 @@ describe("parseWhiteSheetNoteCommand — not_command", () => {
     expect(parseWhiteSheetNoteCommand("พาชิโอ้ ปิดยอด 24/07/2569")).toEqual({ kind: "not_command" });
   });
 });
-
 describe("parseWhiteSheetNoteCommand — open", () => {
   test("parses market + Buddhist date", () => {
     const result = parseWhiteSheetNoteCommand("พาชิโอ้ ส่งใบขาวมือ 01/08/2569");
@@ -77,7 +74,6 @@ describe("parseWhiteSheetNoteCommand — open", () => {
     expect(result.kind).toBe("open_invalid");
   });
 });
-
 describe("parseWhiteSheetNoteCommand — field", () => {
   test("ค่าแรง", () => {
     expect(parseWhiteSheetNoteCommand("ค่าแรง 500")).toEqual({
@@ -236,108 +232,5 @@ describe("parseWhiteSheetNoteCommand — close / cancel", () => {
   });
   test("trims surrounding whitespace", () => {
     expect(parseWhiteSheetNoteCommand("  จบใบขาวมือ  ")).toEqual({ kind: "close" });
-  });
-});
-
-describe("parseWhiteSheetNoteCommand — all-in-one", () => {
-  const HAPPY = [
-    "ตลาดกี้ ส่งใบขาวมือ 01/08/2569",
-    "ค่าแรง 500",
-    "ค่าที่ 200",
-    "ค่าถุง 100",
-    "ค่าขนม 50",
-    "ค่าอื่น 30 ค่าน้ำ",
-    "เงินสด 4850",
-    "จบใบขาวมือ",
-  ].join("\n");
-
-  test("complete happy path", () => {
-    const result = parseWhiteSheetNoteCommand(HAPPY);
-    expect(result.kind).toBe("all_in_one");
-    if (result.kind !== "all_in_one") throw new Error("unreachable");
-    expect(result.command).toEqual({
-      marketLabel: "ตลาดกี้",
-      marketLabelNormalized: "ตลาดกี้",
-      businessDate: "2026-08-01",
-    });
-    expect(result.fields).toEqual([
-      { key: "labor", amount: 500, note: null },
-      { key: "locationFee", amount: 200, note: null },
-      { key: "bag", amount: 100, note: null },
-      { key: "snack", amount: 50, note: null },
-      { key: "other", amount: 30, note: "ค่าน้ำ" },
-      { key: "actualCash", amount: 4850, note: null },
-    ]);
-  });
-
-  test("CRLF and blank lines", () => {
-    const text = [
-      "ตลาดกี้ ส่งใบขาวมือ 01/08/2569",
-      "",
-      "ค่าแรง 500",
-      "\r",
-      "ค่าที่ 200",
-      "จบใบขาวมือ",
-    ].join("\r\n");
-    const result = parseWhiteSheetNoteCommand(text);
-    expect(result.kind).toBe("all_in_one");
-    if (result.kind !== "all_in_one") throw new Error("unreachable");
-    expect(result.fields).toEqual([
-      { key: "labor", amount: 500, note: null },
-      { key: "locationFee", amount: 200, note: null },
-    ]);
-  });
-
-  test("repeated field — last wins at apply; parser returns both", () => {
-    const result = parseWhiteSheetNoteCommand(
-      "ตลาดกี้ ส่งใบขาวมือ 01/08/2569\nค่าแรง 500\nค่าแรง 0\nจบใบขาวมือ",
-    );
-    expect(result.kind).toBe("all_in_one");
-    if (result.kind !== "all_in_one") throw new Error("unreachable");
-    expect(result.fields).toEqual([
-      { key: "labor", amount: 500, note: null },
-      { key: "labor", amount: 0, note: null },
-    ]);
-    expect(collapseWhiteSheetNoteFields(result.fields)).toEqual([
-      { key: "labor", amount: 0, note: null },
-    ]);
-  });
-
-  test("explicit zero", () => {
-    const result = parseWhiteSheetNoteCommand(
-      "ตลาดกี้ ส่งใบขาวมือ 01/08/2569\nค่าแรง 0\nจบใบขาวมือ",
-    );
-    expect(result.kind).toBe("all_in_one");
-    if (result.kind !== "all_in_one") throw new Error("unreachable");
-    expect(result.fields[0]).toEqual({ key: "labor", amount: 0, note: null });
-  });
-
-  test("invalid middle line", () => {
-    const result = parseWhiteSheetNoteCommand(
-      "ตลาดกี้ ส่งใบขาวมือ 01/08/2569\nค่าแรง 500\nค่าที่ abc\nจบใบขาวมือ",
-    );
-    expect(result).toEqual({
-      kind: "all_in_one_invalid",
-      message: "จำนวนเงินไม่ถูกต้องที่บรรทัด:\nค่าที่ abc",
-    });
-  });
-
-  test("missing close is not all-in-one and does not open", () => {
-    const result = parseWhiteSheetNoteCommand(
-      "ตลาดกี้ ส่งใบขาวมือ 01/08/2569\nค่าแรง 500",
-    );
-    expect(result.kind).toBe("all_in_one_invalid");
-    expect(result.kind === "all_in_one_invalid" && result.message).toMatch(/จบใบขาวมือ/);
-  });
-
-  test("single-line opener still opens (unchanged)", () => {
-    expect(parseWhiteSheetNoteCommand("ตลาดกี้ ส่งใบขาวมือ 01/08/2569").kind).toBe("open");
-  });
-
-  test("duplicate close in the middle is rejected", () => {
-    const result = parseWhiteSheetNoteCommand(
-      "ตลาดกี้ ส่งใบขาวมือ 01/08/2569\nค่าแรง 500\nจบใบขาวมือ\nเงินสด 1\nจบใบขาวมือ",
-    );
-    expect(result.kind).toBe("all_in_one_invalid");
   });
 });

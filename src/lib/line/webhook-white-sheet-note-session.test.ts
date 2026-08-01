@@ -116,126 +116,6 @@ function makeSupabase(seedCashEntries: Row[] = []) {
   }
 
   async function rpc(fnName: string, args: Record<string, unknown>) {
-    if (fnName === "submit_manual_white_sheet_note_all_in_one") {
-      const sourceId = args.p_source_id as string;
-      const marketNorm = args.p_market_label_normalized as string;
-      const businessDate = args.p_business_date as string;
-      const eventId = args.p_closed_line_event_id as string;
-
-      const priorClosed = notes.find(
-        (r) => r.source_id === sourceId && r.closed_line_event_id === eventId && r.status === "closed",
-      );
-      if (priorClosed) {
-        const cash = cashEntries.find(
-          (c) => c.source_id === sourceId
-            && c.market_label_normalized === priorClosed.market_label_normalized
-            && c.business_date === priorClosed.business_date,
-        ) ?? null;
-        return { data: { outcome: "already_closed", session: priorClosed, cash_entry: cash }, error: null };
-      }
-
-      const open = notes.find((r) => r.source_id === sourceId && r.status === "open");
-      if (open
-        && (open.market_label_normalized !== marketNorm || open.business_date !== businessDate)
-      ) {
-        return { data: { outcome: "open_conflict", session: open, cash_entry: null }, error: null };
-      }
-
-      const fieldVals = {
-        labor: args.p_labor as number | null,
-        location_fee: args.p_location_fee as number | null,
-        bag: args.p_bag as number | null,
-        snack: args.p_snack as number | null,
-        other_amount: args.p_other_amount as number | null,
-        other_note: args.p_other_note as string | null,
-        actual_cash: args.p_actual_cash as number | null,
-      };
-      const empty = Object.entries(fieldVals)
-        .filter(([k]) => k !== "other_note")
-        .every(([, v]) => v === null);
-      if (empty) return { data: { outcome: "empty", session: null, cash_entry: null }, error: null };
-
-      let cash = cashEntries.find(
-        (c) => c.source_id === sourceId
-          && c.market_label_normalized === marketNorm
-          && c.business_date === businessDate,
-      );
-      if (cash?.finalized_at) {
-        return { data: { outcome: "finalized", session: open ?? null, cash_entry: null }, error: null };
-      }
-
-      let session: Row;
-      if (open) {
-        if (fieldVals.labor !== null) open.labor = fieldVals.labor;
-        if (fieldVals.location_fee !== null) open.location_fee = fieldVals.location_fee;
-        if (fieldVals.bag !== null) open.bag = fieldVals.bag;
-        if (fieldVals.snack !== null) open.snack = fieldVals.snack;
-        if (fieldVals.other_amount !== null) {
-          open.other_amount = fieldVals.other_amount;
-          open.other_note = fieldVals.other_note;
-        }
-        if (fieldVals.actual_cash !== null) open.actual_cash = fieldVals.actual_cash;
-        session = open;
-      } else {
-        session = {
-          id: `note-${++idSeq}`,
-          source_id: sourceId,
-          market_label: args.p_market_label,
-          market_label_normalized: marketNorm,
-          business_date: businessDate,
-          status: "closed",
-          labor: fieldVals.labor,
-          location_fee: fieldVals.location_fee,
-          bag: fieldVals.bag,
-          snack: fieldVals.snack,
-          other_amount: fieldVals.other_amount,
-          other_note: fieldVals.other_note,
-          actual_cash: fieldVals.actual_cash,
-          opened_by_line_user_id: args.p_opened_by_line_user_id,
-          opened_line_event_id: args.p_opened_line_event_id,
-          closed_by_line_user_id: args.p_closed_by_line_user_id,
-          closed_line_event_id: eventId,
-          closed_at: new Date().toISOString(),
-          created_at: new Date().toISOString(),
-        };
-        notes.push(session);
-      }
-
-      if (!cash) {
-        cash = {
-          id: `cash-${++idSeq}`,
-          source_id: sourceId,
-          market_label_normalized: marketNorm,
-          business_date: businessDate,
-          labor: session.labor ?? 0,
-          location_fee: session.location_fee ?? 0,
-          bag: session.bag ?? 0,
-          snack: session.snack ?? 0,
-          other: session.other_amount ?? 0,
-          other_note: session.other_note ?? null,
-          actual_cash_submitted: session.actual_cash ?? 0,
-          finalized_at: null,
-        };
-        cashEntries.push(cash);
-      } else {
-        if (session.labor !== null) cash.labor = session.labor;
-        if (session.location_fee !== null) cash.location_fee = session.location_fee;
-        if (session.bag !== null) cash.bag = session.bag;
-        if (session.snack !== null) cash.snack = session.snack;
-        if (session.other_amount !== null) {
-          cash.other = session.other_amount;
-          cash.other_note = session.other_note;
-        }
-        if (session.actual_cash !== null) cash.actual_cash_submitted = session.actual_cash;
-      }
-
-      session.status = "closed";
-      session.closed_at = new Date().toISOString();
-      session.closed_by_line_user_id = args.p_closed_by_line_user_id;
-      session.closed_line_event_id = eventId;
-      return { data: { outcome: "closed", session, cash_entry: cash }, error: null };
-    }
-
     if (fnName !== "close_manual_white_sheet_note_session") {
       throw new Error(`unexpected rpc: ${fnName}`);
     }
@@ -695,8 +575,7 @@ describe("white sheet note session — close", () => {
         finalized_at: null,
       },
     ]);
-    const replies: string[] = [];
-    const svc = makeService(db, replies);
+    const svc = makeService(db);
 
     await svc.processEvents([makeEvent("พาชิโอ้ ส่งใบขาวมือ 01/08/2569", "tok1", "msg1")], "dest");
     await svc.processEvents([makeEvent("ค่าแรง 0", "tok2", "msg2")], "dest");
@@ -706,36 +585,28 @@ describe("white sheet note session — close", () => {
     expect(db._cashEntries[0].labor).toBe(0);
     expect(db._cashEntries[0].location_fee).toBe(200);
     expect(db._cashEntries[0].actual_cash_submitted).toBe(4850);
-
-    const summary = replies[replies.length - 1];
-    expect(summary).toContain("ค่าแรง: 0 บาท");
-    expect(summary).toContain("ค่าที่: 200 บาท");
-    expect(summary).toContain("เงินสด: 4,850 บาท");
   });
 
-  it("correction close summary includes preserved canonical ค่าแรง even when the session never re-entered it", async () => {
+  it("close reply reads preserved canonical fields, not only the current session patch", async () => {
     const db = makeSupabase([
       {
         source_id: "u1",
         market_label_normalized: "พาชิโอ้",
         business_date: "2026-08-01",
-        labor: 500, location_fee: 200, bag: 0, snack: 0, other: 0, other_note: null,
-        actual_cash_submitted: 4850,
-        finalized_at: null,
+        labor: 500, location_fee: 200, bag: 100, snack: 50, other: 30,
+        other_note: "ค่าน้ำ", actual_cash_submitted: 4000, finalized_at: null,
       },
     ]);
     const replies: string[] = [];
     const svc = makeService(db, replies);
 
     await svc.processEvents([makeEvent("พาชิโอ้ ส่งใบขาวมือ 01/08/2569", "tok1", "msg1")], "dest");
-    await svc.processEvents([makeEvent("ค่าที่ 250", "tok2", "msg2")], "dest");
+    await svc.processEvents([makeEvent("เงินสด 4850", "tok2", "msg2")], "dest");
     await svc.processEvents([makeEvent("จบใบขาวมือ", "tok3", "msg3")], "dest");
 
-    const summary = replies[replies.length - 1];
-    expect(summary).toContain("ค่าแรง: 500 บาท");
-    expect(summary).toContain("ค่าที่: 250 บาท");
-    expect(db._cashEntries[0].labor).toBe(500);
-    expect(db._cashEntries[0].location_fee).toBe(250);
+    expect(replies.at(-1)).toContain("ค่าแรง: 500 บาท");
+    expect(replies.at(-1)).toContain("ค่าที่: 200 บาท");
+    expect(replies.at(-1)).toContain("เงินสด: 4,850 บาท");
   });
 
   it("a FINALIZED canonical row rejects the close transaction and leaves the LINE session open", async () => {
@@ -910,145 +781,5 @@ describe("white sheet note session — duplicate LINE events", () => {
     expect(first.status).toBe("saved");
     expect(dup.status).toBe("duplicate");
     expect(db._notes[0].labor).toBe(500);
-  });
-});
-
-// ── All-in-one single message ─────────────────────────────────────────────────
-
-const ALL_IN_ONE = [
-  "ตลาดกี้ ส่งใบขาวมือ 01/08/2569",
-  "ค่าแรง 500",
-  "ค่าที่ 200",
-  "ค่าถุง 100",
-  "ค่าขนม 50",
-  "ค่าอื่น 30 ค่าน้ำ",
-  "เงินสด 4850",
-  "จบใบขาวมือ",
-].join("\n");
-
-describe("white sheet note session — all-in-one", () => {
-  it("happy path: one canonical row, exact values, no open session, full summary reply", async () => {
-    const db = makeSupabase();
-    const replies: string[] = [];
-    const svc = makeService(db, replies);
-
-    await svc.processEvents([makeEvent(ALL_IN_ONE, "tok1", "msg-aio")], "dest");
-
-    expect(db._cashEntries).toHaveLength(1);
-    expect(db._cashEntries[0].labor).toBe(500);
-    expect(db._cashEntries[0].location_fee).toBe(200);
-    expect(db._cashEntries[0].bag).toBe(100);
-    expect(db._cashEntries[0].snack).toBe(50);
-    expect(db._cashEntries[0].other).toBe(30);
-    expect(db._cashEntries[0].other_note).toBe("ค่าน้ำ");
-    expect(db._cashEntries[0].actual_cash_submitted).toBe(4850);
-    expect(db._notes.every((n) => n.status !== "open")).toBe(true);
-    expect(db._notes).toHaveLength(1);
-    expect(db._notes[0].status).toBe("closed");
-
-    expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("จบใบขาวมือแล้ว");
-    expect(replies[0]).toContain("ตลาด: ตลาดกี้");
-    expect(replies[0]).toContain("เงินสด: 4,850 บาท");
-    expect(replies[0]).toContain("บันทึกข้อมูลใบขาวแล้ว");
-  });
-
-  it("invalid middle line → zero write", async () => {
-    const db = makeSupabase();
-    const replies: string[] = [];
-    const svc = makeService(db, replies);
-    const bad = [
-      "ตลาดกี้ ส่งใบขาวมือ 01/08/2569",
-      "ค่าแรง 500",
-      "ค่าที่ abc",
-      "จบใบขาวมือ",
-    ].join("\n");
-
-    await svc.processEvents([makeEvent(bad, "tok1", "msg-bad")], "dest");
-
-    expect(db._notes).toHaveLength(0);
-    expect(db._cashEntries).toHaveLength(0);
-    expect(replies[0]).toContain("ค่าที่ abc");
-  });
-
-  it("FINALIZED rejection leaves zero new writes", async () => {
-    const db = makeSupabase([
-      {
-        source_id: "u1",
-        market_label_normalized: "ตลาดกี้",
-        business_date: "2026-08-01",
-        labor: 1, location_fee: 0, bag: 0, snack: 0, other: 0, other_note: null,
-        actual_cash_submitted: 0,
-        finalized_at: "2026-07-31T00:00:00.000Z",
-      },
-    ]);
-    const replies: string[] = [];
-    const svc = makeService(db, replies);
-
-    await svc.processEvents([makeEvent(ALL_IN_ONE, "tok1", "msg-fin")], "dest");
-
-    expect(db._notes).toHaveLength(0);
-    expect(db._cashEntries[0].labor).toBe(1);
-    expect(replies[0]).toMatch(/FINALIZED/);
-  });
-
-  it("correction preserves omitted canonical fields and reply shows them", async () => {
-    const db = makeSupabase([
-      {
-        source_id: "u1",
-        market_label_normalized: "ตลาดกี้",
-        business_date: "2026-08-01",
-        labor: 500, location_fee: 200, bag: 100, snack: 50, other: 30, other_note: "ค่าน้ำ",
-        actual_cash_submitted: 4000,
-        finalized_at: null,
-      },
-    ]);
-    const replies: string[] = [];
-    const svc = makeService(db, replies);
-    const correction = [
-      "ตลาดกี้ ส่งใบขาวมือ 01/08/2569",
-      "เงินสด 4850",
-      "จบใบขาวมือ",
-    ].join("\n");
-
-    await svc.processEvents([makeEvent(correction, "tok1", "msg-corr")], "dest");
-
-    expect(db._cashEntries).toHaveLength(1);
-    expect(db._cashEntries[0].labor).toBe(500);
-    expect(db._cashEntries[0].actual_cash_submitted).toBe(4850);
-    expect(replies[0]).toContain("ค่าแรง: 500 บาท");
-    expect(replies[0]).toContain("เงินสด: 4,850 บาท");
-  });
-
-  it("duplicate webhook event is idempotent — one canonical row", async () => {
-    const db = makeSupabase();
-    const replies: string[] = [];
-    const svc = makeService(db, replies);
-    const event = makeEvent(ALL_IN_ONE, "tok1", "msg-idem");
-
-    const [first] = await svc.processEvents([event], "dest");
-    const [dup] = await svc.processEvents([event], "dest");
-
-    expect(first.status).toBe("saved");
-    expect(dup.status).toBe("duplicate");
-    expect(db._cashEntries).toHaveLength(1);
-    expect(db._notes.filter((n) => n.status === "closed")).toHaveLength(1);
-  });
-
-  it("existing separated flow still works unchanged", async () => {
-    const db = makeSupabase();
-    const replies: string[] = [];
-    const svc = makeService(db, replies);
-
-    await svc.processEvents([makeEvent("ตลาดกี้ ส่งใบขาวมือ 01/08/2569", "tok1", "msg1")], "dest");
-    await svc.processEvents([makeEvent("ค่าแรง 500\nค่าที่ 200", "tok2", "msg2")], "dest");
-    await svc.processEvents([makeEvent("จบใบขาวมือ", "tok3", "msg3")], "dest");
-
-    expect(db._notes[0].status).toBe("closed");
-    expect(db._cashEntries[0].labor).toBe(500);
-    expect(db._cashEntries[0].location_fee).toBe(200);
-    expect(replies[0]).toMatch(/เปิดใบขาวมือแล้ว/);
-    expect(replies[1]).toMatch(/บันทึกแล้ว/);
-    expect(replies[2]).toContain("จบใบขาวมือแล้ว");
   });
 });

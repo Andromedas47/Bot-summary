@@ -115,6 +115,18 @@ import {
 
 type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
+type QueueClaim = {
+  queue_id: string;
+  line_event_id: string;
+  source_id: string;
+  raw_message_id: string;
+  receive_order: number;
+};
+type EventReceipt = {
+  event: LineEvent;
+  rawMessageId: string;
+  ordered: boolean;
+};
 type ReplyLineMessage = (replyToken: string, text: string) => Promise<void>;
 type ReplyLineMessages = (replyToken: string, texts: string[]) => Promise<void>;
 type ReplyLineApiMessages = (
@@ -233,11 +245,7 @@ function buildWhiteSheetNoteFieldLines(session: ManualWhiteSheetNoteSessionRow):
 
 type CashEntryForSummary = Database["public"]["Tables"]["digital_white_sheet_cash_entries"]["Row"];
 
-/**
- * Close / all-in-one reply must reflect the final canonical cash row — not
- * only fields touched in the current session. Omitted session fields that
- * were preserved on correction (e.g. ค่าแรง 500) must still appear.
- */
+/** Close replies must show the final canonical row, including preserved fields. */
 function buildWhiteSheetNoteCanonicalSummary(
   marketLabel: string,
   businessDate: string,
@@ -429,6 +437,7 @@ export class WebhookService {
   private readonly physicalInventoryFinalizer: PhysicalInventoryFinalizer;
   private readonly physicalInventoryService: PhysicalInventorySessionGateway;
   private readonly dataEntrySessionOwnershipResolver: DataEntrySessionOwnershipResolver;
+  private orderedQueueAvailable: boolean | null = null;
 
   constructor(
     private readonly supabase: Supabase,
@@ -477,14 +486,65 @@ export class WebhookService {
   }
 
   async processEvents(events: LineEvent[], destination: string): Promise<WebhookProcessResult[]> {
-    const sorted = [...events].sort((a, b) => a.timestamp - b.timestamp);
-    const results: WebhookProcessResult[] = [];
-
-    for (const [eventIndex, event] of sorted.entries()) {
-      results.push(await this.processOne(event, destination, eventIndex, sorted.length));
+    // LINE's array order is the only ordering guarantee inside one payload.
+    // Persist every event before any worker starts so a later close can see
+    // every earlier event in the durable queue.
+    const receipts: EventReceipt[] = [];
+    const immediate = new Map<string, WebhookProcessResult>();
+    for (const event of events) {
+      const rawMessageId = await this.saveRawMessage(event, destination);
+      if (rawMessageId === null) {
+        immediate.set(event.webhookEventId, {
+          eventId: event.webhookEventId,
+          eventType: event.type,
+          status: "duplicate",
+        });
+      } else if (rawMessageId === "error") {
+        immediate.set(event.webhookEventId, {
+          eventId: event.webhookEventId,
+          eventType: event.type,
+          status: "error",
+          error: "db insert failed",
+        });
+      } else {
+        receipts.push({ event, rawMessageId, ordered: this.isWhiteSheetOrderingEvent(event) });
+      }
     }
 
-    return results;
+    if (this.orderedQueueAvailable !== false) {
+      const resultByEventId = new Map<string, WebhookProcessResult>();
+      const orderedReceipts = receipts.filter((receipt) => receipt.ordered);
+      const sourceIds = [...new Set(orderedReceipts.map(({ event }) => getSourceId(event.source)))];
+      try {
+        await Promise.all([
+          ...sourceIds.map((sourceId) => this.drainOrderedSource(sourceId, destination, resultByEventId)),
+          ...receipts.filter((receipt) => !receipt.ordered).map(async (receipt) => {
+            resultByEventId.set(receipt.event.webhookEventId, await this.processOne(
+              receipt.event, destination, 0, 1, receipt.rawMessageId,
+            ));
+          }),
+        ]);
+        return events.map((event) => immediate.get(event.webhookEventId)
+          ?? resultByEventId.get(event.webhookEventId)
+          ?? { eventId: event.webhookEventId, eventType: event.type, status: "saved" });
+      } catch (error) {
+        if (!this.isMissingOrderingInfrastructure(error)) throw error;
+        this.orderedQueueAvailable = false;
+      }
+    }
+
+    // Unit doubles and pre-0060 databases have no queue RPC. They retain the
+    // old direct path; deployed databases always take the durable path above.
+    for (const [eventIndex, receipt] of receipts.entries()) {
+      immediate.set(receipt.event.webhookEventId, await this.processOne(
+        receipt.event,
+        destination,
+        eventIndex,
+        receipts.length,
+        receipt.rawMessageId,
+      ));
+    }
+    return events.map((event) => immediate.get(event.webhookEventId)!);
   }
 
   private async processOne(
@@ -492,6 +552,7 @@ export class WebhookService {
     destination: string,
     eventIndex: number,
     eventCount: number,
+    existingRawMessageId?: string,
   ): Promise<WebhookProcessResult> {
     const eventId = event.webhookEventId;
     const log     = logger.child({
@@ -504,7 +565,7 @@ export class WebhookService {
     log.info("processing event");
 
     // ── 1. Persist raw event ──────────────────────────────────────────────────
-    const rawMessageId = await this.saveRawMessage(event, destination);
+    const rawMessageId = existingRawMessageId ?? await this.saveRawMessage(event, destination);
 
     if (rawMessageId === null) {
       log.info("duplicate event — skipped");
@@ -1811,67 +1872,6 @@ export class WebhookService {
       return { eventId, eventType, status: "saved", parsed: false };
     }
 
-    if (parseResult.kind === "all_in_one_invalid") {
-      if (replyToken) await this.replyMessage(replyToken, parseResult.message);
-      return { eventId, eventType, status: "saved", parsed: false };
-    }
-
-    if (parseResult.kind === "all_in_one") {
-      const { marketLabel, marketLabelNormalized, businessDate } = parseResult.command;
-      try {
-        const result = await svc.submitAllInOne({
-          sourceId,
-          marketLabel,
-          marketLabelNormalized,
-          businessDate,
-          fields: parseResult.fields,
-          lineUserId,
-          lineEventId: eventId,
-        });
-        switch (result.outcome) {
-          case "closed":
-          case "already_closed":
-            if (replyToken && result.cashEntry) {
-              await this.replyMessage(
-                replyToken,
-                buildWhiteSheetNoteCanonicalSummary(
-                  result.session.market_label,
-                  result.session.business_date,
-                  result.cashEntry,
-                ),
-              );
-            } else if (replyToken) {
-              await this.replyMessage(replyToken, WHITE_SHEET_NOTE_ALREADY_CLOSED_REPLY);
-            }
-            log.info("white sheet note all-in-one submitted", {
-              sourceId,
-              outcome: result.outcome,
-              sessionId: result.session.id,
-            });
-            break;
-          case "open_conflict":
-            if (replyToken) {
-              await this.replyMessage(
-                replyToken,
-                `ยังมีใบขาวมือของ ${result.session.market_label} วันที่ ${isoDateToBuddhistDisplay(result.session.business_date)} ที่ยังไม่จบ\nกรุณาพิมพ์ จบใบขาวมือ หรือ ยกเลิกใบขาวมือ ก่อนเปิดใบใหม่`,
-              );
-            }
-            break;
-          case "empty":
-            if (replyToken) await this.replyMessage(replyToken, WHITE_SHEET_NOTE_CLOSE_EMPTY_REPLY);
-            break;
-          case "finalized":
-            if (replyToken) await this.replyMessage(replyToken, WHITE_SHEET_NOTE_FINALIZED_REPLY);
-            break;
-        }
-        return { eventId, eventType, status: "saved", parsed: false };
-      } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : String(err);
-        log.error("white sheet note all-in-one failed", { error: errorMessage });
-        return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
-      }
-    }
-
     if (parseResult.kind === "open") {
       const { marketLabel, marketLabelNormalized, businessDate } = parseResult.command;
       try {
@@ -2817,6 +2817,92 @@ export class WebhookService {
   }
 
   // ── DB helpers ────────────────────────────────────────────────────────────
+  private async drainOrderedSource(
+    sourceId: string,
+    destination: string,
+    resultByEventId: Map<string, WebhookProcessResult>,
+  ): Promise<void> {
+    while (true) {
+      const claim = await this.claimOrderedEvent(sourceId);
+      if (!claim) return;
+
+      let result: WebhookProcessResult;
+      try {
+        const event = await this.loadQueuedEvent(claim.raw_message_id);
+        result = event
+          ? await this.processOne(event, destination, 0, 1, claim.raw_message_id)
+          : {
+            eventId: claim.line_event_id,
+            eventType: "message",
+            status: "error",
+            error: "queued raw event was not found",
+          };
+      } catch (error) {
+        result = {
+          eventId: claim.line_event_id,
+          eventType: "message",
+          status: "error",
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+
+      await this.completeOrderedEvent(
+        claim.raw_message_id,
+        result.status === "error" || Boolean(result.error) ? "failed" : "processed",
+        result.error,
+      );
+      resultByEventId.set(result.eventId, result);
+    }
+  }
+
+  private async claimOrderedEvent(sourceId: string): Promise<QueueClaim | null> {
+    const { data, error } = await this.supabase.rpc("claim_line_webhook_event", {
+      p_source_id: sourceId,
+    });
+    if (error) throw new Error(`ordered webhook claim failed: ${error.message}`);
+    return (data as QueueClaim | null) ?? null;
+  }
+
+  private async loadQueuedEvent(rawMessageId: string): Promise<LineEvent | null> {
+    const { data, error } = await this.supabase
+      .from("raw_messages")
+      .select("payload")
+      .eq("id", rawMessageId)
+      .maybeSingle();
+    if (error) throw new Error(`queued raw event lookup failed: ${error.message}`);
+    return data ? data.payload as unknown as LineEvent : null;
+  }
+
+  private async completeOrderedEvent(
+    rawMessageId: string,
+    status: "processed" | "failed",
+    errorMessage?: string,
+  ): Promise<void> {
+    const { error } = await this.supabase.rpc("complete_line_webhook_event", {
+      p_raw_message_id: rawMessageId,
+      p_status: status,
+      p_error_message: errorMessage ?? null,
+    });
+    if (error) throw new Error(`ordered webhook completion failed: ${error.message}`);
+  }
+
+  private isMissingOrderingInfrastructure(error: unknown): boolean {
+    const message = error instanceof Error
+      ? error.message
+      : typeof error === "object" && error !== null && "message" in error
+        ? String(error.message)
+        : String(error);
+    return /unexpected(?: .*?)?rpc/i.test(message)
+      || (message.includes("claim_line_webhook_event") && message.includes("does not exist"))
+      || message.includes("42883")
+      || message.includes("42P01");
+  }
+
+  private isWhiteSheetOrderingEvent(event: LineEvent): boolean {
+    if (event.type !== "message" || event.message.type !== "text") return false;
+    return parseWhiteSheetNoteCommand(event.message.text).kind !== "not_command";
+  }
+
   private async saveRawMessage(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     event: any,
@@ -2824,6 +2910,46 @@ export class WebhookService {
   ): Promise<string | null | "error"> {
     const source  = event.source  ?? {};
     const message = event.message as LineMessage | undefined;
+
+    if (this.isWhiteSheetOrderingEvent(event) && this.orderedQueueAvailable !== false) {
+      let data: unknown;
+      let error: { code?: string; message: string } | null = null;
+      try {
+        ({ data, error } = await this.supabase.rpc("receive_line_webhook_event", {
+          p_line_event_id: event.webhookEventId,
+          p_destination: destination,
+          p_event_type: event.type,
+          p_source_type: source.type ?? "user",
+          p_source_id: getSourceId(source),
+          p_user_id: getUserId(source),
+          p_message_id: message?.id ?? null,
+          p_message_type: message?.type ?? null,
+          p_raw_text: message && "text" in message ? (message as { text: string }).text : null,
+          p_payload: event,
+        }));
+      } catch (caught) {
+        error = { message: caught instanceof Error ? caught.message : String(caught) };
+        if (this.isMissingOrderingInfrastructure(caught)) {
+          this.orderedQueueAvailable = false;
+        } else {
+          throw caught;
+        }
+      }
+      if (!error) {
+        this.orderedQueueAvailable = true;
+        const receipt = data as { raw_message_id: string; duplicate: boolean };
+        return receipt.duplicate ? null : receipt.raw_message_id;
+      }
+      if (!this.isMissingOrderingInfrastructure(error)) {
+        logger.error("failed to atomically receive ordered webhook event", {
+          code: error.code,
+          message: error.message,
+          eventId: event.webhookEventId,
+        });
+        return "error";
+      }
+      this.orderedQueueAvailable = false;
+    }
 
     const { data, error } = await this.supabase
       .from("raw_messages")

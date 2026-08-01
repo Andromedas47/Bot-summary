@@ -358,7 +358,7 @@ describe.skipIf(!pgAvailable)("0059 manual_white_sheet_note_sessions on real Pos
     // Deterministic proof — no sleep. Models two LINE webhook deliveries where
     // จบใบขาวมือ is processed before an earlier field event finishes (or is
     // delivered later). Ordered delivery is NOT guaranteed across concurrent
-    // serverless invocations; the all-in-one path (0060) is the atomic safe path.
+    // serverless invocations; the durable ordering queue (0060) is the safe path.
     const id = await insertSession({ source_id: "'S-close-first'", actual_cash: "100" });
     await scalar(closeRpcSql(id, "S-close-first"));
     const fieldCount = await scalar(

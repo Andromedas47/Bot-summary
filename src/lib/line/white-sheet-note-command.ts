@@ -7,19 +7,47 @@ const OPEN_RE = /^(.+?)\s+ส่งใบขาวมือ\s+(\d{1,2}\/\d{1,2}\
 const CLOSE_TEXT = "จบใบขาวมือ";
 const CANCEL_TEXT = "ยกเลิกใบขาวมือ";
 
-export const FIELD_LABELS = {
-  labor: "ค่าแรง",
-  locationFee: "ค่าที่",
-  bag: "ค่าถุง",
-  snack: "ค่าขนม",
-  other: "ค่าอื่น",
-  actualCash: "เงินสด",
+/**
+ * ASCII-safe UTF-8 hex for each field label. Labels are decoded at module
+ * load so Turbopack/SWC cannot corrupt Thai source literals into a runtime
+ * mismatch against Production LINE payloads.
+ */
+const FIELD_LABEL_UTF8_HEX = {
+  labor: "e0b884e0b988e0b8b2e0b981e0b8a3e0b887", // ค่าแรง
+  locationFee: "e0b884e0b988e0b8b2e0b897e0b8b5e0b988", // ค่าที่
+  bag: "e0b884e0b988e0b8b2e0b896e0b8b8e0b887", // ค่าถุง
+  snack: "e0b884e0b988e0b8b2e0b882e0b899e0b8a1", // ค่าขนม
+  other: "e0b884e0b988e0b8b2e0b8ade0b8b7e0b988e0b899", // ค่าอื่น
+  actualCash: "e0b980e0b887e0b8b4e0b899e0b8aae0b894", // เงินสด
 } as const;
 
-/** Longest-first so "ค่าอื่น" wins over shorter "ค่า" prefixes if added later. */
-const FIELD_LABELS_LONGEST_FIRST = Object.values(FIELD_LABELS)
-  .slice()
-  .sort((a, b) => b.length - a.length);
+function utf8FromHex(hex: string): string {
+  return Buffer.from(hex, "hex").toString("utf8");
+}
+
+export const FIELD_LABELS = {
+  labor: utf8FromHex(FIELD_LABEL_UTF8_HEX.labor),
+  locationFee: utf8FromHex(FIELD_LABEL_UTF8_HEX.locationFee),
+  bag: utf8FromHex(FIELD_LABEL_UTF8_HEX.bag),
+  snack: utf8FromHex(FIELD_LABEL_UTF8_HEX.snack),
+  other: utf8FromHex(FIELD_LABEL_UTF8_HEX.other),
+  actualCash: utf8FromHex(FIELD_LABEL_UTF8_HEX.actualCash),
+} as const;
+
+export type WhiteSheetNoteFieldKey =
+  | "labor"
+  | "locationFee"
+  | "bag"
+  | "snack"
+  | "other"
+  | "actualCash";
+
+const FIELD_LABEL_ENTRIES: ReadonlyArray<{ key: WhiteSheetNoteFieldKey; label: string }> = (
+  Object.keys(FIELD_LABELS) as WhiteSheetNoteFieldKey[]
+)
+  .map((key) => ({ key, label: FIELD_LABELS[key] }))
+  // Longest-first so "ค่าอื่น" wins over any shorter "ค่า…" prefix if added later.
+  .sort((a, b) => b.label.length - a.label.length);
 
 const MONEY_WITH_COMMAS = /^\d{1,3}(,\d{3})*(\.\d{1,2})?$/;
 const MONEY_PLAIN = /^\d+(\.\d{1,2})?$/;
@@ -32,18 +60,29 @@ export function normalizeWhiteSheetNoteFieldText(text: string): string {
   return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
-/** True when every non-empty line starts with a Manual White Sheet field label. */
+/** Exact label followed by whitespace (SPACE or TAB). No Unicode regex alternation. */
+function matchFieldLabelPrefix(
+  line: string,
+): { key: WhiteSheetNoteFieldKey; label: string } | null {
+  for (const entry of FIELD_LABEL_ENTRIES) {
+    const { key, label } = entry;
+    if (line.length <= label.length) continue;
+    if (!line.startsWith(label)) continue;
+    const after = line.charCodeAt(label.length);
+    // Require whitespace after the exact label (U+0020 SPACE or U+0009 TAB).
+    if (after === 0x20 || after === 0x09) return { key, label };
+  }
+  return null;
+}
+
+/** True when every non-empty line starts with a field label + whitespace. */
 export function isWhiteSheetNoteFieldShaped(text: string): boolean {
   const lines = normalizeWhiteSheetNoteFieldText(text)
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
   if (lines.length === 0) return false;
-  return lines.every((line) =>
-    FIELD_LABELS_LONGEST_FIRST.some(
-      (label) => line === label || line.startsWith(`${label} `),
-    )
-  );
+  return lines.every((line) => matchFieldLabelPrefix(line) !== null);
 }
 
 /** Accepts 300, 300.00, 1,250, 1,250.50. Rejects negatives, NaN, malformed input. */
@@ -68,14 +107,6 @@ export interface WhiteSheetNoteOpenCommand {
   marketLabelNormalized: string;
   businessDate: string;
 }
-
-export type WhiteSheetNoteFieldKey =
-  | "labor"
-  | "locationFee"
-  | "bag"
-  | "snack"
-  | "other"
-  | "actualCash";
 
 export interface WhiteSheetNoteFieldValue {
   key: WhiteSheetNoteFieldKey;
@@ -120,15 +151,6 @@ function parseOtherField(rest: string): { amount: number; note: string | null } 
   return { amount, note };
 }
 
-const FIELD_KEY_BY_LABEL: Record<string, WhiteSheetNoteFieldKey> = {
-  [FIELD_LABELS.labor]: "labor",
-  [FIELD_LABELS.locationFee]: "locationFee",
-  [FIELD_LABELS.bag]: "bag",
-  [FIELD_LABELS.snack]: "snack",
-  [FIELD_LABELS.other]: "other",
-  [FIELD_LABELS.actualCash]: "actualCash",
-};
-
 type FieldLineParse =
   | { kind: "field"; field: WhiteSheetNoteFieldValue }
   | { kind: "invalid"; line: string }
@@ -136,14 +158,10 @@ type FieldLineParse =
 
 /** Parse one already-trimmed non-empty line as a White Sheet field. */
 function parseOneFieldLine(line: string): FieldLineParse {
-  // Prefix match against FIELD_LABELS — avoids Turbopack/SWC Unicode-alternation
-  // regex breakage that classified the Production multiline payload as not_command.
-  const label = FIELD_LABELS_LONGEST_FIRST.find(
-    (candidate) => line === candidate || line.startsWith(`${candidate} `),
-  );
-  if (!label) return { kind: "not_field" };
+  const matched = matchFieldLabelPrefix(line);
+  if (!matched) return { kind: "not_field" };
 
-  const key = FIELD_KEY_BY_LABEL[label];
+  const { key, label } = matched;
   const rest = line.slice(label.length).trim();
   if (!rest) return { kind: "invalid", line };
 

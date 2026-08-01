@@ -21,6 +21,7 @@ function makeDb(initial: Row[] = [], initialCashEntries: Row[] = []) {
   const cashEntries: Row[] = [...initialCashEntries];
   let idSeq = 0;
   let conflictWinner: Row | null = null;
+  const state = { updateCount: 0 };
 
   function queryChain(filtered: Row[]) {
     return {
@@ -77,6 +78,7 @@ function makeDb(initial: Row[] = [], initialCashEntries: Row[] = []) {
                       select() {
                         return {
                           async maybeSingle() {
+                            state.updateCount += 1;
                             const idx = rows.findIndex(
                               (r) => r[col] === val && r[col2] === val2 && r[col3] === val3,
                             );
@@ -158,6 +160,7 @@ function makeDb(initial: Row[] = [], initialCashEntries: Row[] = []) {
   return {
     rows,
     cashEntries,
+    get updateCount() { return state.updateCount; },
     /** Next insert() fails with 23505; `winner` becomes visible only afterward. */
     forceNextInsertConflict(winner: Row) { conflictWinner = winner; },
     supabase: {
@@ -220,6 +223,45 @@ describe("WhiteSheetNoteSessionService.openSession", () => {
     });
     expect(result.opened).toBe(false);
     expect(result.session.id).toBe("winner");
+  });
+});
+
+describe("WhiteSheetNoteSessionService.applyFields", () => {
+  it("applies multiple fields in one update (last-wins for repeats)", async () => {
+    const db = makeDb([{
+      id: "s1", source_id: "src-1", status: "open",
+      labor: null, location_fee: null, bag: null, snack: null, other_amount: null, actual_cash: null,
+    }]);
+    const svc = new WhiteSheetNoteSessionService(db.supabase);
+    const result = await svc.applyFields(
+      { id: "s1", source_id: "src-1", status: "open" } as never,
+      [
+        { key: "locationFee", amount: 200, note: null },
+        { key: "bag", amount: 100, note: null },
+        { key: "labor", amount: 500, note: null },
+        { key: "labor", amount: 0, note: null },
+      ],
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable");
+    expect(result.session.location_fee).toBe(200);
+    expect(result.session.bag).toBe(100);
+    expect(result.session.labor).toBe(0);
+    expect(db.updateCount).toBe(1);
+  });
+
+  it("returns a typed conflict when the session is no longer open", async () => {
+    const db = makeDb([{ id: "s1", source_id: "src-1", status: "closed" }]);
+    const svc = new WhiteSheetNoteSessionService(db.supabase);
+    const result = await svc.applyFields(
+      { id: "s1", source_id: "src-1", status: "open" } as never,
+      [
+        { key: "locationFee", amount: 200, note: null },
+        { key: "bag", amount: 100, note: null },
+      ],
+    );
+    expect(result).toEqual({ ok: false, reason: "conflict" });
+    expect(db.updateCount).toBe(1);
   });
 });
 

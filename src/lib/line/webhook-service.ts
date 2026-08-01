@@ -58,7 +58,9 @@ import { DailySummaryService } from "@/lib/line/daily-summary-service";
 import { SessionDedupService } from "@/lib/line/session-dedup-service";
 import {
   parseWhiteSheetNoteCommand,
+  collapseWhiteSheetNoteFields,
   type WhiteSheetNoteParseResult,
+  type WhiteSheetNoteFieldValue,
 } from "@/lib/line/white-sheet-note-command";
 import {
   WhiteSheetNoteSessionService,
@@ -255,7 +257,17 @@ function buildWhiteSheetNoteResumeSummary(session: ManualWhiteSheetNoteSessionRo
   ].join("\n");
 }
 
-/** Accurate reply for จบใบขาวมือ/ยกเลิกใบขาวมือ/a field-conflict when no open session exists. */
+function buildWhiteSheetNoteFieldSaveReply(fields: WhiteSheetNoteFieldValue[]): string {
+  const collapsed = collapseWhiteSheetNoteFields(fields);
+  const lines = collapsed.map((field) => {
+    const label = WHITE_SHEET_NOTE_FIELD_LABEL[field.key];
+    const noteSuffix = field.note ? ` — ${field.note}` : "";
+    return `${label} ${formatMoney(field.amount)} บาท${noteSuffix}`;
+  });
+  if (lines.length === 1) return `บันทึกแล้ว: ${lines[0]}`;
+  return ["บันทึกแล้ว:", ...lines.map((line) => `- ${line}`)].join("\n");
+}
+
 function buildWhiteSheetNoteTerminalReply(latest: ManualWhiteSheetNoteSessionRow | null): string {
   if (latest?.status === "closed") return WHITE_SHEET_NOTE_ALREADY_CLOSED_REPLY;
   if (latest?.status === "cancelled") return WHITE_SHEET_NOTE_ALREADY_CANCELLED_REPLY;
@@ -1858,25 +1870,25 @@ export class WebhookService {
       }
 
       if (parseResult.kind === "field") {
-        const result = await svc.applyField(openSession, parseResult.field);
+        const result = await svc.applyFields(openSession, parseResult.fields);
         if (!result.ok) {
           // A racing close/cancel already terminated this session — never
           // report false success for the field write.
           const latest = await svc.findLatestSessionForSource(sourceId);
           if (replyToken) await this.replyMessage(replyToken, buildWhiteSheetNoteTerminalReply(latest));
-          log.info("white sheet note field update conflict", { sourceId, field: parseResult.field.key });
+          log.info("white sheet note field update conflict", {
+            sourceId,
+            fields: parseResult.fields.map((f) => f.key),
+          });
           return { eventId, eventType, status: "saved", parsed: false };
         }
         if (replyToken) {
-          const label = WHITE_SHEET_NOTE_FIELD_LABEL[parseResult.field.key];
-          const noteSuffix = parseResult.field.note ? ` — ${parseResult.field.note}` : "";
-          await this.replyMessage(
-            replyToken,
-            `บันทึกแล้ว: ${label} ${formatMoney(parseResult.field.amount)} บาท${noteSuffix}`,
-          );
+          await this.replyMessage(replyToken, buildWhiteSheetNoteFieldSaveReply(parseResult.fields));
         }
-        log.info("white sheet note field applied", {
-          sourceId, field: parseResult.field.key, sessionId: result.session.id,
+        log.info("white sheet note fields applied", {
+          sourceId,
+          fields: parseResult.fields.map((f) => f.key),
+          sessionId: result.session.id,
         });
         return { eventId, eventType, status: "saved", parsed: false };
       }

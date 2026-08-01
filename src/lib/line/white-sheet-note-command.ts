@@ -62,7 +62,7 @@ export type WhiteSheetNoteParseResult =
   | { kind: "not_command" }
   | { kind: "open"; command: WhiteSheetNoteOpenCommand }
   | { kind: "open_invalid"; message: string }
-  | { kind: "field"; field: WhiteSheetNoteFieldValue }
+  | { kind: "field"; fields: WhiteSheetNoteFieldValue[] }
   | { kind: "field_invalid"; message: string }
   | { kind: "close" }
   | { kind: "cancel" };
@@ -104,10 +104,47 @@ const FIELD_KEY_BY_LABEL: Record<string, WhiteSheetNoteFieldKey> = {
   [FIELD_LABELS.actualCash]: "actualCash",
 };
 
+type FieldLineParse =
+  | { kind: "field"; field: WhiteSheetNoteFieldValue }
+  | { kind: "invalid"; line: string }
+  | { kind: "not_field" };
+
+/** Parse one already-trimmed non-empty line as a White Sheet field. */
+function parseOneFieldLine(line: string): FieldLineParse {
+  const field = FIELD_LINE_RE.exec(line);
+  if (!field) return { kind: "not_field" };
+
+  const key = FIELD_KEY_BY_LABEL[field[1]];
+  const rest = field[2];
+
+  if (key === "other") {
+    const parsed = parseOtherField(rest);
+    if (parsed === null) return { kind: "invalid", line };
+    return { kind: "field", field: { key, amount: parsed.amount, note: parsed.note } };
+  }
+
+  const amount = parseNoteMoneyAmount(rest);
+  if (amount === null) return { kind: "invalid", line };
+  return { kind: "field", field: { key, amount, note: null } };
+}
+
 /**
- * Pure classification of a single-line LINE message for the manual White
- * Sheet note session. Never touches the database — the webhook checks for
- * an open session only after this returns something other than not_command.
+ * Collapse repeated keys so the last value wins, preserving first-seen key
+ * order (Map insertion order). Used by the webhook reply builder.
+ */
+export function collapseWhiteSheetNoteFields(
+  fields: WhiteSheetNoteFieldValue[],
+): WhiteSheetNoteFieldValue[] {
+  const byKey = new Map<WhiteSheetNoteFieldKey, WhiteSheetNoteFieldValue>();
+  for (const field of fields) byKey.set(field.key, field);
+  return [...byKey.values()];
+}
+
+/**
+ * Pure classification of a LINE message for the manual White Sheet note
+ * session. Supports multi-line field messages (CRLF/LF, blank lines ignored).
+ * Never touches the database — the webhook checks for an open session only
+ * after this returns something other than not_command.
  */
 export function parseWhiteSheetNoteCommand(text: string): WhiteSheetNoteParseResult {
   const trimmed = text.trim();
@@ -136,25 +173,34 @@ export function parseWhiteSheetNoteCommand(text: string): WhiteSheetNoteParseRes
     };
   }
 
-  const field = FIELD_LINE_RE.exec(trimmed);
-  if (field) {
-    const key = FIELD_KEY_BY_LABEL[field[1]];
-    const rest = field[2];
+  // Field messages: every non-empty line must be a valid field line. Mixed
+  // valid+invalid (or field + unrelated) rejects the whole message with zero
+  // DB mutation. Completely unrelated text stays not_command.
+  const lines = trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
 
-    if (key === "other") {
-      const parsed = parseOtherField(rest);
-      if (parsed === null) {
-        return { kind: "field_invalid", message: `จำนวนเงินไม่ถูกต้องที่บรรทัด:\n${trimmed}` };
-      }
-      return { kind: "field", field: { key, amount: parsed.amount, note: parsed.note } };
-    }
+  if (lines.length === 0) return { kind: "not_command" };
 
-    const amount = parseNoteMoneyAmount(rest);
-    if (amount === null) {
-      return { kind: "field_invalid", message: `จำนวนเงินไม่ถูกต้องที่บรรทัด:\n${trimmed}` };
-    }
-    return { kind: "field", field: { key, amount, note: null } };
+  const parsedLines = lines.map(parseOneFieldLine);
+
+  if (parsedLines.every((p) => p.kind === "field")) {
+    return {
+      kind: "field",
+      fields: parsedLines.map((p) => (p as Extract<FieldLineParse, { kind: "field" }>).field),
+    };
   }
 
-  return { kind: "not_command" };
+  const anyFieldShaped = parsedLines.some((p) => p.kind === "field" || p.kind === "invalid");
+  if (!anyFieldShaped) return { kind: "not_command" };
+
+  const invalid = parsedLines.find((p) => p.kind === "invalid") as
+    | Extract<FieldLineParse, { kind: "invalid" }>
+    | undefined;
+  const notFieldLine = lines.find((_, i) => parsedLines[i]?.kind === "not_field");
+  return {
+    kind: "field_invalid",
+    message: `จำนวนเงินไม่ถูกต้องที่บรรทัด:\n${invalid?.line ?? notFieldLine ?? lines[0]}`,
+  };
 }

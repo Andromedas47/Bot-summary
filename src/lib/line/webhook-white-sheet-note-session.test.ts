@@ -29,6 +29,8 @@ function makeSupabase(seedCashEntries: Row[] = []) {
   const rawEventIds = new Set<string>();
   let idSeq = 0;
   let forceOpenLookupError = false;
+  let forceNextUpdateMiss = false;
+  let updateCount = 0;
 
   function noteStub() {
     function queryChain(filtered: Row[]) {
@@ -79,6 +81,20 @@ function makeSupabase(seedCashEntries: Row[] = []) {
                       select() {
                         return {
                           async maybeSingle() {
+                            updateCount += 1;
+                            if (forceNextUpdateMiss) {
+                              forceNextUpdateMiss = false;
+                              // Concurrent close won the row between lookup and UPDATE.
+                              const raced = notes.find(
+                                (r) => r[col] === val && r[col2] === val2,
+                              );
+                              if (raced) {
+                                raced.status = "closed";
+                                raced.closed_at = new Date().toISOString();
+                                raced.closed_line_event_id = "evt-race-close";
+                              }
+                              return { data: null, error: null };
+                            }
                             const idx = notes.findIndex(
                               (r) => r[col] === val && r[col2] === val2 && r[col3] === val3,
                             );
@@ -197,7 +213,9 @@ function makeSupabase(seedCashEntries: Row[] = []) {
     rpc,
     _notes: notes,
     _cashEntries: cashEntries,
+    get _updateCount() { return updateCount; },
     forceNextOpenLookupError() { forceOpenLookupError = true; },
+    forceNextUpdateMiss() { forceNextUpdateMiss = true; },
   };
 }
 
@@ -337,6 +355,128 @@ describe("white sheet note session — fields", () => {
 
     expect(db._notes[0].labor).toBeNull();
     expect(replies[1]).toMatch(/ไม่ถูกต้อง/);
+  });
+
+  it("multi-line two fields apply atomically with one reply", async () => {
+    const db = makeSupabase();
+    const replies: string[] = [];
+    const svc = makeService(db, replies);
+
+    await svc.processEvents([makeEvent("พาชิโอ้ ส่งใบขาวมือ 01/08/2569", "tok1", "msg1")], "dest");
+    await svc.processEvents([makeEvent("ค่าที่ 200\nค่าถุง 100", "tok2", "msg2")], "dest");
+
+    expect(db._notes[0].location_fee).toBe(200);
+    expect(db._notes[0].bag).toBe(100);
+    expect(db._updateCount).toBe(1);
+    expect(replies[1]).toBe(
+      ["บันทึกแล้ว:", "- ค่าที่ 200 บาท", "- ค่าถุง 100 บาท"].join("\n"),
+    );
+  });
+
+  it("multi-line three fields including ค่าอื่น note", async () => {
+    const db = makeSupabase();
+    const replies: string[] = [];
+    const svc = makeService(db, replies);
+
+    await svc.processEvents([makeEvent("พาชิโอ้ ส่งใบขาวมือ 01/08/2569", "tok1", "msg1")], "dest");
+    await svc.processEvents([makeEvent("ค่าขนม 50\nค่าอื่น 30 ค่าน้ำ\nเงินสด 4850", "tok2", "msg2")], "dest");
+
+    expect(db._notes[0].snack).toBe(50);
+    expect(db._notes[0].other_amount).toBe(30);
+    expect(db._notes[0].other_note).toBe("ค่าน้ำ");
+    expect(db._notes[0].actual_cash).toBe(4850);
+    expect(db._updateCount).toBe(1);
+    expect(replies[1]).toBe(
+      ["บันทึกแล้ว:", "- ค่าขนม 50 บาท", "- ค่าอื่น 30 บาท — ค่าน้ำ", "- เงินสด 4,850 บาท"].join("\n"),
+    );
+  });
+
+  it("mixed valid + invalid multi-line makes zero mutation", async () => {
+    const db = makeSupabase();
+    const replies: string[] = [];
+    const svc = makeService(db, replies);
+
+    await svc.processEvents([makeEvent("พาชิโอ้ ส่งใบขาวมือ 01/08/2569", "tok1", "msg1")], "dest");
+    await svc.processEvents([makeEvent("ค่าแรง 500\nค่าที่ abc", "tok2", "msg2")], "dest");
+
+    expect(db._notes[0].labor).toBeNull();
+    expect(db._notes[0].location_fee).toBeNull();
+    expect(db._updateCount).toBe(0);
+    expect(replies[1]).toMatch(/ไม่ถูกต้อง/);
+  });
+
+  it("unrelated multi-line text falls through unchanged", async () => {
+    const db = makeSupabase();
+    const replies: string[] = [];
+    const svc = makeService(db, replies);
+
+    await svc.processEvents([makeEvent("พาชิโอ้ ส่งใบขาวมือ 01/08/2569", "tok1", "msg1")], "dest");
+    await svc.processEvents([makeEvent("สวัสดีครับ\nวันนี้อากาศดี", "tok2", "msg2")], "dest");
+
+    expect(db._notes[0].labor).toBeNull();
+    expect(db._updateCount).toBe(0);
+    // only the opener reply
+    expect(replies).toHaveLength(1);
+  });
+
+  it("multi-line repeated field — last wins in one update", async () => {
+    const db = makeSupabase();
+    const svc = makeService(db);
+
+    await svc.processEvents([makeEvent("พาชิโอ้ ส่งใบขาวมือ 01/08/2569", "tok1", "msg1")], "dest");
+    await svc.processEvents([makeEvent("ค่าแรง 500\nค่าแรง 0", "tok2", "msg2")], "dest");
+
+    expect(db._notes[0].labor).toBe(0);
+    expect(db._updateCount).toBe(1);
+  });
+
+  it("exact local UAT original multi-line scenario closes with full canonical values", async () => {
+    const db = makeSupabase();
+    const replies: string[] = [];
+    const svc = makeService(db, replies);
+
+    await svc.processEvents([makeEvent("ตลาดทดสอบ ส่งใบขาวมือ 31/12/2599", "tok1", "msg1")], "dest");
+    await svc.processEvents([makeEvent("ค่าแรง 500", "tok2", "msg2")], "dest");
+    await svc.processEvents([makeEvent("ค่าที่ 200\nค่าถุง 100", "tok3", "msg3")], "dest");
+    await svc.processEvents([makeEvent("ค่าขนม 50\nค่าอื่น 30 ค่าน้ำ\nเงินสด 4850", "tok4", "msg4")], "dest");
+    await svc.processEvents([makeEvent("จบใบขาวมือ", "tok5", "msg5")], "dest");
+
+    expect(db._notes).toHaveLength(1);
+    expect(db._notes[0].status).toBe("closed");
+    expect(db._cashEntries).toHaveLength(1);
+    const cash = db._cashEntries[0];
+    expect(cash.labor).toBe(500);
+    expect(cash.location_fee).toBe(200);
+    expect(cash.bag).toBe(100);
+    expect(cash.snack).toBe(50);
+    expect(cash.other).toBe(30);
+    expect(cash.other_note).toBe("ค่าน้ำ");
+    expect(cash.actual_cash_submitted).toBe(4850);
+    expect(cash.business_date).toBe("2056-12-31");
+    expect(replies[2]).toBe(
+      ["บันทึกแล้ว:", "- ค่าที่ 200 บาท", "- ค่าถุง 100 บาท"].join("\n"),
+    );
+    expect(replies[3]).toBe(
+      ["บันทึกแล้ว:", "- ค่าขนม 50 บาท", "- ค่าอื่น 30 บาท — ค่าน้ำ", "- เงินสด 4,850 บาท"].join("\n"),
+    );
+  });
+
+  it("close race on multi-line apply returns conflict — no false success reply", async () => {
+    const db = makeSupabase();
+    const replies: string[] = [];
+    const svc = makeService(db, replies);
+
+    await svc.processEvents([makeEvent("พาชิโอ้ ส่งใบขาวมือ 01/08/2569", "tok1", "msg1")], "dest");
+    // Lookup still sees open; conditional UPDATE matches zero rows (close won).
+    db.forceNextUpdateMiss();
+
+    await svc.processEvents([makeEvent("ค่าที่ 200\nค่าถุง 100", "tok2", "msg2")], "dest");
+
+    expect(db._notes[0].location_fee ?? null).toBeNull();
+    expect(db._notes[0].bag ?? null).toBeNull();
+    expect(db._notes[0].status).toBe("closed");
+    expect(replies[1]).not.toMatch(/บันทึกแล้ว/);
+    expect(replies[1]).toBe("ใบขาวมือนี้ปิดแล้ว");
   });
 
   // A field message that races a concurrent close (both read the row while

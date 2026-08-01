@@ -120,19 +120,29 @@ export class WhiteSheetNoteSessionService {
   }
 
   /**
-   * Applies one field. Uses a conditional UPDATE (id + source_id + status =
-   * 'open') so a session that a racing close/cancel has already terminated
-   * returns a typed conflict instead of a stale fallback session and a
-   * false "saved" reply.
+   * Applies one or more fields in a single conditional UPDATE (id + source_id
+   * + status = 'open'). Repeated keys in `fields` resolve last-wins into one
+   * patch — never one DB write per line. A racing close/cancel that already
+   * terminated the session returns a typed conflict instead of a false
+   * "saved" reply.
    */
-  async applyField(
+  async applyFields(
     session: ManualWhiteSheetNoteSessionRow,
-    field: WhiteSheetNoteFieldValue,
+    fields: WhiteSheetNoteFieldValue[],
   ): Promise<ApplyFieldResult> {
-    const patch: Database["public"]["Tables"]["manual_white_sheet_note_sessions"]["Update"] =
-      field.key === "other"
-        ? { other_amount: field.amount, other_note: field.note }
-        : { [COLUMN_BY_FIELD_KEY[field.key]]: field.amount };
+    if (fields.length === 0) {
+      throw new Error("white sheet note session applyFields requires at least one field");
+    }
+
+    const patch: Database["public"]["Tables"]["manual_white_sheet_note_sessions"]["Update"] = {};
+    for (const field of fields) {
+      if (field.key === "other") {
+        patch.other_amount = field.amount;
+        patch.other_note = field.note;
+      } else {
+        patch[COLUMN_BY_FIELD_KEY[field.key]] = field.amount;
+      }
+    }
 
     const { data, error } = await this.supabase
       .from("manual_white_sheet_note_sessions")
@@ -146,6 +156,14 @@ export class WhiteSheetNoteSessionService {
     if (error) throw new Error(`white sheet note session field update failed: ${error.message}`);
     if (!data) return { ok: false, reason: "conflict" };
     return { ok: true, session: data };
+  }
+
+  /** Convenience wrapper — one field, same conditional UPDATE semantics. */
+  async applyField(
+    session: ManualWhiteSheetNoteSessionRow,
+    field: WhiteSheetNoteFieldValue,
+  ): Promise<ApplyFieldResult> {
+    return this.applyFields(session, [field]);
   }
 
   hasAnyValue(session: ManualWhiteSheetNoteSessionRow): boolean {

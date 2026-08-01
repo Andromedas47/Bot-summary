@@ -7,7 +7,8 @@ const LINE_EXPORT_PREFIX = /^\d{1,2}[:.]\d{2}\s+\S+\s+/;
 const HEADER_RE =
   /^(.+?)\s+ปิดยอด\s+(\d{1,2}\/\d{1,2}\/(?:25)?\d{2})\s*$/;
 
-const FIELD_LABELS = {
+/** Shared with the Manual White Sheet LINE session command parser. */
+export const FIELD_LABELS = {
   labor: "ค่าแรง",
   locationFee: "ค่าที่",
   bag: "ค่าถุง",
@@ -16,8 +17,13 @@ const FIELD_LABELS = {
   actualCash: "เงินสด",
 } as const;
 
-const FIELD_LINE_RE =
+/** Shared with the Manual White Sheet LINE session command parser. */
+export const FIELD_LINE_RE =
   /^(ค่าแรง|ค่าที่|ค่าถุง|ค่าขนม|ค่าอื่น|เงินสด)\s+(.+?)\s*$/;
+
+/** Bare label with no amount at all — a distinct, more specific error than "unrecognized line". */
+export const FIELD_LABEL_ONLY_RE =
+  /^(ค่าแรง|ค่าที่|ค่าถุง|ค่าขนม|ค่าอื่น|เงินสด)\s*$/;
 
 const CLOSE_LINE = "จบปิดยอด";
 
@@ -111,7 +117,8 @@ export function parseBusinessDate(dateStr: string): string | null {
   return valid ? iso : null;
 }
 
-function parseOtherField(rest: string): { amount: number; note: string | null } | null {
+/** Shared with the Manual White Sheet LINE session command parser. */
+export function parseOtherField(rest: string): { amount: number; note: string | null } | null {
   const match = rest.match(/^(\S+)(?:\s+(.+))?$/);
   if (!match) return null;
   const amount = parseCloseMoneyAmount(match[1]);

@@ -24,7 +24,8 @@ type Supabase = SupabaseClient<Database>;
 const GENERIC_SAVE_ERROR =
   "บันทึกปิดยอดไม่สำเร็จ กรุณาลองใหม่อีกครั้ง หรือติดต่อผู้ดูแลระบบ";
 
-const FINALIZED_REPLY = [
+/** Exported so the Manual White Sheet session closer can detect the permanently-terminal case. */
+export const FINALIZED_REPLY = [
   "ปิดยอดของวันนี้ถูกยืนยันแล้ว (FINALIZED)",
   "ไม่สามารถแก้ไขผ่าน LINE ได้",
   "หากต้องการแก้ไข กรุณาติดต่อผู้ดูแลระบบ",

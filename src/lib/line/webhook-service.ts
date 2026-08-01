@@ -56,6 +56,16 @@ import {
 import type { StructuredPendingSession } from "@/lib/line/produce-session-commands";
 import { DailySummaryService } from "@/lib/line/daily-summary-service";
 import { SessionDedupService } from "@/lib/line/session-dedup-service";
+import {
+  parseWhiteSheetNoteCommand,
+  collapseWhiteSheetNoteFields,
+  type WhiteSheetNoteParseResult,
+  type WhiteSheetNoteFieldValue,
+} from "@/lib/line/white-sheet-note-command";
+import {
+  WhiteSheetNoteSessionService,
+  type ManualWhiteSheetNoteSessionRow,
+} from "@/lib/line/white-sheet-note-session-service";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 import { bangkokBusinessDateNow } from "@/lib/business-date";
 import { parseManualSlipAmounts } from "@/lib/parsers/manual-slip-amount";
@@ -168,6 +178,101 @@ const PRODUCE_AFTER_BOUNDARY_REPLY =
 /** 0050: plain-text จบรายการ must not close a Guided/structured session. */
 export const STRUCTURED_TEXT_CLOSE_REFUSED_REPLY =
   "รายการนี้เปิดจากเมนู กรุณากดตรวจและจบจากเมนู ไม่รับคำสั่งจบจากข้อความ";
+
+// ── LINE Manual White Sheet entry session ───────────────────────────────────
+// Temporary session state for multi-message LINE entry. On close, entered
+// values are saved into digital_white_sheet_cash_entries atomically by the
+// close_manual_white_sheet_note_session RPC (migration 0059) — not coupled
+// to produce, slips, transfers, reconciliation, settlement, or work rounds.
+const WHITE_SHEET_NOTE_FIELD_LABEL: Record<string, string> = {
+  labor: "ค่าแรง",
+  locationFee: "ค่าที่",
+  bag: "ค่าถุง",
+  snack: "ค่าขนม",
+  other: "ค่าอื่น",
+  actualCash: "เงินสด",
+};
+
+const WHITE_SHEET_NOTE_NO_OPEN_SESSION_REPLY = "ยังไม่มีใบขาวมือที่เปิดอยู่";
+
+const WHITE_SHEET_NOTE_CLOSE_EMPTY_REPLY =
+  "กรุณาส่งค่าใช้จ่ายอย่างน้อย 1 รายการก่อนพิมพ์ จบใบขาวมือ";
+
+const WHITE_SHEET_NOTE_ALREADY_CLOSED_REPLY = "ใบขาวมือนี้ปิดแล้ว";
+const WHITE_SHEET_NOTE_ALREADY_CANCELLED_REPLY = "ใบขาวมือนี้ยกเลิกแล้ว";
+
+const WHITE_SHEET_NOTE_FINALIZED_REPLY =
+  "ใบขาวมือนี้ถูกปิดสรุปแล้ว (FINALIZED) แก้ไขผ่านข้อความไม่ได้ กรุณาติดต่อผู้ดูแลระบบ";
+
+const WHITE_SHEET_NOTE_LOOKUP_ERROR_REPLY =
+  "ระบบใบขาวมือขัดข้องชั่วคราว กรุณาลองอีกครั้ง";
+
+function isoDateToBuddhistDisplay(iso: string): string {
+  const [year, month, day] = iso.split("-");
+  return `${day}/${month}/${Number(year) + 543}`;
+}
+
+function formatMoney(value: number): string {
+  return value.toLocaleString("th-TH");
+}
+
+function buildWhiteSheetNoteFieldLines(session: ManualWhiteSheetNoteSessionRow): string[] {
+  const lines: string[] = [];
+  if (session.labor !== null) lines.push(`ค่าแรง: ${formatMoney(session.labor)} บาท`);
+  if (session.location_fee !== null) lines.push(`ค่าที่: ${formatMoney(session.location_fee)} บาท`);
+  if (session.bag !== null) lines.push(`ค่าถุง: ${formatMoney(session.bag)} บาท`);
+  if (session.snack !== null) lines.push(`ค่าขนม: ${formatMoney(session.snack)} บาท`);
+  if (session.other_amount !== null) {
+    lines.push(
+      `ค่าอื่น: ${formatMoney(session.other_amount)} บาท${session.other_note ? ` — ${session.other_note}` : ""}`,
+    );
+  }
+  if (session.actual_cash !== null) lines.push(`เงินสด: ${formatMoney(session.actual_cash)} บาท`);
+  return lines;
+}
+
+function buildWhiteSheetNoteSummary(session: ManualWhiteSheetNoteSessionRow): string {
+  return [
+    "จบใบขาวมือแล้ว ✅",
+    "",
+    `ตลาด: ${session.market_label}`,
+    `วันที่: ${isoDateToBuddhistDisplay(session.business_date)}`,
+    ...buildWhiteSheetNoteFieldLines(session),
+    "",
+    "บันทึกข้อมูลใบขาวแล้ว",
+  ].join("\n");
+}
+
+/** Reply for resuming an already-open session — must never claim closed/saved. */
+function buildWhiteSheetNoteResumeSummary(session: ManualWhiteSheetNoteSessionRow): string {
+  return [
+    "ใบขาวมือยังเปิดอยู่",
+    "",
+    `ตลาด: ${session.market_label}`,
+    `วันที่: ${isoDateToBuddhistDisplay(session.business_date)}`,
+    ...buildWhiteSheetNoteFieldLines(session),
+    "",
+    "ส่งข้อมูลต่อได้เลย",
+    "พิมพ์ จบใบขาวมือ เมื่อกรอกครบ",
+  ].join("\n");
+}
+
+function buildWhiteSheetNoteFieldSaveReply(fields: WhiteSheetNoteFieldValue[]): string {
+  const collapsed = collapseWhiteSheetNoteFields(fields);
+  const lines = collapsed.map((field) => {
+    const label = WHITE_SHEET_NOTE_FIELD_LABEL[field.key];
+    const noteSuffix = field.note ? ` — ${field.note}` : "";
+    return `${label} ${formatMoney(field.amount)} บาท${noteSuffix}`;
+  });
+  if (lines.length === 1) return `บันทึกแล้ว: ${lines[0]}`;
+  return ["บันทึกแล้ว:", ...lines.map((line) => `- ${line}`)].join("\n");
+}
+
+function buildWhiteSheetNoteTerminalReply(latest: ManualWhiteSheetNoteSessionRow | null): string {
+  if (latest?.status === "closed") return WHITE_SHEET_NOTE_ALREADY_CLOSED_REPLY;
+  if (latest?.status === "cancelled") return WHITE_SHEET_NOTE_ALREADY_CANCELLED_REPLY;
+  return WHITE_SHEET_NOTE_NO_OPEN_SESSION_REPLY;
+}
 
 interface WebhookServiceDependencies {
   evidenceIngestor?: SlipEvidenceIngestor;
@@ -532,6 +637,22 @@ export class WebhookService {
         event.type,
         log,
       );
+    }
+
+    // ── 3.25. LINE Manual White Sheet entry session ───────────────────────────
+    // Temporary session state for multi-message LINE entry; saves into
+    // digital_white_sheet_cash_entries on close. Not coupled to produce,
+    // slips, transfers, reconciliation, settlement, or work rounds. Text is
+    // classified first (pure, no I/O); a DB lookup only happens for
+    // candidate messages, and field-shaped text falls through unchanged
+    // when this source has no open entry session.
+    const noteParse = parseWhiteSheetNoteCommand(text);
+    if (noteParse.kind !== "not_command") {
+      const noteResult = await this.tryProcessWhiteSheetNoteCommand(
+        msgEvent, noteParse, eventId, event.type, log,
+      );
+      if (noteResult !== null) return noteResult;
+      // field-shaped text with no open session — not this feature's message.
     }
 
     // ── 3.3. Manual slip session commands ────────────────────────────────────
@@ -1646,6 +1767,180 @@ export class WebhookService {
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       log.error("manual slip entry append failed", { error: errorMessage });
+      return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
+    }
+  }
+
+  // ── LINE Manual White Sheet entry session ──────────────────────────────────
+  // Temporary session state for multi-message LINE entry of White Sheet
+  // figures; on close, the entered values are saved atomically into
+  // digital_white_sheet_cash_entries by the close_manual_white_sheet_note_session
+  // RPC (migration 0059). Returns null only for field-shaped text with no
+  // open session, so the caller falls through to existing routing unchanged.
+  private async tryProcessWhiteSheetNoteCommand(
+    event:      LineMessageEvent,
+    parseResult: Exclude<WhiteSheetNoteParseResult, { kind: "not_command" }>,
+    eventId:    string,
+    eventType:  string,
+    log:        ChildLogger,
+  ): Promise<WebhookProcessResult | null> {
+    const sourceId   = getSourceId(event.source);
+    const lineUserId = getUserId(event.source);
+    const replyToken = event.replyToken;
+    const svc        = new WhiteSheetNoteSessionService(this.supabase);
+
+    if (parseResult.kind === "open_invalid") {
+      if (replyToken) await this.replyMessage(replyToken, parseResult.message);
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+
+    if (parseResult.kind === "open") {
+      const { marketLabel, marketLabelNormalized, businessDate } = parseResult.command;
+      try {
+        const result = await svc.openSession({
+          sourceId, marketLabel, marketLabelNormalized, businessDate,
+          lineUserId, lineEventId: eventId,
+        });
+        if (replyToken) {
+          if (result.opened) {
+            await this.replyMessage(
+              replyToken,
+              `เปิดใบขาวมือแล้ว\nตลาด: ${marketLabel}\nวันที่: ${isoDateToBuddhistDisplay(businessDate)}\nส่งค่าใช้จ่ายทีละรายการได้เลย เช่น\nค่าแรง 500\nพิมพ์ จบใบขาวมือ เมื่อส่งครบ`,
+            );
+          } else if (
+            result.session.market_label_normalized === marketLabelNormalized
+            && result.session.business_date === businessDate
+          ) {
+            // Same market/date already open — resume, never claim closed/saved.
+            await this.replyMessage(replyToken, buildWhiteSheetNoteResumeSummary(result.session));
+          } else {
+            await this.replyMessage(
+              replyToken,
+              `ยังมีใบขาวมือของ ${result.session.market_label} วันที่ ${isoDateToBuddhistDisplay(result.session.business_date)} ที่ยังไม่จบ\nกรุณาพิมพ์ จบใบขาวมือ หรือ ยกเลิกใบขาวมือ ก่อนเปิดใบใหม่`,
+            );
+          }
+        }
+        log.info("white sheet note open", { sourceId, opened: result.opened });
+        return { eventId, eventType, status: "saved", parsed: false };
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        log.error("white sheet note open failed", { error: errorMessage });
+        return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
+      }
+    }
+
+    // field / close / cancel — all require an existing open session. A
+    // lookup failure here must never fall through into produce/manual-slip/
+    // other routing — surface it as an error result and stop.
+    let openSession: ManualWhiteSheetNoteSessionRow | null;
+    try {
+      openSession = await svc.findOpenSession(sourceId);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("white sheet note open-session lookup failed", { sourceId, error: errorMessage });
+      if (replyToken) {
+        try {
+          await this.replyMessage(replyToken, WHITE_SHEET_NOTE_LOOKUP_ERROR_REPLY);
+        } catch { /* ignore reply error */ }
+      }
+      return { eventId, eventType, status: "error", parsed: false, error: errorMessage };
+    }
+
+    if (!openSession) {
+      if (parseResult.kind === "field") return null; // fall through unchanged
+
+      // จบใบขาวมือ / ยกเลิกใบขาวมือ with nothing open — look up the latest
+      // terminal session for an accurate reply instead of always claiming
+      // "no open session" when it was in fact already closed/cancelled.
+      try {
+        const latest = await svc.findLatestSessionForSource(sourceId);
+        if (replyToken) await this.replyMessage(replyToken, buildWhiteSheetNoteTerminalReply(latest));
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        log.error("white sheet note latest-session lookup failed", { sourceId, error: errorMessage });
+        return { eventId, eventType, status: "error", parsed: false, error: errorMessage };
+      }
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+
+    try {
+      if (parseResult.kind === "field_invalid") {
+        if (replyToken) await this.replyMessage(replyToken, parseResult.message);
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      if (parseResult.kind === "field") {
+        const result = await svc.applyFields(openSession, parseResult.fields);
+        if (!result.ok) {
+          // A racing close/cancel already terminated this session — never
+          // report false success for the field write.
+          const latest = await svc.findLatestSessionForSource(sourceId);
+          if (replyToken) await this.replyMessage(replyToken, buildWhiteSheetNoteTerminalReply(latest));
+          log.info("white sheet note field update conflict", {
+            sourceId,
+            fields: parseResult.fields.map((f) => f.key),
+          });
+          return { eventId, eventType, status: "saved", parsed: false };
+        }
+        if (replyToken) {
+          await this.replyMessage(replyToken, buildWhiteSheetNoteFieldSaveReply(parseResult.fields));
+        }
+        log.info("white sheet note fields applied", {
+          sourceId,
+          fields: parseResult.fields.map((f) => f.key),
+          sessionId: result.session.id,
+        });
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      if (parseResult.kind === "close") {
+        // Fast-path UX check only — the RPC re-validates against the row it
+        // locks and is the authoritative source of truth for "empty".
+        if (!svc.hasAnyValue(openSession)) {
+          if (replyToken) await this.replyMessage(replyToken, WHITE_SHEET_NOTE_CLOSE_EMPTY_REPLY);
+          return { eventId, eventType, status: "saved", parsed: false };
+        }
+
+        const result = await svc.closeSession(openSession, { lineUserId, lineEventId: eventId });
+        switch (result.outcome) {
+          case "closed":
+            if (replyToken) await this.replyMessage(replyToken, buildWhiteSheetNoteSummary(result.session));
+            log.info("white sheet note closed", { sourceId, sessionId: result.session.id });
+            break;
+          case "already_closed":
+            if (replyToken) await this.replyMessage(replyToken, WHITE_SHEET_NOTE_ALREADY_CLOSED_REPLY);
+            break;
+          case "already_cancelled":
+            if (replyToken) await this.replyMessage(replyToken, WHITE_SHEET_NOTE_ALREADY_CANCELLED_REPLY);
+            break;
+          case "empty":
+            if (replyToken) await this.replyMessage(replyToken, WHITE_SHEET_NOTE_CLOSE_EMPTY_REPLY);
+            break;
+          case "finalized":
+            log.info("white sheet note close rejected — canonical row finalized", { sourceId });
+            if (replyToken) await this.replyMessage(replyToken, WHITE_SHEET_NOTE_FINALIZED_REPLY);
+            break;
+          case "not_found":
+            if (replyToken) await this.replyMessage(replyToken, WHITE_SHEET_NOTE_NO_OPEN_SESSION_REPLY);
+            break;
+        }
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      // parseResult.kind === "cancel"
+      const cancelResult = await svc.cancelSession(openSession, { lineUserId, lineEventId: eventId });
+      if (!cancelResult.ok) {
+        // Raced against a close/another cancel — report what actually won.
+        const latest = await svc.findLatestSessionForSource(sourceId);
+        if (replyToken) await this.replyMessage(replyToken, buildWhiteSheetNoteTerminalReply(latest));
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+      if (replyToken) await this.replyMessage(replyToken, "ยกเลิกใบขาวมือแล้ว");
+      log.info("white sheet note cancelled", { sourceId, sessionId: cancelResult.session.id });
+      return { eventId, eventType, status: "saved", parsed: false };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("white sheet note command failed", { error: errorMessage, kind: parseResult.kind });
       return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
     }
   }

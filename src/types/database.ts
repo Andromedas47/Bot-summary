@@ -29,6 +29,7 @@ export type SlipType =
 export type SlipBatchStatus =
   | "collecting" | "closing" | "processing" | "completed" | "review_needed" | "failed";
 export type ManualSlipSessionStatus      = "open" | "closed";
+export type ManualWhiteSheetNoteSessionStatus = "open" | "closed" | "cancelled";
 export type SettlementFinalizationStatus = "pending" | "sending" | "sent" | "failed" | "ambiguous";
 export type ProduceNotificationStatus = "pending" | "sending" | "sent" | "failed";
 
@@ -524,6 +525,76 @@ export interface Database {
           closed_by_line_user_id?:  string | null;
           opened_line_message_id?:  string | null;
           closed_line_message_id?:  string | null;
+        };
+        Relationships: [];
+      };
+
+      manual_white_sheet_note_sessions: {
+        Row: {
+          id:                       string;
+          source_id:                string;
+          market_label:             string;
+          market_label_normalized:  string;
+          business_date:            string;
+          status:                   ManualWhiteSheetNoteSessionStatus;
+          labor:                    number | null;
+          location_fee:             number | null;
+          bag:                      number | null;
+          snack:                    number | null;
+          other_amount:             number | null;
+          other_note:               string | null;
+          actual_cash:              number | null;
+          opened_by_line_user_id:   string | null;
+          opened_line_event_id:     string;
+          closed_by_line_user_id:   string | null;
+          closed_line_event_id:     string | null;
+          created_at:               string;
+          updated_at:               string;
+          closed_at:                string | null;
+        };
+        Insert: {
+          id?:                      string;
+          source_id:                string;
+          market_label:             string;
+          market_label_normalized:  string;
+          business_date:            string;
+          status?:                  ManualWhiteSheetNoteSessionStatus;
+          labor?:                   number | null;
+          location_fee?:            number | null;
+          bag?:                     number | null;
+          snack?:                   number | null;
+          other_amount?:            number | null;
+          other_note?:              string | null;
+          actual_cash?:             number | null;
+          opened_by_line_user_id?:  string | null;
+          opened_line_event_id:     string;
+          closed_by_line_user_id?:  string | null;
+          closed_line_event_id?:    string | null;
+          created_at?:              string;
+          updated_at?:              string;
+          closed_at?:               string | null;
+        };
+        Update: {
+          id?:                      string;
+          source_id?:               string;
+          market_label?:            string;
+          market_label_normalized?: string;
+          business_date?:           string;
+          status?:                  ManualWhiteSheetNoteSessionStatus;
+          labor?:                   number | null;
+          location_fee?:            number | null;
+          bag?:                     number | null;
+          snack?:                   number | null;
+          other_amount?:            number | null;
+          other_note?:              string | null;
+          actual_cash?:             number | null;
+          opened_by_line_user_id?:  string | null;
+          opened_line_event_id?:    string;
+          closed_by_line_user_id?:  string | null;
+          closed_line_event_id?:    string | null;
+          created_at?:              string;
+          updated_at?:              string;
+          closed_at?:               string | null;
         };
         Relationships: [];
       };
@@ -1512,6 +1583,19 @@ export interface Database {
       };
     };
     Functions: {
+      close_manual_white_sheet_note_session: {
+        Args: {
+          p_session_id:             string;
+          p_source_id:              string;
+          p_closed_by_line_user_id: string | null;
+          p_closed_line_event_id:   string;
+        };
+        Returns: {
+          outcome:    "closed" | "already_closed" | "already_cancelled" | "empty" | "finalized" | "not_found";
+          session:    Database["public"]["Tables"]["manual_white_sheet_note_sessions"]["Row"] | null;
+          cash_entry: Database["public"]["Tables"]["digital_white_sheet_cash_entries"]["Row"] | null;
+        };
+      };
       attach_evidence_to_slip_batch: {
         Args: { p_batch_id: string; p_evidence_id: string };
         Returns: number;
@@ -1798,6 +1882,7 @@ export type SlipEvidenceRow              = Database["public"]["Tables"]["slip_ev
 export type SlipCheckRow                 = Database["public"]["Tables"]["slip_checks"]["Row"];
 export type SlipBatchRow                 = Database["public"]["Tables"]["slip_batches"]["Row"];
 export type ManualSlipSessionRow         = Database["public"]["Tables"]["manual_slip_sessions"]["Row"];
+export type ManualWhiteSheetNoteSessionRow = Database["public"]["Tables"]["manual_white_sheet_note_sessions"]["Row"];
 export type ManualSlipEntryRow           = Database["public"]["Tables"]["manual_slip_entries"]["Row"];
 export type TransferReconciliationRow      = Database["public"]["Tables"]["transfer_reconciliations"]["Row"];
 export type SettlementFinalizationRow      = Database["public"]["Tables"]["settlement_finalizations"]["Row"];

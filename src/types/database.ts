@@ -99,7 +99,8 @@ export interface Database {
           status: "pending" | "processing" | "processed" | "failed";
           error_message: string | null;
           received_at: string;
-          started_at: string | null;
+          processing_started_at: string | null;
+          processing_attempts: number;
           completed_at: string | null;
         };
         Insert: {
@@ -111,7 +112,8 @@ export interface Database {
           status?: "pending" | "processing" | "processed" | "failed";
           error_message?: string | null;
           received_at?: string;
-          started_at?: string | null;
+          processing_started_at?: string | null;
+          processing_attempts?: number;
           completed_at?: string | null;
         };
         Update: {
@@ -123,7 +125,8 @@ export interface Database {
           status?: "pending" | "processing" | "processed" | "failed";
           error_message?: string | null;
           received_at?: string;
-          started_at?: string | null;
+          processing_started_at?: string | null;
+          processing_attempts?: number;
           completed_at?: string | null;
         };
         Relationships: [];

@@ -18,10 +18,16 @@ CREATE TABLE public.line_webhook_event_queue (
                   CHECK (status IN ('pending', 'processing', 'processed', 'failed')),
   error_message   text,
   received_at     timestamptz NOT NULL DEFAULT now(),
-  started_at      timestamptz,
+  processing_started_at timestamptz,
+  processing_attempts   integer NOT NULL DEFAULT 0
+                        CHECK (processing_attempts >= 0),
   completed_at    timestamptz,
   CONSTRAINT line_webhook_event_queue_source_nonblank CHECK (btrim(source_id) <> ''),
   CONSTRAINT line_webhook_event_queue_order_positive CHECK (receive_order > 0),
+  CONSTRAINT line_webhook_event_queue_processing_lease CHECK (
+    status <> 'processing'
+    OR (processing_started_at IS NOT NULL AND processing_attempts > 0)
+  ),
   CONSTRAINT line_webhook_event_queue_terminal_error CHECK (
     status <> 'failed' OR (error_message IS NOT NULL AND completed_at IS NOT NULL)
   )
@@ -85,6 +91,8 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.line_webhook_event_queue TO service
 GRANT USAGE, SELECT ON SEQUENCE public.line_webhook_receive_order_seq TO service_role;
 
 -- Claim only the earliest pending event whose earlier events are terminal.
+-- A crashed worker's processing row becomes claimable again after a fixed
+-- five-minute database-time lease; a fresh processing row remains the barrier.
 -- FOR UPDATE SKIP LOCKED lets different LINE sources run concurrently while
 -- the NOT EXISTS barrier prevents a close from overtaking pending/processing
 -- fields for the same source.
@@ -101,7 +109,13 @@ BEGIN
   SELECT q.* INTO v_row
     FROM public.line_webhook_event_queue q
    WHERE q.source_id = p_source_id
-     AND q.status = 'pending'
+     AND (
+       q.status = 'pending'
+       OR (
+         q.status = 'processing'
+         AND q.processing_started_at <= now() - interval '5 minutes'
+       )
+     )
      AND NOT EXISTS (
        SELECT 1
          FROM public.line_webhook_event_queue earlier
@@ -116,7 +130,9 @@ BEGIN
   IF NOT FOUND THEN RETURN NULL; END IF;
 
   UPDATE public.line_webhook_event_queue
-     SET status = 'processing', started_at = now()
+     SET status = 'processing',
+         processing_started_at = now(),
+         processing_attempts = processing_attempts + 1
    WHERE id = v_row.id
   RETURNING * INTO v_row;
 

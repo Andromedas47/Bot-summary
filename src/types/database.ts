@@ -660,6 +660,88 @@ export interface Database {
         Relationships: [];
       };
 
+      manual_white_sheet_sessions: {
+        Row: {
+          id:                       string;
+          source_id:                string;
+          market_label:             string;
+          market_label_normalized:  string;
+          business_date:            string;
+          business_date_display:    string;
+          status:                   "open" | "closing" | "closed" | "cancelled";
+          labor:                    number | null;
+          location_fee:             number | null;
+          bag:                      number | null;
+          snack:                    number | null;
+          other_amount:             number | null;
+          other_note:               string | null;
+          actual_cash_submitted:    number | null;
+          edited_fields:            string[];
+          opened_by_line_user_id:   string | null;
+          opened_line_event_id:     string;
+          opened_at:                string;
+          closing_started_at:       string | null;
+          closed_by_line_user_id:   string | null;
+          closed_line_event_id:     string | null;
+          closed_at:                string | null;
+          created_at:               string;
+          updated_at:               string;
+        };
+        Insert: {
+          id?:                      string;
+          source_id:                string;
+          market_label:             string;
+          market_label_normalized:  string;
+          business_date:            string;
+          business_date_display:    string;
+          status?:                  "open" | "closing" | "closed" | "cancelled";
+          labor?:                   number | null;
+          location_fee?:            number | null;
+          bag?:                     number | null;
+          snack?:                   number | null;
+          other_amount?:            number | null;
+          other_note?:              string | null;
+          actual_cash_submitted?:   number | null;
+          edited_fields?:           string[];
+          opened_by_line_user_id?:  string | null;
+          opened_line_event_id:     string;
+          opened_at?:               string;
+          closing_started_at?:      string | null;
+          closed_by_line_user_id?:  string | null;
+          closed_line_event_id?:    string | null;
+          closed_at?:               string | null;
+          created_at?:              string;
+          updated_at?:              string;
+        };
+        Update: {
+          id?:                      string;
+          source_id?:               string;
+          market_label?:            string;
+          market_label_normalized?: string;
+          business_date?:           string;
+          business_date_display?:   string;
+          status?:                  "open" | "closing" | "closed" | "cancelled";
+          labor?:                   number | null;
+          location_fee?:            number | null;
+          bag?:                     number | null;
+          snack?:                   number | null;
+          other_amount?:            number | null;
+          other_note?:              string | null;
+          actual_cash_submitted?:   number | null;
+          edited_fields?:           string[];
+          opened_by_line_user_id?:  string | null;
+          opened_line_event_id?:    string;
+          opened_at?:               string;
+          closing_started_at?:      string | null;
+          closed_by_line_user_id?:  string | null;
+          closed_line_event_id?:    string | null;
+          closed_at?:               string | null;
+          created_at?:              string;
+          updated_at?:              string;
+        };
+        Relationships: [];
+      };
+
       white_sheet_lifecycle_events: {
         Row: {
           id:                      string;
@@ -1512,6 +1594,14 @@ export interface Database {
       };
     };
     Functions: {
+      claim_manual_white_sheet_session_close: {
+        Args: { p_source_id: string; p_lease_seconds?: number };
+        Returns: {
+          claimed: boolean;
+          reason: "not_found" | "closing_in_progress" | null;
+          session: Database["public"]["Tables"]["manual_white_sheet_sessions"]["Row"] | null;
+        };
+      };
       attach_evidence_to_slip_batch: {
         Args: { p_batch_id: string; p_evidence_id: string };
         Returns: number;
@@ -1792,6 +1882,7 @@ export type RawMessageRow      = Database["public"]["Tables"]["raw_messages"]["R
 export type ParseErrorRow      = Database["public"]["Tables"]["parse_errors"]["Row"];
 export type ProduceSessionRow  = Database["public"]["Tables"]["produce_sessions"]["Row"];
 export type ProduceItemRow     = Database["public"]["Tables"]["produce_items"]["Row"];
+export type ManualWhiteSheetSessionRow = Database["public"]["Tables"]["manual_white_sheet_sessions"]["Row"];
 export type DailySummaryRow      = Database["public"]["Tables"]["daily_summaries"]["Row"];
 export type ImportedSessionRow   = Database["public"]["Tables"]["imported_sessions"]["Row"];
 export type SlipEvidenceRow              = Database["public"]["Tables"]["slip_evidences"]["Row"];

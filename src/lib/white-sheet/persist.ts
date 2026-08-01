@@ -9,10 +9,28 @@ const TABLE = "digital_white_sheet_cash_entries" as const;
 const OTHER_NOTE_MAX_LENGTH = 1000;
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
+/**
+ * Stable classification for callers that need to branch on *why* a
+ * persistence call failed without string-matching `error.message`.
+ * - validation: bad caller input (identity/money/note), never reached the DB.
+ * - finalized: the row is FINALIZED and permanently blocks normal upsert.
+ * - stale_conflict: an optimistic-concurrency write lost to a concurrent
+ *   canonical update (see saveWhiteSheetCashEntry's `expectedUpdatedAt`).
+ * - infra: DB/query error, safe to retry.
+ */
+export type WhiteSheetPersistenceErrorCode =
+  | "validation"
+  | "finalized"
+  | "stale_conflict"
+  | "infra";
+
 export class WhiteSheetPersistenceError extends Error {
-  constructor(message: string) {
+  readonly code: WhiteSheetPersistenceErrorCode;
+
+  constructor(message: string, code: WhiteSheetPersistenceErrorCode = "infra") {
     super(message);
     this.name = "WhiteSheetPersistenceError";
+    this.code = code;
   }
 }
 
@@ -67,7 +85,7 @@ export interface WhiteSheetCashEntryInput extends WhiteSheetCashEntryIdentity {
 function requireIdentityField(value: string, field: string): string {
   const normalized = value.normalize("NFC").trim();
   if (!normalized) {
-    throw new WhiteSheetPersistenceError(`${field} must not be empty`);
+    throw new WhiteSheetPersistenceError(`${field} must not be empty`, "validation");
   }
   return normalized;
 }
@@ -75,7 +93,7 @@ function requireIdentityField(value: string, field: string): string {
 function requireBusinessDate(value: string): string {
   const trimmed = value.trim();
   if (!ISO_DATE_PATTERN.test(trimmed)) {
-    throw new WhiteSheetPersistenceError("businessDate must be an ISO date (YYYY-MM-DD)");
+    throw new WhiteSheetPersistenceError("businessDate must be an ISO date (YYYY-MM-DD)", "validation");
   }
   // Reject calendar-invalid dates like 2026-02-30 that still match the pattern.
   const [year, month, day] = trimmed.split("-").map(Number);
@@ -85,7 +103,7 @@ function requireBusinessDate(value: string): string {
     date.getUTCMonth() === month - 1 &&
     date.getUTCDate() === day;
   if (!roundTrips) {
-    throw new WhiteSheetPersistenceError(`businessDate is not a valid calendar date: ${trimmed}`);
+    throw new WhiteSheetPersistenceError(`businessDate is not a valid calendar date: ${trimmed}`, "validation");
   }
   return trimmed;
 }
@@ -101,6 +119,7 @@ function requireMoney(value: number, field: string): number {
   if (!isValidMoney(value)) {
     throw new WhiteSheetPersistenceError(
       `${field} must be a finite non-negative number with at most 2 decimal places`,
+      "validation",
     );
   }
   // Normalize -0 and float noise (e.g. 19.999999999999996) to a clean cent value.
@@ -112,6 +131,7 @@ function requireOtherNote(value: string | null | undefined): string | null {
   if (value.length > OTHER_NOTE_MAX_LENGTH) {
     throw new WhiteSheetPersistenceError(
       `otherNote must be at most ${OTHER_NOTE_MAX_LENGTH} characters`,
+      "validation",
     );
   }
   const trimmed = value.trim();
@@ -176,7 +196,7 @@ export async function loadWhiteSheetCashEntry(
     .maybeSingle();
 
   if (error) {
-    throw new WhiteSheetPersistenceError(`white sheet cash entry query failed: ${error.message}`);
+    throw new WhiteSheetPersistenceError(`white sheet cash entry query failed: ${error.message}`, "infra");
   }
   if (!data) return { status: "not_submitted" };
 
@@ -186,14 +206,24 @@ export async function loadWhiteSheetCashEntry(
 /**
  * Validates and upserts one White Sheet cash/expense entry, keyed on
  * (source_id, market_label_normalized, business_date). Last-write-wins for a
- * SUBMITTED entry — no audit history for ordinary corrections in Local MVP
- * (see task scope: deferred). BR-06: rejects the write outright if the
- * existing entry is FINALIZED — normal operator submission can never alter
- * finalized financial inputs; only an explicit privileged reopen can.
+ * SUBMITTED entry by default — no audit history for ordinary corrections in
+ * Local MVP (see task scope: deferred). BR-06: rejects the write outright if
+ * the existing entry is FINALIZED — normal operator submission can never
+ * alter finalized financial inputs; only an explicit privileged reopen can.
+ *
+ * `opts.expectedUpdatedAt`, when supplied, turns the update into an
+ * optimistic-concurrency write: the UPDATE only matches a row whose
+ * `updated_at` is still exactly that value. If the canonical entry changed
+ * between the caller's read and this write (e.g. Backoffice edited it in
+ * between), the write matches nothing and this throws a `stale_conflict`
+ * error instead of silently overwriting — the caller reloads and retries.
+ * Existing callers that omit it keep the prior non-conflict-checked
+ * behavior unchanged.
  */
 export async function saveWhiteSheetCashEntry(
   supabase: Supabase,
   rawInput: WhiteSheetCashEntryInput,
+  opts?: { expectedUpdatedAt?: string },
 ): Promise<WhiteSheetCashEntryState> {
   const sourceId = requireIdentityField(rawInput.sourceId, "sourceId");
   const marketLabelNormalized = requireIdentityField(
@@ -219,7 +249,10 @@ export async function saveWhiteSheetCashEntry(
     .maybeSingle();
 
   if (existingError) {
-    throw new WhiteSheetPersistenceError(`white sheet cash entry query failed: ${existingError.message}`);
+    throw new WhiteSheetPersistenceError(
+      `white sheet cash entry query failed: ${existingError.message}`,
+      "infra",
+    );
   }
 
   const SELECT_COLUMNS =
@@ -238,21 +271,39 @@ export async function saveWhiteSheetCashEntry(
   if (existing) {
     // Atomic guard: the UPDATE only matches while finalized_at is still NULL
     // at write time, so a finalize racing with a resubmission cannot both
-    // succeed — one of them loses.
-    const { data, error } = await supabase
-      .from(TABLE)
-      .update(writeValues)
-      .eq("id", existing.id)
-      .is("finalized_at", null)
-      .select(SELECT_COLUMNS)
-      .maybeSingle();
+    // succeed — one of them loses. When expectedUpdatedAt is supplied, the
+    // UPDATE additionally only matches the exact row version the caller read.
+    const base = supabase.from(TABLE).update(writeValues).eq("id", existing.id).is("finalized_at", null);
+    const query =
+      opts?.expectedUpdatedAt !== undefined ? base.eq("updated_at", opts.expectedUpdatedAt) : base;
+    const { data, error } = await query.select(SELECT_COLUMNS).maybeSingle();
 
     if (error) {
-      throw new WhiteSheetPersistenceError(`white sheet cash entry save failed: ${error.message}`);
+      throw new WhiteSheetPersistenceError(`white sheet cash entry save failed: ${error.message}`, "infra");
     }
     if (!data) {
+      // Disambiguate why the guarded UPDATE matched nothing: finalized (BR-06
+      // hard lock) vs. a concurrent canonical update since expectedUpdatedAt.
+      const { data: current } = await supabase
+        .from(TABLE)
+        .select("finalized_at")
+        .eq("id", existing.id)
+        .maybeSingle();
+      if (current?.finalized_at) {
+        throw new WhiteSheetPersistenceError(
+          "this White Sheet entry is finalized and cannot be changed through normal submission — an admin must reopen it first",
+          "finalized",
+        );
+      }
+      if (opts?.expectedUpdatedAt !== undefined) {
+        throw new WhiteSheetPersistenceError(
+          "this White Sheet entry was changed since it was last loaded — reload and retry",
+          "stale_conflict",
+        );
+      }
       throw new WhiteSheetPersistenceError(
         "this White Sheet entry is finalized and cannot be changed through normal submission — an admin must reopen it first",
+        "finalized",
       );
     }
     return toEntryState(data as CashEntryRow);
@@ -270,7 +321,7 @@ export async function saveWhiteSheetCashEntry(
     .single();
 
   if (error) {
-    throw new WhiteSheetPersistenceError(`white sheet cash entry save failed: ${error.message}`);
+    throw new WhiteSheetPersistenceError(`white sheet cash entry save failed: ${error.message}`, "infra");
   }
   return toEntryState(data as CashEntryRow);
 }
@@ -303,12 +354,13 @@ export async function finalizeWhiteSheetCashEntry(
   });
 
   if (error) {
-    throw new WhiteSheetPersistenceError(`finalize failed: ${error.message}`);
+    throw new WhiteSheetPersistenceError(`finalize failed: ${error.message}`, "infra");
   }
   const row = (Array.isArray(data) ? data[0] : data) as CashEntryRow | null;
   if (!row) {
     throw new WhiteSheetPersistenceError(
       "no SUBMITTED White Sheet entry found for this identity, or it is already finalized",
+      "validation",
     );
   }
 
@@ -337,7 +389,7 @@ export async function reopenWhiteSheetCashEntry(
   const actorId = requireIdentityField(actor, "actor");
   const trimmedReason = reason.trim();
   if (!trimmedReason) {
-    throw new WhiteSheetPersistenceError("reason is required to reopen a finalized entry");
+    throw new WhiteSheetPersistenceError("reason is required to reopen a finalized entry", "validation");
   }
 
   const { data, error } = await supabase.rpc("reopen_white_sheet_cash_entry", {
@@ -349,11 +401,14 @@ export async function reopenWhiteSheetCashEntry(
   });
 
   if (error) {
-    throw new WhiteSheetPersistenceError(`reopen failed: ${error.message}`);
+    throw new WhiteSheetPersistenceError(`reopen failed: ${error.message}`, "infra");
   }
   const row = (Array.isArray(data) ? data[0] : data) as CashEntryRow | null;
   if (!row) {
-    throw new WhiteSheetPersistenceError("no FINALIZED White Sheet entry found for this identity");
+    throw new WhiteSheetPersistenceError(
+      "no FINALIZED White Sheet entry found for this identity",
+      "validation",
+    );
   }
 
   return toEntryState(row);

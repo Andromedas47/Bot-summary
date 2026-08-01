@@ -84,6 +84,21 @@ import {
 } from "@/lib/slips/slip-session-service";
 import { parseWhiteSheetCloseCommandFromMessage } from "@/lib/line/white-sheet-close-command";
 import { processWhiteSheetCloseCommand } from "@/lib/line/white-sheet-close-service";
+import {
+  formatWhiteSheetSessionFieldsSummary,
+  isWhiteSheetSessionCancelCommand,
+  isWhiteSheetSessionCloseCommand,
+  parseWhiteSheetSessionFieldLines,
+  parseWhiteSheetSessionOpener,
+  SESSION_CANCEL_TEXT,
+  SESSION_CLOSE_TEXT,
+} from "@/lib/line/white-sheet-session-command";
+import {
+  buildWhiteSheetCloseCommandFromSession,
+  WhiteSheetSessionService,
+  type WhiteSheetSessionRow,
+} from "@/lib/line/white-sheet-session-service";
+import { listKnownProduceMarketLabels } from "@/lib/white-sheet";
 import { isPhysicalInventoryLineGroupAllowed } from "@/lib/physical-inventory/config";
 import {
   classifyPhysicalInventoryStandaloneIntent,
@@ -519,9 +534,28 @@ export class WebhookService {
     );
     if (physicalInventoryResult !== null) return physicalInventoryResult;
 
+    // ── 3.1a. Manual White Sheet LINE session — opener / closer / cancel ─────
+    // Required precedence: opener, then closer/cancel, ahead of every other
+    // flow below. None of its literal triggers ("ส่งใบขาวมือ", "จบใบขาวมือ",
+    // "ยกเลิกใบขาวมือ") collide with the existing "ปิดยอด" / "ส่งสลิปมือ" /
+    // "จบสลิปมือ" vocabulary, so this is safe ahead of every existing command.
+    const sessionOpener = parseWhiteSheetSessionOpener(text);
+    if (sessionOpener.kind !== "not_command") {
+      return this.processWhiteSheetSessionOpen(msgEvent, sessionOpener, eventId, event.type, log);
+    }
+    if (isWhiteSheetSessionCloseCommand(text)) {
+      return this.processWhiteSheetSessionClose(msgEvent, eventId, event.type, log);
+    }
+    if (isWhiteSheetSessionCancelCommand(text)) {
+      return this.processWhiteSheetSessionCancel(msgEvent, eventId, event.type, log);
+    }
+
     // ── 3.2. White Sheet close command (high-level control; before session appenders)
     // Must take priority over pending produce append, manual-slip amounts, and
     // weigh/return item text so a full closing message is never misrouted.
+    // Must also take priority over the new session's field-line matcher below:
+    // both share the same field vocabulary (ค่าแรง/เงินสด/…), and only this
+    // parser recognizes its own header + "จบปิดยอด" markers.
     const closeParse = parseWhiteSheetCloseCommandFromMessage(text);
     if (closeParse.kind !== "not_command") {
       return this.processWhiteSheetClose(
@@ -532,6 +566,31 @@ export class WebhookService {
         event.type,
         log,
       );
+    }
+
+    // ── 3.2a. Manual White Sheet LINE session — recognized field messages ────
+    // Runs after the old close command so a full "<market> ปิดยอด <date> /
+    // fields / จบปิดยอด" message is never misclaimed by this looser matcher.
+    // Text is classified as a field candidate first (pure, no DB); only then
+    // do we spend one query checking for an open session — so ordinary/legacy
+    // traffic with no White Sheet field lines never touches this table, and a
+    // field-shaped message with no open session falls through unclaimed
+    // instead of being swallowed with "ยังไม่ได้เปิดใบขาวมือ".
+    const sessionFields = parseWhiteSheetSessionFieldLines(text);
+    if (sessionFields.kind !== "none") {
+      const sessionSvc = new WhiteSheetSessionService(this.supabase);
+      const openSession = await sessionSvc.findOpenSession(sourceId);
+      if (openSession && openSession.status === "open") {
+        return this.processWhiteSheetSessionField(
+          msgEvent,
+          sessionFields,
+          openSession,
+          eventId,
+          event.type,
+          log,
+        );
+      }
+      // No open session — not this feature's message. Fall through unchanged.
     }
 
     // ── 3.3. Manual slip session commands ────────────────────────────────────
@@ -1475,6 +1534,363 @@ export class WebhookService {
         } catch { /* ignore reply error */ }
       }
       return { eventId, eventType, status: "error", parsed: false, error: errorMessage };
+    }
+  }
+
+  // ── Manual White Sheet LINE session (open → fields → close/cancel) ────────
+
+  private async processWhiteSheetSessionOpen(
+    event: LineMessageEvent,
+    parseResult: Exclude<ReturnType<typeof parseWhiteSheetSessionOpener>, { kind: "not_command" }>,
+    eventId: string,
+    eventType: string,
+    log: ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const replyToken = event.replyToken;
+    const sourceId = getSourceId(event.source);
+    const lineUserId = getUserId(event.source);
+
+    if (parseResult.kind === "invalid") {
+      if (replyToken) await this.replyMessage(replyToken, parseResult.message);
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+
+    const { opener } = parseResult;
+    log.info("white sheet session open command", {
+      sourceId,
+      market: opener.marketLabelNormalized,
+      businessDate: opener.businessDate,
+    });
+
+    const replyForBlocked = async (
+      kind: Exclude<
+        Awaited<ReturnType<WhiteSheetSessionService["previewOpen"]>>["kind"],
+        "fresh"
+      >,
+      session: WhiteSheetSessionRow,
+    ) => {
+      if (!replyToken) return;
+      if (kind === "resumed") {
+        await this.replyMessage(
+          replyToken,
+          [
+            `ใบขาวมือของ ${session.market_label} วันที่ ${session.business_date_display} เปิดอยู่แล้ว`,
+            "",
+            formatWhiteSheetSessionFieldsSummary(session),
+            "",
+            `พิมพ์ "${SESSION_CLOSE_TEXT}" เมื่อกรอกครบ`,
+          ].join("\n"),
+        );
+      } else if (kind === "other_open" || kind === "closing_in_progress") {
+        await this.replyMessage(
+          replyToken,
+          [
+            `ยังมีใบขาวมือของ ${session.market_label} วันที่ ${session.business_date_display} ที่ยังไม่จบ`,
+            `กรุณาพิมพ์ "${SESSION_CLOSE_TEXT}" หรือ "${SESSION_CANCEL_TEXT}" ก่อนเปิดตลาดใหม่`,
+          ].join("\n"),
+        );
+      } else {
+        // kind === "finalized_locked"
+        await this.replyMessage(
+          replyToken,
+          [
+            `ใบขาวมือของ ${session.market_label} วันที่ ${session.business_date_display} ถูกยืนยันแล้ว (FINALIZED)`,
+            "ไม่สามารถแก้ไขผ่าน LINE ได้ หากต้องการแก้ไข กรุณาติดต่อผู้ดูแลระบบ",
+          ].join("\n"),
+        );
+      }
+    };
+
+    try {
+      const svc = new WhiteSheetSessionService(this.supabase);
+
+      // Session-identity conflicts (resume / other-market-open / closed) are
+      // checked before spending a produce-market lookup — they don't depend
+      // on today's produce data at all.
+      const preview = await svc.previewOpen(
+        sourceId,
+        opener.marketLabelNormalized,
+        opener.businessDate,
+      );
+      if (preview.kind !== "fresh") {
+        await replyForBlocked(preview.kind, preview.session);
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      const knownMarkets = await listKnownProduceMarketLabels(
+        this.supabase,
+        sourceId,
+        opener.businessDate,
+      );
+      if (!knownMarkets.includes(opener.marketLabelNormalized)) {
+        const hint =
+          knownMarkets.length > 0
+            ? `ตลาดที่มีข้อมูลวันนี้:\n${knownMarkets.map((m) => `- ${m}`).join("\n")}`
+            : "ยังไม่พบรายการเบิก/คืนของวันนี้สำหรับแหล่งนี้";
+        if (replyToken) {
+          await this.replyMessage(
+            replyToken,
+            [
+              `ไม่พบตลาด "${opener.marketLabel}" ในข้อมูลวันนี้`,
+              "กรุณาใช้ชื่อตลาดให้ตรงกับรายการเบิก/คืน (ไม่มีการเดาชื่อ)",
+              hint,
+            ].join("\n"),
+          );
+        }
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      const result = await svc.openSession({
+        sourceId,
+        marketLabel: opener.marketLabel,
+        marketLabelNormalized: opener.marketLabelNormalized,
+        businessDate: opener.businessDate,
+        businessDateDisplay: opener.businessDateDisplay,
+        lineUserId,
+        lineEventId: eventId,
+      });
+
+      if (result.opened) {
+        if (replyToken) {
+          const hasSeededValues = result.session.actual_cash_submitted !== null;
+          await this.replyMessage(
+            replyToken,
+            [
+              hasSeededValues ? "เปิดใบขาวมือสำหรับแก้ไขแล้ว ✅" : "เปิดรับใบขาวมือแล้ว ✅",
+              "",
+              `ตลาด: ${opener.marketLabel}`,
+              `วันที่: ${opener.businessDateDisplay}`,
+              ...(hasSeededValues
+                ? ["", "ค่าที่บันทึกไว้ก่อนหน้า:", formatWhiteSheetSessionFieldsSummary(result.session)]
+                : []),
+              "",
+              "ส่งค่าใช้จ่ายและเงินสดได้เลย",
+              `พิมพ์ "${SESSION_CLOSE_TEXT}" เมื่อกรอกครบ`,
+            ].join("\n"),
+          );
+        }
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      // Lost a rare concurrent-open race after the preview — resolve the same way.
+      await replyForBlocked(result.reason, result.session);
+      return { eventId, eventType, status: "saved", parsed: false };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("white sheet session open failed", { error: errorMessage });
+      if (replyToken) {
+        try {
+          await this.replyMessage(replyToken, "เปิดใบขาวมือไม่สำเร็จ กรุณาลองอีกครั้ง");
+        } catch { /* ignore reply error */ }
+      }
+      return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
+    }
+  }
+
+  private async processWhiteSheetSessionField(
+    event: LineMessageEvent,
+    parseResult: Exclude<ReturnType<typeof parseWhiteSheetSessionFieldLines>, { kind: "none" }>,
+    open: WhiteSheetSessionRow,
+    eventId: string,
+    eventType: string,
+    log: ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const replyToken = event.replyToken;
+    const sourceId = getSourceId(event.source);
+
+    if (parseResult.kind === "invalid") {
+      if (replyToken) await this.replyMessage(replyToken, parseResult.message);
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
+
+    try {
+      const svc = new WhiteSheetSessionService(this.supabase);
+      const updated = await svc.applyFields(open, parseResult.fields);
+      const session = updated ?? open;
+      log.info("white sheet session field applied", { sourceId, sessionId: session.id });
+
+      if (replyToken) {
+        await this.replyMessage(
+          replyToken,
+          [
+            "รับข้อมูลใบขาวมือแล้ว ✅",
+            "",
+            formatWhiteSheetSessionFieldsSummary(session),
+            "",
+            `พิมพ์ "${SESSION_CLOSE_TEXT}" เมื่อกรอกครบ`,
+          ].join("\n"),
+        );
+      }
+      return { eventId, eventType, status: "saved", parsed: false };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("white sheet session field failed", { error: errorMessage });
+      if (replyToken) {
+        try {
+          await this.replyMessage(replyToken, "บันทึกข้อมูลใบขาวมือไม่สำเร็จ กรุณาลองอีกครั้ง");
+        } catch { /* ignore reply error */ }
+      }
+      return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
+    }
+  }
+
+  private async processWhiteSheetSessionClose(
+    event: LineMessageEvent,
+    eventId: string,
+    eventType: string,
+    log: ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const replyToken = event.replyToken;
+    const sourceId = getSourceId(event.source);
+    const lineUserId = getUserId(event.source);
+
+    try {
+      const svc = new WhiteSheetSessionService(this.supabase);
+      const claim = await svc.claimForClose(sourceId);
+
+      if (!claim.claimed) {
+        if (claim.reason === "not_found") {
+          if (replyToken) {
+            await this.replyMessage(replyToken, "ไม่มีใบขาวมือที่เปิดอยู่ ไม่มีอะไรให้จบ");
+          }
+        } else if (claim.reason === "closing_in_progress") {
+          if (replyToken) await this.replyMessage(replyToken, "กำลังปิดใบขาวมืออยู่ กรุณารอสักครู่");
+        } else if (claim.reason === "cancelled") {
+          if (replyToken) await this.replyMessage(replyToken, "ใบขาวมือนี้ถูกยกเลิกไปแล้ว");
+        } else {
+          // already_closed — deterministic idempotent reply, no re-submission.
+          if (replyToken) await this.replyMessage(replyToken, "ใบขาวมือนี้จบไปแล้ว ✅");
+        }
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+
+      const { session } = claim;
+      const command = buildWhiteSheetCloseCommandFromSession(session);
+
+      // Everything from here on has claimed the session ("closing"). Any
+      // unexpected throw below must still return it to "open" — never leave
+      // it stuck in "closing" — because saveWhiteSheetCashEntry is an
+      // identity-keyed upsert: retrying "จบใบขาวมือ" after a reopen safely
+      // resubmits the same values (no duplicate row) rather than double-saving.
+      try {
+        const outcome = await processWhiteSheetCloseCommand(this.supabase, {
+          sourceId,
+          command,
+          optimisticConcurrency: true,
+        });
+
+        if (outcome.persisted) {
+          try {
+            await svc.finalizeClosed(session.id, { lineUserId, lineEventId: eventId });
+          } catch (finalizeErr) {
+            log.error("white sheet session finalize failed after persistence", {
+              error: finalizeErr instanceof Error ? finalizeErr.message : String(finalizeErr),
+            });
+            await svc.revertToOpen(session.id);
+            if (replyToken) {
+              try {
+                await this.replyMessage(
+                  replyToken,
+                  'บันทึกใบขาวมือสำเร็จแล้ว แต่ปิดสถานะไม่สำเร็จ กรุณาพิมพ์ "จบใบขาวมือ" อีกครั้ง',
+                );
+              } catch { /* reply failure does not change the DB outcome above */ }
+            }
+            return { eventId, eventType, status: "saved", parsed: true };
+          }
+          // Persistence AND finalize both committed. A reply failure past
+          // this point must never be reported as if the close itself failed
+          // — the transaction already succeeded, and a retry would find an
+          // already-closed session and get the deterministic idempotent
+          // "จบไปแล้ว" reply, not a duplicate write.
+          if (replyToken) {
+            try {
+              await this.replyMessages(replyToken, ["จบใบขาวมือแล้ว ✅", ...outcome.replyMessages]);
+            } catch (replyErr) {
+              log.error("white sheet session close reply failed after committed success", {
+                error: replyErr instanceof Error ? replyErr.message : String(replyErr),
+              });
+            }
+          }
+          return { eventId, eventType, status: "saved", parsed: true };
+        }
+
+        if (outcome.reason === "finalized") {
+          // Permanently terminal — this identity can never be resubmitted via LINE.
+          await svc.finalizeClosed(session.id, { lineUserId, lineEventId: eventId });
+        } else {
+          // Retryable failure (unknown market, save/reload error) — stay correctable.
+          await svc.revertToOpen(session.id);
+        }
+        if (replyToken) await this.replyMessages(replyToken, outcome.replyMessages);
+        return { eventId, eventType, status: "saved", parsed: false };
+      } catch (closeErr) {
+        log.error("white sheet session close command threw", {
+          error: closeErr instanceof Error ? closeErr.message : String(closeErr),
+        });
+        await svc.revertToOpen(session.id);
+        if (replyToken) {
+          try {
+            await this.replyMessage(
+              replyToken,
+              "บันทึกปิดใบขาวมือไม่สำเร็จ กรุณาลองใหม่อีกครั้ง หรือติดต่อผู้ดูแลระบบ",
+            );
+          } catch { /* ignore reply error */ }
+        }
+        return {
+          eventId,
+          eventType,
+          status: "error",
+          parsed: false,
+          error: closeErr instanceof Error ? closeErr.message : String(closeErr),
+        };
+      }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("white sheet session close failed", { error: errorMessage });
+      if (replyToken) {
+        try {
+          await this.replyMessage(
+            replyToken,
+            "บันทึกปิดใบขาวมือไม่สำเร็จ กรุณาลองใหม่อีกครั้ง หรือติดต่อผู้ดูแลระบบ",
+          );
+        } catch { /* ignore reply error */ }
+      }
+      return { eventId, eventType, status: "error", parsed: false, error: errorMessage };
+    }
+  }
+
+  private async processWhiteSheetSessionCancel(
+    event: LineMessageEvent,
+    eventId: string,
+    eventType: string,
+    log: ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const replyToken = event.replyToken;
+    const sourceId = getSourceId(event.source);
+    const lineUserId = getUserId(event.source);
+
+    try {
+      const svc = new WhiteSheetSessionService(this.supabase);
+      const result = await svc.cancelSession(sourceId, { lineUserId, lineEventId: eventId });
+
+      if (result.cancelled || result.reason === "already_cancelled") {
+        log.info("white sheet session cancelled", { sourceId });
+        if (replyToken) await this.replyMessage(replyToken, "ยกเลิกใบขาวมือแล้ว");
+      } else if (result.reason === "already_closed") {
+        if (replyToken) await this.replyMessage(replyToken, "ใบขาวมือนี้จบไปแล้ว ไม่สามารถยกเลิกได้");
+      } else {
+        if (replyToken) await this.replyMessage(replyToken, "ไม่มีใบขาวมือที่เปิดอยู่ ไม่มีอะไรให้ยกเลิก");
+      }
+      return { eventId, eventType, status: "saved", parsed: false };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("white sheet session cancel failed", { error: errorMessage });
+      if (replyToken) {
+        try {
+          await this.replyMessage(replyToken, "ยกเลิกใบขาวมือไม่สำเร็จ กรุณาลองอีกครั้ง");
+        } catch { /* ignore reply error */ }
+      }
+      return { eventId, eventType, status: "saved", parsed: false, error: errorMessage };
     }
   }
 

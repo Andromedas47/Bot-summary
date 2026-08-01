@@ -4,6 +4,7 @@ import { WebhookService } from "./webhook-service";
 import type { LineMessageEvent } from "./types";
 import type { Database } from "@/types/database";
 import { PRODUCTION_UAT_FIELD_PAYLOAD } from "@/lib/line/fixtures/production-uat-field-payload-5b869e9b";
+import { PRODUCTION_SECOND_UAT_FIELD_PAYLOAD } from "@/lib/line/fixtures/production-uat-field-payload-a0d07d14";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -448,6 +449,42 @@ describe("white sheet note session — fields", () => {
     expect(db._notes[0].other_note).toBe("ค่าน้ำ");
     expect(db._notes[0].actual_cash).toBe(4850);
     expect(replies[1]).toMatch(/บันทึกแล้ว/);
+  });
+
+  it("exact Second UAT payload persists and close summarizes all six values", async () => {
+    const db = makeSupabase();
+    const replies: string[] = [];
+    const svc = makeService(db, replies);
+
+    await svc.processEvents([makeEvent("ตลาดทดสอบอนาคต ส่งใบขาวมือ 31/12/2579", "tok1", "msg1")], "dest");
+    await svc.processEvents([makeEvent(PRODUCTION_SECOND_UAT_FIELD_PAYLOAD, "tok2", "msg2")], "dest");
+    await svc.processEvents([makeEvent("จบใบขาวมือ", "tok3", "msg3")], "dest");
+
+    expect(db._notes[0].business_date).toBe("2036-12-31");
+    expect(db._notes[0].labor).toBe(620);
+    expect(db._notes[0].location_fee).toBe(180);
+    expect(db._notes[0].bag).toBe(90);
+    expect(db._notes[0].snack).toBe(40);
+    expect(db._notes[0].other_amount).toBe(25);
+    expect(db._notes[0].other_note).toBe("ค่าน้ำแข็ง");
+    expect(db._notes[0].actual_cash).toBe(5360);
+    expect(db._notes[0].status).toBe("closed");
+    expect(db._cashEntries).toHaveLength(1);
+    expect(db._cashEntries[0].labor).toBe(620);
+    expect(db._cashEntries[0].location_fee).toBe(180);
+    expect(db._cashEntries[0].bag).toBe(90);
+    expect(db._cashEntries[0].snack).toBe(40);
+    expect(db._cashEntries[0].other).toBe(25);
+    expect(db._cashEntries[0].other_note).toBe("ค่าน้ำแข็ง");
+    expect(db._cashEntries[0].actual_cash_submitted).toBe(5360);
+    expect(replies[1]).toMatch(/บันทึกแล้ว/);
+    expect(replies[2]).toMatch(/จบใบขาวมือแล้ว|บันทึกข้อมูลใบขาวแล้ว/);
+    expect(replies[2]).toMatch(/620/);
+    expect(replies[2]).toMatch(/180/);
+    expect(replies[2]).toMatch(/90/);
+    expect(replies[2]).toMatch(/40/);
+    expect(replies[2]).toMatch(/25/);
+    expect(replies[2]).toMatch(/5,?360|5360/);
   });
 
   it("exact Production UAT three-message flow closes with full canonical values", async () => {

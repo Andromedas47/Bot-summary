@@ -3059,22 +3059,17 @@ export class WebhookService {
         };
       }
       if (this.isMissingOrderingInfrastructure(error)) {
-        // Pre-0060 databases only — permanently fall back for this instance.
+        // Pre-0060 databases / unit doubles only — permanently fall back.
         this.orderedQueueAvailable = false;
-      } else if (this.isOrderingSchemaCacheError(error)) {
-        // Transient discovery failure: do not poison orderedQueueAvailable.
-        // Fall through to direct insert for this request only so LINE traffic
-        // is not dropped while PostgREST cache catches up.
-        logger.error("ordered webhook receive hit schema cache; retrying unordered once", {
-          code: error.code,
-          message: error.message,
-          eventId: event.webhookEventId,
-        });
       } else {
-        logger.error("failed to atomically receive ordered webhook event", {
+        // Schema-cache and other receive failures must surface. Do not poison
+        // orderedQueueAvailable and do not silently take the direct insert path
+        // when ordering infrastructure exists (Second UAT: empty queue).
+        logger.error("ordered webhook receive failed for White Sheet event", {
           code: error.code,
           message: error.message,
           eventId: event.webhookEventId,
+          schemaCache: this.isOrderingSchemaCacheError(error),
         });
         return "error";
       }

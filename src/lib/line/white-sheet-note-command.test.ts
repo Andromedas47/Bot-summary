@@ -11,6 +11,10 @@ import {
   PRODUCTION_UAT_FIELD_PAYLOAD,
   PRODUCTION_UAT_FIELD_PAYLOAD_HEX,
 } from "@/lib/line/fixtures/production-uat-field-payload-5b869e9b";
+import {
+  PRODUCTION_SECOND_UAT_FIELD_PAYLOAD,
+  PRODUCTION_SECOND_UAT_FIELD_PAYLOAD_HEX,
+} from "@/lib/line/fixtures/production-uat-field-payload-a0d07d14";
 
 describe("parseNoteMoneyAmount", () => {
   test("accepts plain integers", () => {
@@ -38,6 +42,10 @@ describe("parseNoteMoneyAmount", () => {
 describe("parseNoteBusinessDate", () => {
   test("converts Buddhist date to ISO", () => {
     expect(parseNoteBusinessDate("01/08/2569")).toBe("2026-08-01");
+  });
+  test("31/12/2579 converts to Gregorian 2036-12-31 (2579 - 543)", () => {
+    // Product contract: Buddhist Era year minus 543. Far-future dates are allowed.
+    expect(parseNoteBusinessDate("31/12/2579")).toBe("2036-12-31");
   });
   test("rejects invalid day", () => {
     expect(parseNoteBusinessDate("32/01/2569")).toBeNull();
@@ -280,17 +288,48 @@ describe("Production UAT field payload 5b869e9b", () => {
 
   test("Unicode-alternation FIELD_LINE_RE form fails closed on empty group (documents SWC risk)", () => {
     // Production used /^(ค่าแรง|…|เงินสด)\s+(.+?)\s*$/ which SWC/Turbopack
-    // can break for Thai alternation at runtime. Prefix matching must remain
-    // the only production path — this asserts the fixture is still field-shaped
-    // even if a naive broken alternation regex returns null.
+    // can break for Thai alternation at runtime. Hex-decoded prefix matching
+    // must remain the only production path.
     const brokenAlternation = /^(ค่าแรง|ค่าที่|ค่าถุง|ค่าขนม|ค่าอื่น|เงินสด)\s+(.+?)\s*$/u;
     const lines = PRODUCTION_UAT_FIELD_PAYLOAD.split("\n");
-    // Bun itself may still match; the regression is the fixture + prefix parser.
-    // Prove prefix parser does not depend on alternation success:
     expect(parseWhiteSheetNoteCommand(PRODUCTION_UAT_FIELD_PAYLOAD).kind).toBe("field");
     expect(lines.every((line) => Object.values(FIELD_LABELS).some(
-      (label) => line === label || line.startsWith(`${label} `),
+      (label) => line.startsWith(`${label} `) || line.startsWith(`${label}\t`),
     ))).toBe(true);
     void brokenAlternation;
+  });
+});
+
+describe("Production Second UAT field payload a0d07d14", () => {
+  test("fixture hex round-trips", () => {
+    expect(Buffer.from(PRODUCTION_SECOND_UAT_FIELD_PAYLOAD_HEX, "hex").toString("utf8"))
+      .toBe(PRODUCTION_SECOND_UAT_FIELD_PAYLOAD);
+  });
+
+  test("exact Production multiline payload parses as six fields", () => {
+    const result = parseWhiteSheetNoteCommand(PRODUCTION_SECOND_UAT_FIELD_PAYLOAD);
+    expect(result).toEqual({
+      kind: "field",
+      fields: [
+        { key: "labor", amount: 620, note: null },
+        { key: "locationFee", amount: 180, note: null },
+        { key: "bag", amount: 90, note: null },
+        { key: "snack", amount: 40, note: null },
+        { key: "other", amount: 25, note: "ค่าน้ำแข็ง" },
+        { key: "actualCash", amount: 5360, note: null },
+      ],
+    });
+    expect(isWhiteSheetNoteFieldShaped(PRODUCTION_SECOND_UAT_FIELD_PAYLOAD)).toBe(true);
+  });
+
+  test("open command 31/12/2579 yields businessDate 2036-12-31", () => {
+    expect(parseWhiteSheetNoteCommand("ตลาดทดสอบอนาคต ส่งใบขาวมือ 31/12/2579")).toEqual({
+      kind: "open",
+      command: {
+        marketLabel: "ตลาดทดสอบอนาคต",
+        marketLabelNormalized: "ตลาดทดสอบอนาคต",
+        businessDate: "2036-12-31",
+      },
+    });
   });
 });

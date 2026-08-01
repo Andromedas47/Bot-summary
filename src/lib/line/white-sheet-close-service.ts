@@ -31,10 +31,25 @@ export const FINALIZED_REPLY = [
   "หากต้องการแก้ไข กรุณาติดต่อผู้ดูแลระบบ",
 ].join("\n");
 
+/**
+ * Typed classification of a close attempt, for callers that need to branch on
+ * *why* without string-matching a LINE reply message.
+ * - success: persisted (trusted summary or a hard-stop reply, both persisted).
+ * - finalized: rejected — the canonical entry is FINALIZED, permanently terminal.
+ * - validation_failure: rejected — bad input (e.g. unknown market). Not persisted.
+ * - retryable_failure: rejected — infra/load/save error. Not persisted, safe to retry.
+ */
+export type WhiteSheetCloseOutcomeReason =
+  | "success"
+  | "finalized"
+  | "validation_failure"
+  | "retryable_failure";
+
 export type WhiteSheetCloseOutcome = {
   replyMessages: string[];
   persisted: boolean;
   trusted: boolean;
+  reason: WhiteSheetCloseOutcomeReason;
 };
 
 function isFinalizedPersistenceError(error: unknown): boolean {
@@ -146,6 +161,7 @@ export async function processWhiteSheetCloseCommand(
       ],
       persisted: false,
       trusted: false,
+      reason: "validation_failure",
     };
   }
 
@@ -164,6 +180,7 @@ export async function processWhiteSheetCloseCommand(
       replyMessages: [GENERIC_SAVE_ERROR],
       persisted: false,
       trusted: false,
+      reason: "retryable_failure",
     };
   }
 
@@ -175,6 +192,7 @@ export async function processWhiteSheetCloseCommand(
       replyMessages: [FINALIZED_REPLY],
       persisted: false,
       trusted: false,
+      reason: "finalized",
     };
   }
 
@@ -189,6 +207,7 @@ export async function processWhiteSheetCloseCommand(
         replyMessages: [FINALIZED_REPLY],
         persisted: false,
         trusted: false,
+        reason: "finalized",
       };
     }
 
@@ -199,6 +218,7 @@ export async function processWhiteSheetCloseCommand(
       replyMessages: [GENERIC_SAVE_ERROR],
       persisted: false,
       trusted: false,
+      reason: "retryable_failure",
     };
   }
 
@@ -223,6 +243,7 @@ export async function processWhiteSheetCloseCommand(
       ],
       persisted: true,
       trusted: false,
+      reason: "success",
     };
   }
 
@@ -232,6 +253,7 @@ export async function processWhiteSheetCloseCommand(
       replyMessages: buildWhiteSheetSummaryMessages(summary),
       persisted: true,
       trusted: true,
+      reason: "success",
     };
   } catch (error) {
     if (error instanceof WhiteSheetHardStopError) {
@@ -240,6 +262,7 @@ export async function processWhiteSheetCloseCommand(
         replyMessages: buildWhiteSheetHardStopReplyMessages(hardStopWarnings),
         persisted: true,
         trusted: false,
+        reason: "success",
       };
     }
     throw error;

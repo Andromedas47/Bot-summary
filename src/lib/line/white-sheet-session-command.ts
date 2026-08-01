@@ -109,19 +109,29 @@ export type WhiteSheetSessionFieldParseResult =
 
 /**
  * Scans every line for recognized field syntax (ค่าแรง / ค่าที่ / ค่าถุง /
- * ค่าขนม / ค่าอื่น / เงินสด). Lines that don't start with a known label are
- * ignored (so an unrelated message returns "none" and falls through to the
- * rest of webhook dispatch — it is never swallowed by an open session).
+ * ค่าขนม / ค่าอื่น / เงินสด). A message with NO recognized field line at all
+ * returns "none" and falls through to the rest of webhook dispatch — it is
+ * never swallowed by an open session.
  *
- * Any recognized-but-invalid line makes the WHOLE message invalid — zero
- * fields are ever applied from a partially-bad message. Within one message,
- * a later line for the same field wins over an earlier one.
+ * Once at least one recognized field line is present, the message is treated
+ * as a White Sheet session message end-to-end: every non-empty line must be a
+ * valid field line, or the WHOLE message is invalid and zero fields are
+ * applied. This fails closed on a mixed message like
+ *   ค่าแรง 500
+ *   จบสลิปมือ
+ * instead of silently applying ค่าแรง and dropping "จบสลิปมือ". Within one
+ * message, a later line for the same field wins over an earlier one.
  */
 export function parseWhiteSheetSessionFieldLines(text: string): WhiteSheetSessionFieldParseResult {
   const lines = text
     .split("\n")
     .map(stripExportPrefix)
     .filter((line) => line.length > 0);
+
+  const hasRecognizedFieldLine = lines.some(
+    (line) => FIELD_LINE_RE.test(line) || FIELD_LABEL_ONLY_RE.test(line),
+  );
+  if (!hasRecognizedFieldLine) return { kind: "none" };
 
   const fields: WhiteSheetSessionFieldSet = {
     labor: undefined,
@@ -131,56 +141,53 @@ export function parseWhiteSheetSessionFieldLines(text: string): WhiteSheetSessio
     other: undefined,
     actualCashSubmitted: undefined,
   };
-  let sawField = false;
 
   for (const line of lines) {
+    if (FIELD_LABEL_ONLY_RE.test(line)) {
+      return { kind: "invalid", message: `ต้องระบุจำนวนเงินที่บรรทัด:\n${line}` };
+    }
+
     const full = FIELD_LINE_RE.exec(line);
-    if (full) {
-      sawField = true;
-      const label = full[1];
-      const rest = full[2];
+    if (!full) {
+      return { kind: "invalid", message: `ไม่รู้จักบรรทัดนี้ในใบขาวมือ:\n${line}` };
+    }
 
-      if (label === FIELD_LABELS.other) {
-        const parsed = parseOtherField(rest);
-        if (parsed === null) {
-          return { kind: "invalid", message: `จำนวนเงินไม่ถูกต้องที่บรรทัด:\n${line}` };
-        }
-        fields.other = parsed;
-        continue;
-      }
+    const label = full[1];
+    const rest = full[2];
 
-      const amount = parseCloseMoneyAmount(rest);
-      if (amount === null) {
+    if (label === FIELD_LABELS.other) {
+      const parsed = parseOtherField(rest);
+      if (parsed === null) {
         return { kind: "invalid", message: `จำนวนเงินไม่ถูกต้องที่บรรทัด:\n${line}` };
       }
-
-      switch (label) {
-        case FIELD_LABELS.labor:
-          fields.labor = amount;
-          break;
-        case FIELD_LABELS.locationFee:
-          fields.locationFee = amount;
-          break;
-        case FIELD_LABELS.bag:
-          fields.bag = amount;
-          break;
-        case FIELD_LABELS.snack:
-          fields.snack = amount;
-          break;
-        case FIELD_LABELS.actualCash:
-          fields.actualCashSubmitted = amount;
-          break;
-      }
+      fields.other = parsed;
       continue;
     }
 
-    if (FIELD_LABEL_ONLY_RE.test(line)) {
-      sawField = true;
-      return { kind: "invalid", message: `ต้องระบุจำนวนเงินที่บรรทัด:\n${line}` };
+    const amount = parseCloseMoneyAmount(rest);
+    if (amount === null) {
+      return { kind: "invalid", message: `จำนวนเงินไม่ถูกต้องที่บรรทัด:\n${line}` };
+    }
+
+    switch (label) {
+      case FIELD_LABELS.labor:
+        fields.labor = amount;
+        break;
+      case FIELD_LABELS.locationFee:
+        fields.locationFee = amount;
+        break;
+      case FIELD_LABELS.bag:
+        fields.bag = amount;
+        break;
+      case FIELD_LABELS.snack:
+        fields.snack = amount;
+        break;
+      case FIELD_LABELS.actualCash:
+        fields.actualCashSubmitted = amount;
+        break;
     }
   }
 
-  if (!sawField) return { kind: "none" };
   return { kind: "ok", fields };
 }
 

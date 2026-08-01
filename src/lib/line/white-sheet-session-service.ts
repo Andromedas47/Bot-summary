@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/database";
 import type { WhiteSheetCloseCommand } from "@/lib/line/white-sheet-close-command";
 import type { WhiteSheetSessionFieldSet } from "@/lib/line/white-sheet-session-command";
+import { loadWhiteSheetCashEntry, type WhiteSheetExpenses } from "@/lib/white-sheet";
 
 type Supabase = SupabaseClient<Database>;
 
@@ -23,14 +24,14 @@ export type WhiteSheetSessionOpenResult =
   | { opened: true; reused: false; session: WhiteSheetSessionRow }
   | { opened: false; reason: "resumed"; session: WhiteSheetSessionRow }
   | { opened: false; reason: "other_open"; session: WhiteSheetSessionRow }
-  | { opened: false; reason: "closed_exists"; session: WhiteSheetSessionRow }
+  | { opened: false; reason: "finalized_locked"; session: WhiteSheetSessionRow }
   | { opened: false; reason: "closing_in_progress"; session: WhiteSheetSessionRow };
 
 export type WhiteSheetSessionOpenPreview =
   | { kind: "fresh" }
   | { kind: "resumed"; session: WhiteSheetSessionRow }
   | { kind: "other_open"; session: WhiteSheetSessionRow }
-  | { kind: "closed_exists"; session: WhiteSheetSessionRow }
+  | { kind: "finalized_locked"; session: WhiteSheetSessionRow }
   | { kind: "closing_in_progress"; session: WhiteSheetSessionRow };
 
 export type WhiteSheetSessionCloseClaim =
@@ -83,8 +84,11 @@ export class WhiteSheetSessionService {
 
   /**
    * Read-only precheck so the caller can skip an expensive produce-market
-   * lookup for every blocked case (resume / other-market-open / closed /
-   * closing) and only spend it on a genuinely fresh open.
+   * lookup for every blocked case (resume / other-market-open / closing /
+   * finalized-locked) and only spend it on a genuinely fresh-or-reopenable
+   * open. A `closed` session is only a hard block when the canonical White
+   * Sheet is FINALIZED — otherwise it is reopenable for correction, same as
+   * `cancelled`, so both fall through to "fresh".
    */
   async previewOpen(
     sourceId: string,
@@ -95,8 +99,18 @@ export class WhiteSheetSessionService {
     if (existing) {
       if (existing.status === "open") return { kind: "resumed", session: existing };
       if (existing.status === "closing") return { kind: "closing_in_progress", session: existing };
-      if (existing.status === "closed") return { kind: "closed_exists", session: existing };
-      // cancelled — falls through to "fresh" (reopen resets entered values).
+      if (existing.status === "closed") {
+        const canonical = await loadWhiteSheetCashEntry(this.supabase, {
+          sourceId,
+          marketLabelNormalized,
+          businessDate,
+        });
+        if (canonical.status === "finalized") {
+          return { kind: "finalized_locked", session: existing };
+        }
+        // submitted or not_submitted — safe to reopen for correction.
+      }
+      // cancelled, or closed-but-not-finalized — falls through to "fresh".
     } else {
       const otherOpen = await this.findOpenSession(sourceId);
       if (otherOpen) {
@@ -129,49 +143,33 @@ export class WhiteSheetSessionService {
       if (existing.status === "closing") {
         return { opened: false, reason: "closing_in_progress", session: existing };
       }
+
       if (existing.status === "closed") {
-        return { opened: false, reason: "closed_exists", session: existing };
+        const canonical = await loadWhiteSheetCashEntry(this.supabase, {
+          sourceId: params.sourceId,
+          marketLabelNormalized: params.marketLabelNormalized,
+          businessDate: params.businessDate,
+        });
+        if (canonical.status === "finalized") {
+          // Locked — this identity can never be reopened via LINE.
+          return { opened: false, reason: "finalized_locked", session: existing };
+        }
+        // SUBMITTED (or a vanished not_submitted row) — reopen for
+        // correction, seeded from the canonical persisted entry so a
+        // correction made through another entry path (e.g. Backoffice)
+        // isn't overwritten by stale session values.
+        return this.reopenExisting(
+          existing,
+          params,
+          canonical.status === "submitted" ? canonical.expenses : null,
+          canonical.status === "submitted" ? canonical.actualCashSubmitted : null,
+        );
       }
+
       // status === "cancelled" — a cancelled session never wrote White Sheet
       // data, so it's safe to hand the operator a fresh session on the same
       // identity instead of forcing a permanently-blocked row.
-      const { data, error } = await this.supabase
-        .from("manual_white_sheet_sessions")
-        .update({
-          status: "open",
-          market_label: params.marketLabel,
-          business_date_display: params.businessDateDisplay,
-          labor: null,
-          location_fee: null,
-          bag: null,
-          snack: null,
-          other_amount: null,
-          other_note: null,
-          actual_cash_submitted: null,
-          opened_by_line_user_id: params.lineUserId,
-          opened_line_event_id: params.lineEventId,
-          opened_at: new Date().toISOString(),
-          closed_by_line_user_id: null,
-          closed_line_event_id: null,
-          closed_at: null,
-        })
-        .eq("id", existing.id)
-        .eq("status", "cancelled")
-        .select()
-        .maybeSingle();
-      if (error) throw new Error(`reopen after cancel failed: ${error.message}`);
-      if (!data) {
-        // Lost the race — someone else reopened/cancelled it first; resolve fresh.
-        const refetched = await this.findSession(
-          params.sourceId,
-          params.marketLabelNormalized,
-          params.businessDate,
-        );
-        if (refetched) return { opened: false, reason: "resumed", session: refetched };
-      }
-      return data
-        ? { opened: true, reused: false, session: data }
-        : { opened: false, reason: "resumed", session: existing };
+      return this.reopenExisting(existing, params, null, null);
     }
 
     const otherOpen = await this.findOpenSession(params.sourceId);
@@ -214,6 +212,66 @@ export class WhiteSheetSessionService {
       }
       throw error;
     }
+  }
+
+  /**
+   * Reopens a `cancelled` or non-finalized `closed` session on the same
+   * identity row (never a new row — the unique identity constraint is
+   * preserved), resetting close metadata and seeding entered values from
+   * `seedExpenses`/`seedCash` (both null for a fresh/cancelled reopen, or the
+   * canonical persisted entry's values for a closed-SUBMITTED correction).
+   */
+  private async reopenExisting(
+    existing: WhiteSheetSessionRow,
+    params: {
+      marketLabel: string;
+      businessDateDisplay: string;
+      lineUserId: string | null;
+      lineEventId: string;
+      sourceId: string;
+      marketLabelNormalized: string;
+      businessDate: string;
+    },
+    seedExpenses: WhiteSheetExpenses | null,
+    seedCash: number | null,
+  ): Promise<WhiteSheetSessionOpenResult> {
+    const { data, error } = await this.supabase
+      .from("manual_white_sheet_sessions")
+      .update({
+        status: "open",
+        market_label: params.marketLabel,
+        business_date_display: params.businessDateDisplay,
+        labor: seedExpenses?.labor ?? null,
+        location_fee: seedExpenses?.locationFee ?? null,
+        bag: seedExpenses?.bag ?? null,
+        snack: seedExpenses?.snack ?? null,
+        other_amount: seedExpenses?.other ?? null,
+        other_note: seedExpenses?.otherNote ?? null,
+        actual_cash_submitted: seedCash,
+        opened_by_line_user_id: params.lineUserId,
+        opened_line_event_id: params.lineEventId,
+        opened_at: new Date().toISOString(),
+        closed_by_line_user_id: null,
+        closed_line_event_id: null,
+        closed_at: null,
+      })
+      .eq("id", existing.id)
+      .in("status", ["cancelled", "closed"])
+      .select()
+      .maybeSingle();
+    if (error) throw new Error(`reopen failed: ${error.message}`);
+    if (!data) {
+      // Lost the race — someone else reopened/claimed it first; resolve deterministically.
+      const refetched = await this.findSession(
+        params.sourceId,
+        params.marketLabelNormalized,
+        params.businessDate,
+      );
+      if (refetched) return { opened: false, reason: "resumed", session: refetched };
+    }
+    return data
+      ? { opened: true, reused: false, session: data }
+      : { opened: false, reason: "resumed", session: existing };
   }
 
   /** Applies only the fields present in this message (others left untouched). */

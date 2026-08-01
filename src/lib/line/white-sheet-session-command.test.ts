@@ -141,11 +141,21 @@ describe("parseWhiteSheetSessionFieldLines", () => {
     expect(result.kind).toBe("invalid");
   });
 
-  it("ignores unrelated lines mixed with a valid field line", () => {
+  it("fails closed on an unrelated line mixed with a valid field line (zero mutation)", () => {
     const result = parseWhiteSheetSessionFieldLines("อรุณสวัสดิ์\nค่าแรง 500");
-    expect(result.kind).toBe("ok");
-    if (result.kind !== "ok") throw new Error("expected ok");
-    expect(result.fields.labor).toBe(500);
+    expect(result.kind).toBe("invalid");
+  });
+
+  it("fails closed on a foreign command mixed with a valid field line, instead of silently applying the field", () => {
+    const result = parseWhiteSheetSessionFieldLines("ค่าแรง 500\nจบสลิปมือ");
+    expect(result.kind).toBe("invalid");
+    if (result.kind !== "invalid") throw new Error("expected invalid");
+    expect(result.message).toContain("จบสลิปมือ");
+  });
+
+  it("a message with no recognized field line at all is not_command-like — falls through as none", () => {
+    const result = parseWhiteSheetSessionFieldLines("สวัสดีตอนเช้าครับ");
+    expect(result.kind).toBe("none");
   });
 });
 

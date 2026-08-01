@@ -33,6 +33,8 @@ function makeDb() {
   const sessions: Row[] = [];
   let sessionSeq = 0;
   const seenLineEventIds = new Set<string>();
+  // Test-only failure injection for the closing-recovery tests.
+  const control = { throwOnFinalize: false, throwOnProduceRange: false };
 
   const produceRows: Row[] = [
     {
@@ -96,17 +98,26 @@ function makeDb() {
       eq(col: string, val: unknown) {
         return sessionUpdateChain(patch, [...filters, { op: "eq", col, val }]);
       },
+      in(col: string, val: unknown[]) {
+        return sessionUpdateChain(patch, [...filters, { op: "in", col, val }]);
+      },
       select() {
         return {
           async maybeSingle() {
             const idx = sessions.findIndex((r) => sessionMatches(r, filters));
             if (idx === -1) return { data: null, error: null };
+            if (patch.status === "closed" && control.throwOnFinalize) {
+              throw new Error("simulated finalizeClosed infra failure");
+            }
             Object.assign(sessions[idx], patch);
             return { data: sessions[idx], error: null };
           },
           async single() {
             const idx = sessions.findIndex((r) => sessionMatches(r, filters));
             if (idx === -1) return { data: null, error: { message: "not found" } };
+            if (patch.status === "closed" && control.throwOnFinalize) {
+              throw new Error("simulated finalizeClosed infra failure");
+            }
             Object.assign(sessions[idx], patch);
             return { data: sessions[idx], error: null };
           },
@@ -202,7 +213,12 @@ function makeDb() {
           eq: () => builder,
           in: () => builder,
           order: () => builder,
-          range: async () => ({ data: produceRows, error: null, count: produceRows.length }),
+          range: async () => {
+            if (control.throwOnProduceRange) {
+              throw new Error("simulated produce lookup infra failure");
+            }
+            return { data: produceRows, error: null, count: produceRows.length };
+          },
         };
         return builder;
       }
@@ -302,6 +318,13 @@ function makeDb() {
     supabase: database as unknown as SupabaseClient<Database>,
     _sessions: sessions,
     _cashEntries: cashEntries,
+    _control: control,
+    _markFinalized(market: string, date: string) {
+      const row = cashEntries.get(cashKey(SOURCE_ID, market, date));
+      if (!row) throw new Error("no cash entry to finalize");
+      row.finalized_at = "2026-08-01T00:00:00Z";
+      row.finalized_by = "admin1";
+    },
   };
 }
 
@@ -462,6 +485,16 @@ describe("Manual White Sheet LINE session — field accumulation", () => {
     expect(db._sessions[0].location_fee).toBeNull();
   });
 
+  it("a recognized field mixed with an unrelated command line fails closed — zero mutation, does not swallow the other command", async () => {
+    const db = makeDb();
+    const replies: string[] = [];
+    const svc = makeService(db, replies);
+    await svc.processEvents([makeEvent(`${MARKET} ส่งใบขาวมือ ${DATE_DISPLAY}`)], "dest");
+    await svc.processEvents([makeEvent("ค่าแรง 500\nจบสลิปมือ")], "dest");
+    expect(db._sessions[0].labor).toBeNull();
+    expect(replies[1]).toContain("จบสลิปมือ");
+  });
+
   it("a field line without an open session gets a clear reply, no crash", async () => {
     const db = makeDb();
     const replies: string[] = [];
@@ -589,6 +622,100 @@ describe("Manual White Sheet LINE session — cancel", () => {
 
     // A cancel with no open session must not touch the already-closed entry.
     await svc.processEvents([makeEvent("ยกเลิกใบขาวมือ")], "dest");
+    expect(db._cashEntries.size).toBe(1);
+  });
+});
+
+describe("Manual White Sheet LINE session — closed session correction", () => {
+  it("reopens a closed SUBMITTED session, seeded from the persisted White Sheet, and a corrected close updates the same row", async () => {
+    const db = makeDb();
+    const replies: string[] = [];
+    const svc = makeService(db, replies);
+
+    await svc.processEvents([makeEvent(`${MARKET} ส่งใบขาวมือ ${DATE_DISPLAY}`)], "dest");
+    await svc.processEvents([makeEvent("ค่าแรง 500\nเงินสด 100")], "dest");
+    await svc.processEvents([makeEvent("จบใบขาวมือ")], "dest");
+    expect(db._sessions[0].status).toBe("closed");
+    expect(db._cashEntries.size).toBe(1);
+
+    // Operator reopens the same identity to correct a mistake.
+    await svc.processEvents([makeEvent(`${MARKET} ส่งใบขาวมือ ${DATE_DISPLAY}`)], "dest");
+    expect(db._sessions).toHaveLength(1); // same identity row, no duplicate
+    expect(db._sessions[0].status).toBe("open");
+    expect(db._sessions[0].labor).toBe(500); // seeded from the persisted entry, not lost
+    expect(replies[3]).toContain("ค่าแรง: 500.00");
+
+    // Correction: change labor, close again.
+    await svc.processEvents([makeEvent("ค่าแรง 700")], "dest");
+    await svc.processEvents([makeEvent("จบใบขาวมือ")], "dest");
+
+    expect(db._sessions[0].status).toBe("closed");
+    expect(db._cashEntries.size).toBe(1); // same row updated, not duplicated
+    const entry = db._cashEntries.get(`${SOURCE_ID}::${MARKET}::${DATE_ISO}`);
+    expect(Number(entry?.labor)).toBe(700);
+  });
+
+  it("blocks reopening when the canonical White Sheet is FINALIZED", async () => {
+    const db = makeDb();
+    const replies: string[] = [];
+    const svc = makeService(db, replies);
+
+    await svc.processEvents([makeEvent(`${MARKET} ส่งใบขาวมือ ${DATE_DISPLAY}`)], "dest");
+    await svc.processEvents([makeEvent("เงินสด 100")], "dest");
+    await svc.processEvents([makeEvent("จบใบขาวมือ")], "dest");
+    db._markFinalized(MARKET, DATE_ISO);
+
+    await svc.processEvents([makeEvent(`${MARKET} ส่งใบขาวมือ ${DATE_DISPLAY}`)], "dest");
+
+    expect(db._sessions).toHaveLength(1);
+    expect(db._sessions[0].status).toBe("closed"); // never reopened
+    expect(replies[3]).toContain("FINALIZED");
+  });
+});
+
+describe("Manual White Sheet LINE session — closing recovery", () => {
+  it("persistence success followed by session-finalization failure: session recovers to open, retry succeeds without duplicating the White Sheet", async () => {
+    const db = makeDb();
+    const replies: string[] = [];
+    const svc = makeService(db, replies);
+
+    await svc.processEvents([makeEvent(`${MARKET} ส่งใบขาวมือ ${DATE_DISPLAY}`)], "dest");
+    await svc.processEvents([makeEvent("เงินสด 100")], "dest");
+
+    db._control.throwOnFinalize = true;
+    await svc.processEvents([makeEvent("จบใบขาวมือ")], "dest");
+
+    // Not stuck in "closing" — reverted to "open" for a safe retry.
+    expect(db._sessions[0].status).toBe("open");
+    expect(db._cashEntries.size).toBe(1); // White Sheet was persisted before finalize failed
+    expect(replies[2]).toContain('พิมพ์ "จบใบขาวมือ" อีกครั้ง');
+
+    db._control.throwOnFinalize = false;
+    await svc.processEvents([makeEvent("จบใบขาวมือ")], "dest");
+
+    expect(db._sessions[0].status).toBe("closed");
+    expect(db._cashEntries.size).toBe(1); // still exactly one row — no duplicate
+  });
+
+  it("an exception thrown from the White Sheet close service reverts the session to open for a safe retry", async () => {
+    const db = makeDb();
+    const replies: string[] = [];
+    const svc = makeService(db, replies);
+
+    await svc.processEvents([makeEvent(`${MARKET} ส่งใบขาวมือ ${DATE_DISPLAY}`)], "dest");
+    await svc.processEvents([makeEvent("เงินสด 100")], "dest");
+
+    db._control.throwOnProduceRange = true;
+    const [res] = await svc.processEvents([makeEvent("จบใบขาวมือ")], "dest");
+
+    expect(res.status).toBe("error");
+    expect(db._sessions[0].status).toBe("open"); // reverted, not stuck in "closing"
+    expect(db._cashEntries.size).toBe(0); // nothing persisted before the throw
+
+    db._control.throwOnProduceRange = false;
+    await svc.processEvents([makeEvent("จบใบขาวมือ")], "dest");
+
+    expect(db._sessions[0].status).toBe("closed");
     expect(db._cashEntries.size).toBe(1);
   });
 });

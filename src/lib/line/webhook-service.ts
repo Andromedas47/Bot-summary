@@ -83,7 +83,7 @@ import {
   type SlipSessionHeader,
 } from "@/lib/slips/slip-session-service";
 import { parseWhiteSheetCloseCommandFromMessage } from "@/lib/line/white-sheet-close-command";
-import { processWhiteSheetCloseCommand, FINALIZED_REPLY as WHITE_SHEET_FINALIZED_REPLY } from "@/lib/line/white-sheet-close-service";
+import { processWhiteSheetCloseCommand } from "@/lib/line/white-sheet-close-service";
 import {
   formatWhiteSheetSessionFieldsSummary,
   isWhiteSheetSessionCancelCommand,
@@ -1573,10 +1573,13 @@ export class WebhookService {
           ].join("\n"),
         );
       } else {
-        // kind === "closed_exists"
+        // kind === "finalized_locked"
         await this.replyMessage(
           replyToken,
-          `มีใบขาวมือของ ${session.market_label} วันที่ ${session.business_date_display} อยู่แล้ว (ปิดแล้ว)`,
+          [
+            `ใบขาวมือของ ${session.market_label} วันที่ ${session.business_date_display} ถูกยืนยันแล้ว (FINALIZED)`,
+            "ไม่สามารถแก้ไขผ่าน LINE ได้ หากต้องการแก้ไข กรุณาติดต่อผู้ดูแลระบบ",
+          ].join("\n"),
         );
       }
     };
@@ -1632,13 +1635,17 @@ export class WebhookService {
 
       if (result.opened) {
         if (replyToken) {
+          const hasSeededValues = result.session.actual_cash_submitted !== null;
           await this.replyMessage(
             replyToken,
             [
-              "เปิดรับใบขาวมือแล้ว ✅",
+              hasSeededValues ? "เปิดใบขาวมือสำหรับแก้ไขแล้ว ✅" : "เปิดรับใบขาวมือแล้ว ✅",
               "",
               `ตลาด: ${opener.marketLabel}`,
               `วันที่: ${opener.businessDateDisplay}`,
+              ...(hasSeededValues
+                ? ["", "ค่าที่บันทึกไว้ก่อนหน้า:", formatWhiteSheetSessionFieldsSummary(result.session)]
+                : []),
               "",
               "ส่งค่าใช้จ่ายและเงินสดได้เลย",
               `พิมพ์ "${SESSION_CLOSE_TEXT}" เมื่อกรอกครบ`,
@@ -1763,25 +1770,66 @@ export class WebhookService {
         return { eventId, eventType, status: "saved", parsed: false };
       }
 
-      const outcome = await processWhiteSheetCloseCommand(this.supabase, { sourceId, command });
+      // Everything from here on has claimed the session ("closing"). Any
+      // unexpected throw below must still return it to "open" — never leave
+      // it stuck in "closing" — because saveWhiteSheetCashEntry is an
+      // identity-keyed upsert: retrying "จบใบขาวมือ" after a reopen safely
+      // resubmits the same values (no duplicate row) rather than double-saving.
+      try {
+        const outcome = await processWhiteSheetCloseCommand(this.supabase, { sourceId, command });
 
-      if (outcome.persisted) {
-        await svc.finalizeClosed(session.id, { lineUserId, lineEventId: eventId });
-        if (replyToken) {
-          await this.replyMessages(replyToken, ["จบใบขาวมือแล้ว ✅", ...outcome.replyMessages]);
+        if (outcome.persisted) {
+          try {
+            await svc.finalizeClosed(session.id, { lineUserId, lineEventId: eventId });
+          } catch (finalizeErr) {
+            log.error("white sheet session finalize failed after persistence", {
+              error: finalizeErr instanceof Error ? finalizeErr.message : String(finalizeErr),
+            });
+            await svc.revertToOpen(session.id);
+            if (replyToken) {
+              await this.replyMessage(
+                replyToken,
+                'บันทึกใบขาวมือสำเร็จแล้ว แต่ปิดสถานะไม่สำเร็จ กรุณาพิมพ์ "จบใบขาวมือ" อีกครั้ง',
+              );
+            }
+            return { eventId, eventType, status: "saved", parsed: true };
+          }
+          if (replyToken) {
+            await this.replyMessages(replyToken, ["จบใบขาวมือแล้ว ✅", ...outcome.replyMessages]);
+          }
+          return { eventId, eventType, status: "saved", parsed: true };
         }
-        return { eventId, eventType, status: "saved", parsed: true };
-      }
 
-      if (outcome.replyMessages[0] === WHITE_SHEET_FINALIZED_REPLY) {
-        // Permanently terminal — this identity can never be resubmitted via LINE.
-        await svc.finalizeClosed(session.id, { lineUserId, lineEventId: eventId });
-      } else {
-        // Retryable failure (unknown market, save/reload error) — stay correctable.
+        if (outcome.reason === "finalized") {
+          // Permanently terminal — this identity can never be resubmitted via LINE.
+          await svc.finalizeClosed(session.id, { lineUserId, lineEventId: eventId });
+        } else {
+          // Retryable failure (unknown market, save/reload error) — stay correctable.
+          await svc.revertToOpen(session.id);
+        }
+        if (replyToken) await this.replyMessages(replyToken, outcome.replyMessages);
+        return { eventId, eventType, status: "saved", parsed: false };
+      } catch (closeErr) {
+        log.error("white sheet session close command threw", {
+          error: closeErr instanceof Error ? closeErr.message : String(closeErr),
+        });
         await svc.revertToOpen(session.id);
+        if (replyToken) {
+          try {
+            await this.replyMessage(
+              replyToken,
+              "บันทึกปิดใบขาวมือไม่สำเร็จ กรุณาลองใหม่อีกครั้ง หรือติดต่อผู้ดูแลระบบ",
+            );
+          } catch { /* ignore reply error */ }
+        }
+        return {
+          eventId,
+          eventType,
+          status: "error",
+          parsed: false,
+          error: closeErr instanceof Error ? closeErr.message : String(closeErr),
+        };
       }
-      if (replyToken) await this.replyMessages(replyToken, outcome.replyMessages);
-      return { eventId, eventType, status: "saved", parsed: false };
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       log.error("white sheet session close failed", { error: errorMessage });

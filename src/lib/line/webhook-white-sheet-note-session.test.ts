@@ -19,67 +19,30 @@ function makeEvent(text: string, replyToken = "tok1", messageId = "msg1"): LineM
 
 type Row = Record<string, unknown>;
 
+// rpc("close_manual_white_sheet_note_session", ...) mirrors the plpgsql RPC's
+// outcome logic against the in-memory notes/cashEntries arrays. The real
+// transactional/locking behavior is proven separately in the real-PostgreSQL
+// test (migration-0059.pg.test.ts) — this stub only proves the TS wiring.
 function makeSupabase(seedCashEntries: Row[] = []) {
   const notes: Row[] = [];
   const cashEntries: Row[] = [...seedCashEntries];
   const rawEventIds = new Set<string>();
   let idSeq = 0;
-
-  // Mirrors the exact query chains used by src/lib/white-sheet/persist.ts.
-  function cashEntryStub() {
-    function filterChain(filtered: Row[]) {
-      return {
-        eq(col: string, val: unknown) { return filterChain(filtered.filter((r) => r[col] === val)); },
-        async maybeSingle() { return { data: filtered[0] ?? null, error: null }; },
-      };
-    }
-    return {
-      select(_cols = "*") { return filterChain(cashEntries); },
-      insert(payload: Row) {
-        return {
-          select(_cols = "*") {
-            return {
-              async single() {
-                const row: Row = { id: `cash-${++idSeq}`, finalized_at: null, finalized_by: null, ...payload };
-                cashEntries.push(row);
-                return { data: row, error: null };
-              },
-            };
-          },
-        };
-      },
-      update(patch: Row) {
-        return {
-          eq(col: string, val: unknown) {
-            return {
-              is(col2: string, val2: unknown) {
-                const matched = cashEntries.filter(
-                  (r) => r[col] === val && (val2 === null ? r[col2] === null : r[col2] === val2),
-                );
-                return {
-                  select(_cols = "*") {
-                    return {
-                      async maybeSingle() {
-                        if (matched.length === 0) return { data: null, error: null };
-                        Object.assign(matched[0], patch);
-                        return { data: matched[0], error: null };
-                      },
-                    };
-                  },
-                };
-              },
-            };
-          },
-        };
-      },
-    };
-  }
+  let forceOpenLookupError = false;
 
   function noteStub() {
     function queryChain(filtered: Row[]) {
       return {
         eq(col: string, val: unknown) { return queryChain(filtered.filter((r) => r[col] === val)); },
-        async maybeSingle() { return { data: filtered[0] ?? null, error: null }; },
+        order(_col: string, _opts?: unknown) { return queryChain(filtered); },
+        limit(_n: number) { return queryChain(filtered); },
+        async maybeSingle() {
+          if (forceOpenLookupError) {
+            forceOpenLookupError = false;
+            return { data: null, error: { message: "connection reset" } };
+          }
+          return { data: filtered[0] ?? null, error: null };
+        },
       };
     }
     return {
@@ -95,6 +58,7 @@ function makeSupabase(seedCashEntries: Row[] = []) {
                   labor: null, location_fee: null, bag: null, snack: null,
                   other_amount: null, other_note: null, actual_cash: null,
                   closed_at: null, closed_by_line_user_id: null, closed_line_event_id: null,
+                  created_at: new Date(Date.now() + idSeq).toISOString(),
                   ...payload,
                 };
                 notes.push(row);
@@ -110,13 +74,19 @@ function makeSupabase(seedCashEntries: Row[] = []) {
             return {
               eq(col2: string, val2: unknown) {
                 return {
-                  select() {
+                  eq(col3: string, val3: unknown) {
                     return {
-                      async maybeSingle() {
-                        const idx = notes.findIndex((r) => r[col] === val && r[col2] === val2);
-                        if (idx === -1) return { data: null, error: null };
-                        Object.assign(notes[idx], patch);
-                        return { data: notes[idx], error: null };
+                      select() {
+                        return {
+                          async maybeSingle() {
+                            const idx = notes.findIndex(
+                              (r) => r[col] === val && r[col2] === val2 && r[col3] === val3,
+                            );
+                            if (idx === -1) return { data: null, error: null };
+                            Object.assign(notes[idx], patch);
+                            return { data: notes[idx], error: null };
+                          },
+                        };
                       },
                     };
                   },
@@ -127,6 +97,64 @@ function makeSupabase(seedCashEntries: Row[] = []) {
         };
       },
     };
+  }
+
+  async function rpc(fnName: string, args: Record<string, unknown>) {
+    if (fnName !== "close_manual_white_sheet_note_session") {
+      throw new Error(`unexpected rpc: ${fnName}`);
+    }
+    const session = notes.find((r) => r.id === args.p_session_id && r.source_id === args.p_source_id);
+    if (!session) return { data: { outcome: "not_found", session: null, cash_entry: null }, error: null };
+    if (session.status === "closed") {
+      return { data: { outcome: "already_closed", session, cash_entry: null }, error: null };
+    }
+    if (session.status === "cancelled") {
+      return { data: { outcome: "already_cancelled", session, cash_entry: null }, error: null };
+    }
+    const empty = ["labor", "location_fee", "bag", "snack", "other_amount", "actual_cash"]
+      .every((k) => session[k] === null || session[k] === undefined);
+    if (empty) return { data: { outcome: "empty", session, cash_entry: null }, error: null };
+
+    let cash = cashEntries.find(
+      (c) => c.source_id === session.source_id
+        && c.market_label_normalized === session.market_label_normalized
+        && c.business_date === session.business_date,
+    );
+    if (cash?.finalized_at) {
+      return { data: { outcome: "finalized", session, cash_entry: null }, error: null };
+    }
+    if (!cash) {
+      cash = {
+        id: `cash-${++idSeq}`,
+        source_id: session.source_id,
+        market_label_normalized: session.market_label_normalized,
+        business_date: session.business_date,
+        labor: session.labor ?? 0,
+        location_fee: session.location_fee ?? 0,
+        bag: session.bag ?? 0,
+        snack: session.snack ?? 0,
+        other: session.other_amount ?? 0,
+        other_note: session.other_note ?? null,
+        actual_cash_submitted: session.actual_cash ?? 0,
+        finalized_at: null,
+      };
+      cashEntries.push(cash);
+    } else {
+      if (session.labor !== null) cash.labor = session.labor;
+      if (session.location_fee !== null) cash.location_fee = session.location_fee;
+      if (session.bag !== null) cash.bag = session.bag;
+      if (session.snack !== null) cash.snack = session.snack;
+      if (session.other_amount !== null) {
+        cash.other = session.other_amount;
+        cash.other_note = session.other_note;
+      }
+      if (session.actual_cash !== null) cash.actual_cash_submitted = session.actual_cash;
+    }
+    session.status = "closed";
+    session.closed_at = new Date().toISOString();
+    session.closed_by_line_user_id = args.p_closed_by_line_user_id;
+    session.closed_line_event_id = args.p_closed_line_event_id;
+    return { data: { outcome: "closed", session, cash_entry: cash }, error: null };
   }
 
   function nullStub() {
@@ -161,14 +189,15 @@ function makeSupabase(seedCashEntries: Row[] = []) {
         };
       }
       if (table === "manual_white_sheet_note_sessions") return noteStub();
-      if (table === "digital_white_sheet_cash_entries") return cashEntryStub();
       if (table === "pending_sessions") {
         return { select() { return { eq() { return { async maybeSingle() { return { data: null, error: null }; } }; } }; } };
       }
       return nullStub();
     },
+    rpc,
     _notes: notes,
     _cashEntries: cashEntries,
+    forceNextOpenLookupError() { forceOpenLookupError = true; },
   };
 }
 
@@ -203,9 +232,35 @@ describe("white sheet note session — open", () => {
     const svc = makeService(db, replies);
 
     await svc.processEvents([makeEvent("พาชิโอ้ ส่งใบขาวมือ 01/08/2569", "tok1", "msg1")], "dest");
-    await svc.processEvents([makeEvent("พาชิโอ้ ส่งใบขาวมือ 01/08/2569", "tok2", "msg2")], "dest");
+    await svc.processEvents([makeEvent("ค่าแรง 500", "tok2", "msg2")], "dest");
+    await svc.processEvents([makeEvent("พาชิโอ้ ส่งใบขาวมือ 01/08/2569", "tok3", "msg3")], "dest");
 
     expect(db._notes).toHaveLength(1);
+  });
+
+  it("resume reply is exact — never claims closed or saved", async () => {
+    const db = makeSupabase();
+    const replies: string[] = [];
+    const svc = makeService(db, replies);
+
+    await svc.processEvents([makeEvent("พาชิโอ้ ส่งใบขาวมือ 01/08/2569", "tok1", "msg1")], "dest");
+    await svc.processEvents([makeEvent("ค่าแรง 500", "tok2", "msg2")], "dest");
+    await svc.processEvents([makeEvent("พาชิโอ้ ส่งใบขาวมือ 01/08/2569", "tok3", "msg3")], "dest");
+
+    expect(replies[2]).toBe(
+      [
+        "ใบขาวมือยังเปิดอยู่",
+        "",
+        "ตลาด: พาชิโอ้",
+        "วันที่: 01/08/2569",
+        "ค่าแรง: 500 บาท",
+        "",
+        "ส่งข้อมูลต่อได้เลย",
+        "พิมพ์ จบใบขาวมือ เมื่อกรอกครบ",
+      ].join("\n"),
+    );
+    expect(replies[2]).not.toContain("จบใบขาวมือแล้ว");
+    expect(replies[2]).not.toContain("บันทึกข้อมูลใบขาวแล้ว");
   });
 
   it("opening a different market/date while one is open is blocked", async () => {
@@ -283,6 +338,15 @@ describe("white sheet note session — fields", () => {
     expect(db._notes[0].labor).toBeNull();
     expect(replies[1]).toMatch(/ไม่ถูกต้อง/);
   });
+
+  // A field message that races a concurrent close (both read the row while
+  // still open, close wins the row lock first) cannot be reproduced through
+  // this sequential single-connection harness — findOpenSession here would
+  // simply see the already-closed row and fall through. That exact race
+  // (field's UPDATE matching zero rows because close already committed) is
+  // proven at the service layer in white-sheet-note-session-service.test.ts
+  // ("returns a typed conflict when the session is no longer open") and with
+  // real concurrent connections in migration-0059.pg.test.ts.
 });
 
 // ── Close ─────────────────────────────────────────────────────────────────────
@@ -338,7 +402,6 @@ describe("white sheet note session — close", () => {
     expect(summary).toContain("ค่าอื่น: 30 บาท — ค่าน้ำ");
     expect(summary).toContain("เงินสด: 4,850 บาท");
     expect(summary).toContain("บันทึกข้อมูลใบขาวแล้ว");
-    // no operational/production-derived content leaks into the receipt
     expect(summary).not.toMatch(/ยอดขาย|สลิป|ยอดโอน|ผลต่าง|ตรงกัน|ปิดวัน/);
   });
 
@@ -351,7 +414,6 @@ describe("white sheet note session — close", () => {
     await svc.processEvents([makeEvent("เงินสด 4850", "tok3", "msg3")], "dest");
     await svc.processEvents([makeEvent("จบใบขาวมือ", "tok4", "msg4")], "dest");
 
-    // reopen the same market/date and close again with a different labor value
     await svc.processEvents([makeEvent("พาชิโอ้ ส่งใบขาวมือ 01/08/2569", "tok5", "msg5")], "dest");
     await svc.processEvents([makeEvent("ค่าแรง 900", "tok6", "msg6")], "dest");
     await svc.processEvents([makeEvent("เงินสด 5000", "tok7", "msg7")], "dest");
@@ -362,17 +424,15 @@ describe("white sheet note session — close", () => {
     expect(db._cashEntries[0].actual_cash_submitted).toBe(5000);
   });
 
-  it("explicit zero updates the canonical field correctly", async () => {
+  it("explicit zero updates the canonical field; untouched fields preserve the latest DB value", async () => {
     const db = makeSupabase([
       {
-        id: "cash-seed",
         source_id: "u1",
         market_label_normalized: "พาชิโอ้",
         business_date: "2026-08-01",
         labor: 999, location_fee: 200, bag: 100, snack: 50, other: 30, other_note: "เดิม",
         actual_cash_submitted: 4850,
-        finalized_at: null, finalized_by: null,
-        updated_at: "2026-07-31T00:00:00.000Z",
+        finalized_at: null,
       },
     ]);
     const svc = makeService(db);
@@ -383,22 +443,19 @@ describe("white sheet note session — close", () => {
 
     expect(db._cashEntries).toHaveLength(1);
     expect(db._cashEntries[0].labor).toBe(0);
-    // fields not touched this session keep their existing canonical values
     expect(db._cashEntries[0].location_fee).toBe(200);
     expect(db._cashEntries[0].actual_cash_submitted).toBe(4850);
   });
 
-  it("a FINALIZED canonical row rejects the update and leaves the LINE session open", async () => {
+  it("a FINALIZED canonical row rejects the close transaction and leaves the LINE session open", async () => {
     const db = makeSupabase([
       {
-        id: "cash-final",
         source_id: "u1",
         market_label_normalized: "พาชิโอ้",
         business_date: "2026-08-01",
         labor: 500, location_fee: 200, bag: 100, snack: 50, other: 30, other_note: null,
         actual_cash_submitted: 4850,
-        finalized_at: "2026-07-31T00:00:00.000Z", finalized_by: "admin-1",
-        updated_at: "2026-07-31T00:00:00.000Z",
+        finalized_at: "2026-07-31T00:00:00.000Z",
       },
     ]);
     const replies: string[] = [];
@@ -408,9 +465,11 @@ describe("white sheet note session — close", () => {
     await svc.processEvents([makeEvent("ค่าแรง 700", "tok2", "msg2")], "dest");
     await svc.processEvents([makeEvent("จบใบขาวมือ", "tok3", "msg3")], "dest");
 
-    expect(db._notes[0].status).toBe("open"); // session left open, not closed
-    expect(db._cashEntries[0].labor).toBe(500); // canonical row untouched
-    expect(replies[replies.length - 1]).toMatch(/finalized/i);
+    expect(db._notes[0].status).toBe("open");
+    expect(db._cashEntries[0].labor).toBe(500);
+    expect(replies[replies.length - 1]).toBe(
+      "ใบขาวมือนี้ถูกปิดสรุปแล้ว (FINALIZED) แก้ไขผ่านข้อความไม่ได้ กรุณาติดต่อผู้ดูแลระบบ",
+    );
   });
 
   it("a cancelled session writes no canonical row", async () => {
@@ -424,21 +483,9 @@ describe("white sheet note session — close", () => {
     expect(db._cashEntries).toHaveLength(0);
   });
 
-  it("closing with no open session replies clearly and mutates nothing", async () => {
-    const db = makeSupabase();
-    const replies: string[] = [];
-    const svc = makeService(db, replies);
-
-    await svc.processEvents([makeEvent("จบใบขาวมือ")], "dest");
-
-    expect(db._notes).toHaveLength(0);
-    expect(db._cashEntries).toHaveLength(0);
-    expect(replies[0]).toMatch(/ยังไม่มีใบขาวมือ/);
-  });
-
   it("close requires no produce, slip, or settlement data to exist", async () => {
-    // The stub's nullStub() fallback returns empty/null for every other
-    // table (produce_sessions, manual_slip_sessions, transfer_reconciliations,
+    // nullStub() fallback returns empty/null for every other table
+    // (produce_sessions, manual_slip_sessions, transfer_reconciliations,
     // settlement, etc.) — closing must still succeed with zero coupling.
     const db = makeSupabase();
     const svc = makeService(db);
@@ -477,6 +524,83 @@ describe("white sheet note session — cancel", () => {
 
     expect(db._notes).toHaveLength(2);
     expect(db._notes[1].status).toBe("open");
+  });
+
+  it("cancelling an already-closed session reports accurately and mutates nothing", async () => {
+    const db = makeSupabase();
+    const replies: string[] = [];
+    const svc = makeService(db, replies);
+
+    await svc.processEvents([makeEvent("พาชิโอ้ ส่งใบขาวมือ 01/08/2569", "tok1", "msg1")], "dest");
+    await svc.processEvents([makeEvent("เงินสด 100", "tok2", "msg2")], "dest");
+    await svc.processEvents([makeEvent("จบใบขาวมือ", "tok3", "msg3")], "dest");
+    await svc.processEvents([makeEvent("ยกเลิกใบขาวมือ", "tok4", "msg4")], "dest");
+
+    expect(replies[replies.length - 1]).toBe("ใบขาวมือนี้ปิดแล้ว");
+    expect(db._notes[0].status).toBe("closed");
+  });
+});
+
+// ── Repeated close/cancel with no open session ──────────────────────────────
+
+describe("white sheet note session — repeated close/cancel", () => {
+  it("closing with no history ever replies with 'no open session'", async () => {
+    const db = makeSupabase();
+    const replies: string[] = [];
+    const svc = makeService(db, replies);
+
+    await svc.processEvents([makeEvent("จบใบขาวมือ")], "dest");
+
+    expect(db._notes).toHaveLength(0);
+    expect(db._cashEntries).toHaveLength(0);
+    expect(replies[0]).toBe("ยังไม่มีใบขาวมือที่เปิดอยู่");
+  });
+
+  it("closing again after already closed replies 'already closed'", async () => {
+    const db = makeSupabase();
+    const replies: string[] = [];
+    const svc = makeService(db, replies);
+
+    await svc.processEvents([makeEvent("พาชิโอ้ ส่งใบขาวมือ 01/08/2569", "tok1", "msg1")], "dest");
+    await svc.processEvents([makeEvent("เงินสด 100", "tok2", "msg2")], "dest");
+    await svc.processEvents([makeEvent("จบใบขาวมือ", "tok3", "msg3")], "dest");
+    await svc.processEvents([makeEvent("จบใบขาวมือ", "tok4", "msg4")], "dest");
+
+    expect(replies[replies.length - 1]).toBe("ใบขาวมือนี้ปิดแล้ว");
+    expect(db._cashEntries).toHaveLength(1); // no rewrite of canonical data
+  });
+
+  it("closing after cancel replies 'already cancelled'", async () => {
+    const db = makeSupabase();
+    const replies: string[] = [];
+    const svc = makeService(db, replies);
+
+    await svc.processEvents([makeEvent("พาชิโอ้ ส่งใบขาวมือ 01/08/2569", "tok1", "msg1")], "dest");
+    await svc.processEvents([makeEvent("ยกเลิกใบขาวมือ", "tok2", "msg2")], "dest");
+    await svc.processEvents([makeEvent("จบใบขาวมือ", "tok3", "msg3")], "dest");
+
+    expect(replies[replies.length - 1]).toBe("ใบขาวมือนี้ยกเลิกแล้ว");
+    expect(db._cashEntries).toHaveLength(0);
+  });
+});
+
+// ── Lookup errors ────────────────────────────────────────────────────────────
+
+describe("white sheet note session — lookup failure", () => {
+  it("does not fall through to any other routing and mutates nothing downstream", async () => {
+    const db = makeSupabase();
+    const replies: string[] = [];
+    const svc = makeService(db, replies);
+    db.forceNextOpenLookupError();
+
+    // "ค่าแรง 500" is field-shaped; on a healthy lookup with no open session
+    // it falls through silently. On a lookup FAILURE it must instead report
+    // an error and must never reach produce/manual-slip/other routing.
+    const [res] = await svc.processEvents([makeEvent("ค่าแรง 500")], "dest");
+
+    expect(res.status).toBe("error");
+    expect(db._notes).toHaveLength(0);
+    expect(db._cashEntries).toHaveLength(0);
   });
 });
 

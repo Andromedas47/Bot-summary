@@ -1583,6 +1583,19 @@ export interface Database {
       };
     };
     Functions: {
+      close_manual_white_sheet_note_session: {
+        Args: {
+          p_session_id:             string;
+          p_source_id:              string;
+          p_closed_by_line_user_id: string | null;
+          p_closed_line_event_id:   string;
+        };
+        Returns: {
+          outcome:    "closed" | "already_closed" | "already_cancelled" | "empty" | "finalized" | "not_found";
+          session:    Database["public"]["Tables"]["manual_white_sheet_note_sessions"]["Row"] | null;
+          cash_entry: Database["public"]["Tables"]["digital_white_sheet_cash_entries"]["Row"] | null;
+        };
+      };
       attach_evidence_to_slip_batch: {
         Args: { p_batch_id: string; p_evidence_id: string };
         Returns: number;

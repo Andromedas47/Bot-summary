@@ -115,6 +115,25 @@ import {
 
 type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
+type QueueClaim = {
+  queue_id: string;
+  line_event_id: string;
+  source_id: string;
+  raw_message_id: string;
+  receive_order: number;
+  claim_token: string;
+};
+type OrderedEventReceipt = {
+  rawMessageId: string;
+  sourceId: string;
+  duplicate: boolean;
+};
+type EventReceipt = {
+  event: LineEvent;
+  rawMessageId: string;
+  ordered: boolean;
+  sourceId: string;
+};
 type ReplyLineMessage = (replyToken: string, text: string) => Promise<void>;
 type ReplyLineMessages = (replyToken: string, texts: string[]) => Promise<void>;
 type ReplyLineApiMessages = (
@@ -231,13 +250,26 @@ function buildWhiteSheetNoteFieldLines(session: ManualWhiteSheetNoteSessionRow):
   return lines;
 }
 
-function buildWhiteSheetNoteSummary(session: ManualWhiteSheetNoteSessionRow): string {
+type CashEntryForSummary = Database["public"]["Tables"]["digital_white_sheet_cash_entries"]["Row"];
+
+/** Close replies must show the final canonical row, including preserved fields. */
+function buildWhiteSheetNoteCanonicalSummary(
+  marketLabel: string,
+  businessDate: string,
+  cash: CashEntryForSummary,
+): string {
+  const otherNote = cash.other_note ? ` — ${cash.other_note}` : "";
   return [
     "จบใบขาวมือแล้ว ✅",
     "",
-    `ตลาด: ${session.market_label}`,
-    `วันที่: ${isoDateToBuddhistDisplay(session.business_date)}`,
-    ...buildWhiteSheetNoteFieldLines(session),
+    `ตลาด: ${marketLabel}`,
+    `วันที่: ${isoDateToBuddhistDisplay(businessDate)}`,
+    `ค่าแรง: ${formatMoney(Number(cash.labor))} บาท`,
+    `ค่าที่: ${formatMoney(Number(cash.location_fee))} บาท`,
+    `ค่าถุง: ${formatMoney(Number(cash.bag))} บาท`,
+    `ค่าขนม: ${formatMoney(Number(cash.snack))} บาท`,
+    `ค่าอื่น: ${formatMoney(Number(cash.other))} บาท${otherNote}`,
+    `เงินสด: ${formatMoney(Number(cash.actual_cash_submitted))} บาท`,
     "",
     "บันทึกข้อมูลใบขาวแล้ว",
   ].join("\n");
@@ -299,6 +331,7 @@ export interface WebhookProcessResult {
   parsed?:   boolean;
   error?:    string;
   pendingSessionClosed?: boolean;
+  claimConflict?: boolean;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -412,6 +445,7 @@ export class WebhookService {
   private readonly physicalInventoryFinalizer: PhysicalInventoryFinalizer;
   private readonly physicalInventoryService: PhysicalInventorySessionGateway;
   private readonly dataEntrySessionOwnershipResolver: DataEntrySessionOwnershipResolver;
+  private orderedQueueAvailable: boolean | null = null;
 
   constructor(
     private readonly supabase: Supabase,
@@ -460,14 +494,78 @@ export class WebhookService {
   }
 
   async processEvents(events: LineEvent[], destination: string): Promise<WebhookProcessResult[]> {
-    const sorted = [...events].sort((a, b) => a.timestamp - b.timestamp);
-    const results: WebhookProcessResult[] = [];
-
-    for (const [eventIndex, event] of sorted.entries()) {
-      results.push(await this.processOne(event, destination, eventIndex, sorted.length));
+    // LINE's array order is the only ordering guarantee inside one payload.
+    // Persist every event before any worker starts so a later close can see
+    // every earlier event in the durable queue.
+    const receipts: EventReceipt[] = [];
+    const immediate = new Map<string, WebhookProcessResult>();
+    for (const event of events) {
+      const saved = await this.saveRawMessage(event, destination);
+      if (saved === null) {
+        immediate.set(event.webhookEventId, {
+          eventId: event.webhookEventId,
+          eventType: event.type,
+          status: "duplicate",
+        });
+      } else if (saved === "error") {
+        immediate.set(event.webhookEventId, {
+          eventId: event.webhookEventId,
+          eventType: event.type,
+          status: "error",
+          error: "db insert failed",
+        });
+      } else {
+        const ordered = typeof saved === "object";
+        if (ordered && saved.duplicate) {
+          immediate.set(event.webhookEventId, {
+            eventId: event.webhookEventId,
+            eventType: event.type,
+            status: "duplicate",
+          });
+        }
+        receipts.push({
+          event,
+          rawMessageId: ordered ? saved.rawMessageId : saved,
+          ordered,
+          sourceId: ordered ? saved.sourceId : getSourceId(event.source),
+        });
+      }
     }
 
-    return results;
+    if (this.orderedQueueAvailable !== false) {
+      const resultByEventId = new Map<string, WebhookProcessResult>();
+      const orderedReceipts = receipts.filter((receipt) => receipt.ordered);
+      const sourceIds = [...new Set(orderedReceipts.map(({ sourceId }) => sourceId))];
+      try {
+        await Promise.all([
+          ...sourceIds.map((sourceId) => this.drainOrderedSource(sourceId, destination, resultByEventId)),
+          ...receipts.filter((receipt) => !receipt.ordered).map(async (receipt) => {
+            resultByEventId.set(receipt.event.webhookEventId, await this.processOne(
+              receipt.event, destination, 0, 1, receipt.rawMessageId,
+            ));
+          }),
+        ]);
+        return events.map((event) => immediate.get(event.webhookEventId)
+          ?? resultByEventId.get(event.webhookEventId)
+          ?? { eventId: event.webhookEventId, eventType: event.type, status: "saved" });
+      } catch (error) {
+        if (!this.isMissingOrderingInfrastructure(error)) throw error;
+        this.orderedQueueAvailable = false;
+      }
+    }
+
+    // Unit doubles and pre-0060 databases have no queue RPC. They retain the
+    // old direct path; deployed databases always take the durable path above.
+    for (const [eventIndex, receipt] of receipts.entries()) {
+      immediate.set(receipt.event.webhookEventId, await this.processOne(
+        receipt.event,
+        destination,
+        eventIndex,
+        receipts.length,
+        receipt.rawMessageId,
+      ));
+    }
+    return events.map((event) => immediate.get(event.webhookEventId)!);
   }
 
   private async processOne(
@@ -475,6 +573,8 @@ export class WebhookService {
     destination: string,
     eventIndex: number,
     eventCount: number,
+    existingRawMessageId?: string,
+    replyMessage: ReplyLineMessage = this.replyMessage,
   ): Promise<WebhookProcessResult> {
     const eventId = event.webhookEventId;
     const log     = logger.child({
@@ -487,7 +587,8 @@ export class WebhookService {
     log.info("processing event");
 
     // ── 1. Persist raw event ──────────────────────────────────────────────────
-    const rawMessageId = await this.saveRawMessage(event, destination);
+    const saved = existingRawMessageId ?? await this.saveRawMessage(event, destination);
+    const rawMessageId = saved && typeof saved === "object" ? saved.rawMessageId : saved;
 
     if (rawMessageId === null) {
       log.info("duplicate event — skipped");
@@ -649,7 +750,7 @@ export class WebhookService {
     const noteParse = parseWhiteSheetNoteCommand(text);
     if (noteParse.kind !== "not_command") {
       const noteResult = await this.tryProcessWhiteSheetNoteCommand(
-        msgEvent, noteParse, eventId, event.type, log,
+        msgEvent, noteParse, eventId, event.type, log, replyMessage,
       );
       if (noteResult !== null) return noteResult;
       // field-shaped text with no open session — not this feature's message.
@@ -1783,6 +1884,7 @@ export class WebhookService {
     eventId:    string,
     eventType:  string,
     log:        ChildLogger,
+    replyMessage: ReplyLineMessage,
   ): Promise<WebhookProcessResult | null> {
     const sourceId   = getSourceId(event.source);
     const lineUserId = getUserId(event.source);
@@ -1790,7 +1892,7 @@ export class WebhookService {
     const svc        = new WhiteSheetNoteSessionService(this.supabase);
 
     if (parseResult.kind === "open_invalid") {
-      if (replyToken) await this.replyMessage(replyToken, parseResult.message);
+      if (replyToken) await replyMessage(replyToken, parseResult.message);
       return { eventId, eventType, status: "saved", parsed: false };
     }
 
@@ -1803,7 +1905,7 @@ export class WebhookService {
         });
         if (replyToken) {
           if (result.opened) {
-            await this.replyMessage(
+            await replyMessage(
               replyToken,
               `เปิดใบขาวมือแล้ว\nตลาด: ${marketLabel}\nวันที่: ${isoDateToBuddhistDisplay(businessDate)}\nส่งค่าใช้จ่ายทีละรายการได้เลย เช่น\nค่าแรง 500\nพิมพ์ จบใบขาวมือ เมื่อส่งครบ`,
             );
@@ -1812,9 +1914,9 @@ export class WebhookService {
             && result.session.business_date === businessDate
           ) {
             // Same market/date already open — resume, never claim closed/saved.
-            await this.replyMessage(replyToken, buildWhiteSheetNoteResumeSummary(result.session));
+            await replyMessage(replyToken, buildWhiteSheetNoteResumeSummary(result.session));
           } else {
-            await this.replyMessage(
+            await replyMessage(
               replyToken,
               `ยังมีใบขาวมือของ ${result.session.market_label} วันที่ ${isoDateToBuddhistDisplay(result.session.business_date)} ที่ยังไม่จบ\nกรุณาพิมพ์ จบใบขาวมือ หรือ ยกเลิกใบขาวมือ ก่อนเปิดใบใหม่`,
             );
@@ -1840,7 +1942,7 @@ export class WebhookService {
       log.error("white sheet note open-session lookup failed", { sourceId, error: errorMessage });
       if (replyToken) {
         try {
-          await this.replyMessage(replyToken, WHITE_SHEET_NOTE_LOOKUP_ERROR_REPLY);
+          await replyMessage(replyToken, WHITE_SHEET_NOTE_LOOKUP_ERROR_REPLY);
         } catch { /* ignore reply error */ }
       }
       return { eventId, eventType, status: "error", parsed: false, error: errorMessage };
@@ -1854,7 +1956,7 @@ export class WebhookService {
       // "no open session" when it was in fact already closed/cancelled.
       try {
         const latest = await svc.findLatestSessionForSource(sourceId);
-        if (replyToken) await this.replyMessage(replyToken, buildWhiteSheetNoteTerminalReply(latest));
+        if (replyToken) await replyMessage(replyToken, buildWhiteSheetNoteTerminalReply(latest));
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : String(err);
         log.error("white sheet note latest-session lookup failed", { sourceId, error: errorMessage });
@@ -1865,7 +1967,7 @@ export class WebhookService {
 
     try {
       if (parseResult.kind === "field_invalid") {
-        if (replyToken) await this.replyMessage(replyToken, parseResult.message);
+        if (replyToken) await replyMessage(replyToken, parseResult.message);
         return { eventId, eventType, status: "saved", parsed: false };
       }
 
@@ -1875,7 +1977,7 @@ export class WebhookService {
           // A racing close/cancel already terminated this session — never
           // report false success for the field write.
           const latest = await svc.findLatestSessionForSource(sourceId);
-          if (replyToken) await this.replyMessage(replyToken, buildWhiteSheetNoteTerminalReply(latest));
+          if (replyToken) await replyMessage(replyToken, buildWhiteSheetNoteTerminalReply(latest));
           log.info("white sheet note field update conflict", {
             sourceId,
             fields: parseResult.fields.map((f) => f.key),
@@ -1883,7 +1985,7 @@ export class WebhookService {
           return { eventId, eventType, status: "saved", parsed: false };
         }
         if (replyToken) {
-          await this.replyMessage(replyToken, buildWhiteSheetNoteFieldSaveReply(parseResult.fields));
+          await replyMessage(replyToken, buildWhiteSheetNoteFieldSaveReply(parseResult.fields));
         }
         log.info("white sheet note fields applied", {
           sourceId,
@@ -1897,31 +1999,40 @@ export class WebhookService {
         // Fast-path UX check only — the RPC re-validates against the row it
         // locks and is the authoritative source of truth for "empty".
         if (!svc.hasAnyValue(openSession)) {
-          if (replyToken) await this.replyMessage(replyToken, WHITE_SHEET_NOTE_CLOSE_EMPTY_REPLY);
+          if (replyToken) await replyMessage(replyToken, WHITE_SHEET_NOTE_CLOSE_EMPTY_REPLY);
           return { eventId, eventType, status: "saved", parsed: false };
         }
 
         const result = await svc.closeSession(openSession, { lineUserId, lineEventId: eventId });
         switch (result.outcome) {
           case "closed":
-            if (replyToken) await this.replyMessage(replyToken, buildWhiteSheetNoteSummary(result.session));
+            if (replyToken) {
+              await replyMessage(
+                replyToken,
+                buildWhiteSheetNoteCanonicalSummary(
+                  result.session.market_label,
+                  result.session.business_date,
+                  result.cashEntry,
+                ),
+              );
+            }
             log.info("white sheet note closed", { sourceId, sessionId: result.session.id });
             break;
           case "already_closed":
-            if (replyToken) await this.replyMessage(replyToken, WHITE_SHEET_NOTE_ALREADY_CLOSED_REPLY);
+            if (replyToken) await replyMessage(replyToken, WHITE_SHEET_NOTE_ALREADY_CLOSED_REPLY);
             break;
           case "already_cancelled":
-            if (replyToken) await this.replyMessage(replyToken, WHITE_SHEET_NOTE_ALREADY_CANCELLED_REPLY);
+            if (replyToken) await replyMessage(replyToken, WHITE_SHEET_NOTE_ALREADY_CANCELLED_REPLY);
             break;
           case "empty":
-            if (replyToken) await this.replyMessage(replyToken, WHITE_SHEET_NOTE_CLOSE_EMPTY_REPLY);
+            if (replyToken) await replyMessage(replyToken, WHITE_SHEET_NOTE_CLOSE_EMPTY_REPLY);
             break;
           case "finalized":
             log.info("white sheet note close rejected — canonical row finalized", { sourceId });
-            if (replyToken) await this.replyMessage(replyToken, WHITE_SHEET_NOTE_FINALIZED_REPLY);
+            if (replyToken) await replyMessage(replyToken, WHITE_SHEET_NOTE_FINALIZED_REPLY);
             break;
           case "not_found":
-            if (replyToken) await this.replyMessage(replyToken, WHITE_SHEET_NOTE_NO_OPEN_SESSION_REPLY);
+            if (replyToken) await replyMessage(replyToken, WHITE_SHEET_NOTE_NO_OPEN_SESSION_REPLY);
             break;
         }
         return { eventId, eventType, status: "saved", parsed: false };
@@ -1932,10 +2043,10 @@ export class WebhookService {
       if (!cancelResult.ok) {
         // Raced against a close/another cancel — report what actually won.
         const latest = await svc.findLatestSessionForSource(sourceId);
-        if (replyToken) await this.replyMessage(replyToken, buildWhiteSheetNoteTerminalReply(latest));
+        if (replyToken) await replyMessage(replyToken, buildWhiteSheetNoteTerminalReply(latest));
         return { eventId, eventType, status: "saved", parsed: false };
       }
-      if (replyToken) await this.replyMessage(replyToken, "ยกเลิกใบขาวมือแล้ว");
+      if (replyToken) await replyMessage(replyToken, "ยกเลิกใบขาวมือแล้ว");
       log.info("white sheet note cancelled", { sourceId, sessionId: cancelResult.session.id });
       return { eventId, eventType, status: "saved", parsed: false };
     } catch (err) {
@@ -2730,13 +2841,167 @@ export class WebhookService {
   }
 
   // ── DB helpers ────────────────────────────────────────────────────────────
+  private async drainOrderedSource(
+    sourceId: string,
+    destination: string,
+    resultByEventId: Map<string, WebhookProcessResult>,
+  ): Promise<void> {
+    while (true) {
+      const claim = await this.claimOrderedEvent(sourceId);
+      if (!claim) return;
+
+      let result: WebhookProcessResult;
+      const replies: Parameters<ReplyLineMessage>[] = [];
+      try {
+        const event = await this.loadQueuedEvent(claim.raw_message_id);
+        result = event
+          ? await this.processOne(
+            event,
+            destination,
+            0,
+            1,
+            claim.raw_message_id,
+            async (...reply) => { replies.push(reply); },
+          )
+          : {
+            eventId: claim.line_event_id,
+            eventType: "message",
+            status: "error",
+            error: "queued raw event was not found",
+          };
+      } catch (error) {
+        result = {
+          eventId: claim.line_event_id,
+          eventType: "message",
+          status: "error",
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+
+      const completed = await this.completeOrderedEvent(
+        claim.raw_message_id,
+        claim.claim_token,
+        result.status === "error" || Boolean(result.error) ? "failed" : "processed",
+        result.error,
+      );
+      if (!completed) {
+        if (!resultByEventId.has(result.eventId)) {
+          resultByEventId.set(result.eventId, {
+            eventId: result.eventId,
+            eventType: result.eventType,
+            status: "duplicate",
+            claimConflict: true,
+          });
+        }
+        continue;
+      }
+      for (const reply of replies) await this.replyMessage(...reply);
+      resultByEventId.set(result.eventId, result);
+    }
+  }
+
+  private async claimOrderedEvent(sourceId: string): Promise<QueueClaim | null> {
+    const { data, error } = await this.supabase.rpc("claim_line_webhook_event", {
+      p_source_id: sourceId,
+    });
+    if (error) throw new Error(`ordered webhook claim failed: ${error.message}`);
+    return (data as QueueClaim | null) ?? null;
+  }
+
+  private async loadQueuedEvent(rawMessageId: string): Promise<LineEvent | null> {
+    const { data, error } = await this.supabase
+      .from("raw_messages")
+      .select("payload")
+      .eq("id", rawMessageId)
+      .maybeSingle();
+    if (error) throw new Error(`queued raw event lookup failed: ${error.message}`);
+    return data ? data.payload as unknown as LineEvent : null;
+  }
+
+  private async completeOrderedEvent(
+    rawMessageId: string,
+    claimToken: string,
+    status: "processed" | "failed",
+    errorMessage?: string,
+  ): Promise<boolean> {
+    const { data, error } = await this.supabase.rpc("complete_line_webhook_event", {
+      p_raw_message_id: rawMessageId,
+      p_claim_token: claimToken,
+      p_status: status,
+      p_error_message: errorMessage ?? null,
+    });
+    if (error) throw new Error(`ordered webhook completion failed: ${error.message}`);
+    return data === true;
+  }
+
+  private isMissingOrderingInfrastructure(error: unknown): boolean {
+    const message = error instanceof Error
+      ? error.message
+      : typeof error === "object" && error !== null && "message" in error
+        ? String(error.message)
+        : String(error);
+    return /unexpected(?: .*?)?rpc/i.test(message)
+      || (message.includes("claim_line_webhook_event") && message.includes("does not exist"))
+      || message.includes("42883")
+      || message.includes("42P01");
+  }
+
+  private isWhiteSheetOrderingEvent(event: LineEvent): boolean {
+    if (event.type !== "message" || event.message.type !== "text") return false;
+    return parseWhiteSheetNoteCommand(event.message.text).kind !== "not_command";
+  }
+
   private async saveRawMessage(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     event: any,
     destination: string
-  ): Promise<string | null | "error"> {
+  ): Promise<string | null | "error" | OrderedEventReceipt> {
     const source  = event.source  ?? {};
     const message = event.message as LineMessage | undefined;
+
+    if (this.isWhiteSheetOrderingEvent(event) && this.orderedQueueAvailable !== false) {
+      let data: unknown;
+      let error: { code?: string; message: string } | null = null;
+      try {
+        ({ data, error } = await this.supabase.rpc("receive_line_webhook_event", {
+          p_line_event_id: event.webhookEventId,
+          p_destination: destination,
+          p_event_type: event.type,
+          p_source_type: source.type ?? "user",
+          p_source_id: getSourceId(source),
+          p_user_id: getUserId(source),
+          p_message_id: message?.id ?? null,
+          p_message_type: message?.type ?? null,
+          p_raw_text: message && "text" in message ? (message as { text: string }).text : null,
+          p_payload: event,
+        }));
+      } catch (caught) {
+        error = { message: caught instanceof Error ? caught.message : String(caught) };
+        if (this.isMissingOrderingInfrastructure(caught)) {
+          this.orderedQueueAvailable = false;
+        } else {
+          throw caught;
+        }
+      }
+      if (!error) {
+        this.orderedQueueAvailable = true;
+        const receipt = data as { raw_message_id: string; duplicate: boolean };
+        return {
+          rawMessageId: receipt.raw_message_id,
+          sourceId: getSourceId(source),
+          duplicate: receipt.duplicate,
+        };
+      }
+      if (!this.isMissingOrderingInfrastructure(error)) {
+        logger.error("failed to atomically receive ordered webhook event", {
+          code: error.code,
+          message: error.message,
+          eventId: event.webhookEventId,
+        });
+        return "error";
+      }
+      this.orderedQueueAvailable = false;
+    }
 
     const { data, error } = await this.supabase
       .from("raw_messages")

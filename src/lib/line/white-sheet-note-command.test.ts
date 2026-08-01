@@ -29,7 +29,6 @@ describe("parseNoteMoneyAmount", () => {
     expect(parseNoteMoneyAmount("4,85")).toBeNull();
   });
 });
-
 describe("parseNoteBusinessDate", () => {
   test("converts Buddhist date to ISO", () => {
     expect(parseNoteBusinessDate("01/08/2569")).toBe("2026-08-01");
@@ -44,7 +43,6 @@ describe("parseNoteBusinessDate", () => {
     expect(parseNoteBusinessDate("not a date")).toBeNull();
   });
 });
-
 describe("parseWhiteSheetNoteCommand — not_command", () => {
   test("empty text", () => {
     expect(parseWhiteSheetNoteCommand("")).toEqual({ kind: "not_command" });
@@ -59,7 +57,6 @@ describe("parseWhiteSheetNoteCommand — not_command", () => {
     expect(parseWhiteSheetNoteCommand("พาชิโอ้ ปิดยอด 24/07/2569")).toEqual({ kind: "not_command" });
   });
 });
-
 describe("parseWhiteSheetNoteCommand — open", () => {
   test("parses market + Buddhist date", () => {
     const result = parseWhiteSheetNoteCommand("พาชิโอ้ ส่งใบขาวมือ 01/08/2569");
@@ -77,7 +74,6 @@ describe("parseWhiteSheetNoteCommand — open", () => {
     expect(result.kind).toBe("open_invalid");
   });
 });
-
 describe("parseWhiteSheetNoteCommand — field", () => {
   test("ค่าแรง", () => {
     expect(parseWhiteSheetNoteCommand("ค่าแรง 500")).toEqual({

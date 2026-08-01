@@ -89,6 +89,52 @@ export interface Database {
         Relationships: [];
       };
 
+      line_webhook_event_queue: {
+        Row: {
+          id: string;
+          line_event_id: string;
+          source_id: string;
+          raw_message_id: string;
+          receive_order: number;
+          status: "pending" | "processing" | "processed" | "failed";
+          error_message: string | null;
+          received_at: string;
+          processing_started_at: string | null;
+          processing_attempts: number;
+          claim_token: string | null;
+          completed_at: string | null;
+        };
+        Insert: {
+          id?: string;
+          line_event_id: string;
+          source_id: string;
+          raw_message_id: string;
+          receive_order?: number;
+          status?: "pending" | "processing" | "processed" | "failed";
+          error_message?: string | null;
+          received_at?: string;
+          processing_started_at?: string | null;
+          processing_attempts?: number;
+          claim_token?: string | null;
+          completed_at?: string | null;
+        };
+        Update: {
+          id?: string;
+          line_event_id?: string;
+          source_id?: string;
+          raw_message_id?: string;
+          receive_order?: number;
+          status?: "pending" | "processing" | "processed" | "failed";
+          error_message?: string | null;
+          received_at?: string;
+          processing_started_at?: string | null;
+          processing_attempts?: number;
+          claim_token?: string | null;
+          completed_at?: string | null;
+        };
+        Relationships: [];
+      };
+
       parse_errors: {
         Row: {
           id:               string;
@@ -1583,6 +1629,41 @@ export interface Database {
       };
     };
     Functions: {
+      receive_line_webhook_event: {
+        Args: {
+          p_line_event_id: string;
+          p_destination: string;
+          p_event_type: string;
+          p_source_type: string;
+          p_source_id: string;
+          p_user_id: string | null;
+          p_message_id: string | null;
+          p_message_type: string | null;
+          p_raw_text: string | null;
+          p_payload: Json;
+        };
+        Returns: { raw_message_id: string; duplicate: boolean };
+      };
+      claim_line_webhook_event: {
+        Args: { p_source_id: string };
+        Returns: {
+          queue_id: string;
+          line_event_id: string;
+          source_id: string;
+          raw_message_id: string;
+          receive_order: number;
+          claim_token: string;
+        } | null;
+      };
+      complete_line_webhook_event: {
+        Args: {
+          p_raw_message_id: string;
+          p_claim_token: string;
+          p_status: "processed" | "failed";
+          p_error_message?: string | null;
+        };
+        Returns: boolean;
+      };
       close_manual_white_sheet_note_session: {
         Args: {
           p_session_id:             string;

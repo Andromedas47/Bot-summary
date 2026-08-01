@@ -587,6 +587,28 @@ describe("white sheet note session — close", () => {
     expect(db._cashEntries[0].actual_cash_submitted).toBe(4850);
   });
 
+  it("close reply reads preserved canonical fields, not only the current session patch", async () => {
+    const db = makeSupabase([
+      {
+        source_id: "u1",
+        market_label_normalized: "พาชิโอ้",
+        business_date: "2026-08-01",
+        labor: 500, location_fee: 200, bag: 100, snack: 50, other: 30,
+        other_note: "ค่าน้ำ", actual_cash_submitted: 4000, finalized_at: null,
+      },
+    ]);
+    const replies: string[] = [];
+    const svc = makeService(db, replies);
+
+    await svc.processEvents([makeEvent("พาชิโอ้ ส่งใบขาวมือ 01/08/2569", "tok1", "msg1")], "dest");
+    await svc.processEvents([makeEvent("เงินสด 4850", "tok2", "msg2")], "dest");
+    await svc.processEvents([makeEvent("จบใบขาวมือ", "tok3", "msg3")], "dest");
+
+    expect(replies.at(-1)).toContain("ค่าแรง: 500 บาท");
+    expect(replies.at(-1)).toContain("ค่าที่: 200 บาท");
+    expect(replies.at(-1)).toContain("เงินสด: 4,850 บาท");
+  });
+
   it("a FINALIZED canonical row rejects the close transaction and leaves the LINE session open", async () => {
     const db = makeSupabase([
       {

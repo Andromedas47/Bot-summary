@@ -12,6 +12,7 @@
  * Adding a scope here is a deliberate, reviewable act.
  */
 const QA_MARKET_LABELS: ReadonlySet<string> = new Set([
+  "ทดสอบ",
   "ทดสอบเงินโอน",
   "ทดสอบผลต่าง",
   "ทดสอบราคาA",

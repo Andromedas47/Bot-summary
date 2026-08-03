@@ -1455,6 +1455,7 @@ describe("P1 pending ingest lookup fails closed", () => {
 
 describe("P1 excludes QA market scopes from production reporting", () => {
   const QA_LABELS = [
+    "ทดสอบ",
     "ทดสอบเงินโอน",
     "ทดสอบผลต่าง",
     "ทดสอบราคาA",
@@ -1511,7 +1512,7 @@ describe("P1 excludes QA market scopes from production reporting", () => {
   });
 
   test("exclusion is exact — a real market that merely resembles one is kept", async () => {
-    for (const label of ["ทดสอบราคาC", "ทดสอบไวท์ชีทใหม่", "ตลาดทดสอบผลต่าง", "qaไวท์ชีท"]) {
+    for (const label of ["ทดสอบราคาC", "ทดสอบไวท์ชีทใหม่", "ตลาดทดสอบผลต่าง", "qaไวท์ชีท", "ตลาดทดสอบใหม่"]) {
       const report = await loadSalesReport(fakeSupabase(withQaMarket(label)), DATE);
 
       expect(report.markets.map((market) => market.marketLabel).sort()).toEqual(

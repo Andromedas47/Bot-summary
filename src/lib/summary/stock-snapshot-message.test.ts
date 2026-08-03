@@ -8,6 +8,7 @@ import {
   stockSnapshotMarketCoverage,
   STOCK_SNAPSHOT_NO_DATA_PREFIX,
   STOCK_SNAPSHOT_NO_HISTORY_NOTICE,
+  STOCK_SNAPSHOT_NOTICE,
   STOCK_SNAPSHOT_TITLE,
 } from "./stock-snapshot-message";
 import { countCodePoints, LINE_MESSAGE_MAX_CODE_POINTS, OVERFLOW_NOTICE } from "./line-chunking";
@@ -42,10 +43,13 @@ describe("stock snapshot header", () => {
     ]);
 
     expect(text).toContain(
-      `${STOCK_SNAPSHOT_TITLE}\nข้อมูลวันที่ 25 กรกฎาคม 2569\nข้อมูลจาก 2 ตลาด • พบคงเหลือ 2 ตลาด`,
+      `${STOCK_SNAPSHOT_TITLE}\nข้อมูลวันที่ 25 กรกฎาคม 2569\n${STOCK_SNAPSHOT_NOTICE}\nข้อมูลจาก 2 ตลาด • พบคงเหลือ 2 ตลาด`,
     );
     // The purpose has to be legible from the first line.
     expect(STOCK_SNAPSHOT_TITLE).toContain("รวมทุกตลาด");
+    // Must not claim to be physically counted stock.
+    expect(STOCK_SNAPSHOT_TITLE).not.toContain("ตรวจนับ");
+    expect(text).toContain(STOCK_SNAPSHOT_NOTICE);
   });
 
   test("both counts match when every market contributed sellable stock", () => {
@@ -457,8 +461,8 @@ describe("stock snapshot message splitting", () => {
   });
 });
 
-describe("the manual report is a different, unchanged rendering", () => {
-  test("manual keeps its own title, quantity ordering and per-market warning detail", () => {
+describe("the manual report is a different rendering sharing the same P0 heading", () => {
+  test("manual keeps its own quantity ordering and per-market warning detail", () => {
     const rows = [
       row({ market_name: "ตลาดกี้", product_name: "มหาชนก", quantity: 120.2, unit: "โล" }),
       row({ market_name: "ตลาดกี้", product_name: "องุ่นแดง", quantity: 2.3, unit: "โล" }),
@@ -473,11 +477,12 @@ describe("the manual report is a different, unchanged rendering", () => {
 
     const manual = buildStockSummaryBlocks(buildStockSummaryFromRows(DATE, rows)).join("\n\n");
 
-    expect(manual).toContain("📦 สรุปคงเหลือทุกตลาด");
+    expect(manual).toContain("📦 สรุปของดีชั่งคืนรวมทุกตลาด");
     // Manual is quantity DESCENDING and not grouped by unit.
     expect(manual).toContain("🍉 ผลไม้\nมหาชนก — 120.2 กก.\nองุ่นแดง — 2.3 กก.");
     // Manual keeps the full per-market missing-return listing.
     expect(manual).toContain("- เฉลิม72 ผลไม้: แก้วมังกร (กก.)");
-    expect(manual).not.toContain(STOCK_SNAPSHOT_TITLE);
+    // Same shared heading as the scheduled snapshot — same P0 model, same claim.
+    expect(manual).toContain(STOCK_SNAPSHOT_TITLE);
   });
 });

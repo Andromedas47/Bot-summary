@@ -183,7 +183,7 @@ describe("daily stock summary cron — delivery", () => {
     expect(body.incompleteCount).toBe(1);
 
     expect(pushCalls.map((c) => c.to)).toEqual(["Cgroup1", "Cgroup2"]);
-    expect(pushCalls[0].text).toContain("📦 สต๊อกคงเหลือรวมทุกตลาด");
+    expect(pushCalls[0].text).toContain("📦 สรุปของดีชั่งคืนรวมทุกตลาด");
     // เฉลิม72 ผลไม้ is in the day's data but owes its ชั่งคืน, so it counts
     // toward the total and not toward พบคงเหลือ.
     expect(pushCalls[0].text).toContain("ข้อมูลจาก 2 ตลาด • พบคงเหลือ 1 ตลาด");
@@ -226,6 +226,56 @@ describe("daily stock summary cron — delivery", () => {
   });
 });
 
+describe("daily stock summary cron — QA/test-market exclusion", () => {
+  test("the exact QA market ทดสอบ is excluded from the scheduled 08:00 report", async () => {
+    produceResult = {
+      data: [
+        ...produceRows(),
+        {
+          market_name: "ทดสอบ",
+          product_name: "หมอนทอง",
+          quantity: 999,
+          unit: "โล",
+          transaction_type: TX_RETURN,
+        },
+      ],
+      error: null,
+    };
+    process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
+
+    const res = await GET(request("?date=2026-07-25"));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    // Market/product counts reflect the excluded scope: still 2 markets (QA
+    // never counted), and the QA quantity never joins หมอนทอง's total.
+    expect(pushCalls[0].text).toContain("ข้อมูลจาก 2 ตลาด • พบคงเหลือ 1 ตลาด");
+    expect(pushCalls[0].text).toContain("หมอนทอง — 281.1 กก.");
+    expect(pushCalls[0].text).not.toContain("1280");
+    expect(body.productCount).toBe(1);
+  });
+
+  test("a legitimate market whose name contains ทดสอบ is not excluded", async () => {
+    produceResult = {
+      data: [
+        {
+          market_name: "ตลาดทดสอบทองผาภูมิ",
+          product_name: "แตงโม",
+          quantity: 12,
+          unit: "โล",
+          transaction_type: TX_RETURN,
+        },
+      ],
+      error: null,
+    };
+    process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
+
+    await GET(request("?date=2026-07-25"));
+
+    expect(pushCalls[0].text).toContain("แตงโม — 12 กก.");
+  });
+});
+
 describe("daily stock summary cron — scheduled report date", () => {
   test("a scheduled run with no date param reports the previous business date", async () => {
     produceResult = { data: produceRows(), error: null };
@@ -246,7 +296,7 @@ describe("daily stock summary cron — scheduled report date", () => {
     await GET(request("?date=2026-07-25"));
     const text = pushCalls.map((c) => c.text).join("\n\n");
 
-    expect(text).toContain("📦 สต๊อกคงเหลือรวมทุกตลาด");
+    expect(text).toContain("📦 สรุปของดีชั่งคืนรวมทุกตลาด");
     expect(text).toContain("🥭 ทุเรียน");
     expect(text).toContain("หมอนทอง — 281.1 กก.");
     // Missing returns collapse to counts …
@@ -322,7 +372,7 @@ describe("daily stock summary cron — debug mode", () => {
     expect(body.debug).toBe(true);
     expect(body.wouldSendLine).toBe(true);
     expect(body.productCount).toBe(1);
-    expect(body.messages[0]).toContain("📦 สต๊อกคงเหลือรวมทุกตลาด");
+    expect(body.messages[0]).toContain("📦 สรุปของดีชั่งคืนรวมทุกตลาด");
     expect(pushCalls).toHaveLength(0);
   });
 });

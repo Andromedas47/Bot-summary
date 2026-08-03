@@ -1,5 +1,6 @@
 import { normalizeUnitAlias } from "@/lib/parsers/weigh-session/units";
 import { cleanMarketName } from "@/lib/market";
+import { isQaMarketLabel } from "@/lib/sales/qa-scopes";
 import { transactionBucket, type TransactionBucket } from "@/lib/summary/transactions";
 import { logger } from "@/lib/logger";
 
@@ -42,6 +43,10 @@ export const PRODUCT_ALIASES: Record<string, string> = {
   \u0E2A\u0E31\u0E1B\u0E1B\u0E23\u0E16: "\u0E2A\u0E31\u0E1A\u0E1B\u0E30\u0E23\u0E14",
   \u0E2A\u0E31\u0E1B\u0E41\u0E23\u0E16: "\u0E2A\u0E31\u0E1A\u0E1B\u0E30\u0E23\u0E14",
   \u0E2A\u0E35\u0E1B\u0E1B\u0E30\u0E23\u0E14: "\u0E2A\u0E31\u0E1A\u0E1B\u0E30\u0E23\u0E14",
+
+  // \u2500\u2500 exact confirmed typos \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  \u0E2B\u0E21\u0E2D\u0E19\u0E17\u0E2D\u0E19: "\u0E2B\u0E21\u0E2D\u0E19\u0E17\u0E2D\u0E07",
+  \u0E17\u0E38\u0E40\u0E19\u0E35\u0E22\u0E19\u0E01\u0E27\u0E19: "\u0E17\u0E38\u0E40\u0E23\u0E35\u0E22\u0E19\u0E01\u0E27\u0E19",
 
   // \u2500\u2500 \u0E2D\u0E30\u0E42\u0E27\u0E04\u0E32\u0E42\u0E14 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   "\u0E2D\u0E42\u0E27\u0E04\u0E32\u0E42\u0E14\u0E49": "\u0E2D\u0E30\u0E42\u0E27\u0E04\u0E32\u0E42\u0E14",
@@ -496,10 +501,13 @@ export function buildRemainingFruitReport(
   options: {
     marketFilter?: string | null;
     aliases?: Record<string, string>;
+    /** Same escape hatch P1 uses (src/lib/sales/load.ts) — off by default. */
+    includeQaScopes?: boolean;
   } = {},
 ): RemainingFruitReport {
   const aliases = options.aliases ?? PRODUCT_ALIASES;
   const marketFilter = options.marketFilter?.trim() || null;
+  const includeQaScopes = options.includeQaScopes ?? false;
   const sourceRows = dedupeRemainingSourceRows(source, aliases);
 
   const pass1Names = new Set(
@@ -517,6 +525,9 @@ export function buildRemainingFruitReport(
 
     const rawMarket = row.market_name ?? "";
     const resolvedMarket = cleanMarketName(rawMarket);
+    // Same exact-match QA/test-scope exclusion P1 already uses — dropped here,
+    // before aggregation, so a QA row can never reach the automatic report.
+    if (!includeQaScopes && isQaMarketLabel(resolvedMarket)) continue;
     if (marketFilter) {
       const haystack = `${rawMarket} ${resolvedMarket ?? ""}`.toLowerCase();
       if (!haystack.includes(marketFilter.toLowerCase())) continue;

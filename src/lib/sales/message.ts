@@ -32,6 +32,16 @@ export const SALES_AUTO_TITLE = "💰 สรุปยอดขายประจ
 /** The only wording allowed for a subtotal that is not fully verified. */
 export const SALES_PARTIAL_HEADING = "⚠️ ยอดที่ยืนยันได้บางส่วน";
 export const SALES_TOTAL_HEADING = "ยอดขายรวมทุกตลาด";
+
+/**
+ * The headline "ยอดขายรวมทุกตลาด" figure specifically — the number a reader
+ * skims first and is most likely to mistake for the whole day's sales.
+ * Stronger wording than the per-market/product SALES_PARTIAL_HEADING, plus an
+ * explicit line saying what the figure is NOT.
+ */
+export const SALES_PARTIAL_TOTAL_HEADING = "⚠️ ยอดที่ตรวจสอบได้บางส่วน";
+export const SALES_PARTIAL_TOTAL_NOTICE =
+  "หมายเหตุ: ยอดนี้เป็นเฉพาะรายการที่ตรวจสอบได้ ไม่ใช่ยอดขายรวมประจำวัน";
 export const SALES_MARKET_TOTAL_HEADING = "ยอดขายรวม";
 
 export const SALES_PRODUCT_SECTION_HEADING = "📦 ยอดขายรายสินค้า (ทุกตลาด)";
@@ -118,9 +128,14 @@ function unitLabel(unit: string): string {
  * A total plus its heading. The heading is the safety mechanism: an
  * authoritative figure is a total, anything else is explicitly partial.
  */
-function totalBlock(heading: string, total: SalesTotal, withCounts = true): string {
+function totalBlock(
+  heading: string,
+  total: SalesTotal,
+  withCounts = true,
+  partial: { heading?: string; notice?: string } = {},
+): string {
   const lines = [
-    total.valueAuthoritative ? heading : SALES_PARTIAL_HEADING,
+    total.valueAuthoritative ? heading : (partial.heading ?? SALES_PARTIAL_HEADING),
     // Nothing is priced yet: "0.00 บาท" would read as zero revenue, which is a
     // different (and false) claim from "the value is not calculable".
     total.trustedRowCount === 0 && !total.valueAuthoritative
@@ -128,6 +143,7 @@ function totalBlock(heading: string, total: SalesTotal, withCounts = true): stri
       : `${satangToBahtText(total.expectedSalesSatang)} บาท`,
   ];
   if (!total.valueAuthoritative) {
+    if (partial.notice) lines.push(partial.notice);
     const blocked = total.valueBlockedRowCount + total.quantityBlockedRowCount;
     // The Auto report states these counts on their own lines and passes
     // withCounts=false, so the figure is never printed twice.
@@ -139,6 +155,14 @@ function totalBlock(heading: string, total: SalesTotal, withCounts = true): stri
     if (total.quantityAuthoritative) lines.push(SALES_QUANTITY_ONLY_NOTICE);
   }
   return lines.join("\n");
+}
+
+/** The headline total specifically — stronger partial wording, see SALES_PARTIAL_TOTAL_HEADING. */
+function overallTotalBlock(total: SalesTotal, withCounts: boolean): string {
+  return totalBlock(SALES_TOTAL_HEADING, total, withCounts, {
+    heading: SALES_PARTIAL_TOTAL_HEADING,
+    notice: SALES_PARTIAL_TOTAL_NOTICE,
+  });
 }
 
 /** W / R / D / sold / central price / expected sales / status for one identity. */
@@ -281,7 +305,7 @@ export function buildSalesSummaryBlocks(report: SalesReport): string[] {
   if (hasNoRows(report)) return noRowsBlocks(report, header);
 
   return [
-    `${header}\n\n${totalBlock(SALES_TOTAL_HEADING, report.allMarkets)}`,
+    `${header}\n\n${overallTotalBlock(report.allMarkets, true)}`,
     ...scopeBlockerBlocks(report),
     ...blockedBlocks(report),
     ...report.markets.map(marketBlock),
@@ -349,7 +373,7 @@ export function buildSalesAutoBlocks(
   );
 
   return [
-    `${header}\n\n${totalBlock(SALES_TOTAL_HEADING, report.allMarkets, false)}\n\n${counts}`,
+    `${header}\n\n${overallTotalBlock(report.allMarkets, false)}\n\n${counts}`,
     ...scopeBlockerBlocks(report),
     ...(marketTotals.length > 0
       ? [[SALES_MARKET_SECTION_HEADING, ...marketTotals].join("\n")]

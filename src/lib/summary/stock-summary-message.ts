@@ -9,7 +9,11 @@ import {
   LINE_MESSAGE_MAX_CODE_POINTS,
 } from "@/lib/summary/line-chunking";
 
-export const STOCK_REPORT_TITLE = "📦 สรุปคงเหลือทุกตลาด";
+export const STOCK_REPORT_TITLE = "📦 สรุปของดีชั่งคืนรวมทุกตลาด";
+
+/** Same notice as the scheduled snapshot — this block shares the same StockSummary model. */
+export const STOCK_REPORT_NOTICE =
+  "หมายเหตุ: รายงานนี้สรุปเฉพาะของดีที่ชั่งคืน ไม่ใช่สต๊อกตรวจนับจริง";
 export const STOCK_INCOMPLETE_HEADING = "⚠️ ข้อมูลชั่งคืนยังไม่ครบ";
 export const STOCK_COMPLETE_NOTICE = "✅ ชั่งคืนครบทุกตลาด";
 export const STOCK_UNIDENTIFIED_HEADING = "❔ ยังระบุตลาดไม่ได้";
@@ -130,7 +134,7 @@ export function buildStockSummaryBlocks(
 ): string[] {
   // "full" keeps the manual reply exactly as it was.
   const detail = options.incomplete ?? "full";
-  const header = `${STOCK_REPORT_TITLE}\nวันที่ ${formatThaiDate(summary.businessDate)}`;
+  const header = `${STOCK_REPORT_TITLE}\nวันที่ ${formatThaiDate(summary.businessDate)}\n${STOCK_REPORT_NOTICE}`;
 
   const body = [
     ...summary.categories.flatMap(categoryBlocks),

@@ -182,13 +182,21 @@ describe("daily stock summary cron — delivery", () => {
     expect(body.incompleteCount).toBe(1);
     expect(body.incompleteMarketCount).toBe(1);
     expect(body.isComplete).toBe(false);
+    expect(body.anomalyCount).toBe(1);
+    expect(body.anomalyMarketCount).toBe(1);
+    expect(body.hasAnomalies).toBe(true);
 
-    expect(pushCalls.map((c) => c.to)).toEqual(["Cgroup1", "Cgroup2"]);
-    expect(pushCalls[0].text).toContain("📦 สรุปของดีชั่งคืนประจำวัน");
-    expect(pushCalls[0].text).toContain("🥭 ทุเรียน");
-    expect(pushCalls[0].text).toContain("1. หมอนทอง — 281.1 กก.");
-    expect(pushCalls[0].text).toContain("ยังระบุมูลค่าไม่ได้ — ไม่พบรายการเบิกที่ตรงกัน");
-    expect(pushCalls[0].text).not.toContain("เฉลิม72 ผลไม้: แก้วมังกร");
+    // One product message + one market-anomaly-detail message per target.
+    expect(pushCalls.map((c) => c.to)).toEqual(["Cgroup1", "Cgroup1", "Cgroup2", "Cgroup2"]);
+    const text = pushCalls.filter((c) => c.to === "Cgroup1").map((c) => c.text).join("\n\n");
+    expect(text).toContain("📦 สรุปของดีชั่งคืนประจำวัน");
+    expect(text).toContain("🥭 ทุเรียน");
+    expect(text).toContain("1. หมอนทอง — 281.1 กก.");
+    expect(text).toContain("⚠️ รอตรวจทั้งหมดจาก 1 ตลาด");
+    expect(text).toContain("⚠️ รายละเอียดข้อมูลผิดปกติ");
+    expect(text).toContain("ตลาดกี้ — หมอนทอง — กก.");
+    expect(text).toContain("ปัญหา: ไม่พบรายการเบิกที่ตรงกัน");
+    expect(text).not.toContain("เฉลิม72 ผลไม้: แก้วมังกร");
   });
 
   test("repeat scheduler calls reuse the same retry keys — no duplicate LINE spam", async () => {
@@ -296,7 +304,8 @@ describe("daily stock summary cron — scheduled report date", () => {
     expect(text).toContain("📦 สรุปของดีชั่งคืนประจำวัน");
     expect(text).toContain("🥭 ทุเรียน");
     expect(text).toContain("หมอนทอง — 281.1 กก.");
-    expect(text).toContain("ยังระบุมูลค่าไม่ได้ — ไม่พบรายการเบิกที่ตรงกัน");
+    expect(text).toContain("⚠️ รายละเอียดข้อมูลผิดปกติ");
+    expect(text).toContain("ปัญหา: ไม่พบรายการเบิกที่ตรงกัน");
     // … and no per-market detail block is appended.
     expect(text).not.toContain("เฉลิม72 ผลไม้: แก้วมังกร");
     expect(text).not.toContain("เหลือขายต่อ:");
@@ -370,7 +379,11 @@ describe("daily stock summary cron — debug mode", () => {
     expect(body.productCount).toBe(1);
     expect(body.incompleteCount).toBe(1);
     expect(body.isComplete).toBe(false);
+    expect(body.anomalyCount).toBe(1);
+    expect(body.anomalyMarketCount).toBe(1);
+    expect(body.hasAnomalies).toBe(true);
     expect(body.messages[0]).toContain("📦 สรุปของดีชั่งคืนประจำวัน");
+    expect(body.messages.join("\n\n")).toContain("⚠️ รายละเอียดข้อมูลผิดปกติ");
     expect(pushCalls).toHaveLength(0);
   });
 });

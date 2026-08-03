@@ -115,12 +115,18 @@ export async function GET(req: NextRequest) {
       });
     }
   }
-  const messages = buildDailyGoodReturnValueMessages(report, {
-    latest,
-    incomplete: stockSummary.incomplete,
-  });
+  // The good-return report values what markets actually weighed back in — a
+  // withdrawal with no good return is sold, not incomplete. incomplete/
+  // isComplete below describe the SEPARATE StockSummary model (still shared
+  // with the manual `สรุปคงเหลือ` command) and no longer drive this message;
+  // anomalyCount/anomalyMarketCount/hasAnomalies are this report's own
+  // truth about fail-closed, market-level valuation problems.
+  const messages = buildDailyGoodReturnValueMessages(report, { latest });
   const productCount = report.products.length;
   const incompleteMarketCount = new Set(stockSummary.incomplete.map((row) => row.marketName)).size;
+  const anomalyCount = report.anomalies.length;
+  const anomalyMarketCount = new Set(report.anomalies.map((row) => row.marketName)).size;
+  const hasAnomalies = anomalyCount > 0;
 
   if (debugMode) {
     logger.info("daily stock summary cron debug completed", {
@@ -129,6 +135,9 @@ export async function GET(req: NextRequest) {
       incompleteCount: stockSummary.incomplete.length,
       incompleteMarketCount,
       isComplete: stockSummary.isComplete,
+      anomalyCount,
+      anomalyMarketCount,
+      hasAnomalies,
       latestLookupStatus: latest?.status ?? null,
       latestDataDate: latest?.status === "found" ? latest.hint.date : null,
       latestDataMarketCount: latest?.status === "found" ? latest.hint.marketCount : null,
@@ -145,6 +154,9 @@ export async function GET(req: NextRequest) {
       incompleteCount: stockSummary.incomplete.length,
       incompleteMarketCount,
       isComplete: stockSummary.isComplete,
+      anomalyCount,
+      anomalyMarketCount,
+      hasAnomalies,
       latestLookupStatus: latest?.status ?? null,
       latestDataDate: latest?.status === "found" ? latest.hint.date : null,
       latestDataMarketCount: latest?.status === "found" ? latest.hint.marketCount : null,
@@ -171,6 +183,9 @@ export async function GET(req: NextRequest) {
       incompleteCount: stockSummary.incomplete.length,
       incompleteMarketCount,
       isComplete: stockSummary.isComplete,
+      anomalyCount,
+      anomalyMarketCount,
+      hasAnomalies,
       targetCount: 0,
     });
   }
@@ -211,6 +226,9 @@ export async function GET(req: NextRequest) {
         incompleteCount: stockSummary.incomplete.length,
         incompleteMarketCount,
         isComplete: stockSummary.isComplete,
+        anomalyCount,
+        anomalyMarketCount,
+        hasAnomalies,
         targetCount: targets.length,
       },
       { status: 500 },
@@ -224,6 +242,9 @@ export async function GET(req: NextRequest) {
     incompleteCount: stockSummary.incomplete.length,
     incompleteMarketCount,
     isComplete: stockSummary.isComplete,
+    anomalyCount,
+    anomalyMarketCount,
+    hasAnomalies,
   });
 
   return NextResponse.json({
@@ -235,6 +256,9 @@ export async function GET(req: NextRequest) {
     incompleteCount: stockSummary.incomplete.length,
     incompleteMarketCount,
     isComplete: stockSummary.isComplete,
+    anomalyCount,
+    anomalyMarketCount,
+    hasAnomalies,
     targetCount: targets.length,
   });
 }

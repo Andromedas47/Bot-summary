@@ -482,3 +482,49 @@ describe("dedupeRemainingSourceRows (session-aware duplicate suppression)", () =
     expect(dedupeRemainingSourceRows(source)).toHaveLength(2);
   });
 });
+
+describe("exact confirmed product aliases", () => {
+  test("หมอนทอน aggregates under หมอนทอง when units match", () => {
+    const report = buildRemainingFruitReport([
+      row({ product_name: "หมอนทอง", quantity: 218.9, unit: UNIT_KG, transaction_type: TX_RETURN }),
+      row({ product_name: "หมอนทอน", quantity: 33.1, unit: UNIT_KG, transaction_type: TX_RETURN }),
+    ]);
+
+    const overall = report.overall.find((o) => o.fruitName === "หมอนทอง");
+    expect(overall?.totalRemainingForResale).toBe(252);
+    expect(report.overall.find((o) => o.fruitName === "หมอนทอน")).toBeUndefined();
+  });
+
+  test("ทุเนียนกวน aggregates under ทุเรียนกวน when units match", () => {
+    const report = buildRemainingFruitReport([
+      row({ product_name: "ทุเรียนกวน", quantity: 5, unit: "ปุก", transaction_type: TX_RETURN }),
+      row({ product_name: "ทุเนียนกวน", quantity: 12, unit: "ปุก", transaction_type: TX_RETURN }),
+    ]);
+
+    const overall = report.overall.find((o) => o.fruitName === "ทุเรียนกวน");
+    expect(overall?.totalRemainingForResale).toBe(17);
+    expect(report.overall.find((o) => o.fruitName === "ทุเนียนกวน")).toBeUndefined();
+  });
+
+  test("หมอนทอง and หมอนทอน never merge across different units", () => {
+    const report = buildRemainingFruitReport([
+      row({ product_name: "หมอนทอง", quantity: 100, unit: UNIT_KG, transaction_type: TX_RETURN }),
+      row({ product_name: "หมอนทอน", quantity: 10, unit: UNIT_PIECE, transaction_type: TX_RETURN }),
+    ]);
+
+    const kg = report.overall.find((o) => o.fruitName === "หมอนทอง" && o.unit === UNIT_KG);
+    const piece = report.overall.find((o) => o.fruitName === "หมอนทอง" && o.unit === UNIT_PIECE);
+    expect(kg?.totalRemainingForResale).toBe(100);
+    expect(piece?.totalRemainingForResale).toBe(10);
+  });
+
+  test("an unapproved similar typo stays a separate product", () => {
+    const report = buildRemainingFruitReport([
+      row({ product_name: "หมอนทอง", quantity: 50, unit: UNIT_KG, transaction_type: TX_RETURN }),
+      row({ product_name: "หมอนทิง", quantity: 7, unit: UNIT_KG, transaction_type: TX_RETURN }),
+    ]);
+
+    expect(report.overall.find((o) => o.fruitName === "หมอนทอง")?.totalRemainingForResale).toBe(50);
+    expect(report.overall.find((o) => o.fruitName === "หมอนทิง")?.totalRemainingForResale).toBe(7);
+  });
+});

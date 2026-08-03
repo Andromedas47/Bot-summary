@@ -2,13 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { logger } from "@/lib/logger";
 import { pushLineMessage } from "@/lib/line/reply";
-import { loadStockSummary } from "@/lib/summary/stock-summary-service";
-import { findLatestStockDataDate } from "@/lib/summary/remaining-fruit-data";
+import { fetchRemainingFruitRows, findLatestStockDataDate } from "@/lib/summary/remaining-fruit-data";
 import type { LatestDataLookup } from "@/lib/summary/latest-data-hint";
-import {
-  buildStockSnapshotMessages,
-  isStockSnapshotEmpty,
-} from "@/lib/summary/stock-snapshot-message";
+import { buildDailyGoodReturnValueMessages, buildDailyGoodReturnValueReport } from "@/lib/summary/daily-good-return-value";
 import {
   parseStockSummaryTargets,
   resolveStockSummaryDate,
@@ -76,9 +72,12 @@ export async function GET(req: NextRequest) {
 
   const supabase = createServiceClient();
 
-  let summary;
+  let report;
   try {
-    summary = await loadStockSummary(supabase, businessDate);
+    report = buildDailyGoodReturnValueReport(
+      businessDate,
+      await fetchRemainingFruitRows(supabase, businessDate),
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error("daily stock summary cron failed - summary build error", {
@@ -96,31 +95,31 @@ export async function GET(req: NextRequest) {
   // A failure stays "unavailable" and NEVER becomes "none" — the report would
   // otherwise tell the business its records are empty on the strength of a
   // database error. The error text is logged here and never reaches LINE.
-  const isEmpty = isStockSnapshotEmpty(summary);
-  let latest: LatestDataLookup = { status: "unavailable" };
-  if (isEmpty) {
+  // The all-market stock snapshot, grouped by category then unit, with the
+  // missing-ชั่งคืน section collapsed to counts. No per-market detail: the
+  // morning report has to be readable before the markets run.
+  let latest: LatestDataLookup | undefined;
+  if (report.products.length === 0) {
     try {
       latest = await findLatestStockDataDate(supabase, businessDate);
     } catch (error) {
+      latest = { status: "unavailable" };
       logger.warn("daily stock summary latest-date lookup failed", {
         businessDate,
         error: error instanceof Error ? error.message : String(error),
       });
     }
   }
-
-  // The all-market stock snapshot, grouped by category then unit, with the
-  // missing-ชั่งคืน section collapsed to counts. No per-market detail: the
-  // morning report has to be readable before the markets run.
-  const messages = buildStockSnapshotMessages(summary, { latest });
-  const productCount = summary.categories.reduce((n, group) => n + group.products.length, 0);
+  const messages = buildDailyGoodReturnValueMessages(report, { latest });
+  const productCount = report.products.length;
 
   if (debugMode) {
     logger.info("daily stock summary cron debug completed", {
       businessDate,
       productCount,
-      incompleteCount: summary.incomplete.length,
-      isComplete: summary.isComplete,
+      latestLookupStatus: latest?.status ?? null,
+      latestDataDate: latest?.status === "found" ? latest.hint.date : null,
+      latestDataMarketCount: latest?.status === "found" ? latest.hint.marketCount : null,
       messageCount: messages.length,
       targetCount: targets.length,
       wouldSendLine: targets.length > 0,
@@ -131,12 +130,9 @@ export async function GET(req: NextRequest) {
       debug: true,
       businessDate,
       productCount,
-      incompleteCount: summary.incomplete.length,
-      isComplete: summary.isComplete,
-      // null status = never attempted, because the date had data.
-      latestLookupStatus: isEmpty ? latest.status : null,
-      latestDataDate: latest.status === "found" ? latest.hint.date : null,
-      latestDataMarketCount: latest.status === "found" ? latest.hint.marketCount : null,
+      latestLookupStatus: latest?.status ?? null,
+      latestDataDate: latest?.status === "found" ? latest.hint.date : null,
+      latestDataMarketCount: latest?.status === "found" ? latest.hint.marketCount : null,
       messageCount: messages.length,
       targetCount: targets.length,
       wouldSendLine: targets.length > 0,
@@ -157,7 +153,6 @@ export async function GET(req: NextRequest) {
       sent: false,
       reason: "no_targets_configured",
       productCount,
-      incompleteCount: summary.incomplete.length,
       targetCount: 0,
     });
   }
@@ -195,7 +190,6 @@ export async function GET(req: NextRequest) {
         sentCount,
         failedCount: failedTargets.length,
         productCount,
-        incompleteCount: summary.incomplete.length,
         targetCount: targets.length,
       },
       { status: 500 },
@@ -206,8 +200,6 @@ export async function GET(req: NextRequest) {
     businessDate,
     sentCount,
     productCount,
-    incompleteCount: summary.incomplete.length,
-    isComplete: summary.isComplete,
   });
 
   return NextResponse.json({
@@ -216,8 +208,6 @@ export async function GET(req: NextRequest) {
     sent: true,
     sentCount,
     productCount,
-    incompleteCount: summary.incomplete.length,
-    isComplete: summary.isComplete,
     targetCount: targets.length,
   });
 }

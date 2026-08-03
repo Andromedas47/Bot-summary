@@ -179,17 +179,12 @@ describe("daily stock summary cron — delivery", () => {
     expect(body.sent).toBe(true);
     expect(body.sentCount).toBe(2);
     expect(body.businessDate).toBe("2026-07-25");
-    expect(body.isComplete).toBe(false);
-    expect(body.incompleteCount).toBe(1);
 
     expect(pushCalls.map((c) => c.to)).toEqual(["Cgroup1", "Cgroup2"]);
-    expect(pushCalls[0].text).toContain("📦 สรุปของดีชั่งคืนรวมทุกตลาด");
-    // เฉลิม72 ผลไม้ is in the day's data but owes its ชั่งคืน, so it counts
-    // toward the total and not toward พบคงเหลือ.
-    expect(pushCalls[0].text).toContain("ข้อมูลจาก 2 ตลาด • พบคงเหลือ 1 ตลาด");
-    expect(pushCalls[0].text).toContain("🥭 ทุเรียน\n\nกก.\nหมอนทอง — 281.1 กก.");
-    // Scheduled delivery collapses the missing-return section to counts.
-    expect(pushCalls[0].text).toContain("⚠️ พบรายการเบิกที่ไม่มีข้อมูลชั่งคืน\n1 รายการ จาก 1 ตลาด");
+    expect(pushCalls[0].text).toContain("📦 สรุปของดีชั่งคืนประจำวัน");
+    expect(pushCalls[0].text).toContain("🥭 ทุเรียน");
+    expect(pushCalls[0].text).toContain("1. หมอนทอง — 281.1 กก.");
+    expect(pushCalls[0].text).toContain("ยังระบุมูลค่าไม่ได้ — ไม่พบรายการเบิกที่ตรงกัน");
     expect(pushCalls[0].text).not.toContain("เฉลิม72 ผลไม้: แก้วมังกร");
   });
 
@@ -249,7 +244,6 @@ describe("daily stock summary cron — QA/test-market exclusion", () => {
     expect(res.status).toBe(200);
     // Market/product counts reflect the excluded scope: still 2 markets (QA
     // never counted), and the QA quantity never joins หมอนทอง's total.
-    expect(pushCalls[0].text).toContain("ข้อมูลจาก 2 ตลาด • พบคงเหลือ 1 ตลาด");
     expect(pushCalls[0].text).toContain("หมอนทอง — 281.1 กก.");
     expect(pushCalls[0].text).not.toContain("1280");
     expect(body.productCount).toBe(1);
@@ -296,11 +290,10 @@ describe("daily stock summary cron — scheduled report date", () => {
     await GET(request("?date=2026-07-25"));
     const text = pushCalls.map((c) => c.text).join("\n\n");
 
-    expect(text).toContain("📦 สรุปของดีชั่งคืนรวมทุกตลาด");
+    expect(text).toContain("📦 สรุปของดีชั่งคืนประจำวัน");
     expect(text).toContain("🥭 ทุเรียน");
     expect(text).toContain("หมอนทอง — 281.1 กก.");
-    // Missing returns collapse to counts …
-    expect(text).toContain("⚠️ พบรายการเบิกที่ไม่มีข้อมูลชั่งคืน\n1 รายการ จาก 1 ตลาด");
+    expect(text).toContain("ยังระบุมูลค่าไม่ได้ — ไม่พบรายการเบิกที่ตรงกัน");
     // … and no per-market detail block is appended.
     expect(text).not.toContain("เฉลิม72 ผลไม้: แก้วมังกร");
     expect(text).not.toContain("เหลือขายต่อ:");
@@ -372,7 +365,7 @@ describe("daily stock summary cron — debug mode", () => {
     expect(body.debug).toBe(true);
     expect(body.wouldSendLine).toBe(true);
     expect(body.productCount).toBe(1);
-    expect(body.messages[0]).toContain("📦 สรุปของดีชั่งคืนรวมทุกตลาด");
+    expect(body.messages[0]).toContain("📦 สรุปของดีชั่งคืนประจำวัน");
     expect(pushCalls).toHaveLength(0);
   });
 });
@@ -488,7 +481,7 @@ describe("daily stock summary cron — empty business date", () => {
     expect(probed).toBe(false);
     // null status = never attempted, distinct from all three real outcomes.
     expect(body.latestLookupStatus).toBeNull();
-    expect(body.messages[0]).toContain("ข้อมูลจาก 2 ตลาด • พบคงเหลือ 1 ตลาด");
+    expect(body.messages[0]).toContain("📦 สรุปของดีชั่งคืนประจำวัน");
     expect(body.messages.join("\n")).not.toContain(LATEST_DATA_UNAVAILABLE_NOTICE);
   });
 });

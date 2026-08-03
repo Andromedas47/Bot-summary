@@ -241,7 +241,7 @@ export function satangToBahtText(satang: number): string {
 }
 
 /** Half-up division of a non-negative bigint — the single rounding rule for money. */
-function roundHalfUp(value: bigint, divisor: bigint): bigint {
+export function roundHalfUp(value: bigint, divisor: bigint): bigint {
   const quotient = value / divisor;
   const remainder = value % divisor;
   return remainder * BigInt(2) >= divisor ? quotient + BigInt(1) : quotient;
@@ -252,7 +252,7 @@ function roundHalfUp(value: bigint, divisor: bigint): bigint {
  * drift can never reach a reported quantity. Returns null for anything that is
  * not a finite non-negative number — the caller then blocks the identity.
  */
-function toMilliQuantity(value: number): bigint | null {
+export function toMilliQuantity(value: number): bigint | null {
   if (!Number.isFinite(value) || value < 0) return null;
 
   const [coefficient, exponentText] = value.toString().toLowerCase().split("e");
@@ -264,6 +264,13 @@ function toMilliQuantity(value: number): bigint | null {
   const shift = 3 - decimalPlaces;
   if (shift >= 0) return unscaled * BigInt(10) ** BigInt(shift);
   return roundHalfUp(unscaled, BigInt(10) ** BigInt(-shift));
+}
+
+/** P1's approved quantity × unit-price money boundary. */
+export function quantityTimesSatang(quantity: number, unitPriceSatang: number): number | null {
+  const milli = toMilliQuantity(quantity);
+  if (milli === null || !Number.isSafeInteger(unitPriceSatang) || unitPriceSatang < 0) return null;
+  return Number(roundHalfUp(milli * BigInt(unitPriceSatang), BigInt(1000)));
 }
 
 function fromMilliQuantity(value: bigint): number {

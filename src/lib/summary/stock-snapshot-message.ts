@@ -28,7 +28,16 @@ import { chunkBlocks, countCodePoints } from "@/lib/summary/line-chunking";
  * manual `สรุปคงเหลือ` command renders; no stock arithmetic happens here.
  */
 
-export const STOCK_SNAPSHOT_TITLE = "📦 สต๊อกคงเหลือรวมทุกตลาด";
+export const STOCK_SNAPSHOT_TITLE = "📦 สรุปของดีชั่งคืนรวมทุกตลาด";
+
+/**
+ * This report is a ชั่งคืน (good-return) summary, not a physically counted
+ * stock balance — no opening balance, no purchase intake, no ledger. Stated
+ * next to the heading/date so the number is never mistaken for warehouse
+ * stock.
+ */
+export const STOCK_SNAPSHOT_NOTICE =
+  "หมายเหตุ: รายงานนี้สรุปเฉพาะของดีที่ชั่งคืน ไม่ใช่สต๊อกตรวจนับจริง";
 
 /**
  * Auto-snapshot incomplete heading. Wording differs from the manual
@@ -236,7 +245,7 @@ export function buildStockSnapshotBlocks(
     // all, "ข้อมูลจาก 0 ตลาด" states a count that was never taken.
     return [
       [
-        `${STOCK_SNAPSHOT_TITLE}\nข้อมูลวันที่ ${requestedDate}`,
+        `${STOCK_SNAPSHOT_TITLE}\nข้อมูลวันที่ ${requestedDate}\n${STOCK_SNAPSHOT_NOTICE}`,
         `${STOCK_SNAPSHOT_NO_DATA_PREFIX} ${requestedDate}`,
         latestDataBlock(latest, STOCK_SNAPSHOT_NO_HISTORY_NOTICE),
       ].join("\n\n"),
@@ -247,6 +256,7 @@ export function buildStockSnapshotBlocks(
   const header = [
     STOCK_SNAPSHOT_TITLE,
     `ข้อมูลวันที่ ${requestedDate}`,
+    STOCK_SNAPSHOT_NOTICE,
     `ข้อมูลจาก ${coverage.total} ตลาด • พบคงเหลือ ${coverage.withStock} ตลาด`,
   ].join("\n");
 

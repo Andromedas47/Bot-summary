@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { NextRequest } from "next/server";
 import { LATEST_DATA_UNAVAILABLE_NOTICE } from "@/lib/summary/latest-data-hint";
+import {
+  HOUSE_STOCK_PRICED_PARSER_VERSION,
+  PHYSICAL_INVENTORY_PARSER_VERSION,
+} from "@/lib/physical-inventory/types";
 
 // ── Stubs ──────────────────────────────────────────────────────────────────
 //
@@ -13,6 +17,8 @@ type QueryResult = { data: unknown[] | null; error: { message: string } | null }
 let produceResult: QueryResult = { data: [], error: null };
 let sessionResult: QueryResult = { data: [], error: null };
 let messageResult: QueryResult = { data: [], error: null };
+let physicalSnapshotResult: QueryResult = { data: [], error: null };
+let physicalItemResult: QueryResult = { data: [], error: null };
 
 /**
  * Answer produce_transactions per query rather than per table.
@@ -24,16 +30,24 @@ let messageResult: QueryResult = { data: [], error: null };
  */
 let produceByQuery: ((filters: Record<string, unknown>) => QueryResult | null) | null = null;
 
-function chain(result: () => QueryResult, produceAware = false): Record<string, unknown> {
+function chain(result: () => QueryResult, produceAware = false, pricedSnapshotAware = false): Record<string, unknown> {
   const filters: Record<string, unknown> = {};
-  const answer = () =>
-    (produceAware ? produceByQuery?.(filters) ?? null : null) ?? result();
+  const answer = () => {
+    const response = (produceAware ? produceByQuery?.(filters) ?? null : null) ?? result();
+    if (!pricedSnapshotAware || !response.data) return response;
+    return {
+      ...response,
+      data: response.data.filter((entry) =>
+        (entry as Record<string, unknown>).parser_version === filters["eq:parser_version"]),
+    };
+  };
 
   const node: Record<string, unknown> = {};
   const self = () => node;
   node.select = self;
   node.in = self;
   node.ilike = self;
+  node.is = self;
   node.order = self;
   node.eq = (column: string, value: unknown) => {
     filters[`eq:${column}`] = value;
@@ -56,6 +70,8 @@ mock.module("@/lib/supabase/server", () => ({
       if (table === "produce_transactions") return chain(() => produceResult, true);
       if (table === "produce_sessions") return chain(() => sessionResult);
       if (table === "raw_messages") return chain(() => messageResult);
+      if (table === "physical_inventory_snapshots") return chain(() => physicalSnapshotResult, false, true);
+      if (table === "physical_inventory_items") return chain(() => physicalItemResult);
       throw new Error(`Unexpected table: ${table}`);
     },
   }),
@@ -97,6 +113,8 @@ beforeEach(() => {
   produceResult = { data: [], error: null };
   sessionResult = { data: [], error: null };
   messageResult = { data: [], error: null };
+  physicalSnapshotResult = { data: [], error: null };
+  physicalItemResult = { data: [], error: null };
   produceByQuery = null;
   process.env.CRON_SECRET = "stock-secret";
   delete process.env.STOCK_SUMMARY_LINE_TARGETS;
@@ -187,7 +205,10 @@ describe("daily stock summary cron — delivery", () => {
     expect(body.hasAnomalies).toBe(true);
 
     // One product message + one market-anomaly-detail message per target.
-    expect(pushCalls.map((c) => c.to)).toEqual(["Cgroup1", "Cgroup1", "Cgroup2", "Cgroup2"]);
+    expect(pushCalls.map((c) => c.to)).toEqual([
+      "Cgroup1", "Cgroup1", "Cgroup1",
+      "Cgroup2", "Cgroup2", "Cgroup2",
+    ]);
     const text = pushCalls.filter((c) => c.to === "Cgroup1").map((c) => c.text).join("\n\n");
     expect(text).toContain("📦 สรุปของดีชั่งคืนประจำวัน");
     expect(text).toContain("🥭 ทุเรียน");
@@ -229,6 +250,73 @@ describe("daily stock summary cron — delivery", () => {
     const day2 = pushCalls.map((c) => c.retryKey);
 
     expect(day2).not.toEqual(day1);
+  });
+
+  test("House Stock is a separate priced message with separate retry namespace", async () => {
+    produceResult = { data: produceRows(), error: null };
+    physicalSnapshotResult = {
+      data: [{
+        id: "house-snapshot",
+        business_date: "2026-08-03",
+        parser_version: HOUSE_STOCK_PRICED_PARSER_VERSION,
+      }],
+      error: null,
+    };
+    physicalItemResult = {
+      data: [{
+        id: "house-item", snapshot_id: "house-snapshot", item_ordinal: 1,
+        staff_sequence: 1, raw_text: "1 เขียวมรกต 30 บาท\n49.7 โล",
+        raw_product_description: "เขียวมรกต", normalized_product: "เขียวมรกต",
+        quantity: 49.7, unit_price_satang: 3000, raw_unit: "โล", normalized_unit: "โล",
+        resolution_status: "ACCEPTED_NORMALIZED", reason: null, created_at: "2026-08-03T00:00:00Z",
+      }],
+      error: null,
+    };
+    process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
+
+    const response = await GET(request("?date=2026-08-03"));
+    const body = await response.json();
+    const good = pushCalls.filter((call) => call.text.includes("สรุปของดีชั่งคืน"));
+    const house = pushCalls.filter((call) => call.text.includes("สรุปสต๊อกคงเหลือในบ้าน"));
+    expect(good.length).toBeGreaterThan(0);
+    expect(house).toHaveLength(1);
+    expect(good.every((call) => !call.text.includes("สรุปสต๊อกคงเหลือในบ้าน"))).toBe(true);
+    expect(house[0]?.text).toContain("มูลค่า 1,491.00 บาท");
+    expect(house[0]?.retryKey).not.toBe(good[0]?.retryKey);
+    expect(body).toMatchObject({
+      houseStockFound: true,
+      houseStockItemCount: 1,
+      houseStockGroupCount: 1,
+      houseStockTotalValueSatang: 149100,
+    });
+  });
+
+  test("no-snapshot date sends truthful separate House Stock message", async () => {
+    process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
+    await GET(request("?date=2026-08-03"));
+    expect(pushCalls.map((call) => call.text).join("\n\n"))
+      .toContain("ยังไม่มีการบันทึกผลไม้คงเหลือในบ้านสำหรับวันนี้");
+  });
+
+  test("legacy Physical Inventory snapshot does not fail the House Stock route", async () => {
+    physicalSnapshotResult = {
+      data: [{
+        id: "legacy-snapshot",
+        business_date: "2026-08-03",
+        parser_version: PHYSICAL_INVENTORY_PARSER_VERSION,
+      }],
+      error: null,
+    };
+    physicalItemResult = {
+      data: [{ unit_price_satang: null }],
+      error: null,
+    };
+    process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
+
+    const response = await GET(request("?date=2026-08-03"));
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.houseStockFound).toBe(false);
   });
 });
 
@@ -385,6 +473,9 @@ describe("daily stock summary cron — debug mode", () => {
     expect(body.messages[0]).toContain("📦 สรุปของดีชั่งคืนประจำวัน");
     expect(body.messages.join("\n\n")).toContain("⚠️ รายละเอียดข้อมูลผิดปกติ");
     expect(pushCalls).toHaveLength(0);
+    expect(body.goodReturnMessages).toEqual(body.messages);
+    expect(body.houseStockMessages[0]).toContain("สต๊อกคงเหลือในบ้าน");
+    expect(body.houseStockFound).toBe(false);
   });
 });
 
@@ -449,7 +540,7 @@ describe("daily stock summary cron — empty business date", () => {
 
     // The empty state is still delivered in full …
     expect(res.status).toBe(200);
-    expect(pushCalls).toHaveLength(1);
+    expect(pushCalls).toHaveLength(2);
     expect(text).toContain("ยังไม่พบข้อมูลชั่งคืนประจำวันที่ 27 กรกฎาคม 2569");
     expect(text).toContain(LATEST_DATA_UNAVAILABLE_NOTICE);
     // … without telling the business its records are empty on the strength of

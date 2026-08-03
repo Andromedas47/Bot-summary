@@ -15,7 +15,6 @@ import {
   PHYSICAL_INVENTORY_PARSER_VERSION,
   type PhysicalInventoryParsedItem,
   type PhysicalInventoryParsedSession,
-  type PhysicalInventoryParseIssue,
 } from "./types";
 
 type Supabase = SupabaseClient<Database>;
@@ -115,12 +114,19 @@ export class PhysicalInventoryCloseBoundaryRequiredError extends Error {
   }
 }
 
-function issuesToJson(issues: PhysicalInventoryParseIssue[]): Json {
-  return issues.map((i) => ({
-    code: i.code,
-    message: i.message,
-    ...(i.line != null ? { line: i.line } : {}),
-  })) as unknown as Json;
+function finalizationWarnings(session: PhysicalInventoryParsedSession): Json {
+  return [
+    ...session.warnings,
+    ...session.errors,
+    ...session.items
+      .filter((item) => item.resolutionStatus === "REJECTED")
+      .map((item) => ({
+        code: "invalid_item",
+        message: item.reason ?? "invalid_item",
+        sequence: item.sequence,
+        reason: item.reason,
+      })),
+  ] as unknown as Json;
 }
 
 function itemsToJson(items: PhysicalInventoryParsedItem[]): Json {
@@ -130,6 +136,7 @@ function itemsToJson(items: PhysicalInventoryParsedItem[]): Json {
     raw_product_description: it.rawProductDescription,
     normalized_product: it.normalizedProduct,
     quantity: it.quantity,
+    unit_price_satang: it.unitPriceSatang ?? null,
     raw_unit: it.rawUnit,
     normalized_unit: it.normalizedUnit,
     resolution_status: it.resolutionStatus,
@@ -288,6 +295,26 @@ export class PhysicalInventorySessionService {
     };
   }
 
+  /** Close a complete document carried by its already-persisted open event. */
+  async closeOpenEvent(params: {
+    sessionId: string;
+    expectedGeneration: string;
+    openedLineEventId: string;
+  }): Promise<PhysicalInventorySessionRow> {
+    const { data, error } = await this.supabase.rpc(
+      "close_physical_inventory_open_event",
+      {
+        p_session_id: params.sessionId,
+        p_expected_generation: params.expectedGeneration,
+        p_opened_line_event_id: params.openedLineEventId,
+      },
+    );
+    if (error) throw mapRpcError(error.message ?? "", "admit");
+    const session = await this.getSession((data as { session_id: string }).session_id);
+    if (!session) throw new Error("session missing after inline close");
+    return session;
+  }
+
   async getFinalizeCandidate(params: {
     sessionId: string;
     expectedGeneration: string;
@@ -374,10 +401,7 @@ export class PhysicalInventorySessionService {
       p_expected_ingest_hash: params.expectedIngestHash,
       p_business_date: params.parsed.businessDate,
       p_parser_version: params.parsed.parserVersion || PHYSICAL_INVENTORY_PARSER_VERSION,
-      p_warnings: issuesToJson([
-        ...params.parsed.warnings,
-        ...params.parsed.errors,
-      ]),
+      p_warnings: finalizationWarnings(params.parsed),
       p_items: failClosed ? ([] as unknown as Json) : itemsToJson(params.parsed.items),
       p_fail_closed: failClosed,
       p_fail_reason: failClosed

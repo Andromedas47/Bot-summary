@@ -6,7 +6,9 @@
 /** Header lines that open a physical-stock document (NFC-normalized compare). */
 export const PHYSICAL_INVENTORY_HEADERS = [
   "สตอกผลไม้คงเหลือ",
+  "สต๊อกผลไม้คงเหลือ",
   "สตอกผลไม้คงเหลือวันนี้",
+  "ผลไม้คงเหลือในบ้าน",
 ] as const;
 
 /**

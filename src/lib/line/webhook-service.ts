@@ -101,6 +101,7 @@ import {
   isRecognizedPhysicalInventoryItemBlock,
   matchesPhysicalInventoryCloseLine,
   parsePhysicalInventoryDocument,
+  HOUSE_STOCK_PRICED_PARSER_VERSION,
 } from "@/lib/physical-inventory";
 import {
   PhysicalInventoryAfterCloseBoundaryError,
@@ -149,7 +150,7 @@ type PhysicalInventoryFinalizer = (params: {
 type PhysicalInventorySessionGateway = Pick<
   PhysicalInventorySessionService,
   "findOpenSession" | "openSession" | "registerIngest"
->;
+> & Partial<Pick<PhysicalInventorySessionService, "closeOpenEvent">>;
 
 const BATCH_FIRST_IMAGE_REPLY = [
   "รับรูปหลักฐานแล้วครับ",
@@ -538,14 +539,14 @@ export class WebhookService {
       const orderedReceipts = receipts.filter((receipt) => receipt.ordered);
       const sourceIds = [...new Set(orderedReceipts.map(({ sourceId }) => sourceId))];
       try {
-        await Promise.all([
-          ...sourceIds.map((sourceId) => this.drainOrderedSource(sourceId, destination, resultByEventId)),
-          ...receipts.filter((receipt) => !receipt.ordered).map(async (receipt) => {
-            resultByEventId.set(receipt.event.webhookEventId, await this.processOne(
-              receipt.event, destination, 0, 1, receipt.rawMessageId,
-            ));
-          }),
-        ]);
+        await Promise.all(
+          sourceIds.map((sourceId) => this.drainOrderedSource(sourceId, destination, resultByEventId)),
+        );
+        for (const receipt of receipts.filter((item) => !item.ordered)) {
+          resultByEventId.set(receipt.event.webhookEventId, await this.processOne(
+            receipt.event, destination, 0, 1, receipt.rawMessageId,
+          ));
+        }
         return events.map((event) => immediate.get(event.webhookEventId)
           ?? resultByEventId.get(event.webhookEventId)
           ?? { eventId: event.webhookEventId, eventType: event.type, status: "saved" });
@@ -1262,7 +1263,7 @@ export class WebhookService {
     const replyToken = event.replyToken;
 
     if (standaloneIntent === "header") {
-      const parsed = parsePhysicalInventoryDocument(text);
+      const parsed = parsePhysicalInventoryDocument(text, { requireUnitPrice: true });
       try {
         const opened = await service.openSession({
           sourceType: "group",
@@ -1274,10 +1275,22 @@ export class WebhookService {
           lineMessageId,
           rawMessageId,
           businessDate: parsed.businessDate,
+          parserVersion: HOUSE_STOCK_PRICED_PARSER_VERSION,
         });
-        await this.markRawMessageProcessed(rawMessageId, log);
+        const closesInline = Boolean(parsed.closeText);
+        if (closesInline && !service.closeOpenEvent) {
+          throw new Error("inline Physical Inventory close is unavailable");
+        }
+        const activeSession = closesInline
+          ? await service.closeOpenEvent!({
+            sessionId: opened.session.id,
+            expectedGeneration: opened.session.session_generation,
+            openedLineEventId: eventId,
+          })
+          : opened.session;
+        if (!closesInline) await this.markRawMessageProcessed(rawMessageId, log);
 
-        if (replyToken && opened.opened && !opened.idempotent) {
+        if (replyToken && opened.opened && !opened.idempotent && !closesInline) {
           const businessDate = parsed.businessDate ?? opened.session.business_date;
           const displayDate = businessDate
             ? formatPhysicalInventoryBusinessDate(businessDate)
@@ -1288,6 +1301,15 @@ export class WebhookService {
               ? `เริ่มบันทึกสต๊อกผลไม้คงเหลือวันที่ ${displayDate} แล้ว`
               : "เริ่มรายการแล้ว แต่ไม่พบวันที่ที่ถูกต้อง กรุณาตรวจสอบวันที่ก่อนปิดรายการ",
           );
+        }
+
+        if (closesInline) {
+          this.scheduleBackgroundTask(async () => {
+            await this.physicalInventoryFinalizer({
+              sessionId: activeSession.id,
+              expectedGeneration: activeSession.session_generation,
+            });
+          });
         }
 
         log.info("Physical Inventory session opened", {
@@ -1322,7 +1344,10 @@ export class WebhookService {
     if (!session) return null;
 
     const close = matchesPhysicalInventoryCloseLine(text);
-    const item = !close && isRecognizedPhysicalInventoryItemBlock(text);
+    const item = !close && (
+      isRecognizedPhysicalInventoryItemBlock(text, { requireUnitPrice: true })
+      || isRecognizedPhysicalInventoryItemBlock(text)
+    );
     if (!close && !item) return null;
 
     try {

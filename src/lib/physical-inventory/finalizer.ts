@@ -2,7 +2,13 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/database";
 import { logger } from "@/lib/logger";
 import { pushLineMessage } from "@/lib/line/reply";
+import { houseStockImmediateRetryKey } from "@/lib/summary/daily-stock-cron";
 import { parsePhysicalInventoryDocument } from "./parse";
+import {
+  buildHouseStockInvalidMessage,
+  buildHouseStockReport,
+} from "./house-stock-report";
+import { HOUSE_STOCK_PRICED_PARSER_VERSION } from "./types";
 import {
   PHYSICAL_INVENTORY_CLOSE_DEADLINE_MS,
   PhysicalInventoryCloseQuietWindowError,
@@ -20,7 +26,7 @@ type PushMessage = (
 ) => Promise<unknown>;
 type PhysicalInventoryFinalizationGateway = Pick<
   PhysicalInventorySessionService,
-  "getFinalizeCandidate" | "finalize" | "getSession" | "getSnapshot"
+  "getFinalizeCandidate" | "finalize" | "getSession" | "getSnapshot" | "listSnapshotItems"
 >;
 
 const DEFAULT_SWEEP_LIMIT = 25;
@@ -117,17 +123,35 @@ async function deliverTerminalMessage(
   }
   if (await closeRawMessageProcessed(supabase, session.close_raw_message_id)) return;
 
-  let message: string;
+  let messages: string[];
   if (session.status === "finalized" && session.snapshot_id) {
     const snapshot = await service.getSnapshot(session.snapshot_id);
     if (!snapshot) throw new Error("finalized Physical Inventory snapshot not found");
-    message = buildPhysicalInventorySuccessMessage({
-      businessDate: snapshot.business_date,
-      itemCount: snapshot.item_count,
-      rejectedCount: snapshot.rejected_count,
-    });
+    if (snapshot.parser_version === HOUSE_STOCK_PRICED_PARSER_VERSION) {
+      const items = await service.listSnapshotItems(snapshot.id);
+      messages = buildHouseStockReport(snapshot.business_date, items).messages;
+    } else {
+      messages = [buildPhysicalInventorySuccessMessage({
+        businessDate: snapshot.business_date,
+        itemCount: snapshot.item_count,
+        rejectedCount: snapshot.rejected_count,
+      })];
+    }
   } else if (session.status === "failed_closed") {
-    message = buildPhysicalInventoryFailedMessage(session.fail_reason);
+    const warningObjects = Array.isArray(session.warnings)
+      ? session.warnings.filter((warning) =>
+        Boolean(warning) && typeof warning === "object" && !Array.isArray(warning))
+        .map((warning) => warning as { [key: string]: unknown })
+      : [];
+    const invalidItems = warningObjects
+      .filter((warning) => warning.code === "invalid_item")
+      .map((warning) => ({
+        sequence: typeof warning.sequence === "number" ? warning.sequence : null,
+        reason: typeof warning.reason === "string" ? warning.reason : null,
+      }));
+    messages = invalidItems.length
+      ? [buildHouseStockInvalidMessage(invalidItems)]
+      : [buildPhysicalInventoryFailedMessage(session.fail_reason)];
   } else {
     return;
   }
@@ -136,7 +160,15 @@ async function deliverTerminalMessage(
   // If delivery succeeded but the worker died before the raw-message marker,
   // recovery sends the same retry key and LINE returns already_accepted rather
   // than delivering a duplicate.
-  await push(session.source_id, message, session.session_generation);
+  for (const [index, message] of messages.entries()) {
+    await push(
+      session.source_id,
+      message,
+      session.parser_version === HOUSE_STOCK_PRICED_PARSER_VERSION
+        ? houseStockImmediateRetryKey(session.session_generation, index)
+        : session.session_generation,
+    );
+  }
   await markCloseRawMessageProcessed(supabase, session.close_raw_message_id);
 }
 
@@ -168,9 +200,13 @@ export async function finalizePhysicalInventorySession(
       };
     }
 
-    const parsed = parsePhysicalInventoryDocument(
-      candidateDocument(candidate.ingests),
-    );
+    const activeSession = await service.getSession(candidate.sessionId);
+    const priced = activeSession?.parser_version === HOUSE_STOCK_PRICED_PARSER_VERSION;
+    const parsed = parsePhysicalInventoryDocument(candidateDocument(candidate.ingests), {
+      requireUnitPrice: priced,
+    });
+    const hasInvalidPricedItem = priced
+      && parsed.items.some((item) => item.resolutionStatus === "REJECTED");
 
     try {
       const result = await service.finalize({
@@ -179,6 +215,8 @@ export async function finalizePhysicalInventorySession(
         expectedIngestRevision: candidate.ingestRevision,
         expectedIngestHash: candidate.ingestSetHash,
         parsed,
+        failClosed: hasInvalidPricedItem,
+        failReason: hasInvalidPricedItem ? "invalid_items" : undefined,
       });
       const terminal = await service.getSession(candidate.sessionId);
       if (terminal) await deliverTerminalMessage(supabase, terminal, push, service);

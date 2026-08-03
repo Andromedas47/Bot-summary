@@ -8,7 +8,12 @@ import { buildDailyGoodReturnValueMessages, buildDailyGoodReturnValueReport } fr
 import { buildStockSummaryFromRows } from "@/lib/summary/stock-summary";
 import { isStockSnapshotEmpty } from "@/lib/summary/stock-snapshot-message";
 import {
+  buildNoHouseStockMessage,
+  fetchAuthoritativeHouseStockReport,
+} from "@/lib/physical-inventory/house-stock-report";
+import {
   parseStockSummaryTargets,
+  houseStockSummaryRetryKey,
   resolveStockSummaryDate,
   stockSummaryRetryKey,
   STOCK_SUMMARY_TARGETS_ENV,
@@ -76,6 +81,7 @@ export async function GET(req: NextRequest) {
 
   let report;
   let stockSummary;
+  let houseStockReport;
   try {
     const rows = await fetchRemainingFruitRows(supabase, businessDate);
     report = buildDailyGoodReturnValueReport(
@@ -83,6 +89,7 @@ export async function GET(req: NextRequest) {
       rows,
     );
     stockSummary = buildStockSummaryFromRows(businessDate, rows);
+    houseStockReport = await fetchAuthoritativeHouseStockReport(supabase, businessDate);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error("daily stock summary cron failed - summary build error", {
@@ -121,7 +128,8 @@ export async function GET(req: NextRequest) {
   // with the manual `สรุปคงเหลือ` command) and no longer drive this message;
   // anomalyCount/anomalyMarketCount/hasAnomalies are this report's own
   // truth about fail-closed, market-level valuation problems.
-  const messages = buildDailyGoodReturnValueMessages(report, { latest });
+  const goodReturnMessages = buildDailyGoodReturnValueMessages(report, { latest });
+  const houseStockMessages = houseStockReport?.messages ?? buildNoHouseStockMessage(businessDate);
   const productCount = report.products.length;
   const incompleteMarketCount = new Set(stockSummary.incomplete.map((row) => row.marketName)).size;
   const anomalyCount = report.anomalies.length;
@@ -141,7 +149,11 @@ export async function GET(req: NextRequest) {
       latestLookupStatus: latest?.status ?? null,
       latestDataDate: latest?.status === "found" ? latest.hint.date : null,
       latestDataMarketCount: latest?.status === "found" ? latest.hint.marketCount : null,
-      messageCount: messages.length,
+      messageCount: goodReturnMessages.length,
+      houseStockFound: Boolean(houseStockReport),
+      houseStockItemCount: houseStockReport?.itemCount ?? 0,
+      houseStockGroupCount: houseStockReport?.groupCount ?? 0,
+      houseStockTotalValueSatang: houseStockReport?.totalValueSatang ?? 0,
       targetCount: targets.length,
       wouldSendLine: targets.length > 0,
     });
@@ -160,10 +172,16 @@ export async function GET(req: NextRequest) {
       latestLookupStatus: latest?.status ?? null,
       latestDataDate: latest?.status === "found" ? latest.hint.date : null,
       latestDataMarketCount: latest?.status === "found" ? latest.hint.marketCount : null,
-      messageCount: messages.length,
+      messageCount: goodReturnMessages.length,
       targetCount: targets.length,
       wouldSendLine: targets.length > 0,
-      messages,
+      messages: goodReturnMessages,
+      goodReturnMessages,
+      houseStockMessages,
+      houseStockFound: Boolean(houseStockReport),
+      houseStockItemCount: houseStockReport?.itemCount ?? 0,
+      houseStockGroupCount: houseStockReport?.groupCount ?? 0,
+      houseStockTotalValueSatang: houseStockReport?.totalValueSatang ?? 0,
     });
   }
 
@@ -187,6 +205,10 @@ export async function GET(req: NextRequest) {
       anomalyMarketCount,
       hasAnomalies,
       targetCount: 0,
+      houseStockFound: Boolean(houseStockReport),
+      houseStockItemCount: houseStockReport?.itemCount ?? 0,
+      houseStockGroupCount: houseStockReport?.groupCount ?? 0,
+      houseStockTotalValueSatang: houseStockReport?.totalValueSatang ?? 0,
     });
   }
 
@@ -195,8 +217,15 @@ export async function GET(req: NextRequest) {
 
   for (const target of targets) {
     try {
-      for (const [index, message] of messages.entries()) {
+      for (const [index, message] of goodReturnMessages.entries()) {
         await pushLineMessage(target, message, stockSummaryRetryKey(businessDate, target, index));
+      }
+      for (const [index, message] of houseStockMessages.entries()) {
+        await pushLineMessage(
+          target,
+          message,
+          houseStockSummaryRetryKey(businessDate, target, index),
+        );
       }
       sentCount += 1;
     } catch (error) {
@@ -230,6 +259,10 @@ export async function GET(req: NextRequest) {
         anomalyMarketCount,
         hasAnomalies,
         targetCount: targets.length,
+        houseStockFound: Boolean(houseStockReport),
+        houseStockItemCount: houseStockReport?.itemCount ?? 0,
+        houseStockGroupCount: houseStockReport?.groupCount ?? 0,
+        houseStockTotalValueSatang: houseStockReport?.totalValueSatang ?? 0,
       },
       { status: 500 },
     );
@@ -245,6 +278,10 @@ export async function GET(req: NextRequest) {
     anomalyCount,
     anomalyMarketCount,
     hasAnomalies,
+    houseStockFound: Boolean(houseStockReport),
+    houseStockItemCount: houseStockReport?.itemCount ?? 0,
+    houseStockGroupCount: houseStockReport?.groupCount ?? 0,
+    houseStockTotalValueSatang: houseStockReport?.totalValueSatang ?? 0,
   });
 
   return NextResponse.json({
@@ -260,5 +297,9 @@ export async function GET(req: NextRequest) {
     anomalyMarketCount,
     hasAnomalies,
     targetCount: targets.length,
+    houseStockFound: Boolean(houseStockReport),
+    houseStockItemCount: houseStockReport?.itemCount ?? 0,
+    houseStockGroupCount: houseStockReport?.groupCount ?? 0,
+    houseStockTotalValueSatang: houseStockReport?.totalValueSatang ?? 0,
   });
 }

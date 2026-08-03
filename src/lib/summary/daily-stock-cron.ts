@@ -55,19 +55,38 @@ export function resolveStockSummaryDate(dateParam: string | null, timestamp = Da
  * LINE answers 409 for anything already delivered instead of re-sending it.
  * Same construction as dailySummaryRetryKey — different namespace.
  */
-export function stockSummaryRetryKey(
-  businessDate: string,
-  targetId: string,
-  partIndex: number,
-): string {
+function retryKey(namespace: string, ...parts: Array<string | number>): string {
   const bytes = createHash("sha256")
-    .update(`daily-stock-summary:${businessDate}:${targetId}:${partIndex}`)
+    .update(`${namespace}:${parts.join(":")}`)
     .digest()
     .subarray(0, 16);
   bytes[6] = (bytes[6] & 0x0f) | 0x50; // UUID version bits (name-based)
   bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
   const hex = bytes.toString("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+export function stockSummaryRetryKey(
+  businessDate: string,
+  targetId: string,
+  partIndex: number,
+): string {
+  return retryKey("daily-stock-summary", businessDate, targetId, partIndex);
+}
+
+export function houseStockSummaryRetryKey(
+  businessDate: string,
+  targetId: string,
+  partIndex: number,
+): string {
+  return retryKey("daily-house-stock", businessDate, targetId, partIndex);
+}
+
+export function houseStockImmediateRetryKey(
+  sessionGeneration: string,
+  partIndex: number,
+): string {
+  return retryKey("house-stock-finalization", sessionGeneration, partIndex);
 }
 
 /**

@@ -1374,6 +1374,7 @@ export interface Database {
           raw_product_description: string | null;
           normalized_product:      string | null;
           quantity:                number | null;
+          unit_price_satang:       number | null;
           raw_unit:                string | null;
           normalized_unit:         string | null;
           resolution_status:       "ACCEPTED_NORMALIZED" | "ACCEPTED_RAW" | "REJECTED";
@@ -1389,6 +1390,7 @@ export interface Database {
           raw_product_description?: string | null;
           normalized_product?:      string | null;
           quantity?:                number | null;
+          unit_price_satang?:       number | null;
           raw_unit?:                string | null;
           normalized_unit?:         string | null;
           resolution_status:        "ACCEPTED_NORMALIZED" | "ACCEPTED_RAW" | "REJECTED";
@@ -1404,6 +1406,7 @@ export interface Database {
           raw_product_description?: string | null;
           normalized_product?:      string | null;
           quantity?:                number | null;
+          unit_price_satang?:       number | null;
           raw_unit?:                string | null;
           normalized_unit?:         string | null;
           resolution_status?:       "ACCEPTED_NORMALIZED" | "ACCEPTED_RAW" | "REJECTED";
@@ -1820,6 +1823,14 @@ export interface Database {
           p_raw_text:            string;
           p_line_message_id?:    string | null;
           p_raw_message_id?:     string | null;
+        };
+        Returns: Json;
+      };
+      close_physical_inventory_open_event: {
+        Args: {
+          p_session_id:          string;
+          p_expected_generation: string;
+          p_opened_line_event_id: string;
         };
         Returns: Json;
       };

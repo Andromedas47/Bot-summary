@@ -112,7 +112,9 @@ export default async function ReportSummaryPage({ searchParams }: PageProps) {
         await timed("report-summary:remaining-fruit", () =>
           fetchRemainingFruitRows(supabase, date, market ?? null),
         ),
-        { marketFilter: market ?? null },
+        // Staff debugging tool — keep the ability to inspect QA/test-market
+        // rows that the automatic reports intentionally exclude.
+        { marketFilter: market ?? null, includeQaScopes: true },
       )
     : null;
 

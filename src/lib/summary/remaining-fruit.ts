@@ -501,10 +501,13 @@ export function buildRemainingFruitReport(
   options: {
     marketFilter?: string | null;
     aliases?: Record<string, string>;
+    /** Same escape hatch P1 uses (src/lib/sales/load.ts) — off by default. */
+    includeQaScopes?: boolean;
   } = {},
 ): RemainingFruitReport {
   const aliases = options.aliases ?? PRODUCT_ALIASES;
   const marketFilter = options.marketFilter?.trim() || null;
+  const includeQaScopes = options.includeQaScopes ?? false;
   const sourceRows = dedupeRemainingSourceRows(source, aliases);
 
   const pass1Names = new Set(
@@ -523,8 +526,8 @@ export function buildRemainingFruitReport(
     const rawMarket = row.market_name ?? "";
     const resolvedMarket = cleanMarketName(rawMarket);
     // Same exact-match QA/test-scope exclusion P1 already uses — dropped here,
-    // before aggregation, so a QA row can never reach the P0 report.
-    if (isQaMarketLabel(resolvedMarket)) continue;
+    // before aggregation, so a QA row can never reach the automatic report.
+    if (!includeQaScopes && isQaMarketLabel(resolvedMarket)) continue;
     if (marketFilter) {
       const haystack = `${rawMarket} ${resolvedMarket ?? ""}`.toLowerCase();
       if (!haystack.includes(marketFilter.toLowerCase())) continue;

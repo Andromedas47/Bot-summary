@@ -554,4 +554,17 @@ describe("QA/test-market exclusion (P0)", () => {
     expect(report.markets.find((m) => m.marketName === "ตลาดทดสอบทองผาภูมิ")).toBeDefined();
     expect(report.overall.find((o) => o.fruitName === "แตงโม")?.totalRemainingForResale).toBe(12);
   });
+
+  test("includeQaScopes: true keeps ทดสอบ — debug/dashboard escape hatch", () => {
+    const report = buildRemainingFruitReport(
+      [
+        row({ market_name: "ทดสอบ", product_name: "แตงโม", quantity: 999, unit: UNIT_KG, transaction_type: TX_RETURN }),
+        row({ market_name: MARKET_KEE, product_name: "แตงโม", quantity: 5, unit: UNIT_KG, transaction_type: TX_RETURN }),
+      ],
+      { includeQaScopes: true },
+    );
+
+    expect(report.markets.find((m) => m.marketName === "ทดสอบ")).toBeDefined();
+    expect(report.overall.find((o) => o.fruitName === "แตงโม")?.totalRemainingForResale).toBe(1004);
+  });
 });

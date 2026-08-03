@@ -528,3 +528,30 @@ describe("exact confirmed product aliases", () => {
     expect(report.overall.find((o) => o.fruitName === "หมอนทิง")?.totalRemainingForResale).toBe(7);
   });
 });
+
+describe("QA/test-market exclusion (P0)", () => {
+  test("the exact QA market ทดสอบ contributes nothing to the report", () => {
+    const report = buildRemainingFruitReport([
+      row({ market_name: "ทดสอบ", product_name: "แตงโม", quantity: 999, unit: UNIT_KG, transaction_type: TX_RETURN }),
+      row({ market_name: MARKET_KEE, product_name: "แตงโม", quantity: 5, unit: UNIT_KG, transaction_type: TX_RETURN }),
+    ]);
+
+    expect(report.markets.find((m) => m.marketName === "ทดสอบ")).toBeUndefined();
+    expect(report.overall.find((o) => o.fruitName === "แตงโม")?.totalRemainingForResale).toBe(5);
+  });
+
+  test("a legitimate market whose name contains ทดสอบ is not excluded", () => {
+    const report = buildRemainingFruitReport([
+      row({
+        market_name: "ตลาดทดสอบทองผาภูมิ",
+        product_name: "แตงโม",
+        quantity: 12,
+        unit: UNIT_KG,
+        transaction_type: TX_RETURN,
+      }),
+    ]);
+
+    expect(report.markets.find((m) => m.marketName === "ตลาดทดสอบทองผาภูมิ")).toBeDefined();
+    expect(report.overall.find((o) => o.fruitName === "แตงโม")?.totalRemainingForResale).toBe(12);
+  });
+});

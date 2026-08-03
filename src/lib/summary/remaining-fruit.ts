@@ -1,5 +1,6 @@
 import { normalizeUnitAlias } from "@/lib/parsers/weigh-session/units";
 import { cleanMarketName } from "@/lib/market";
+import { isQaMarketLabel } from "@/lib/sales/qa-scopes";
 import { transactionBucket, type TransactionBucket } from "@/lib/summary/transactions";
 import { logger } from "@/lib/logger";
 
@@ -521,6 +522,9 @@ export function buildRemainingFruitReport(
 
     const rawMarket = row.market_name ?? "";
     const resolvedMarket = cleanMarketName(rawMarket);
+    // Same exact-match QA/test-scope exclusion P1 already uses — dropped here,
+    // before aggregation, so a QA row can never reach the P0 report.
+    if (isQaMarketLabel(resolvedMarket)) continue;
     if (marketFilter) {
       const haystack = `${rawMarket} ${resolvedMarket ?? ""}`.toLowerCase();
       if (!haystack.includes(marketFilter.toLowerCase())) continue;

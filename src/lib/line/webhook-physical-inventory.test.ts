@@ -4,6 +4,7 @@ import { WebhookService } from "./webhook-service";
 import {
   PhysicalInventoryAfterCloseBoundaryError,
   PhysicalInventoryAfterCloseError,
+  PhysicalInventoryGenerationConflictError,
   PhysicalInventorySessionService,
 } from "@/lib/physical-inventory/session-service";
 import type { PhysicalInventorySessionRow } from "@/lib/physical-inventory";
@@ -188,6 +189,7 @@ function makePhysicalInventoryGateway() {
       rawText: string;
       rawMessageId?: string | null;
       businessDate?: string | null;
+      parserVersion?: string;
     }) {
       const duplicate = ingests.find((ingest) => ingest.eventId === params.openedLineEventId);
       if (duplicate) {
@@ -227,7 +229,7 @@ function makePhysicalInventoryGateway() {
         business_date: params.businessDate ?? null,
         warehouse_code: "MAIN",
         status: "open",
-        parser_version: "p2a-physical-1.0.0",
+        parser_version: params.parserVersion ?? "p2a-physical-1.0.0",
         opened_at: new Date().toISOString(),
         close_requested_at: null,
         close_event_timestamp_ms: null,
@@ -313,6 +315,27 @@ function makePhysicalInventoryGateway() {
         session,
       };
     },
+    async closeOpenEvent(params: {
+      sessionId: string;
+      expectedGeneration: string;
+      openedLineEventId: string;
+    }) {
+      const session = sessions.find((row) => row.id === params.sessionId)!;
+      if (session.session_generation !== params.expectedGeneration) {
+        throw new PhysicalInventoryGenerationConflictError();
+      }
+      if (session.opened_line_event_id !== params.openedLineEventId) {
+        throw new Error("line_event_conflict");
+      }
+      if (session.status === "open") {
+        const ingest = ingests.find((row) => row.eventId === params.openedLineEventId)!;
+        session.status = "closing";
+        session.close_event_timestamp_ms = ingest.timestamp;
+        session.close_line_event_id = ingest.eventId;
+        session.close_raw_message_id = session.header_raw_message_id;
+      }
+      return session;
+    },
     _sessions: sessions,
     _ingests: ingests,
   };
@@ -361,6 +384,7 @@ function withPhysicalInventoryRpc(
           rawText: String(args.p_raw_text),
           rawMessageId: args.p_raw_message_id as string | null,
           businessDate: args.p_business_date as string | null,
+          parserVersion: args.p_parser_version as string | undefined,
         });
         return {
           data: {
@@ -398,6 +422,14 @@ function withPhysicalInventoryRpc(
             error: { message: error instanceof Error ? error.message : String(error) },
           };
         }
+      }
+      if (name === "close_physical_inventory_open_event") {
+        const session = await gateway.closeOpenEvent({
+          sessionId: String(args.p_session_id),
+          expectedGeneration: String(args.p_expected_generation),
+          openedLineEventId: String(args.p_opened_line_event_id),
+        });
+        return { data: { session_id: session.id }, error: null };
       }
       return base.rpc(name, args);
     },
@@ -553,6 +585,40 @@ describe("P2A Slice C webhook routing", () => {
     expect(ctx.replies).toEqual([
       "เริ่มบันทึกสต๊อกผลไม้คงเหลือวันที่ 28/07/2026 แล้ว",
     ]);
+  });
+
+  test("complete priced document in one LINE message opens and closes one session", async () => {
+    const ctx = service();
+    const [result] = await ctx.webhook.processEvents([textEvent(
+      "ผลไม้คงเหลือในบ้าน 3/8/69\n1 เขียวมรกต 30 บาท\n49.7 โล\nจบ",
+    )], "destination");
+    expect(result?.parsed).toBe(true);
+    expect(ctx.gateway._sessions).toHaveLength(1);
+    expect(ctx.gateway._sessions[0]).toMatchObject({
+      status: "closing",
+      parser_version: "house-stock-priced-1.0.0",
+    });
+    expect(ctx.gateway._ingests.map((row) => row.kind)).toEqual(["header"]);
+    expect(ctx.replies).toHaveLength(0);
+    expect(ctx.scheduled).toHaveLength(1);
+  });
+
+  test("priced House Stock uses the existing multi-message session lifecycle", async () => {
+    const ctx = service();
+    await ctx.webhook.processEvents([
+      textEvent("ผลไม้คงเหลือในบ้าน\n3/8/69"),
+      textEvent("1 เขียวมรกต 30 บาท\n49.7 โล"),
+      textEvent("2 เขียวมรกต 30 บาท\n50.1 โล"),
+      textEvent("จบ"),
+    ], "destination");
+    expect(ctx.gateway._ingests.map((row) => row.kind)).toEqual([
+      "header", "item", "item", "close",
+    ]);
+    expect(ctx.gateway._sessions[0]).toMatchObject({
+      status: "closing",
+      parser_version: "house-stock-priced-1.0.0",
+    });
+    expect(ctx.scheduled).toHaveLength(1);
   });
 
   test("unauthorized group remains outside P2A", async () => {

@@ -27,6 +27,12 @@ const MIGRATION = join(
   "migrations",
   "0047_physical_inventory_capture.sql",
 );
+const PRICED_MIGRATION = join(
+  REPO_ROOT,
+  "supabase",
+  "migrations",
+  "20260803122757_priced_house_stock.sql",
+);
 const HARDENING = join(REPO_ROOT, "supabase", "tests", "p2a_0047_hardening.sql");
 
 type PsqlResult = { code: number; stdout: string; stderr: string };
@@ -158,6 +164,7 @@ describe.skipIf(!pgAvailable)("P2A migration 0047 PostgreSQL hardening", () => {
     async () => {
       expect(existsSync(BOOTSTRAP)).toBe(true);
       expect(existsSync(MIGRATION)).toBe(true);
+      expect(existsSync(PRICED_MIGRATION)).toBe(true);
       expect(existsSync(HARDENING)).toBe(true);
 
       const create = await runPsql(psqlPath, [
@@ -233,10 +240,90 @@ describe.skipIf(!pgAvailable)("P2A migration 0047 PostgreSQL hardening", () => {
       );
       expect(hard.code, `hardening failed:\n${hard.stderr}\n${hard.stdout}`).toBe(0);
       expect(hard.stderr + hard.stdout).toContain("p2a_0047_hardening PASS");
+      const priced = await runPsql(
+        psqlPath,
+        ["-v", "ON_ERROR_STOP=1", "-d", dbName, "-f", PRICED_MIGRATION],
+        { database: dbName },
+      );
+      expect(priced.code, `priced migration failed:\n${priced.stderr}\n${priced.stdout}`).toBe(0);
       ready = true;
       console.info("P2A 0047 hardening: PASS (real PostgreSQL)");
     },
     { timeout: 180_000 },
+  );
+
+  test(
+    "priced House Stock persists integer satang and inline close remains idempotent",
+    async () => {
+      expect(ready).toBe(true);
+      const tag = randomBytes(3).toString("hex");
+      const event = `evt-priced-${tag}`;
+      const opened = await psqlJson(
+        psqlPath,
+        dbName,
+        `SELECT public.open_physical_inventory_session(
+          'group', ${sqlLiteral(`G-priced-${tag}`)}, ${sqlLiteral(`U-priced-${tag}`)},
+          ${sqlLiteral(event)}, 1000, 'complete document', NULL, NULL,
+          '2026-08-03', 'house-stock-priced-1.0.0'
+        )::text`,
+      );
+      const sid = String(opened.session_id);
+      const gen = String(opened.session_generation);
+      const closeSql = `SELECT public.close_physical_inventory_open_event(
+        ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid, ${sqlLiteral(event)}
+      )::text`;
+      const firstClose = await psqlJson(psqlPath, dbName, closeSql);
+      const secondClose = await psqlJson(psqlPath, dbName, closeSql);
+      expect(firstClose.idempotent).toBe(false);
+      expect(secondClose.idempotent).toBe(true);
+      await psqlScalar(psqlPath, dbName, "SELECT pg_sleep(8.1)::text");
+      const candidate = await psqlJson(
+        psqlPath,
+        dbName,
+        `SELECT public.get_physical_inventory_finalize_candidate(
+          ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid
+        )::text`,
+      );
+      const items = JSON.stringify([{
+        staff_sequence: 1,
+        raw_text: "1 เขียวมรกต 30.50 บาท\\n1 โล",
+        raw_product_description: "เขียวมรกต",
+        normalized_product: "เขียวมรกต",
+        quantity: 1,
+        unit_price_satang: 3050,
+        raw_unit: "โล",
+        normalized_unit: "โล",
+        resolution_status: "ACCEPTED_NORMALIZED",
+        reason: null,
+      }]);
+      const finalized = await psqlJson(
+        psqlPath,
+        dbName,
+        `SELECT public.finalize_physical_inventory_session(
+          ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid,
+          ${Number(candidate.ingest_revision)}, ${sqlLiteral(String(candidate.ingest_set_hash))},
+          '2026-08-03', 'house-stock-priced-1.0.0', '[]'::jsonb,
+          ${sqlLiteral(items)}::jsonb, false, NULL
+        )::text`,
+      );
+      expect(finalized.status).toBe("finalized");
+      expect(await psqlScalar(
+        psqlPath,
+        dbName,
+        `SELECT unit_price_satang::text FROM public.physical_inventory_items
+         WHERE snapshot_id = ${sqlLiteral(String(finalized.snapshot_id))}::uuid`,
+      )).toBe("3050");
+      expect(await psqlScalar(
+        psqlPath,
+        dbName,
+        `SELECT has_function_privilege(
+          'service_role',
+          'public.finalize_physical_inventory_session_base(uuid,uuid,bigint,text,date,text,jsonb,jsonb,boolean,text)',
+          'EXECUTE'
+        )::text`,
+      )).toBe("false");
+    },
+    { timeout: 60_000 },
   );
 
   test(

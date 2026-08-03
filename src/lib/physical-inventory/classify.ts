@@ -16,7 +16,9 @@ function nfcTrim(text: string): string {
 
 export function isPhysicalInventoryHeaderLine(line: string): boolean {
   const n = nfcTrim(line);
-  return (PHYSICAL_INVENTORY_HEADERS as readonly string[]).includes(n);
+  return (PHYSICAL_INVENTORY_HEADERS as readonly string[]).some(
+    (header) => n === header || n.startsWith(`${header} `),
+  );
 }
 
 /**

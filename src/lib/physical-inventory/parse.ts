@@ -14,6 +14,7 @@ import {
 } from "./classify";
 import {
   PHYSICAL_INVENTORY_PARSER_VERSION,
+  HOUSE_STOCK_PRICED_PARSER_VERSION,
   PHYSICAL_INVENTORY_WAREHOUSE_MAIN,
   type PhysicalInventoryParseIssue,
   type PhysicalInventoryParsedItem,
@@ -27,6 +28,7 @@ export {
   isPhysicalInventorySessionClose,
   matchesPhysicalInventoryCloseLine,
 } from "./classify";
+import { PHYSICAL_INVENTORY_HEADERS } from "./patterns";
 export * from "./types";
 export * from "./patterns";
 
@@ -43,7 +45,13 @@ const QTY_UNIT_ONLY =
 
 /** Indexed line: leading sequence digits + remainder. */
 const INDEXED_LINE =
-  /^(\d+)(?!\d)(.*)$/u;
+  /^(\d+)(?!\d)(?:[.)])?\s*(.*)$/u;
+
+const UNIT_PRICE_SUFFIX = /^(.+?)\s+(-?\d+(?:\.\d+)?)\s*บาท$/u;
+
+export interface PhysicalInventoryParseOptions {
+  requireUnitPrice?: boolean;
+}
 
 function nfcCollapse(text: string): string {
   return text.normalize("NFC").replace(/\s+/g, " ").trim();
@@ -75,6 +83,7 @@ function rejected(
     rawText: partial.rawText,
     rawProductDescription: partial.rawProductDescription ?? null,
     quantity: partial.quantity ?? null,
+    unitPriceSatang: partial.unitPriceSatang ?? null,
     rawUnit: partial.rawUnit ?? null,
     normalizedUnit: null,
     normalizedProduct: null,
@@ -89,6 +98,8 @@ function resolveAccepted(
   rawProduct: string,
   quantity: number,
   rawUnit: string,
+  unitPriceSatang: number | null = null,
+  priceReason: string | null = null,
 ): PhysicalInventoryParsedItem {
   const product = nfcCollapse(rawProduct);
   const unitRaw = nfcCollapse(rawUnit);
@@ -133,6 +144,17 @@ function resolveAccepted(
       reason: quantity === 0 ? "zero_quantity" : "negative_quantity",
     });
   }
+  if (priceReason || unitPriceSatang !== null && unitPriceSatang <= 0) {
+    return rejected({
+      sequence,
+      rawText,
+      rawProductDescription: product,
+      quantity,
+      rawUnit: unitRaw,
+      unitPriceSatang,
+      reason: priceReason ?? "invalid_unit_price",
+    });
+  }
 
   // Spelling aliases only — never resolveUnitQuantity (no ขีด→โล rescale here).
   const unitKnown = isKnownUnit(unitRaw);
@@ -147,6 +169,7 @@ function resolveAccepted(
     rawText,
     rawProductDescription: product,
     quantity,
+    unitPriceSatang,
     rawUnit: unitRaw,
     normalizedUnit,
     normalizedProduct: product,
@@ -200,13 +223,35 @@ interface OpenItem {
   sequence: number;
   product: string;
   headerRaw: string;
+  unitPriceSatang: number | null;
+  priceReason: string | null;
+}
+
+function parseUnitPrice(text: string): {
+  product: string;
+  unitPriceSatang: number | null;
+  priceReason: string | null;
+} {
+  const match = UNIT_PRICE_SUFFIX.exec(nfcCollapse(text));
+  if (!match) return { product: nfcCollapse(text), unitPriceSatang: null, priceReason: "missing_unit_price" };
+  const [, product, amount] = match;
+  const [, fraction = ""] = amount.split(".");
+  if (fraction.length > 2) return { product: nfcCollapse(product), unitPriceSatang: null, priceReason: "invalid_unit_price" };
+  const satang = Number(amount) * 100;
+  if (!Number.isSafeInteger(satang) || satang <= 0) {
+    return { product: nfcCollapse(product), unitPriceSatang: null, priceReason: "invalid_unit_price" };
+  }
+  return { product: nfcCollapse(product), unitPriceSatang: satang, priceReason: null };
 }
 
 /**
  * Parse a complete Physical Stock multi-line document (header + date + items + close).
  * Deleted/unsent LINE content is unknowable — never inferred or reconstructed.
  */
-export function parsePhysicalInventoryDocument(text: string): PhysicalInventoryParsedSession {
+export function parsePhysicalInventoryDocument(
+  text: string,
+  options: PhysicalInventoryParseOptions = {},
+): PhysicalInventoryParsedSession {
   const errors: PhysicalInventoryParseIssue[] = [];
   const warnings: PhysicalInventoryParseIssue[] = [];
   const items: PhysicalInventoryParsedItem[] = [];
@@ -224,7 +269,13 @@ export function parsePhysicalInventoryDocument(text: string): PhysicalInventoryP
 
   // Header
   if (i < lines.length && isPhysicalInventoryHeaderLine(lines[i]!)) {
-    headerText = nfcCollapse(lines[i]!);
+    const headerLine = nfcCollapse(lines[i]!);
+    const header = [...PHYSICAL_INVENTORY_HEADERS]
+      .sort((a, b) => b.length - a.length)
+      .find((value) => headerLine === value || headerLine.startsWith(`${value} `))!;
+    headerText = header;
+    const inlineDate = headerLine.slice(header.length).trim();
+    if (inlineDate) businessDate = parseDateToken(inlineDate);
     i++;
   } else {
     pushIssue(errors, "missing_header", "Physical stock header not found");
@@ -233,7 +284,7 @@ export function parsePhysicalInventoryDocument(text: string): PhysicalInventoryP
   while (i < lines.length && !nfcCollapse(lines[i] ?? "")) i++;
 
   // Date (dedicated line)
-  if (i < lines.length) {
+  if (!businessDate && i < lines.length) {
     const date = parseDateToken(lines[i]!);
     if (date) {
       businessDate = date;
@@ -241,7 +292,7 @@ export function parsePhysicalInventoryDocument(text: string): PhysicalInventoryP
     } else if (headerText) {
       pushIssue(errors, "missing_or_invalid_date", "Business date missing or invalid", lines[i]);
     }
-  } else if (headerText) {
+  } else if (!businessDate && headerText) {
     pushIssue(errors, "missing_or_invalid_date", "Business date missing or invalid");
   }
 
@@ -289,10 +340,30 @@ export function parsePhysicalInventoryDocument(text: string): PhysicalInventoryP
     // Continuation qty+unit MUST win over "leading digits = sequence"
     // (e.g. open product then "15โล" / "6ตะกร้า").
     if (open) {
+      if (/^-?\d+(?:\.\d+)?$/.test(collapsed)) {
+        items.push(rejected({
+          sequence: open.sequence,
+          rawText: `${open.headerRaw}\n${collapsed}`,
+          rawProductDescription: open.product,
+          quantity: Number(collapsed),
+          unitPriceSatang: open.unitPriceSatang,
+          reason: options.requireUnitPrice ? "missing_unit" : "missing_quantity",
+        }));
+        open = null;
+        continue;
+      }
       const qu = tryParseQtyUnitOnly(collapsed);
       if (qu) {
         const rawText = `${open.headerRaw}\n${collapsed}`;
-        items.push(resolveAccepted(open.sequence, rawText, open.product, qu.quantity, qu.unit));
+        items.push(resolveAccepted(
+          open.sequence,
+          rawText,
+          open.product,
+          qu.quantity,
+          qu.unit,
+          open.unitPriceSatang,
+          open.priceReason,
+        ));
         open = null;
         continue;
       }
@@ -328,16 +399,32 @@ export function parsePhysicalInventoryDocument(text: string): PhysicalInventoryP
         continue;
       }
 
-      const oneLine = trySplitProductQtyUnit(remainder);
+      const priced = options.requireUnitPrice ? parseUnitPrice(remainder) : null;
+      const itemRemainder = priced?.product ?? remainder;
+      const oneLine = trySplitProductQtyUnit(itemRemainder);
       if (oneLine) {
         items.push(
-          resolveAccepted(seq, collapsed, oneLine.product, oneLine.quantity, oneLine.unit),
+          resolveAccepted(
+            seq,
+            collapsed,
+            oneLine.product,
+            oneLine.quantity,
+            oneLine.unit,
+            priced?.unitPriceSatang ?? null,
+            priced?.priceReason ?? null,
+          ),
         );
         continue;
       }
 
       // Product-only line; qty/unit expected next
-      open = { sequence: seq, product: remainder, headerRaw: collapsed };
+      open = {
+        sequence: seq,
+        product: itemRemainder,
+        headerRaw: collapsed,
+        unitPriceSatang: priced?.unitPriceSatang ?? null,
+        priceReason: priced?.priceReason ?? null,
+      };
       continue;
     }
 
@@ -377,7 +464,9 @@ export function parsePhysicalInventoryDocument(text: string): PhysicalInventoryP
   return {
     businessDate,
     warehouseCode: PHYSICAL_INVENTORY_WAREHOUSE_MAIN,
-    parserVersion: PHYSICAL_INVENTORY_PARSER_VERSION,
+    parserVersion: options.requireUnitPrice
+      ? HOUSE_STOCK_PRICED_PARSER_VERSION
+      : PHYSICAL_INVENTORY_PARSER_VERSION,
     headerText,
     closeText,
     items,
@@ -391,10 +480,13 @@ export function parsePhysicalInventoryDocument(text: string): PhysicalInventoryP
  * item message. The actual parser must recognize at least one accepted
  * observation. Selling-price text belongs to Produce, never P2A.
  */
-export function isRecognizedPhysicalInventoryItemBlock(text: string): boolean {
-  if (/บาท/u.test(text.normalize("NFC"))) return false;
+export function isRecognizedPhysicalInventoryItemBlock(
+  text: string,
+  options: PhysicalInventoryParseOptions = {},
+): boolean {
+  if (!options.requireUnitPrice && /บาท/u.test(text.normalize("NFC"))) return false;
 
-  const parsed = parsePhysicalInventoryDocument(text);
+  const parsed = parsePhysicalInventoryDocument(text, options);
   const hasAcceptedObservation = parsed.items.some(
     (item) =>
       item.resolutionStatus === "ACCEPTED_NORMALIZED"

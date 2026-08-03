@@ -8,6 +8,7 @@ export const PHYSICAL_INVENTORY_WAREHOUSE_MAIN = "MAIN" as const;
 export type PhysicalInventoryWarehouseCode = typeof PHYSICAL_INVENTORY_WAREHOUSE_MAIN;
 
 export const PHYSICAL_INVENTORY_PARSER_VERSION = "p2a-physical-1.0.0";
+export const HOUSE_STOCK_PRICED_PARSER_VERSION = "house-stock-priced-1.0.0";
 
 /**
  * Capture-time acceptance only — NOT canonical inventory identity.
@@ -28,6 +29,8 @@ export interface PhysicalInventoryParsedItem {
   rawText: string;
   rawProductDescription: string | null;
   quantity: number | null;
+  /** Integer satang. Null only for legacy Physical Inventory observations. */
+  unitPriceSatang?: number | null;
   rawUnit: string | null;
   /** Spelling-normalized unit when safely known; never a converted/invented unit. */
   normalizedUnit: string | null;

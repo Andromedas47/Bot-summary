@@ -8,6 +8,10 @@ import {
   fetchAuthoritativeHouseStockReport,
   HouseStockSnapshotConflictError,
 } from "./house-stock-report";
+import {
+  HOUSE_STOCK_PRICED_PARSER_VERSION,
+  PHYSICAL_INVENTORY_PARSER_VERSION,
+} from "./types";
 
 type Item = Database["public"]["Tables"]["physical_inventory_items"]["Row"];
 
@@ -157,14 +161,56 @@ describe("priced House Stock summary", () => {
 });
 
 describe("authoritative House Stock snapshot", () => {
-  test("several active snapshots conflict instead of summing", async () => {
-    const query = {
-      select() { return this; }, eq() { return this; }, is() { return this; },
+  function supabaseWith(
+    snapshots: Array<{ id: string; business_date: string; parser_version: string }>,
+    items: Item[] = [],
+  ) {
+    return { from(table: string) {
+      const filters: Record<string, unknown> = {};
+      const query = {
+        select() { return this; },
+        eq(column: string, value: unknown) { filters[column] = value; return this; },
+        is() { return this; },
+        order() { return this; },
       then(resolve: (value: unknown) => unknown) {
-        return Promise.resolve({ data: [{ id: "one" }, { id: "two" }], error: null }).then(resolve);
-      },
-    };
-    const supabase = { from: () => query } as unknown as Parameters<typeof fetchAuthoritativeHouseStockReport>[0];
+          const rows = table === "physical_inventory_snapshots" ? snapshots : items;
+          const data = rows.filter((entry) =>
+            Object.entries(filters).every(([column, value]) =>
+              (entry as unknown as Record<string, unknown>)[column] === value));
+          return Promise.resolve({ data, error: null }).then(resolve);
+        },
+      };
+      return query;
+    } } as unknown as Parameters<typeof fetchAuthoritativeHouseStockReport>[0];
+  }
+
+  const snapshot = (id: string, parserVersion: string) => ({
+    id,
+    business_date: "2026-08-03",
+    warehouse_code: "MAIN",
+    status: "finalized",
+    parser_version: parserVersion,
+  });
+
+  test("legacy Physical Inventory snapshot is ignored", async () => {
+    const supabase = supabaseWith([snapshot("legacy", PHYSICAL_INVENTORY_PARSER_VERSION)]);
+    expect(await fetchAuthoritativeHouseStockReport(supabase, "2026-08-03")).toBeNull();
+  });
+
+  test("legacy plus priced snapshot selects only the priced snapshot", async () => {
+    const supabase = supabaseWith([
+      snapshot("legacy", PHYSICAL_INVENTORY_PARSER_VERSION),
+      snapshot("priced", HOUSE_STOCK_PRICED_PARSER_VERSION),
+    ], [row({ snapshot_id: "priced" })]);
+    const report = await fetchAuthoritativeHouseStockReport(supabase, "2026-08-03");
+    expect(report).toMatchObject({ itemCount: 1, totalValueSatang: 149_100 });
+  });
+
+  test("two priced snapshots still conflict instead of summing", async () => {
+    const supabase = supabaseWith([
+      snapshot("one", HOUSE_STOCK_PRICED_PARSER_VERSION),
+      snapshot("two", HOUSE_STOCK_PRICED_PARSER_VERSION),
+    ]);
     await expect(fetchAuthoritativeHouseStockReport(supabase, "2026-08-03"))
       .rejects.toBeInstanceOf(HouseStockSnapshotConflictError);
   });

@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { NextRequest } from "next/server";
 import { LATEST_DATA_UNAVAILABLE_NOTICE } from "@/lib/summary/latest-data-hint";
+import {
+  HOUSE_STOCK_PRICED_PARSER_VERSION,
+  PHYSICAL_INVENTORY_PARSER_VERSION,
+} from "@/lib/physical-inventory/types";
 
 // ── Stubs ──────────────────────────────────────────────────────────────────
 //
@@ -26,10 +30,17 @@ let physicalItemResult: QueryResult = { data: [], error: null };
  */
 let produceByQuery: ((filters: Record<string, unknown>) => QueryResult | null) | null = null;
 
-function chain(result: () => QueryResult, produceAware = false): Record<string, unknown> {
+function chain(result: () => QueryResult, produceAware = false, pricedSnapshotAware = false): Record<string, unknown> {
   const filters: Record<string, unknown> = {};
-  const answer = () =>
-    (produceAware ? produceByQuery?.(filters) ?? null : null) ?? result();
+  const answer = () => {
+    const response = (produceAware ? produceByQuery?.(filters) ?? null : null) ?? result();
+    if (!pricedSnapshotAware || !response.data) return response;
+    return {
+      ...response,
+      data: response.data.filter((entry) =>
+        (entry as Record<string, unknown>).parser_version === filters["eq:parser_version"]),
+    };
+  };
 
   const node: Record<string, unknown> = {};
   const self = () => node;
@@ -59,7 +70,7 @@ mock.module("@/lib/supabase/server", () => ({
       if (table === "produce_transactions") return chain(() => produceResult, true);
       if (table === "produce_sessions") return chain(() => sessionResult);
       if (table === "raw_messages") return chain(() => messageResult);
-      if (table === "physical_inventory_snapshots") return chain(() => physicalSnapshotResult);
+      if (table === "physical_inventory_snapshots") return chain(() => physicalSnapshotResult, false, true);
       if (table === "physical_inventory_items") return chain(() => physicalItemResult);
       throw new Error(`Unexpected table: ${table}`);
     },
@@ -244,7 +255,11 @@ describe("daily stock summary cron — delivery", () => {
   test("House Stock is a separate priced message with separate retry namespace", async () => {
     produceResult = { data: produceRows(), error: null };
     physicalSnapshotResult = {
-      data: [{ id: "house-snapshot", business_date: "2026-08-03" }],
+      data: [{
+        id: "house-snapshot",
+        business_date: "2026-08-03",
+        parser_version: HOUSE_STOCK_PRICED_PARSER_VERSION,
+      }],
       error: null,
     };
     physicalItemResult = {
@@ -281,6 +296,27 @@ describe("daily stock summary cron — delivery", () => {
     await GET(request("?date=2026-08-03"));
     expect(pushCalls.map((call) => call.text).join("\n\n"))
       .toContain("ยังไม่มีการบันทึกผลไม้คงเหลือในบ้านสำหรับวันนี้");
+  });
+
+  test("legacy Physical Inventory snapshot does not fail the House Stock route", async () => {
+    physicalSnapshotResult = {
+      data: [{
+        id: "legacy-snapshot",
+        business_date: "2026-08-03",
+        parser_version: PHYSICAL_INVENTORY_PARSER_VERSION,
+      }],
+      error: null,
+    };
+    physicalItemResult = {
+      data: [{ unit_price_satang: null }],
+      error: null,
+    };
+    process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgroup1";
+
+    const response = await GET(request("?date=2026-08-03"));
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.houseStockFound).toBe(false);
   });
 });
 

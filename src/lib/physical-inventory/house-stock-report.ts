@@ -8,7 +8,10 @@ import {
   countCodePoints,
   LINE_MESSAGE_MAX_CODE_POINTS,
 } from "@/lib/summary/line-chunking";
-import type { PhysicalInventoryParsedItem } from "./types";
+import {
+  HOUSE_STOCK_PRICED_PARSER_VERSION,
+  type PhysicalInventoryParsedItem,
+} from "./types";
 
 type Supabase = SupabaseClient<Database>;
 type ItemRow = Database["public"]["Tables"]["physical_inventory_items"]["Row"];
@@ -162,6 +165,7 @@ export async function fetchAuthoritativeHouseStockReport(
     .eq("business_date", businessDate)
     .eq("warehouse_code", "MAIN")
     .eq("status", "finalized")
+    .eq("parser_version", HOUSE_STOCK_PRICED_PARSER_VERSION)
     .is("replacement_snapshot_id", null);
   if (snapshotError) throw new Error(`House Stock snapshot lookup failed: ${snapshotError.message}`);
   if (!snapshots?.length) return null;

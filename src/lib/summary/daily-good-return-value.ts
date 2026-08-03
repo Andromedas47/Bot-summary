@@ -93,11 +93,19 @@ export function buildDailyGoodReturnValueReport(businessDate: string, rows: read
     // invalid good-return row IS reportable dirty data even with zero valid quantity.
     if (cell.returned <= 0 && !cell.invalidReturned) continue;
     const key = `${cell.product}||${cell.unit}`;
-    const product = products.get(key) ?? { productName: cell.product, unit: cell.unit, quantity: 0, valuedQuantity: 0, unvaluedQuantity: 0, valueSatang: 0, anomalyMarketCount: 0 };
-    product.quantity += cell.returned;
-    const blockers = cellBlockers(cell); const value = blockers.length ? null : quantityTimesSatang(cell.returned, [...cell.prices][0]!);
-    if (value === null) {
-      product.unvaluedQuantity += cell.returned;
+    const blockers = cellBlockers(cell);
+    // An invalid quantity is unknown, not zero — it must never inflate the
+    // physical aggregate with a zero-quantity product row. Only a genuinely
+    // positive recorded good-return quantity creates or updates the product.
+    if (cell.returned > 0) {
+      const product = products.get(key) ?? { productName: cell.product, unit: cell.unit, quantity: 0, valuedQuantity: 0, unvaluedQuantity: 0, valueSatang: 0, anomalyMarketCount: 0 };
+      product.quantity += cell.returned;
+      const value = blockers.length ? null : quantityTimesSatang(cell.returned, [...cell.prices][0]!);
+      if (value === null) product.unvaluedQuantity += cell.returned;
+      else { product.valuedQuantity += cell.returned; product.valueSatang += value; }
+      products.set(key, product);
+    }
+    if (blockers.length) {
       const markets = anomalyMarketsByProduct.get(key) ?? new Set<string>(); markets.add(cell.market); anomalyMarketsByProduct.set(key, markets);
       anomalies.push({
         marketName: cell.market, productName: cell.product, unit: cell.unit,
@@ -107,9 +115,12 @@ export function buildDailyGoodReturnValueReport(businessDate: string, rows: read
         priceEvidence: [...cell.prices].sort((a, b) => a - b), blockers,
         valuedQuantity: 0, unvaluedQuantity: cell.invalidReturned ? null : cell.returned, valueSatang: 0,
       });
-    } else { product.valuedQuantity += cell.returned; product.valueSatang += value; }
-    products.set(key, product);
+    }
   }
+  // Only backfills markets onto a product that actually exists — an
+  // invalid-only cell with no sibling valid cell never gets a product row,
+  // so it stays a pure anomaly-only entry (products.length can be 0 while
+  // anomalies.length > 0).
   for (const [key, markets] of anomalyMarketsByProduct) { const product = products.get(key); if (product) product.anomalyMarketCount = markets.size; }
   return { businessDate, products: [...products.values()].sort(productOrder), anomalies: anomalies.sort(anomalyOrder), hasActivity: cells.size > 0 };
 }
@@ -117,8 +128,12 @@ export function buildDailyGoodReturnValueReport(businessDate: string, rows: read
 function productBlock(row: GoodReturnValueProduct, index: number): string {
   const unit = displayUnit(row.unit); const base = `${index}. ${row.productName} — ${formatQuantity(row.quantity)} ${unit}`;
   if (!row.valuedQuantity) return `${base}\n   ⚠️ รอตรวจทั้งหมดจาก ${row.anomalyMarketCount} ตลาด`;
-  if (!row.unvaluedQuantity) return `${base} • ${satangToBahtText(row.valueSatang)} บาท`;
-  return `${base} • ${satangToBahtText(row.valueSatang)} บาท\n   ⚠️ รอตรวจ ${formatQuantity(row.unvaluedQuantity)} ${unit} จาก ${row.anomalyMarketCount} ตลาด`;
+  if (row.unvaluedQuantity) return `${base} • ${satangToBahtText(row.valueSatang)} บาท\n   ⚠️ รอตรวจ ${formatQuantity(row.unvaluedQuantity)} ${unit} จาก ${row.anomalyMarketCount} ตลาด`;
+  // Every quantity this product carries valued cleanly, but at least one OTHER
+  // market for the same product+unit is invalid-only (contributed zero
+  // quantity, not a trustworthy zero) — still flagged, amount stays unknown.
+  if (row.anomalyMarketCount) return `${base} • ${satangToBahtText(row.valueSatang)} บาท\n   ⚠️ มีข้อมูลผิดปกติจาก ${row.anomalyMarketCount} ตลาด (จำนวนไม่ทราบ)`;
+  return `${base} • ${satangToBahtText(row.valueSatang)} บาท`;
 }
 const ANOMALY_HEADING = "⚠️ รายละเอียดข้อมูลผิดปกติ";
 function marketAnomalyBlock(row: MarketAnomaly, index: number): string {
@@ -133,7 +148,10 @@ function header(report: GoodReturnValueReport, part: number, totalParts: number,
   return [...lines, `รายการ ${first}–${last} จากทั้งหมด ${report.products.length} รายการ`];
 }
 function summaryBlock(report: GoodReturnValueReport, omittedProductCount: number, omittedAnomalyCount: number): string {
-  const complete = report.products.filter((row) => !row.unvaluedQuantity).length;
+  // A product is only "fully calculated" when nothing about it is flagged —
+  // anomalyMarketCount > 0 means some market's evidence is still untrustworthy,
+  // even when that market contributed zero to unvaluedQuantity (unknown, not zero).
+  const complete = report.products.filter((row) => !row.unvaluedQuantity && !row.anomalyMarketCount).length;
   const anomalyMarketCount = new Set(report.anomalies.map((row) => row.marketName)).size;
   return [
     omittedProductCount ? `⚠️ ไม่ได้แสดงสินค้าบางส่วน ${omittedProductCount} รายการ เนื่องจากขีดจำกัด LINE` : null,
@@ -161,7 +179,11 @@ type DeliveredGroup = { kind: "product"; entries: Entry[]; text: string } | { ki
  * entire point of this report.
  */
 export function buildDailyGoodReturnValueMessages(report: GoodReturnValueReport, options: { latest?: LatestDataLookup } = {}): string[] {
-  if (!report.products.length) {
+  // An anomaly-only report (zero product rows, but invalid-only good-return
+  // evidence still flagged) is neither a sold-out day nor a genuinely empty
+  // one — it falls through to the normal render path below, which already
+  // handles an empty productParts list and a non-empty anomalyParts list.
+  if (!report.products.length && !report.anomalies.length) {
     const date = formatThaiDate(report.businessDate);
     if (report.hasActivity) {
       // Withdrawals happened but nothing was weighed back — that is sold out, not missing data.

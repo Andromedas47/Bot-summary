@@ -14,6 +14,7 @@ type Blocker = "ไม่พบรายการเบิกที่ตรง�
 export interface GoodReturnValueProduct { productName: string; unit: string; quantity: number; valuedQuantity: number; unvaluedQuantity: number; valueSatang: number; blockers: Blocker[]; }
 export interface GoodReturnValueReport { businessDate: string; products: GoodReturnValueProduct[]; }
 interface Cell { product: string; unit: string; resolvedMarket: boolean; withdrawn: number; returned: number; damaged: number; prices: Set<number>; hasWithdrawal: boolean; invalidQuantity: boolean; invalidPrice: boolean; }
+interface Entry { category: string; block: string; shortened: boolean; }
 
 function priceSatang(value: number | null | undefined): number | null {
   if (value === null || value === undefined || !Number.isFinite(value) || value < 0) return null;
@@ -76,7 +77,10 @@ function header(report: GoodReturnValueReport, part: number, totalParts: number,
 }
 function summaryBlock(report: GoodReturnValueReport, incomplete: readonly StockIncompleteEntry[], omitted: number): string {
   const complete = report.products.filter((row) => !row.unvaluedQuantity).length;
-  return [incompleteBlock(incomplete), omitted ? `⚠️ แสดงไม่ครบ ${omitted} รายการ เนื่องจากเกินขีดจำกัดข้อความ LINE` : null, `รวมมูลค่าของดีที่ยืนยันได้ ${satangToBahtText(report.products.reduce((sum, row) => sum + row.valueSatang, 0))} บาท`, `✅ คิดได้ครบ ${complete} รายการ`, `⚠️ คำนวณไม่ได้หรือได้บางส่วน ${report.products.length - complete} รายการ`].filter((line): line is string => Boolean(line)).join("\n\n");
+  return [incompleteBlock(incomplete), omitted ? `⚠️ แสดงรายละเอียดไม่ครบ ${omitted} รายการ เนื่องจากเกินขีดจำกัดข้อความ LINE` : null, `รวมมูลค่าของดีที่ยืนยันได้ ${satangToBahtText(report.products.reduce((sum, row) => sum + row.valueSatang, 0))} บาท`, `✅ คิดได้ครบ ${complete} รายการ`, `⚠️ คำนวณไม่ได้หรือได้บางส่วน ${report.products.length - complete} รายการ`].filter((line): line is string => Boolean(line)).join("\n\n");
+}
+function lines(entries: readonly Entry[]): string {
+  return entries.flatMap((item, index) => [index === 0 || item.category !== entries[index - 1]!.category ? `${STOCK_CATEGORY_EMOJI[item.category as keyof typeof STOCK_CATEGORY_EMOJI]} ${item.category}` : null, item.block]).filter(Boolean).join("\n");
 }
 
 /** Packs whole product+warning blocks under both LINE limits. */
@@ -86,26 +90,27 @@ export function buildDailyGoodReturnValueMessages(report: GoodReturnValueReport,
     const date = formatThaiDate(report.businessDate); const activity = incompleteBlock(incomplete);
     return [["📦 สรุปของดีชั่งคืนประจำวัน", `ข้อมูลวันที่ ${date}`, "หมายเหตุ: รายงานนี้สรุปเฉพาะของดีที่ชั่งคืน ไม่ใช่สต๊อกตรวจนับจริง", activity ?? `ยังไม่พบข้อมูลชั่งคืนประจำวันที่ ${date}`, activity ? null : latestDataBlock(options.latest ?? { status: "unavailable" }, "ยังไม่พบข้อมูลชั่งคืนในระบบ")].filter(Boolean).join("\n\n")];
   }
-  const parts: Array<Array<{ category: string; block: string }>> = []; let current: Array<{ category: string; block: string }> = [];
+  const parts: Entry[][] = []; let current: Entry[] = []; let shortened = 0;
   for (const [index, row] of report.products.entries()) {
-    const entry = { category: stockCategoryFor(row.productName), block: productBlock(row, index + 1) };
-    const candidate = [...current, entry]; const candidateLines = candidate.flatMap((item, i) => [i === 0 || item.category !== candidate[i - 1]!.category ? `${STOCK_CATEGORY_EMOJI[item.category as keyof typeof STOCK_CATEGORY_EMOJI]} ${item.category}` : null, item.block]).filter(Boolean).join("\n");
-    // Header worst case is small; reserve it plus the final summary on the last part.
-    if (current.length === 15 || (current.length && countCodePoints(candidateLines) + 450 > LINE_MESSAGE_MAX_CODE_POINTS)) { parts.push(current); current = [entry]; }
-    else if (!current.length && countCodePoints(candidateLines) + 450 > LINE_MESSAGE_MAX_CODE_POINTS) { const preview = [...row.productName].slice(0, 80).join(""); parts.push([{ category: entry.category, block: `${index + 1}. ${preview}… — รายการยาวเกินขีดจำกัด LINE จึงไม่แสดงรายละเอียด` }]); }
-    else current = candidate;
+    const entry = { category: stockCategoryFor(row.productName), block: productBlock(row, index + 1), shortened: false };
+    if (current.length && (current.length === 15 || countCodePoints(lines([...current, entry])) + 450 > LINE_MESSAGE_MAX_CODE_POINTS)) { parts.push(current); current = []; }
+    if (countCodePoints(lines([entry])) + 450 > LINE_MESSAGE_MAX_CODE_POINTS) {
+      parts.push([{ category: entry.category, block: `${index + 1}. รายการยาวเกินขีดจำกัด LINE จึงไม่แสดงรายละเอียด`, shortened: true }]);
+      shortened++;
+    } else current.push(entry);
   }
   if (current.length) parts.push(current);
-  let omitted = parts.length > LINE_REPLY_MAX_MESSAGES ? parts.slice(LINE_REPLY_MAX_MESSAGES - 1).reduce((n, part) => n + part.length, 0) : 0;
-  const delivered = omitted ? parts.slice(0, LINE_REPLY_MAX_MESSAGES - 1) : parts;
-  const totalParts = delivered.length; const messages = delivered.map((part, i) => {
-    const first = Number(part[0]!.block.match(/^(\d+)\./)?.[1] ?? i * 15 + 1);
-    const body = part.flatMap((item, j) => [j === 0 || item.category !== part[j - 1]!.category ? `${STOCK_CATEGORY_EMOJI[item.category as keyof typeof STOCK_CATEGORY_EMOJI]} ${item.category}` : null, item.block]).filter(Boolean).join("\n");
-    return [...header(report, i + 1, totalParts, first, first + part.length - 1), body].join("\n");
+  const omittedRows = (groups: readonly (readonly Entry[])[]) => groups.reduce((count, group) => count + group.filter((entry) => !entry.shortened).length, 0);
+  let omitted = shortened + (parts.length > LINE_REPLY_MAX_MESSAGES ? omittedRows(parts.slice(LINE_REPLY_MAX_MESSAGES - 1)) : 0);
+  const delivered = parts.length > LINE_REPLY_MAX_MESSAGES ? parts.slice(0, LINE_REPLY_MAX_MESSAGES - 1) : parts;
+  const messages = delivered.map((part, index) => {
+    const first = Number(part[0]!.block.match(/^(\d+)\./)?.[1] ?? index * 15 + 1);
+    return [...header(report, index + 1, delivered.length, first, first + part.length - 1), lines(part)].join("\n");
   });
-  const final = summaryBlock(report, incomplete, omitted); const last = messages[messages.length - 1] ?? "";
+  const final = summaryBlock(report, incomplete, omitted); const last = messages[messages.length - 1]!;
   if (countCodePoints(`${last}\n\n${final}`) <= LINE_MESSAGE_MAX_CODE_POINTS) messages[messages.length - 1] = `${last}\n\n${final}`;
   else if (messages.length < LINE_REPLY_MAX_MESSAGES) messages.push(final);
-  else { omitted += delivered.pop()?.length ?? 0; messages.pop(); messages.push(summaryBlock(report, incomplete, omitted)); }
-  return messages.slice(0, LINE_REPLY_MAX_MESSAGES);
+  else { omitted += omittedRows([delivered.pop()!]); messages.pop(); messages.push(summaryBlock(report, incomplete, omitted)); }
+  if (messages.some((message) => countCodePoints(message) > LINE_MESSAGE_MAX_CODE_POINTS)) throw new Error("daily good-return value message exceeds LINE limit");
+  return messages;
 }

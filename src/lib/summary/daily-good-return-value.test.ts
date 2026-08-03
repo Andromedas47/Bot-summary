@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { buildDailyGoodReturnValueMessages, buildDailyGoodReturnValueReport } from "./daily-good-return-value";
 import { LINE_MESSAGE_MAX_CODE_POINTS, countCodePoints } from "./line-chunking";
 import type { RemainingFruitSourceRow } from "./remaining-fruit";
+import type { GoodReturnValueProduct } from "./daily-good-return-value";
 
 const base = (overrides: Partial<RemainingFruitSourceRow>): RemainingFruitSourceRow => ({ market_name: "ตลาด A", product_name: "หมอนทอง", quantity: 1, unit: "โล", transaction_type: "คืน", ...overrides });
+const valued = (productName: string): GoodReturnValueProduct => ({ productName, unit: "โล", quantity: 1, valuedQuantity: 1, unvaluedQuantity: 0, valueSatang: 1_000, blockers: [] });
 
 describe("daily good-return value", () => {
   test("values each market before combining product totals", () => {
@@ -64,5 +66,31 @@ describe("daily good-return value", () => {
     const messages = buildDailyGoodReturnValueMessages(report);
     expect(messages.every((message) => countCodePoints(message) <= LINE_MESSAGE_MAX_CODE_POINTS)).toBe(true);
     expect(messages.join("\n")).toContain("รายการยาวเกินขีดจำกัด LINE");
+  });
+
+  test("rechecks an oversized row after flushing a short row", () => {
+    const messages = buildDailyGoodReturnValueMessages({ businessDate: "2026-08-01", products: [valued("ก"), valued("ย".repeat(3_920))] });
+    expect(messages.every((message) => countCodePoints(message) <= LINE_MESSAGE_MAX_CODE_POINTS)).toBe(true);
+    expect(messages.join("\n")).toContain("2. รายการยาวเกินขีดจำกัด LINE");
+    expect(messages.join("\n")).toContain("แสดงรายละเอียดไม่ครบ 1 รายการ");
+    expect(messages.at(-1)).toContain("รวมมูลค่าของดีที่ยืนยันได้ 20.00 บาท");
+  });
+
+  test("counts each oversized fallback once without renumbering later rows", () => {
+    const messages = buildDailyGoodReturnValueMessages({ businessDate: "2026-08-01", products: [valued("ย".repeat(3_920)), valued("ย".repeat(3_920)), valued("short")] });
+    expect(messages.every((message) => countCodePoints(message) <= LINE_MESSAGE_MAX_CODE_POINTS)).toBe(true);
+    expect(messages.join("\n")).toContain("1. รายการยาวเกินขีดจำกัด LINE");
+    expect(messages.join("\n")).toContain("2. รายการยาวเกินขีดจำกัด LINE");
+    expect(messages.join("\n")).toContain("3. short");
+    expect(messages.at(-1)).toContain("แสดงรายละเอียดไม่ครบ 2 รายการ");
+  });
+
+  test("combines capacity and oversized display omissions in final summary only", () => {
+    const products = [valued("ย".repeat(3_920)), ...Array.from({ length: 75 }, (_, index) => valued(`P${index}`))];
+    const messages = buildDailyGoodReturnValueMessages({ businessDate: "2026-08-01", products });
+    expect(messages.length).toBeLessThanOrEqual(5);
+    expect(messages.every((message) => countCodePoints(message) <= LINE_MESSAGE_MAX_CODE_POINTS)).toBe(true);
+    expect(messages.at(-1)).toContain("แสดงรายละเอียดไม่ครบ 31 รายการ");
+    expect(messages.slice(0, -1).join("\n")).not.toContain("แสดงรายละเอียดไม่ครบ");
   });
 });

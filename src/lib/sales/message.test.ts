@@ -23,6 +23,8 @@ import {
   SALES_MARKET_SECTION_HEADING,
   SALES_PRODUCT_SECTION_HEADING,
   SALES_PARTIAL_HEADING,
+  SALES_PARTIAL_TOTAL_HEADING,
+  SALES_PARTIAL_TOTAL_NOTICE,
   SALES_QUANTITY_ONLY_NOTICE,
   SALES_TOTAL_HEADING,
   SALES_VALUE_UNAVAILABLE,
@@ -233,7 +235,65 @@ describe("P1 automatic message — executive summary", () => {
     ).join("\n\n");
 
     expect(text).toContain("มีชุดข้อมูลที่ยังไม่ปิด/ปิดไม่สำเร็จ 2 ชุด");
-    expect(text).toContain(SALES_PARTIAL_HEADING);
+    // The headline total uses the stronger partial-total wording, not the
+    // per-market/product SALES_PARTIAL_HEADING.
+    expect(text).toContain(SALES_PARTIAL_TOTAL_HEADING);
+    expect(text).toContain(SALES_PARTIAL_TOTAL_NOTICE);
+  });
+});
+
+describe("P1 partial-total warning", () => {
+  test("a partial auto report states the warning and the caveat next to the total", () => {
+    const text = buildSalesAutoBlocks(
+      report([...TRUSTED_ROWS, row({ productName: "ชะอม", unit: "กำ", quantity: 5 })]),
+    ).join("\n\n");
+
+    expect(text).toContain(SALES_PARTIAL_TOTAL_HEADING);
+    expect(text).toContain(SALES_PARTIAL_TOTAL_NOTICE);
+  });
+
+  test("a fully authoritative auto report never claims to be partial", () => {
+    const text = buildSalesAutoBlocks(report(TRUSTED_ROWS)).join("\n\n");
+
+    expect(text).toContain(SALES_TOTAL_HEADING);
+    expect(text).not.toContain(SALES_PARTIAL_TOTAL_HEADING);
+    expect(text).not.toContain(SALES_PARTIAL_TOTAL_NOTICE);
+  });
+
+  test("a partial manual report states the same warning on its headline total", () => {
+    const text = buildSalesSummaryBlocks(
+      report([...TRUSTED_ROWS, row({ productName: "ชะอม", unit: "กำ", quantity: 5 })]),
+    ).join("\n\n");
+
+    expect(text).toContain(SALES_PARTIAL_TOTAL_HEADING);
+    expect(text).toContain(SALES_PARTIAL_TOTAL_NOTICE);
+  });
+
+  test("a fully authoritative manual report never claims to be partial", () => {
+    const text = buildSalesSummaryBlocks(report(TRUSTED_ROWS)).join("\n\n");
+
+    expect(text).toContain(SALES_TOTAL_HEADING);
+    expect(text).not.toContain(SALES_PARTIAL_TOTAL_HEADING);
+    expect(text).not.toContain(SALES_PARTIAL_TOTAL_NOTICE);
+  });
+
+  test("the P1 calculation and blocker classification are untouched by the wording change", () => {
+    const built = report([...TRUSTED_ROWS, row({ productName: "ชะอม", unit: "กำ", quantity: 5 })]);
+
+    expect(built.allMarkets.expectedSalesSatang).toBe(84_000);
+    expect(built.allMarkets.trustedRowCount).toBe(1);
+    expect(built.allMarkets.valueBlockedRowCount + built.allMarkets.quantityBlockedRowCount).toBe(1);
+    expect(built.blocked).toHaveLength(1);
+  });
+
+  test("introduces no stock, purchase, cost, cash, slip, or profit wording", () => {
+    const text = buildSalesAutoBlocks(
+      report([...TRUSTED_ROWS, row({ productName: "ชะอม", unit: "กำ", quantity: 5 })]),
+    ).join("\n\n");
+
+    for (const forbidden of ["สต๊อก", "ซื้อ", "ต้นทุน", "เงินสด", "สลิป", "กำไร"]) {
+      expect(text).not.toContain(forbidden);
+    }
   });
 });
 

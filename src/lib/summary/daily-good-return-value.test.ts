@@ -1,0 +1,96 @@
+import { describe, expect, test } from "bun:test";
+import { buildDailyGoodReturnValueMessages, buildDailyGoodReturnValueReport } from "./daily-good-return-value";
+import { LINE_MESSAGE_MAX_CODE_POINTS, countCodePoints } from "./line-chunking";
+import type { RemainingFruitSourceRow } from "./remaining-fruit";
+import type { GoodReturnValueProduct } from "./daily-good-return-value";
+
+const base = (overrides: Partial<RemainingFruitSourceRow>): RemainingFruitSourceRow => ({ market_name: "ตลาด A", product_name: "หมอนทอง", quantity: 1, unit: "โล", transaction_type: "คืน", ...overrides });
+const valued = (productName: string): GoodReturnValueProduct => ({ productName, unit: "โล", quantity: 1, valuedQuantity: 1, unvaluedQuantity: 0, valueSatang: 1_000, blockers: [] });
+
+describe("daily good-return value", () => {
+  test("values each market before combining product totals", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-01", [
+      base({ market_name: "ตลาด A", transaction_type: "เบิก", quantity: 20, price_per_unit: 40 }),
+      base({ market_name: "ตลาด A", quantity: 7 }),
+      base({ market_name: "ตลาด B", transaction_type: "เบิก", quantity: 20, price_per_unit: 50 }),
+      base({ market_name: "ตลาด B", quantity: 2 }),
+    ]);
+    expect(report.products[0]).toMatchObject({ quantity: 9, valuedQuantity: 9, unvaluedQuantity: 0, valueSatang: 38_000 });
+  });
+
+  test("fails closed for absent, conflicting, or structurally impossible withdrawal evidence", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-01", [
+      base({ product_name: "A", quantity: 3 }),
+      base({ product_name: "B", transaction_type: "เบิก", quantity: 5, price_per_unit: 10 }), base({ product_name: "B", transaction_type: "เบิก", quantity: 5, price_per_unit: 20 }), base({ product_name: "B", quantity: 3 }),
+      base({ product_name: "C", transaction_type: "เบิก", quantity: 2, price_per_unit: 10 }), base({ product_name: "C", quantity: 3 }),
+    ]);
+    expect(report.products.every((row) => row.valueSatang === 0 && row.unvaluedQuantity === row.quantity)).toBe(true);
+    expect(buildDailyGoodReturnValueMessages(report).join("\n")).not.toMatch(/^\d+\. .*0\.00 บาท/m);
+  });
+
+  test("caps each scheduled message at fifteen product rows with continuous numbering", () => {
+    const rows = Array.from({ length: 16 }, (_, i) => [base({ product_name: `P${i}`, transaction_type: "เบิก", quantity: 2, price_per_unit: 10 }), base({ product_name: `P${i}`, quantity: 1 })]).flat();
+    const messages = buildDailyGoodReturnValueMessages(buildDailyGoodReturnValueReport("2026-08-01", rows));
+    expect(messages).toHaveLength(2); expect(messages[0]).toContain("รายการ 1–15"); expect(messages[1]).toContain("รายการ 16–16"); expect(messages[0]).toContain("15. "); expect(messages[1]).toContain("16. ");
+  });
+
+  test("fails closed on every invalid withdrawal price while accepting a proven zero", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-01", [
+      base({ product_name: "null", transaction_type: "เบิก", quantity: 2, price_per_unit: 40 }), base({ product_name: "null", transaction_type: "เบิก", quantity: 2, price_per_unit: null }), base({ product_name: "null", quantity: 1 }),
+      base({ product_name: "negative", transaction_type: "เบิก", quantity: 2, price_per_unit: -1 }), base({ product_name: "negative", quantity: 1 }),
+      base({ product_name: "zero", transaction_type: "เบิก", quantity: 2, price_per_unit: 0 }), base({ product_name: "zero", transaction_type: "เบิก", quantity: 2, price_per_unit: 0 }), base({ product_name: "zero", quantity: 1 }),
+      base({ product_name: "conflict", transaction_type: "เบิก", quantity: 2, price_per_unit: 0 }), base({ product_name: "conflict", transaction_type: "เบิก", quantity: 2, price_per_unit: 10 }), base({ product_name: "conflict", quantity: 1 }),
+    ]);
+    expect(report.products.find((row) => row.productName === "null")?.blockers).toContain("รายการเบิกไม่มีราคา");
+    expect(report.products.find((row) => row.productName === "negative")?.blockers).toContain("รายการเบิกไม่มีราคา");
+    expect(report.products.find((row) => row.productName === "zero")).toMatchObject({ valuedQuantity: 1, unvaluedQuantity: 0, valueSatang: 0 });
+    expect(report.products.find((row) => row.productName === "conflict")?.blockers).toContain("ราคาจากรายการเบิกขัดแย้งกัน");
+  });
+
+  test("never matches unresolved markets and keeps their return visible but unvalued", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-01", [
+      base({ market_name: null, transaction_type: "เบิก", quantity: 2, price_per_unit: 40 }), base({ market_name: null, quantity: 1 }),
+      base({ market_name: "", transaction_type: "เบิก", quantity: 2, price_per_unit: 40 }), base({ market_name: "", quantity: 1 }),
+      base({ market_name: "ตลาด A", transaction_type: "เบิก", quantity: 2, price_per_unit: 50 }), base({ market_name: "ตลาด A", quantity: 1 }),
+    ]);
+    expect(report.products[0]).toMatchObject({ quantity: 3, valuedQuantity: 1, unvaluedQuantity: 2, valueSatang: 5_000 });
+    expect(report.products[0]?.blockers).toContain("ระบุตลาดไม่ได้");
+  });
+
+  test("keeps atomic product blocks within the LINE code-point limit", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-01", [
+      base({ product_name: "ย".repeat(3_900), transaction_type: "เบิก", quantity: 2, price_per_unit: 10 }),
+      base({ product_name: "ย".repeat(3_900), quantity: 1 }),
+      base({ product_name: "short", transaction_type: "เบิก", quantity: 2, price_per_unit: 10 }), base({ product_name: "short", quantity: 1 }),
+    ]);
+    const messages = buildDailyGoodReturnValueMessages(report);
+    expect(messages.every((message) => countCodePoints(message) <= LINE_MESSAGE_MAX_CODE_POINTS)).toBe(true);
+    expect(messages.join("\n")).toContain("รายการยาวเกินขีดจำกัด LINE");
+  });
+
+  test("rechecks an oversized row after flushing a short row", () => {
+    const messages = buildDailyGoodReturnValueMessages({ businessDate: "2026-08-01", products: [valued("ก"), valued("ย".repeat(3_920))] });
+    expect(messages.every((message) => countCodePoints(message) <= LINE_MESSAGE_MAX_CODE_POINTS)).toBe(true);
+    expect(messages.join("\n")).toContain("2. รายการยาวเกินขีดจำกัด LINE");
+    expect(messages.join("\n")).toContain("แสดงรายละเอียดไม่ครบ 1 รายการ");
+    expect(messages.at(-1)).toContain("รวมมูลค่าของดีที่ยืนยันได้ 20.00 บาท");
+  });
+
+  test("counts each oversized fallback once without renumbering later rows", () => {
+    const messages = buildDailyGoodReturnValueMessages({ businessDate: "2026-08-01", products: [valued("ย".repeat(3_920)), valued("ย".repeat(3_920)), valued("short")] });
+    expect(messages.every((message) => countCodePoints(message) <= LINE_MESSAGE_MAX_CODE_POINTS)).toBe(true);
+    expect(messages.join("\n")).toContain("1. รายการยาวเกินขีดจำกัด LINE");
+    expect(messages.join("\n")).toContain("2. รายการยาวเกินขีดจำกัด LINE");
+    expect(messages.join("\n")).toContain("3. short");
+    expect(messages.at(-1)).toContain("แสดงรายละเอียดไม่ครบ 2 รายการ");
+  });
+
+  test("combines capacity and oversized display omissions in final summary only", () => {
+    const products = [valued("ย".repeat(3_920)), ...Array.from({ length: 75 }, (_, index) => valued(`P${index}`))];
+    const messages = buildDailyGoodReturnValueMessages({ businessDate: "2026-08-01", products });
+    expect(messages.length).toBeLessThanOrEqual(5);
+    expect(messages.every((message) => countCodePoints(message) <= LINE_MESSAGE_MAX_CODE_POINTS)).toBe(true);
+    expect(messages.at(-1)).toContain("แสดงรายละเอียดไม่ครบ 31 รายการ");
+    expect(messages.slice(0, -1).join("\n")).not.toContain("แสดงรายละเอียดไม่ครบ");
+  });
+});

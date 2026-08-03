@@ -111,6 +111,7 @@ export interface RemainingFruitSourceRow {
   quantity: number | null;
   unit: string | null;
   transaction_type: string;
+  price_per_unit?: number | null;
   /** Identity fields used only for session-aware dedup — optional so existing callers/fixtures keep compiling. */
   session_id?: string;
   sender_name?: string | null;

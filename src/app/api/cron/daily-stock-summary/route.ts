@@ -5,6 +5,8 @@ import { pushLineMessage } from "@/lib/line/reply";
 import { fetchRemainingFruitRows, findLatestStockDataDate } from "@/lib/summary/remaining-fruit-data";
 import type { LatestDataLookup } from "@/lib/summary/latest-data-hint";
 import { buildDailyGoodReturnValueMessages, buildDailyGoodReturnValueReport } from "@/lib/summary/daily-good-return-value";
+import { buildStockSummaryFromRows } from "@/lib/summary/stock-summary";
+import { isStockSnapshotEmpty } from "@/lib/summary/stock-snapshot-message";
 import {
   parseStockSummaryTargets,
   resolveStockSummaryDate,
@@ -73,11 +75,14 @@ export async function GET(req: NextRequest) {
   const supabase = createServiceClient();
 
   let report;
+  let stockSummary;
   try {
+    const rows = await fetchRemainingFruitRows(supabase, businessDate);
     report = buildDailyGoodReturnValueReport(
       businessDate,
-      await fetchRemainingFruitRows(supabase, businessDate),
+      rows,
     );
+    stockSummary = buildStockSummaryFromRows(businessDate, rows);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error("daily stock summary cron failed - summary build error", {
@@ -99,7 +104,7 @@ export async function GET(req: NextRequest) {
   // missing-ชั่งคืน section collapsed to counts. No per-market detail: the
   // morning report has to be readable before the markets run.
   let latest: LatestDataLookup | undefined;
-  if (report.products.length === 0) {
+  if (isStockSnapshotEmpty(stockSummary)) {
     try {
       latest = await findLatestStockDataDate(supabase, businessDate);
     } catch (error) {
@@ -110,13 +115,20 @@ export async function GET(req: NextRequest) {
       });
     }
   }
-  const messages = buildDailyGoodReturnValueMessages(report, { latest });
+  const messages = buildDailyGoodReturnValueMessages(report, {
+    latest,
+    incomplete: stockSummary.incomplete,
+  });
   const productCount = report.products.length;
+  const incompleteMarketCount = new Set(stockSummary.incomplete.map((row) => row.marketName)).size;
 
   if (debugMode) {
     logger.info("daily stock summary cron debug completed", {
       businessDate,
       productCount,
+      incompleteCount: stockSummary.incomplete.length,
+      incompleteMarketCount,
+      isComplete: stockSummary.isComplete,
       latestLookupStatus: latest?.status ?? null,
       latestDataDate: latest?.status === "found" ? latest.hint.date : null,
       latestDataMarketCount: latest?.status === "found" ? latest.hint.marketCount : null,
@@ -130,6 +142,9 @@ export async function GET(req: NextRequest) {
       debug: true,
       businessDate,
       productCount,
+      incompleteCount: stockSummary.incomplete.length,
+      incompleteMarketCount,
+      isComplete: stockSummary.isComplete,
       latestLookupStatus: latest?.status ?? null,
       latestDataDate: latest?.status === "found" ? latest.hint.date : null,
       latestDataMarketCount: latest?.status === "found" ? latest.hint.marketCount : null,
@@ -153,6 +168,9 @@ export async function GET(req: NextRequest) {
       sent: false,
       reason: "no_targets_configured",
       productCount,
+      incompleteCount: stockSummary.incomplete.length,
+      incompleteMarketCount,
+      isComplete: stockSummary.isComplete,
       targetCount: 0,
     });
   }
@@ -190,6 +208,9 @@ export async function GET(req: NextRequest) {
         sentCount,
         failedCount: failedTargets.length,
         productCount,
+        incompleteCount: stockSummary.incomplete.length,
+        incompleteMarketCount,
+        isComplete: stockSummary.isComplete,
         targetCount: targets.length,
       },
       { status: 500 },
@@ -200,6 +221,9 @@ export async function GET(req: NextRequest) {
     businessDate,
     sentCount,
     productCount,
+    incompleteCount: stockSummary.incomplete.length,
+    incompleteMarketCount,
+    isComplete: stockSummary.isComplete,
   });
 
   return NextResponse.json({
@@ -208,6 +232,9 @@ export async function GET(req: NextRequest) {
     sent: true,
     sentCount,
     productCount,
+    incompleteCount: stockSummary.incomplete.length,
+    incompleteMarketCount,
+    isComplete: stockSummary.isComplete,
     targetCount: targets.length,
   });
 }

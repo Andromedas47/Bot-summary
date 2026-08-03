@@ -179,6 +179,9 @@ describe("daily stock summary cron — delivery", () => {
     expect(body.sent).toBe(true);
     expect(body.sentCount).toBe(2);
     expect(body.businessDate).toBe("2026-07-25");
+    expect(body.incompleteCount).toBe(1);
+    expect(body.incompleteMarketCount).toBe(1);
+    expect(body.isComplete).toBe(false);
 
     expect(pushCalls.map((c) => c.to)).toEqual(["Cgroup1", "Cgroup2"]);
     expect(pushCalls[0].text).toContain("📦 สรุปของดีชั่งคืนประจำวัน");
@@ -365,6 +368,8 @@ describe("daily stock summary cron — debug mode", () => {
     expect(body.debug).toBe(true);
     expect(body.wouldSendLine).toBe(true);
     expect(body.productCount).toBe(1);
+    expect(body.incompleteCount).toBe(1);
+    expect(body.isComplete).toBe(false);
     expect(body.messages[0]).toContain("📦 สรุปของดีชั่งคืนประจำวัน");
     expect(pushCalls).toHaveLength(0);
   });

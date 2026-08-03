@@ -71,29 +71,29 @@ describe("daily good-return value", () => {
   });
 
   test("rechecks an oversized row after flushing a short row", () => {
-    const messages = buildDailyGoodReturnValueMessages({ businessDate: "2026-08-01", products: [valued("ก"), valued("ย".repeat(3_920))], anomalies: [] });
+    const messages = buildDailyGoodReturnValueMessages({ businessDate: "2026-08-01", products: [valued("ก"), valued("ย".repeat(3_920))], anomalies: [], hasActivity: true });
     expect(messages.every((message) => countCodePoints(message) <= LINE_MESSAGE_MAX_CODE_POINTS)).toBe(true);
     expect(messages.join("\n")).toContain("2. รายการยาวเกินขีดจำกัด LINE");
-    expect(messages.join("\n")).toContain("แสดงรายละเอียดไม่ครบ 1 รายการ");
+    expect(messages.join("\n")).toContain("ไม่ได้แสดงสินค้าบางส่วน 1 รายการ เนื่องจากขีดจำกัด LINE");
     expect(messages.at(-1)).toContain("รวมมูลค่าของดีที่ยืนยันได้ 20.00 บาท");
   });
 
   test("counts each oversized fallback once without renumbering later rows", () => {
-    const messages = buildDailyGoodReturnValueMessages({ businessDate: "2026-08-01", products: [valued("ย".repeat(3_920)), valued("ย".repeat(3_920)), valued("short")], anomalies: [] });
+    const messages = buildDailyGoodReturnValueMessages({ businessDate: "2026-08-01", products: [valued("ย".repeat(3_920)), valued("ย".repeat(3_920)), valued("short")], anomalies: [], hasActivity: true });
     expect(messages.every((message) => countCodePoints(message) <= LINE_MESSAGE_MAX_CODE_POINTS)).toBe(true);
     expect(messages.join("\n")).toContain("1. รายการยาวเกินขีดจำกัด LINE");
     expect(messages.join("\n")).toContain("2. รายการยาวเกินขีดจำกัด LINE");
     expect(messages.join("\n")).toContain("3. short");
-    expect(messages.at(-1)).toContain("แสดงรายละเอียดไม่ครบ 2 รายการ");
+    expect(messages.at(-1)).toContain("ไม่ได้แสดงสินค้าบางส่วน 2 รายการ เนื่องจากขีดจำกัด LINE");
   });
 
   test("combines capacity and oversized display omissions in final summary only", () => {
     const products = [valued("ย".repeat(3_920)), ...Array.from({ length: 75 }, (_, index) => valued(`P${index}`))];
-    const messages = buildDailyGoodReturnValueMessages({ businessDate: "2026-08-01", products, anomalies: [] });
+    const messages = buildDailyGoodReturnValueMessages({ businessDate: "2026-08-01", products, anomalies: [], hasActivity: true });
     expect(messages.length).toBeLessThanOrEqual(5);
     expect(messages.every((message) => countCodePoints(message) <= LINE_MESSAGE_MAX_CODE_POINTS)).toBe(true);
-    expect(messages.at(-1)).toContain("แสดงรายละเอียดไม่ครบ 31 รายการ");
-    expect(messages.slice(0, -1).join("\n")).not.toContain("แสดงรายละเอียดไม่ครบ");
+    expect(messages.at(-1)).toContain("ไม่ได้แสดงสินค้าบางส่วน 31 รายการ เนื่องจากขีดจำกัด LINE");
+    expect(messages.slice(0, -1).join("\n")).not.toContain("ไม่ได้แสดงสินค้าบางส่วน");
   });
 
   // ── Market-level anomaly business rules ───────────────────────────────────
@@ -245,5 +245,143 @@ describe("daily good-return value", () => {
     expect(totalLine).not.toBeNull();
     const totalBaht = Number(totalLine![1].replace(/,/g, ""));
     expect(Math.round(totalBaht * 100)).toBe(expectedTotal);
+  });
+
+  // ── Blocker 1: realistic LINE cap must never drop every anomaly ───────────
+
+  test("18. 65+ products and multiple anomalies: at least one anomaly message survives the LINE cap", () => {
+    const clean = Array.from({ length: 65 }, (_, i) => [
+      base({ product_name: `P${i}`, transaction_type: "เบิก", quantity: 2, price_per_unit: 10 }),
+      base({ product_name: `P${i}`, quantity: 1 }),
+    ]).flat();
+    // 20 markets, each returning the same product with no matching withdrawal there — 20 market-level anomalies.
+    const anomalyRows = Array.from({ length: 20 }, (_, i) => base({ market_name: `ตลาดผิดปกติ${i}`, product_name: "ทุเรียน", quantity: 3 }));
+    const report = buildDailyGoodReturnValueReport("2026-08-01", [...clean, ...anomalyRows]);
+    expect(report.products.length).toBeGreaterThanOrEqual(65);
+    expect(report.anomalies).toHaveLength(20);
+    const expectedTotal = report.products.reduce((sum, row) => sum + row.valueSatang, 0);
+
+    const messages = buildDailyGoodReturnValueMessages(report);
+    expect(messages.length).toBeLessThanOrEqual(5);
+    const joined = messages.join("\n\n");
+
+    // Summary present.
+    expect(joined).toContain("รวมมูลค่าของดีที่ยืนยันได้");
+    // At least one real anomaly block with a market name is delivered.
+    expect(joined).toContain("⚠️ รายละเอียดข้อมูลผิดปกติ");
+    expect(joined).toMatch(/ตลาดผิดปกติ\d+ — ทุเรียน/);
+
+    // Separate, correctly-computed omission counts.
+    const omittedProductMatch = joined.match(/ไม่ได้แสดงสินค้าบางส่วน (\d+) รายการ เนื่องจากขีดจำกัด LINE/);
+    const omittedAnomalyMatch = joined.match(/ไม่ได้แสดงรายละเอียดผิดปกติ (\d+) รายการ เนื่องจากขีดจำกัด LINE/);
+    expect(omittedProductMatch).not.toBeNull();
+    const omittedProductCount = Number(omittedProductMatch![1]);
+    const omittedAnomalyCount = omittedAnomalyMatch ? Number(omittedAnomalyMatch[1]) : 0;
+    expect(omittedProductCount).toBeGreaterThan(0);
+
+    // No duplicate delivered products or anomalies.
+    const productNumbers = [...joined.matchAll(/^(\d+)\. .+ — [\d.,]+ /gm)].map((m) => Number(m[1]));
+    expect(new Set(productNumbers).size).toBe(productNumbers.length);
+    const anomalyNumbers = [...joined.matchAll(/^(\d+)\. ตลาดผิดปกติ\d+ — /gm)].map((m) => Number(m[1]));
+    expect(new Set(anomalyNumbers).size).toBe(anomalyNumbers.length);
+
+    // Confirmed total value is exactly preserved regardless of truncation.
+    const totalLine = joined.match(/รวมมูลค่าของดีที่ยืนยันได้ ([\d,]+\.\d{2}) บาท/);
+    expect(totalLine).not.toBeNull();
+    expect(Math.round(Number(totalLine![1].replace(/,/g, "")) * 100)).toBe(expectedTotal);
+
+    // Reproduce omittedAnomalyCount independently: total anomalies minus how many anomaly numbers were actually delivered.
+    expect(omittedAnomalyCount + anomalyNumbers.length).toBe(report.anomalies.length);
+    // Reproduce omittedProductCount independently via delivered product numbering.
+    expect(omittedProductCount + productNumbers.length).toBe(report.products.length);
+  });
+
+  test("19. anomalies alone (no truncation needed) still reserve their own message", () => {
+    const rows = [
+      base({ transaction_type: "เบิก", quantity: 100, price_per_unit: 40 }),
+      base({ market_name: "ตลาดกี้", quantity: 5 }), // no matching withdrawal at ตลาดกี้
+    ];
+    const report = buildDailyGoodReturnValueReport("2026-08-01", rows);
+    const messages = buildDailyGoodReturnValueMessages(report);
+    expect(messages.some((m) => m.includes("⚠️ รายละเอียดข้อมูลผิดปกติ") && m.includes("ตลาดกี้"))).toBe(true);
+  });
+
+  // ── Blocker 2: invalid good-return quantities must never silently vanish ──
+
+  test("20. null good-return quantity produces an anomaly even with zero valid returned quantity", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-01", [
+      base({ market_name: "ตลาดปลา", transaction_type: "เบิก", quantity: 10, price_per_unit: 40 }),
+      base({ market_name: "ตลาดปลา", quantity: null }),
+    ]);
+    expect(report.anomalies).toHaveLength(1);
+    expect(report.anomalies[0]).toMatchObject({ marketName: "ตลาดปลา", returnedQuantity: null, blockers: ["จำนวนไม่ถูกต้อง"] });
+    const text = buildDailyGoodReturnValueMessages(report).join("\n");
+    expect(text).toContain("คืนดี ไม่ถูกต้อง");
+    expect(text).toContain("ปัญหา: จำนวนไม่ถูกต้อง");
+  });
+
+  test("21. negative good-return quantity produces an anomaly", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-01", [
+      base({ market_name: "ตลาดปลา", transaction_type: "เบิก", quantity: 10, price_per_unit: 40 }),
+      base({ market_name: "ตลาดปลา", quantity: -5 }),
+    ]);
+    expect(report.anomalies).toHaveLength(1);
+    expect(report.anomalies[0]).toMatchObject({ marketName: "ตลาดปลา", returnedQuantity: null, blockers: ["จำนวนไม่ถูกต้อง"] });
+  });
+
+  test("22. invalid withdrawal quantity with a valid good return still surfaces as an anomaly", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-01", [
+      base({ market_name: "ตลาดปลา", transaction_type: "เบิก", quantity: -1, price_per_unit: 40 }),
+      base({ market_name: "ตลาดปลา", quantity: 6 }),
+    ]);
+    expect(report.anomalies).toHaveLength(1);
+    expect(report.anomalies[0]).toMatchObject({ marketName: "ตลาดปลา", withdrawnQuantity: null, returnedQuantity: 6, blockers: ["จำนวนไม่ถูกต้อง"] });
+    expect(report.products[0]).toMatchObject({ quantity: 6, unvaluedQuantity: 6 });
+  });
+
+  test("23. invalid damaged-return quantity with a valid good return still surfaces as an anomaly", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-01", [
+      base({ market_name: "ตลาดปลา", transaction_type: "เบิก", quantity: 10, price_per_unit: 40 }),
+      base({ market_name: "ตลาดปลา", quantity: 6 }),
+      base({ market_name: "ตลาดปลา", transaction_type: "คืนเสีย", quantity: null }),
+    ]);
+    expect(report.anomalies).toHaveLength(1);
+    expect(report.anomalies[0]).toMatchObject({ marketName: "ตลาดปลา", damagedQuantity: null, returnedQuantity: 6, blockers: ["จำนวนไม่ถูกต้อง"] });
+  });
+
+  test("24. no invalid row silently disappears across every invalid-quantity scenario", () => {
+    const rows = [
+      base({ market_name: "A", transaction_type: "เบิก", quantity: 10, price_per_unit: 40 }), base({ market_name: "A", quantity: null }),
+      base({ market_name: "B", transaction_type: "เบิก", quantity: 10, price_per_unit: 40 }), base({ market_name: "B", quantity: -2 }),
+      base({ market_name: "C", transaction_type: "เบิก", quantity: -1, price_per_unit: 40 }), base({ market_name: "C", quantity: 3 }),
+      base({ market_name: "D", transaction_type: "เบิก", quantity: 10, price_per_unit: 40 }), base({ market_name: "D", quantity: 3 }), base({ market_name: "D", transaction_type: "คืนเสีย", quantity: -1 }),
+    ];
+    const report = buildDailyGoodReturnValueReport("2026-08-01", rows);
+    expect(new Set(report.anomalies.map((row) => row.marketName))).toEqual(new Set(["A", "B", "C", "D"]));
+    expect(report.anomalies.every((row) => row.blockers.includes("จำนวนไม่ถูกต้อง"))).toBe(true);
+  });
+
+  // ── Blocker 3: withdrawals-only day is a normal sold-out day ──────────────
+
+  test("25. withdrawals-only date: sold-out wording, no missing-return warning, no latest-data hint", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-01", [
+      base({ transaction_type: "เบิก", quantity: 5, price_per_unit: 40 }),
+    ]);
+    expect(report.hasActivity).toBe(true);
+    const text = buildDailyGoodReturnValueMessages(report, { latest: { status: "found", hint: { date: "2026-07-31", marketCount: 3 } } }).join("\n");
+    expect(text).toContain("วันนี้ไม่มีของดีชั่งคืนจากตลาด");
+    expect(text).toContain("สินค้าที่ไม่ได้คืนถือว่าขายออกแล้ว");
+    expect(text).not.toContain("ยังไม่พบข้อมูลชั่งคืนประจำวันที่");
+    expect(text).not.toContain("ข้อมูลล่าสุดที่มีคือ");
+    expect(text).not.toContain("ไม่ครบ");
+  });
+
+  test("26. completely empty date: genuine no-data wording with latest-data hint", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-01", []);
+    expect(report.hasActivity).toBe(false);
+    const text = buildDailyGoodReturnValueMessages(report, { latest: { status: "found", hint: { date: "2026-07-31", marketCount: 3 } } }).join("\n");
+    expect(text).toContain("ยังไม่พบข้อมูลชั่งคืนประจำวันที่");
+    expect(text).toContain("ข้อมูลล่าสุดที่มีคือวันที่ 31 กรกฎาคม 2569");
+    expect(text).not.toContain("วันนี้ไม่มีของดีชั่งคืนจากตลาด");
   });
 });

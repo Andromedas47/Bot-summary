@@ -98,10 +98,12 @@ import { processWhiteSheetCloseCommand } from "@/lib/line/white-sheet-close-serv
 import { isPhysicalInventoryLineGroupAllowed } from "@/lib/physical-inventory/config";
 import {
   classifyPhysicalInventoryStandaloneIntent,
+  isPricedPhysicalInventoryHeaderText,
   isRecognizedPhysicalInventoryItemBlock,
   matchesPhysicalInventoryCloseLine,
   parsePhysicalInventoryDocument,
   HOUSE_STOCK_PRICED_PARSER_VERSION,
+  PHYSICAL_INVENTORY_PARSER_VERSION,
 } from "@/lib/physical-inventory";
 import {
   PhysicalInventoryAfterCloseBoundaryError,
@@ -189,6 +191,14 @@ const STALE_PRODUCE_SESSION_REPLY =
 
 const NEW_HEADER_REQUIRED_REPLY =
   "ไม่พบรายการที่เปิดอยู่ กรุณาพิมพ์หัวรายการใหม่ก่อนส่งรายการ";
+
+function buildPhysicalInventoryItemParseFailureReply(sequence: number | null): string {
+  return [
+    `รายการที่ ${sequence ?? 1} อ่านรูปแบบราคาไม่สำเร็จ`,
+    "กรุณาแก้ไขแล้วส่งรายการใหม่",
+    "รายการยังเปิดอยู่",
+  ].join("\n");
+}
 
 const PRODUCE_CLOSE_PENDING_REPLY =
   "รับจบรายการแล้ว กำลังตรวจสอบรายการที่ยังส่งมาไม่ถึง กรุณารอสักครู่";
@@ -1275,7 +1285,9 @@ export class WebhookService {
           lineMessageId,
           rawMessageId,
           businessDate: parsed.businessDate,
-          parserVersion: HOUSE_STOCK_PRICED_PARSER_VERSION,
+          parserVersion: isPricedPhysicalInventoryHeaderText(parsed.headerText)
+            ? HOUSE_STOCK_PRICED_PARSER_VERSION
+            : PHYSICAL_INVENTORY_PARSER_VERSION,
         });
         const closesInline = Boolean(parsed.closeText);
         if (closesInline && !service.closeOpenEvent) {
@@ -1343,12 +1355,55 @@ export class WebhookService {
     const session = ownership.physicalInventorySession;
     if (!session) return null;
 
+    // Recognize items in the session's own parser mode only. Trying both
+    // modes unconditionally let Produce-priced text (e.g. "80บาท") leak
+    // into an unpriced session once no-space house-stock prices were
+    // supported below — the two syntaxes are only distinguishable by which
+    // parser the open session actually uses.
+    const usesPricedParser = session.parser_version === HOUSE_STOCK_PRICED_PARSER_VERSION;
+    const parseOptions = { requireUnitPrice: usesPricedParser };
     const close = matchesPhysicalInventoryCloseLine(text);
-    const item = !close && (
-      isRecognizedPhysicalInventoryItemBlock(text, { requireUnitPrice: true })
-      || isRecognizedPhysicalInventoryItemBlock(text)
-    );
-    if (!close && !item) return null;
+    // Mirrors the guard inside isRecognizedPhysicalInventoryItemBlock: an
+    // unpriced session must never treat Produce selling-price text as a P2A
+    // attempt, even to report a parse failure.
+    const skipUnpricedSellingPriceText =
+      !usesPricedParser && /บาท/u.test(text.normalize("NFC"));
+    const item = !close && !skipUnpricedSellingPriceText
+      && isRecognizedPhysicalInventoryItemBlock(text, parseOptions);
+
+    if (!close && !item) {
+      const attempt = skipUnpricedSellingPriceText
+        ? null
+        : parsePhysicalInventoryDocument(text, parseOptions);
+      if (!attempt || attempt.items.length === 0) return null;
+
+      // The text was clearly meant as an item line (it parsed into at
+      // least one item-shaped observation) but failed validation. Report
+      // it plainly instead of silently swallowing it or falling through to
+      // the unrelated legacy Produce router — the session stays open and
+      // the sender can resend a corrected line.
+      await this.markRawMessageProcessed(rawMessageId, log);
+      if (replyToken) {
+        const failedSequence =
+          attempt.items.find((it) => it.resolutionStatus === "REJECTED")?.sequence
+          ?? attempt.items[0]?.sequence
+          ?? null;
+        try {
+          await this.replyMessage(
+            replyToken,
+            buildPhysicalInventoryItemParseFailureReply(failedSequence),
+          );
+        } catch (e) {
+          log.error("physical inventory item parse-failure reply failed", { error: String(e) });
+        }
+      }
+      log.info("Physical Inventory item failed to parse — session remains open", {
+        sourceId,
+        senderLineUserId,
+        sessionId: session.id,
+      });
+      return { eventId, eventType, status: "saved", parsed: false };
+    }
 
     try {
       const admitted = await service.registerIngest({

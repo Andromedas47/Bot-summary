@@ -893,4 +893,244 @@ describe("P2A Slice C webhook routing", () => {
     expect(ctx.gateway._sessions).toHaveLength(0);
     expect(ctx.db._rows("raw_messages")).toHaveLength(2);
   });
+
+  describe("house-stock priced session: compact no-space pricing (multi-message and combined)", () => {
+    test("header, then one message per item (bundle + standard pricing), stays open until จบ", async () => {
+      const ctx = service();
+      await ctx.webhook.processEvents([
+        textEvent("ผลไม้คงเหลือในบ้าน\n4/8/69"),
+      ], "destination");
+      expect(ctx.gateway._sessions[0]?.status).toBe("open");
+
+      await ctx.webhook.processEvents([
+        textEvent("1ส้มไต้หวัน3โล100บาท\n16.โล"),
+      ], "destination");
+      expect(ctx.gateway._sessions[0]?.status).toBe("open");
+
+      await ctx.webhook.processEvents([
+        textEvent("2อะโวอาโด้120บาท\n25.1.โล"),
+      ], "destination");
+      expect(ctx.gateway._sessions[0]?.status).toBe("open");
+
+      await ctx.webhook.processEvents([textEvent("จบ")], "destination");
+
+      expect(ctx.gateway._ingests.map((row) => row.kind)).toEqual([
+        "header", "item", "item", "close",
+      ]);
+      expect(ctx.gateway._sessions).toHaveLength(1);
+      expect(ctx.gateway._sessions[0]).toMatchObject({
+        status: "closing",
+        parser_version: "house-stock-priced-1.0.0",
+      });
+    });
+
+    test("header + items + จบ combined into one LINE message parses and finalizes", async () => {
+      const ctx = service();
+      const [result] = await ctx.webhook.processEvents([textEvent(
+        "ผลไม้คงเหลือในบ้าน\n4/8/69\n\n1ส้มไต้หวัน3โล100บาท\n16.โล\n\n2อะโวอาโด้120บาท\n25.1.โล\n\nจบ",
+      )], "destination");
+
+      expect(result?.parsed).toBe(true);
+      expect(ctx.gateway._sessions).toHaveLength(1);
+      expect(ctx.gateway._sessions[0]).toMatchObject({
+        status: "closing",
+        parser_version: "house-stock-priced-1.0.0",
+      });
+      // Whole document arrived as the header's own raw text — nothing more to admit.
+      expect(ctx.gateway._ingests.map((row) => row.kind)).toEqual(["header"]);
+      expect(ctx.scheduled).toHaveLength(1);
+    });
+
+    test("an item that fails to parse is reported by sequence, keeps the session open, and a corrected resend is admitted", async () => {
+      const ctx = service();
+      await ctx.webhook.processEvents([
+        textEvent("ผลไม้คงเหลือในบ้าน\n4/8/69"),
+      ], "destination");
+
+      // No digits before บาท at all — genuinely unparseable price, not just no-space.
+      await ctx.webhook.processEvents([
+        textEvent("1ส้มไต้หวันบาท\n16.โล"),
+      ], "destination");
+
+      expect(ctx.gateway._ingests.filter((row) => row.kind === "item")).toHaveLength(0);
+      expect(ctx.gateway._sessions[0]?.status).toBe("open");
+      const failureReply = ctx.replies.at(-1)!;
+      expect(failureReply).toContain("รายการที่ 1");
+      expect(failureReply).toContain("รายการยังเปิดอยู่");
+      // Must come from the P2A flow itself, never the unrelated legacy
+      // "no open session" reply — that would misleadingly suggest the
+      // stock session was lost when it was never touched.
+      expect(failureReply).not.toContain("ไม่พบรายการที่เปิดอยู่");
+      expect(ctx.db._legacyAppends).toHaveLength(0);
+      expect(ctx.db._rows("manual_slip_entries")).toHaveLength(0);
+
+      await ctx.webhook.processEvents([
+        textEvent("1ส้มไต้หวัน3โล100บาท\n16.โล"),
+      ], "destination");
+
+      expect(ctx.gateway._ingests.filter((row) => row.kind === "item")).toHaveLength(1);
+      expect(ctx.gateway._sessions).toHaveLength(1);
+      expect(ctx.gateway._sessions[0]?.status).toBe("open");
+    });
+
+    test("priced sessions are isolated per sender — another sender's item never attaches to this session", async () => {
+      const ctx = service();
+      await ctx.webhook.processEvents([
+        textEvent("ผลไม้คงเหลือในบ้าน\n4/8/69", { senderId: "U-one" }),
+      ], "destination");
+
+      await ctx.webhook.processEvents([
+        textEvent("1ส้มไต้หวัน3โล100บาท\n16.โล", { senderId: "U-two" }),
+      ], "destination");
+
+      expect(ctx.gateway._ingests.filter((row) => row.kind === "item")).toHaveLength(0);
+      expect(ctx.gateway._sessions).toHaveLength(1);
+      expect(ctx.gateway._sessions[0]?.sender_line_user_id).toBe("U-one");
+    });
+
+    test("an unpriced P2A session still rejects Produce-styled selling-price text (no regression from priced support)", async () => {
+      const ctx = service();
+      await ctx.webhook.processEvents([
+        textEvent("สตอกผลไม้คงเหลือ\n28/7/69"),
+      ], "destination");
+      expect(ctx.gateway._sessions[0]?.parser_version).toBe("p2a-physical-1.0.0");
+
+      await ctx.webhook.processEvents([
+        textEvent("1.มังคุด80บาท\n3.9.โล"),
+      ], "destination");
+
+      expect(ctx.gateway._ingests.filter((row) => row.kind === "item")).toHaveLength(0);
+      expect(ctx.gateway._sessions[0]?.status).toBe("open");
+    });
+
+    test("every recognized header phrase maps to the correct parser mode, unchanged from before this fix", async () => {
+      const cases: Array<[string, string]> = [
+        ["สตอกผลไม้คงเหลือ", "p2a-physical-1.0.0"],
+        ["สต๊อกผลไม้คงเหลือ", "p2a-physical-1.0.0"],
+        ["สตอกผลไม้คงเหลือวันนี้", "p2a-physical-1.0.0"],
+        ["ผลไม้คงเหลือในบ้าน", "house-stock-priced-1.0.0"],
+      ];
+      for (const [header, expectedVersion] of cases) {
+        const ctx = service();
+        await ctx.webhook.processEvents([
+          textEvent(`${header}\n28/7/69`),
+        ], "destination");
+        expect(ctx.gateway._sessions[0]?.parser_version).toBe(expectedVersion);
+      }
+    });
+
+    test("the exact 15-item production fixture, sent as one message per item, is fully admitted and closes", async () => {
+      const ctx = service();
+      await ctx.webhook.processEvents([
+        textEvent("ผลไม้คงเหลือในบ้าน\n4/8/69"),
+      ], "destination");
+
+      const items = [
+        "1ส้มไต้หวัน3โล100บาท\n16.โล",
+        "2อะโวอาโด้120บาท\n25.1.โล",
+        "3เขียวมรกต30บาท\n49.4.โล",
+        "4แอปเปิ้ล10บาท\n88.ลูก",
+        "5สาลี่10บาท\n216.ลูก",
+        "6หมอน100บาท\n29.6.โล",
+        "7หมอน100บาท\n26.5.โล",
+        "8หมอน100บาท\n38.1.โล",
+        "9หมอน100บาท\n31.2.โล",
+        "10หมอน100บาท\n37.7.โล",
+        "11หมอน119บาท\n45.2.โล",
+        "12หมอน119บาท\n47.2.โล",
+        "13หมอน119บาท\n45.5.โล",
+        "14หมอน119บาท\n52.7.โล",
+        "15หมอน119บาท\n47.4โล",
+      ];
+      for (const item of items) {
+        await ctx.webhook.processEvents([textEvent(item)], "destination");
+        // Session must stay open after every single item, never close early.
+        expect(ctx.gateway._sessions[0]?.status).toBe("open");
+      }
+      // Exactly the header-open confirmation — no item-level failure replies.
+      expect(ctx.replies).toHaveLength(1);
+
+      await ctx.webhook.processEvents([textEvent("จบ")], "destination");
+
+      expect(ctx.gateway._ingests.filter((row) => row.kind === "item")).toHaveLength(15);
+      expect(ctx.gateway._sessions[0]?.status).toBe("closing");
+      expect(ctx.scheduled).toHaveLength(1); // finalize scheduled, not run inline
+    });
+
+    test("the exact 15-item production fixture, sent as one combined message, is admitted identically", async () => {
+      const ctx = service();
+      const FIXTURE = [
+        "ผลไม้คงเหลือในบ้าน", "4/8/69", "",
+        "1ส้มไต้หวัน3โล100บาท", "16.โล", "",
+        "2อะโวอาโด้120บาท", "25.1.โล", "",
+        "3เขียวมรกต30บาท", "49.4.โล", "",
+        "4แอปเปิ้ล10บาท", "88.ลูก", "",
+        "5สาลี่10บาท", "216.ลูก", "",
+        "6หมอน100บาท", "29.6.โล", "",
+        "7หมอน100บาท", "26.5.โล", "",
+        "8หมอน100บาท", "38.1.โล", "",
+        "9หมอน100บาท", "31.2.โล", "",
+        "10หมอน100บาท", "37.7.โล", "",
+        "11หมอน119บาท", "45.2.โล", "",
+        "12หมอน119บาท", "47.2.โล", "",
+        "13หมอน119บาท", "45.5.โล", "",
+        "14หมอน119บาท", "52.7.โล", "",
+        "15หมอน119บาท", "47.4โล", "",
+        "จบ",
+      ].join("\n");
+
+      const [result] = await ctx.webhook.processEvents([textEvent(FIXTURE)], "destination");
+
+      expect(result?.parsed).toBe(true);
+      expect(ctx.gateway._sessions[0]).toMatchObject({
+        status: "closing",
+        parser_version: "house-stock-priced-1.0.0",
+      });
+      expect(ctx.gateway._ingests.map((row) => row.kind)).toEqual(["header"]);
+      expect(ctx.scheduled).toHaveLength(1);
+    });
+
+    test("a different sender's จบ never touches another sender's open session (established per-sender scoping)", async () => {
+      const ctx = service();
+      await ctx.webhook.processEvents([
+        textEvent("ผลไม้คงเหลือในบ้าน\n4/8/69", { senderId: "U-one" }),
+      ], "destination");
+      await ctx.webhook.processEvents([
+        textEvent("1ส้มไต้หวัน3โล100บาท\n16.โล", { senderId: "U-two" }),
+      ], "destination");
+
+      // U-two has no session of their own — จบ from U-two must not close U-one's session.
+      await ctx.webhook.processEvents([
+        textEvent("จบ", { senderId: "U-two" }),
+      ], "destination");
+      expect(ctx.gateway._sessions[0]?.status).toBe("open");
+      expect(ctx.gateway._sessions[0]?.sender_line_user_id).toBe("U-one");
+      expect(ctx.gateway._ingests.filter((row) => row.kind === "close")).toHaveLength(0);
+
+      // The session owner's own จบ closes their own session normally.
+      await ctx.webhook.processEvents([
+        textEvent("จบ", { senderId: "U-one" }),
+      ], "destination");
+      expect(ctx.gateway._sessions[0]?.status).toBe("closing");
+      expect(ctx.gateway._ingests.filter((row) => row.kind === "close")).toHaveLength(1);
+    });
+
+    test("unrelated normal chat inside an active priced session is not captured as an item", async () => {
+      const ctx = service();
+      await ctx.webhook.processEvents([
+        textEvent("ผลไม้คงเหลือในบ้าน\n4/8/69"),
+      ], "destination");
+
+      const results = await ctx.webhook.processEvents([
+        textEvent("ขอบคุณครับ"),
+        textEvent("เดี๋ยวส่งต่อนะ"),
+      ], "destination");
+
+      expect(ctx.gateway._ingests.filter((row) => row.kind === "item")).toHaveLength(0);
+      // Exactly the header-open confirmation — the two chat messages produced no reply.
+      expect(ctx.replies).toHaveLength(1);
+      expect(ctx.gateway._sessions[0]?.status).toBe("open");
+      expect(results.every((r) => r.parsed !== true)).toBe(true);
+    });
+  });
 });

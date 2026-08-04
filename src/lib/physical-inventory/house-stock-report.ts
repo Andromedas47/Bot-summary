@@ -9,6 +9,10 @@ import {
   LINE_MESSAGE_MAX_CODE_POINTS,
 } from "@/lib/summary/line-chunking";
 import {
+  extractPhysicalInventoryBundlePricingBasis,
+  type PhysicalInventoryBundlePricingBasis,
+} from "./parse";
+import {
   HOUSE_STOCK_PRICED_PARSER_VERSION,
   type PhysicalInventoryParsedItem,
 } from "./types";
@@ -38,6 +42,24 @@ interface Group {
   quantities: number[];
   quantityMilli: bigint;
   valueSatang: number;
+  /**
+   * The bundle-pricing expression (e.g. "3 โล 100 บาท") behind this group's
+   * effective per-unit price, shown so staff can see it came from a bundle
+   * rather than mistake the computed price for what was actually entered.
+   * Cleared to null the moment a second raw entry disagrees, so the note
+   * only ever reflects a single, unambiguous source line.
+   */
+  bundleBasis: PhysicalInventoryBundlePricingBasis | null | "unset";
+}
+
+function sameBundleBasis(
+  a: PhysicalInventoryBundlePricingBasis | null,
+  b: PhysicalInventoryBundlePricingBasis | null,
+): boolean {
+  if (a === null || b === null) return a === b;
+  return a.pricingQuantity === b.pricingQuantity
+    && a.pricingUnit === b.pricingUnit
+    && a.totalPriceSatang === b.totalPriceSatang;
 }
 
 const displayUnit = (unit: string): string => unit === "โล" ? "กก." : unit;
@@ -69,7 +91,12 @@ function reportFromItems(businessDate: string, items: readonly ItemRow[]): House
       quantities: [],
       quantityMilli: BigInt(0),
       valueSatang: 0,
+      bundleBasis: "unset",
     };
+    const itemBundleBasis = extractPhysicalInventoryBundlePricingBasis(item.raw_text ?? "");
+    group.bundleBasis = group.bundleBasis === "unset"
+      ? itemBundleBasis
+      : sameBundleBasis(group.bundleBasis, itemBundleBasis) ? group.bundleBasis : null;
     group.quantities.push(quantity);
     group.quantityMilli += quantityMilli;
     group.valueSatang += valueSatang;
@@ -84,8 +111,15 @@ function reportFromItems(businessDate: string, items: readonly ItemRow[]): House
     const expression = group.quantities.length > 1
       ? `${group.quantities.map(formatQuantity).join(" + ")} = ${formatQuantity(milliToQuantity(group.quantityMilli))}`
       : formatQuantity(group.quantities[0]!);
+    // Bundle-priced entries (e.g. "3 โล 100 บาท") get converted to an
+    // effective per-unit price for storage/valuation; note the original
+    // expression here so staff never mistake the computed price for what
+    // was actually keyed in.
+    const bundleNote = group.bundleBasis && typeof group.bundleBasis === "object"
+      ? ` (ซื้อ ${formatQuantity(group.bundleBasis.pricingQuantity)} ${displayUnit(group.bundleBasis.pricingUnit)} ${displayPrice(group.bundleBasis.totalPriceSatang)} บาท)`
+      : "";
     const block = [
-      `${index + 1}. ${group.product} — ${displayPrice(group.unitPriceSatang)} บาท/${displayUnit(group.unit)}`,
+      `${index + 1}. ${group.product} — ${displayPrice(group.unitPriceSatang)} บาท/${displayUnit(group.unit)}${bundleNote}`,
       `${expression} ${displayUnit(group.unit)}`,
       `มูลค่า ${satangToBahtText(group.valueSatang)} บาท`,
     ].join("\n");

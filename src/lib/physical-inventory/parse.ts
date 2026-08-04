@@ -8,6 +8,7 @@
 
 import { parseBuddhistDate } from "@/lib/parsers/weigh-session/parser";
 import { isKnownUnit, normalizeUnitAlias } from "@/lib/parsers/weigh-session/units";
+import { roundHalfUp, toMilliQuantity } from "@/lib/sales/calculate";
 import {
   isPhysicalInventoryHeaderLine,
   matchesPhysicalInventoryCloseLine,
@@ -26,6 +27,7 @@ export {
   classifyPhysicalInventoryStandaloneIntent,
   isPhysicalInventoryHeaderLine,
   isPhysicalInventorySessionClose,
+  isPricedPhysicalInventoryHeaderText,
   matchesPhysicalInventoryCloseLine,
 } from "./classify";
 import { PHYSICAL_INVENTORY_HEADERS } from "./patterns";
@@ -47,7 +49,7 @@ const QTY_UNIT_ONLY =
 const INDEXED_LINE =
   /^(\d+)(?!\d)(?:[.)])?\s*(.*)$/u;
 
-const UNIT_PRICE_SUFFIX = /^(.+?)\s+(-?\d+(?:\.\d+)?)\s*บาท$/u;
+const UNIT_PRICE_SUFFIX = /^(.+?)\s*(-?\d+(?:\.\d+)?)\s*บาท$/u;
 
 export interface PhysicalInventoryParseOptions {
   requireUnitPrice?: boolean;
@@ -213,10 +215,12 @@ function isQtyUnitOnlyLine(line: string): boolean {
   const collapsed = nfcCollapse(line);
   const qu = tryParseQtyUnitOnly(collapsed);
   if (!qu) return false;
-  const indexed = INDEXED_LINE.exec(collapsed);
-  if (!indexed) return isUnitOnlyToken(qu.unit);
-  const rem = nfcCollapse(indexed[2] ?? "");
-  return rem === qu.unit && isUnitOnlyToken(qu.unit);
+  // Decide purely from the quantity+unit split itself (isUnitOnlyToken), not
+  // by comparing against INDEXED_LINE's naive leading-digit-run remainder —
+  // that comparison breaks whenever the quantity has its own decimal point
+  // (e.g. "25.1.โล": INDEXED_LINE reads sequence 25 + remainder "1.โล",
+  // which never matches the correctly split unit "โล").
+  return isUnitOnlyToken(qu.unit);
 }
 
 interface OpenItem {
@@ -242,6 +246,24 @@ function parseUnitPrice(text: string): {
     return { product: nfcCollapse(product), unitPriceSatang: null, priceReason: "invalid_unit_price" };
   }
   return { product: nfcCollapse(product), unitPriceSatang: satang, priceReason: null };
+}
+
+/**
+ * Bundle pricing (e.g. "3โล100บาท" = 100 บาท for every 3 โล) converts to an
+ * effective per-remaining-unit price, half-up rounded to the nearest satang.
+ * The schema has one quantity/unit-price pair — there is no separate
+ * pricing-basis column — so the bundle basis is folded in here; the raw
+ * text stays intact in rawText for audit.
+ */
+function computeBundleUnitPriceSatang(
+  totalPriceSatang: number,
+  pricingQuantity: number,
+): number | null {
+  if (!Number.isSafeInteger(totalPriceSatang) || totalPriceSatang <= 0) return null;
+  const pricingMilli = toMilliQuantity(pricingQuantity);
+  if (pricingMilli === null || pricingMilli <= BigInt(0)) return null;
+  const perUnit = roundHalfUp(BigInt(totalPriceSatang) * BigInt(1000), pricingMilli);
+  return Number.isSafeInteger(Number(perUnit)) && perUnit > BigInt(0) ? Number(perUnit) : null;
 }
 
 /**
@@ -400,6 +422,49 @@ export function parsePhysicalInventoryDocument(
       }
 
       const priced = options.requireUnitPrice ? parseUnitPrice(remainder) : null;
+
+      // A found price never resolves on the same line — the remaining
+      // quantity/unit always arrives as a continuation line/message. A
+      // qty+unit still embedded in the product text after the price is
+      // stripped is the bundle pricing basis (e.g. "3โล" in
+      // "ส้มไต้หวัน3โล100บาท" = 100 บาท per 3 โล), never the remaining stock.
+      if (priced && priced.priceReason === null) {
+        const bundle = trySplitProductQtyUnit(priced.product);
+        if (bundle) {
+          const bundleUnitPriceSatang = computeBundleUnitPriceSatang(
+            priced.unitPriceSatang!,
+            bundle.quantity,
+          );
+          if (bundleUnitPriceSatang === null) {
+            items.push(
+              rejected({
+                sequence: seq,
+                rawText: collapsed,
+                rawProductDescription: bundle.product,
+                reason: "invalid_unit_price",
+              }),
+            );
+            continue;
+          }
+          open = {
+            sequence: seq,
+            product: bundle.product,
+            headerRaw: collapsed,
+            unitPriceSatang: bundleUnitPriceSatang,
+            priceReason: null,
+          };
+          continue;
+        }
+        open = {
+          sequence: seq,
+          product: priced.product,
+          headerRaw: collapsed,
+          unitPriceSatang: priced.unitPriceSatang,
+          priceReason: null,
+        };
+        continue;
+      }
+
       const itemRemainder = priced?.product ?? remainder;
       const oneLine = trySplitProductQtyUnit(itemRemainder);
       if (oneLine) {
@@ -497,6 +562,40 @@ export function isRecognizedPhysicalInventoryItemBlock(
   );
 
   return hasAcceptedObservation && !hasUnrecognizedLine;
+}
+
+export interface PhysicalInventoryBundlePricingBasis {
+  pricingQuantity: number;
+  pricingUnit: string;
+  totalPriceSatang: number;
+}
+
+/**
+ * Recover the original bundle-pricing expression (e.g. "3 โล 100 บาท") from
+ * a persisted item's rawText, for DISPLAY only — never re-derives quantity
+ * or price for storage/finalize. Reuses the same price/qty-unit splitting
+ * the live parser uses, so this never drifts from what parsing actually
+ * decided. Returns null for standard (non-bundle) pricing or plain text.
+ */
+export function extractPhysicalInventoryBundlePricingBasis(
+  rawText: string,
+): PhysicalInventoryBundlePricingBasis | null {
+  const headerLine = nfcCollapse(rawText.split(/\r?\n/)[0] ?? "");
+  const indexed = INDEXED_LINE.exec(headerLine);
+  const remainder = indexed ? nfcCollapse(indexed[2] ?? "") : headerLine;
+  if (!remainder) return null;
+
+  const priced = parseUnitPrice(remainder);
+  if (priced.priceReason !== null || priced.unitPriceSatang === null) return null;
+
+  const bundle = trySplitProductQtyUnit(priced.product);
+  if (!bundle) return null;
+
+  return {
+    pricingQuantity: bundle.quantity,
+    pricingUnit: bundle.unit,
+    totalPriceSatang: priced.unitPriceSatang,
+  };
 }
 
 /** Accepted observations only (RESOLVED + RAW). */

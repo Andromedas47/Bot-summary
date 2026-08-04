@@ -4,7 +4,7 @@ import { normalizeUnitAlias } from "@/lib/parsers/weigh-session/units";
 import { quantityTimesSatang, roundHalfUp, satangToBahtText } from "@/lib/sales/calculate";
 import { isQaMarketLabel } from "@/lib/sales/qa-scopes";
 import { latestDataBlock, type LatestDataLookup } from "@/lib/summary/latest-data-hint";
-import { LINE_MESSAGE_MAX_CODE_POINTS, LINE_REPLY_MAX_MESSAGES, countCodePoints } from "@/lib/summary/line-chunking";
+import { LINE_MESSAGE_MAX_CODE_POINTS, countCodePoints } from "@/lib/summary/line-chunking";
 import { STOCK_CATEGORY_EMOJI, STOCK_CATEGORY_ORDER, stockCategoryFor } from "@/lib/summary/stock-categories";
 import { dedupeRemainingSourceRows, formatQuantity, normalizeProductName, type RemainingFruitSourceRow } from "@/lib/summary/remaining-fruit";
 import { transactionBucket } from "@/lib/summary/transactions";
@@ -164,19 +164,31 @@ function summaryBlock(report: GoodReturnValueReport, omittedProductCount: number
 function lines(entries: readonly Entry[]): string {
   return entries.flatMap((item, index) => [index === 0 || item.category !== entries[index - 1]!.category ? `${STOCK_CATEGORY_EMOJI[item.category as keyof typeof STOCK_CATEGORY_EMOJI]} ${item.category}` : null, item.block]).filter(Boolean).join("\n");
 }
-const omittedRows = (groups: readonly (readonly RowEntry[])[]) => groups.reduce((count, group) => count + group.filter((entry) => !entry.shortened).length, 0);
-
 type DeliveredGroup = { kind: "product"; entries: Entry[]; text: string } | { kind: "anomaly"; entries: RowEntry[]; text: string };
 
 /**
- * Packs whole product blocks (max 15/message) and whole anomaly blocks under both LINE limits, never splitting either.
+ * Readability target for a fully-rendered message (heading + entries), well
+ * under the 4,000 code-point LINE hard limit. Real Good Return messages were
+ * hitting LINE's client-side "See more" collapse (~5-6 visible entries) long
+ * before the hard limit, so packing is driven by this instead of a fixed
+ * entry count. HEADING_RESERVE is a conservative estimate of the heading +
+ * "รายการ N-M จากทั้งหมด ..." continuation lines, which can't be computed
+ * exactly until packing (and thus total part count) is finished.
+ */
+const GOOD_RETURN_READABLE_MAX_CODE_POINTS = 850;
+const HEADING_RESERVE = 200;
+const HARD_LIMIT_RESERVE = 450;
+
+/**
+ * Packs whole product blocks and whole anomaly blocks by rendered code-point
+ * length, never splitting an entry. This is a P0-specific readability
+ * adjustment — see GOOD_RETURN_READABLE_MAX_CODE_POINTS above — and is
+ * deliberately scoped to this report rather than the shared line-chunking
+ * helpers.
  *
- * Allocation is capacity-reserved, not first-come-first-served: the final
- * summary and (whenever anomalies exist) at least one anomaly-detail message
- * are budgeted BEFORE product messages claim the remaining slots. A realistic
- * day with many products and a few anomalies must never let the product list
- * alone crowd out every market-level anomaly detail — that detail is the
- * entire point of this report.
+ * Every generated part is delivered: this scheduled report pushes each part
+ * via its own retry-keyed pushLineMessage call, so LINE_REPLY_MAX_MESSAGES
+ * (a webhook-reply-flow concept) does not apply here.
  */
 export function buildDailyGoodReturnValueMessages(report: GoodReturnValueReport, options: { latest?: LatestDataLookup } = {}): string[] {
   // An anomaly-only report (zero product rows, but invalid-only good-return
@@ -192,45 +204,50 @@ export function buildDailyGoodReturnValueMessages(report: GoodReturnValueReport,
     return [["📦 สรุปของดีชั่งคืนประจำวัน", `ข้อมูลวันที่ ${date}`, "หมายเหตุ: รายงานนี้สรุปเฉพาะของดีที่ชั่งคืน ไม่ใช่สต๊อกตรวจนับจริง", `ยังไม่พบข้อมูลชั่งคืนประจำวันที่ ${date}`, latestDataBlock(options.latest ?? { status: "unavailable" }, "ยังไม่พบข้อมูลชั่งคืนในระบบ")].filter(Boolean).join("\n\n")];
   }
 
+  // Greedy packing by rendered code-point length: before adding the next
+  // whole entry, check whether it would push the in-progress part over the
+  // readability target. If a single entry alone already exceeds the target
+  // (but stays under the LINE hard limit), it ships alone rather than being
+  // split or shortened — only the hard-limit fallback below shortens an entry.
   const productParts: Entry[][] = []; let currentProduct: Entry[] = []; let shortenedProduct = 0;
   for (const [index, row] of report.products.entries()) {
     const entry: Entry = { category: stockCategoryFor(row.productName), block: productBlock(row, index + 1), shortened: false };
-    if (currentProduct.length && (currentProduct.length === 15 || countCodePoints(lines([...currentProduct, entry])) + 450 > LINE_MESSAGE_MAX_CODE_POINTS)) { productParts.push(currentProduct); currentProduct = []; }
-    if (countCodePoints(lines([entry])) + 450 > LINE_MESSAGE_MAX_CODE_POINTS) { productParts.push([{ category: entry.category, block: `${index + 1}. รายการยาวเกินขีดจำกัด LINE จึงไม่แสดงรายละเอียด`, shortened: true }]); shortenedProduct++; }
-    else currentProduct.push(entry);
+    if (countCodePoints(lines([entry])) + HARD_LIMIT_RESERVE > LINE_MESSAGE_MAX_CODE_POINTS) {
+      productParts.push([{ category: entry.category, block: `${index + 1}. รายการยาวเกินขีดจำกัด LINE จึงไม่แสดงรายละเอียด`, shortened: true }]);
+      shortenedProduct++;
+      continue;
+    }
+    if (currentProduct.length && countCodePoints(lines([...currentProduct, entry])) + HEADING_RESERVE > GOOD_RETURN_READABLE_MAX_CODE_POINTS) { productParts.push(currentProduct); currentProduct = []; }
+    currentProduct.push(entry);
   }
   if (currentProduct.length) productParts.push(currentProduct);
 
   const anomalyParts: RowEntry[][] = []; let currentAnomaly: RowEntry[] = []; let shortenedAnomaly = 0;
   for (const [index, row] of report.anomalies.entries()) {
     const entry: RowEntry = { block: marketAnomalyBlock(row, index + 1), shortened: false };
-    if (currentAnomaly.length && (currentAnomaly.length === 15 || countCodePoints([...currentAnomaly, entry].map((e) => e.block).join("\n\n")) + 450 > LINE_MESSAGE_MAX_CODE_POINTS)) { anomalyParts.push(currentAnomaly); currentAnomaly = []; }
-    if (countCodePoints(entry.block) + 450 > LINE_MESSAGE_MAX_CODE_POINTS) { anomalyParts.push([{ block: `${index + 1}. รายละเอียดยาวเกินขีดจำกัด LINE จึงไม่แสดง`, shortened: true }]); shortenedAnomaly++; }
-    else currentAnomaly.push(entry);
+    if (countCodePoints(entry.block) + HARD_LIMIT_RESERVE > LINE_MESSAGE_MAX_CODE_POINTS) {
+      anomalyParts.push([{ block: `${index + 1}. รายละเอียดยาวเกินขีดจำกัด LINE จึงไม่แสดง`, shortened: true }]);
+      shortenedAnomaly++;
+      continue;
+    }
+    if (currentAnomaly.length && countCodePoints([...currentAnomaly, entry].map((e) => e.block).join("\n\n")) + HEADING_RESERVE > GOOD_RETURN_READABLE_MAX_CODE_POINTS) { anomalyParts.push(currentAnomaly); currentAnomaly = []; }
+    currentAnomaly.push(entry);
   }
   if (currentAnomaly.length) anomalyParts.push(currentAnomaly);
 
-  // Reserve one slot for the final summary and, whenever anomalies exist, one
-  // slot for at least one anomaly-detail message. Products get only what's left.
-  const anomalyReserve = anomalyParts.length > 0 ? 1 : 0;
-  const productBudget = Math.max(0, LINE_REPLY_MAX_MESSAGES - 1 - anomalyReserve);
-  const deliveredProductParts = productParts.slice(0, productBudget);
-  const droppedProductParts = productParts.slice(productBudget);
-  const anomalyBudget = Math.max(0, LINE_REPLY_MAX_MESSAGES - 1 - deliveredProductParts.length);
-  const deliveredAnomalyParts = anomalyParts.slice(0, anomalyBudget);
-  const droppedAnomalyParts = anomalyParts.slice(anomalyBudget);
+  // This scheduled report delivers every generated part (see function doc) —
+  // no LINE_REPLY_MAX_MESSAGES budgeting/dropping here.
+  const omittedProductCount = shortenedProduct;
+  const omittedAnomalyCount = shortenedAnomaly;
 
-  let omittedProductCount = shortenedProduct + omittedRows(droppedProductParts);
-  let omittedAnomalyCount = shortenedAnomaly + omittedRows(droppedAnomalyParts);
-
-  const deliveredProductTotal = deliveredProductParts.length;
-  const deliveredAnomalyTotal = deliveredAnomalyParts.length;
+  const deliveredProductTotal = productParts.length;
+  const deliveredAnomalyTotal = anomalyParts.length;
   const groups: DeliveredGroup[] = [
-    ...deliveredProductParts.map((entries, index): DeliveredGroup => {
-      const first = Number(entries[0]!.block.match(/^(\d+)\./)?.[1] ?? index * 15 + 1);
+    ...productParts.map((entries, index): DeliveredGroup => {
+      const first = Number(entries[0]!.block.match(/^(\d+)\./)?.[1] ?? 1);
       return { kind: "product", entries, text: [...header(report, index + 1, deliveredProductTotal, first, first + entries.length - 1), lines(entries)].join("\n") };
     }),
-    ...deliveredAnomalyParts.map((entries, index): DeliveredGroup => {
+    ...anomalyParts.map((entries, index): DeliveredGroup => {
       const heading = deliveredAnomalyTotal > 1 ? `${ANOMALY_HEADING} (ต่อ ${index + 1}/${deliveredAnomalyTotal})` : ANOMALY_HEADING;
       return { kind: "anomaly", entries, text: [heading, entries.map((e) => e.block).join("\n\n")].join("\n\n") };
     }),
@@ -238,13 +255,11 @@ export function buildDailyGoodReturnValueMessages(report: GoodReturnValueReport,
 
   const messages = groups.map((g) => g.text);
   const final = summaryBlock(report, omittedProductCount, omittedAnomalyCount); const last = messages[messages.length - 1]!;
-  if (countCodePoints(`${last}\n\n${final}`) <= LINE_MESSAGE_MAX_CODE_POINTS) messages[messages.length - 1] = `${last}\n\n${final}`;
-  else if (messages.length < LINE_REPLY_MAX_MESSAGES) messages.push(final);
-  else {
-    const popped = groups.pop()!; messages.pop();
-    if (popped.kind === "product") omittedProductCount += omittedRows([popped.entries]); else omittedAnomalyCount += omittedRows([popped.entries]);
-    messages.push(summaryBlock(report, omittedProductCount, omittedAnomalyCount));
-  }
+  // The summary only rides along on the final message when that stays within
+  // the readability target; otherwise it ships as its own short message
+  // (never dropped — this flow has no five-message cap).
+  if (countCodePoints(`${last}\n\n${final}`) <= GOOD_RETURN_READABLE_MAX_CODE_POINTS) messages[messages.length - 1] = `${last}\n\n${final}`;
+  else messages.push(final);
   if (messages.some((message) => countCodePoints(message) > LINE_MESSAGE_MAX_CODE_POINTS)) throw new Error("daily good-return value message exceeds LINE limit");
   return messages;
 }

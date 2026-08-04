@@ -7,6 +7,7 @@ import {
 } from "@/lib/summary/line-chunking";
 import { latestDataBlock, type LatestDataLookup } from "@/lib/summary/latest-data-hint";
 import {
+  isSoldOutByAbsentReturn,
   satangToBahtText,
   type SalesBlockReason,
   type SalesIdentityRow,
@@ -73,6 +74,16 @@ export const SALES_VALUE_UNAVAILABLE = "ยอดเงินยังคำน�
 export const SALES_MARKET_SECTION_HEADING = "🏪 สถานะยอดขายรายตลาด";
 /** Quantity is complete, only the money is not. */
 export const SALES_QUANTITY_ONLY_NOTICE = "จำนวนที่ขายครบถ้วน • ยอดเงินยังไม่ครบ (รอราคากลาง)";
+/**
+ * The "no return rows means sold out" rule, stated in plain words. A
+ * withdrawal-only identity is a real, valid sale — never an anomaly — so this
+ * never appears under SALES_BLOCKED_HEADING.
+ */
+export const SALES_SOLD_OUT_NO_RETURN_LABEL = "ถือว่าขายหมดเพราะไม่มีรายการคืน";
+/** Marks a single identity's ขาย line as sold out by absence of return. */
+export const SALES_SOLD_OUT_NO_RETURN_SUFFIX = "ถือว่าขายหมด";
+/** Replaces "คืน 0 • เสีย 0" when there is no return row to report at all. */
+export const SALES_NO_RETURN_ROW_LABEL = "ไม่มีรายการคืน";
 
 /**
  * P1 has no Sales web page, so the shared overflow notice — which points at one
@@ -167,10 +178,13 @@ function overallTotalBlock(total: SalesTotal, withCounts: boolean): string {
 
 /** W / R / D / sold / central price / expected sales / status for one identity. */
 function identityLines(row: SalesIdentityRow): string[] {
+  const soldOut = isSoldOutByAbsentReturn(row);
   const lines = [
     `${row.productName} (${unitLabel(row.unit)})`,
-    `เบิก ${formatQuantity(row.withdrawnQuantity)} • คืน ${formatQuantity(row.goodReturnQuantity)}`
-      + ` • เสีย ${formatQuantity(row.damagedReturnQuantity)}`,
+    soldOut
+      ? `เบิก ${formatQuantity(row.withdrawnQuantity)} • ${SALES_NO_RETURN_ROW_LABEL}`
+      : `เบิก ${formatQuantity(row.withdrawnQuantity)} • คืน ${formatQuantity(row.goodReturnQuantity)}`
+        + ` • เสีย ${formatQuantity(row.damagedReturnQuantity)}`,
   ];
 
   if (row.soldQuantity === null) {
@@ -178,7 +192,11 @@ function identityLines(row: SalesIdentityRow): string[] {
     return lines;
   }
 
-  lines.push(`ขาย ${formatQuantity(row.soldQuantity)} ${unitLabel(row.unit)}`);
+  lines.push(
+    soldOut
+      ? `ขาย ${formatQuantity(row.soldQuantity)} ${unitLabel(row.unit)} (${SALES_SOLD_OUT_NO_RETURN_SUFFIX})`
+      : `ขาย ${formatQuantity(row.soldQuantity)} ${unitLabel(row.unit)}`,
+  );
   if (row.centralPriceSatang === null || row.expectedSalesSatang === null) {
     lines.push(`ยอดขาย — (${row.reasons.map(salesReasonLabel).join(", ")})`);
     return lines;
@@ -281,6 +299,16 @@ function hasNoRows(report: SalesReport): boolean {
 }
 
 /**
+ * How many market+product+unit identities are sold out purely by absence of
+ * a return row. `market.rows` already carries one row per identity — TRUSTED
+ * and VALUE_BLOCKED alike, aggregation done once in the calculator — so this
+ * never re-derives a quantity, only counts what is already there.
+ */
+function soldOutByAbsentReturnCount(report: SalesReport): number {
+  return report.markets.flatMap((market) => market.rows).filter(isSoldOutByAbsentReturn).length;
+}
+
+/**
  * The opening blocks when the day produced no sales rows at all.
  *
  * With nothing missing, that is a real answer: no sales. With a scope blocker
@@ -363,9 +391,13 @@ export function buildSalesAutoBlocks(
   }
   if (hasNoRows(report)) return noRowsBlocks(report, header);
 
+  const soldOutCount = soldOutByAbsentReturnCount(report);
   const counts = [
     `✅ ยืนยันได้ ${report.allMarkets.trustedRowCount} รายการ`,
     `⚠️ ยืนยันไม่ได้ ${report.allMarkets.valueBlockedRowCount + report.allMarkets.quantityBlockedRowCount} รายการ`,
+    // Sold out by absence of return is a valid sale, not a blocker — its own
+    // line, never folded into ยืนยันไม่ได้ or the blocked-reason section.
+    ...(soldOutCount > 0 ? [`✅ ${SALES_SOLD_OUT_NO_RETURN_LABEL} — ${soldOutCount} รายการ`] : []),
   ].join("\n");
 
   const marketTotals = report.markets.map(

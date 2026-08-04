@@ -96,9 +96,123 @@ describe("priced House Stock parser", () => {
     expect(buildHouseStockInvalidMessage(parsed.items)).toContain("รายการที่ 1: ไม่พบราคาต่อหน่วย");
     expect(buildHouseStockInvalidMessage(parsed.items)).toContain("รายการที่ 2: จำนวนหรือหน่วยไม่ถูกต้อง");
   });
+
+  test("compact no-space bundle pricing: pricing qty/unit is never the remaining stock", () => {
+    const parsed = parsePhysicalInventoryDocument(
+      "ผลไม้คงเหลือในบ้าน\n4/8/69\n1ส้มไต้หวัน3โล100บาท\n16.โล\nจบ",
+      { requireUnitPrice: true },
+    );
+    const item = parsed.items[0]!;
+    expect(item.resolutionStatus).toBe("ACCEPTED_NORMALIZED");
+    expect(item.rawProductDescription).toBe("ส้มไต้หวัน");
+    expect(item.quantity).toBe(16);
+    expect(item.rawUnit).toBe("โล");
+    // 100 บาท for every 3 โล → 33.33 บาท/โล (half-up rounded to the satang).
+    expect(item.unitPriceSatang).toBe(3_333);
+  });
+
+  test("compact no-space standard pricing (no pricing basis embedded)", () => {
+    const parsed = parsePhysicalInventoryDocument(
+      "ผลไม้คงเหลือในบ้าน\n4/8/69\n2อะโวอาโด้120บาท\n25.1.โล\nจบ",
+      { requireUnitPrice: true },
+    );
+    const item = parsed.items[0]!;
+    expect(item.resolutionStatus).toBe("ACCEPTED_NORMALIZED");
+    expect(item.rawProductDescription).toBe("อะโวอาโด้");
+    expect(item.quantity).toBe(25.1);
+    expect(item.rawUnit).toBe("โล");
+    expect(item.unitPriceSatang).toBe(12_000);
+  });
+
+  test("decimal-with-dot remaining quantity normalizes without breaking the fraction", () => {
+    const cases: Array<[string, number, string]> = [
+      ["16.โล", 16, "โล"],
+      ["25.1.โล", 25.1, "โล"],
+      ["88.ลูก", 88, "ลูก"],
+      ["47.4โล", 47.4, "โล"],
+    ];
+    for (const [line, quantity, unit] of cases) {
+      const parsed = parsePhysicalInventoryDocument(
+        `ผลไม้คงเหลือในบ้าน\n4/8/69\n1มะม่วง10บาท\n${line}\nจบ`,
+        { requireUnitPrice: true },
+      );
+      const item = parsed.items[0]!;
+      expect([item.quantity, item.rawUnit]).toEqual([quantity, unit]);
+      expect(item.resolutionStatus).not.toBe("REJECTED");
+    }
+  });
+
+  test("15-item regression fixture: header, bundle + standard compact pricing, repeated products all accepted", () => {
+    const FIXTURE = [
+      "ผลไม้คงเหลือในบ้าน", "4/8/69", "",
+      "1ส้มไต้หวัน3โล100บาท", "16.โล", "",
+      "2อะโวอาโด้120บาท", "25.1.โล", "",
+      "3เขียวมรกต30บาท", "49.4.โล", "",
+      "4แอปเปิ้ล10บาท", "88.ลูก", "",
+      "5สาลี่10บาท", "216.ลูก", "",
+      "6หมอน100บาท", "29.6.โล", "",
+      "7หมอน100บาท", "26.5.โล", "",
+      "8หมอน100บาท", "38.1.โล", "",
+      "9หมอน100บาท", "31.2.โล", "",
+      "10หมอน100บาท", "37.7.โล", "",
+      "11หมอน119บาท", "45.2.โล", "",
+      "12หมอน119บาท", "47.2.โล", "",
+      "13หมอน119บาท", "45.5.โล", "",
+      "14หมอน119บาท", "52.7.โล", "",
+      "15หมอน119บาท", "47.4โล", "",
+      "จบ",
+    ].join("\n");
+
+    const parsed = parsePhysicalInventoryDocument(FIXTURE, { requireUnitPrice: true });
+    expect(parsed.businessDate).toBe("2026-08-04");
+    expect(parsed.closeText).toBe("จบ");
+    expect(parsed.items).toHaveLength(15);
+    expect(parsed.items.every((item) => item.resolutionStatus !== "REJECTED")).toBe(true);
+    expect(parsed.items.map((item) => item.sequence)).toEqual(
+      Array.from({ length: 15 }, (_, i) => i + 1),
+    );
+    // "หมอน" repeats 10 times (sequences 6-15) with distinct quantities — none merged or dropped.
+    const หมอนQuantities = parsed.items
+      .filter((item) => item.rawProductDescription === "หมอน")
+      .map((item) => item.quantity);
+    expect(หมอนQuantities).toEqual([29.6, 26.5, 38.1, 31.2, 37.7, 45.2, 47.2, 45.5, 52.7, 47.4]);
+  });
 });
 
 describe("priced House Stock summary", () => {
+  test("bundle-priced entries show the original bundle expression, not just the derived per-unit price", () => {
+    const parsed = parsePhysicalInventoryDocument(
+      "ผลไม้คงเหลือในบ้าน\n4/8/69\n1ส้มไต้หวัน3โล100บาท\n16.โล\nจบ",
+      { requireUnitPrice: true },
+    );
+    const item = parsed.items[0]!;
+    const report = buildHouseStockReport("2026-08-04", [row({
+      raw_text: item.rawText,
+      raw_product_description: item.rawProductDescription,
+      normalized_product: item.normalizedProduct,
+      quantity: item.quantity!,
+      unit_price_satang: item.unitPriceSatang!,
+      raw_unit: item.rawUnit,
+      normalized_unit: item.normalizedUnit,
+    })]);
+    const text = report.messages.join("\n\n");
+    // Shows the computed per-unit price for valuation AND the original
+    // "3 โล for 100 บาท" the staff actually typed — never just 33.33 บาท
+    // alone, which would misrepresent what was entered.
+    expect(text).toContain("ส้มไต้หวัน — 33.33 บาท/กก. (ซื้อ 3 กก. 100 บาท)");
+    expect(text).toContain("16 กก.");
+    expect(text).toContain("มูลค่า 533.28 บาท");
+  });
+
+  test("standard (non-bundle) pricing never gets a bundle note", () => {
+    // row()'s default raw_text is plain spaced pricing with no embedded
+    // pricing qty/unit — must render exactly as before this change.
+    const report = buildHouseStockReport("2026-08-03", [row()]);
+    const text = report.messages.join("\n\n");
+    expect(text).toContain("เขียวมรกต — 30 บาท/กก.");
+    expect(text).not.toContain("ซื้อ");
+  });
+
   test("exact example aggregates only same product/unit/price and rounds each item", () => {
     const report = buildHouseStockReport("2026-08-03", [
       row(),

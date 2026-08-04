@@ -11,6 +11,11 @@ export const PHYSICAL_INVENTORY_HEADERS = [
   "ผลไม้คงเหลือในบ้าน",
 ] as const;
 
+/** Headers whose flow requires a per-item unit price (House Stock). */
+export const PHYSICAL_INVENTORY_PRICED_HEADERS = [
+  "ผลไม้คงเหลือในบ้าน",
+] as const;
+
 /**
  * Close lines recognized only when a Physical Stock session is already open.
  * Bare "จบ" is intentionally included for in-session use — callers must gate.

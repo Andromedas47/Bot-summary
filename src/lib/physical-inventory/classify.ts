@@ -8,6 +8,7 @@
 import {
   PHYSICAL_INVENTORY_CLOSE_LINES,
   PHYSICAL_INVENTORY_HEADERS,
+  PHYSICAL_INVENTORY_PRICED_HEADERS,
 } from "./patterns";
 
 function nfcTrim(text: string): string {
@@ -19,6 +20,12 @@ export function isPhysicalInventoryHeaderLine(line: string): boolean {
   return (PHYSICAL_INVENTORY_HEADERS as readonly string[]).some(
     (header) => n === header || n.startsWith(`${header} `),
   );
+}
+
+/** True when the matched header text opens the priced House Stock flow. */
+export function isPricedPhysicalInventoryHeaderText(headerText: string | null): boolean {
+  if (!headerText) return false;
+  return (PHYSICAL_INVENTORY_PRICED_HEADERS as readonly string[]).includes(headerText);
 }
 
 /**

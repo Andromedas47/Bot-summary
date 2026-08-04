@@ -168,6 +168,24 @@ export interface SalesIdentityRow {
 }
 
 /**
+ * True for a quantity-trusted identity whose sold quantity equals its
+ * withdrawal because no good-return row and no damaged-return row exists —
+ * the "no return rows means sold out" case P1 must present, not hide.
+ *
+ * Independent of value trust: a VALUE_BLOCKED row (missing/conflicting
+ * central price) still qualifies, since its quantity is trusted. A
+ * QUANTITY_BLOCKED row never qualifies — soldQuantity is null.
+ */
+export function isSoldOutByAbsentReturn(row: SalesIdentityRow): boolean {
+  return (
+    row.withdrawnQuantity > 0 &&
+    row.goodReturnQuantity === 0 &&
+    row.damagedReturnQuantity === 0 &&
+    row.soldQuantity !== null
+  );
+}
+
+/**
  * A subtotal plus what makes it safe to read.
  *
  * Quantity trust and value trust are INDEPENDENT. A missing or disputed central

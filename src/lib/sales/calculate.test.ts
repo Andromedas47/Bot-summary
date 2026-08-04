@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { centralPriceMapKey } from "@/lib/white-sheet/pricing";
 import {
   calculateSalesReport,
+  isSoldOutByAbsentReturn,
   salesMarketKey,
   satangToBahtText,
   type SalesIdentityRow,
@@ -279,6 +280,55 @@ describe("P1 absence of return rows means sold out", () => {
     expect(result.reasons).toContain("central_price_conflict");
     expect(result.soldQuantity).toBe(10);
     expect(result.expectedSalesSatang).toBeNull();
+  });
+});
+
+describe("isSoldOutByAbsentReturn", () => {
+  test("true for a TRUSTED withdrawal-only identity", () => {
+    const result = onlyRow(build([row({ quantity: 10, transactionType: TX_WITHDRAW })], {
+      centralPrices: DURIAN_PRICE,
+    }));
+    expect(isSoldOutByAbsentReturn(result)).toBe(true);
+  });
+
+  test("true for a VALUE_BLOCKED withdrawal-only identity — quantity trust is independent of price", () => {
+    const result = onlyRow(build([row({ quantity: 10, transactionType: TX_WITHDRAW })]));
+    expect(result.status).toBe("VALUE_BLOCKED");
+    expect(isSoldOutByAbsentReturn(result)).toBe(true);
+  });
+
+  test("false when a nonzero good return row exists", () => {
+    const result = onlyRow(
+      build(
+        [
+          row({ quantity: 10, transactionType: TX_WITHDRAW }),
+          row({ quantity: 3, transactionType: TX_RETURN }),
+        ],
+        { centralPrices: DURIAN_PRICE },
+      ),
+    );
+    expect(isSoldOutByAbsentReturn(result)).toBe(false);
+  });
+
+  test("false when a damaged return row exists", () => {
+    const result = onlyRow(
+      build(
+        [
+          row({ quantity: 10, transactionType: TX_WITHDRAW }),
+          row({ quantity: 2, transactionType: TX_DAMAGED }),
+        ],
+        { centralPrices: DURIAN_PRICE },
+      ),
+    );
+    expect(isSoldOutByAbsentReturn(result)).toBe(false);
+  });
+
+  test("false for a QUANTITY_BLOCKED identity — soldQuantity is null", () => {
+    const result = onlyRow(build([row({ quantity: 4, transactionType: TX_RETURN })], {
+      centralPrices: DURIAN_PRICE,
+    }));
+    expect(result.soldQuantity).toBeNull();
+    expect(isSoldOutByAbsentReturn(result)).toBe(false);
   });
 });
 

@@ -19,6 +19,7 @@ import {
   SALES_EMPTY_NOTICE,
   SALES_MANUAL_TITLE,
   SALES_OVERFLOW_NOTICE,
+  SALES_NO_RETURN_ROW_LABEL,
   SALES_NO_ROWS_BLOCKED_NOTICE,
   SALES_MARKET_SECTION_HEADING,
   SALES_PRODUCT_SECTION_HEADING,
@@ -26,6 +27,8 @@ import {
   SALES_PARTIAL_TOTAL_HEADING,
   SALES_PARTIAL_TOTAL_NOTICE,
   SALES_QUANTITY_ONLY_NOTICE,
+  SALES_SOLD_OUT_NO_RETURN_LABEL,
+  SALES_SOLD_OUT_NO_RETURN_SUFFIX,
   SALES_TOTAL_HEADING,
   SALES_VALUE_UNAVAILABLE,
 } from "./message";
@@ -514,5 +517,123 @@ describe("P1 unpriced value wording", () => {
 
     expect(text).toContain(SALES_PARTIAL_HEADING);
     expect(text).toContain("840.00 บาท");
+  });
+});
+
+// ── Sold out by absence of return — presentation ────────────────────────────
+
+describe("P1 sold-out by absence of return — presentation", () => {
+  test("A: an automatic report with withdrawal-only rows states the sold-out count", () => {
+    const rows = [
+      row({ productName: "หมอนทอง", unit: "โล", quantity: 10, transactionType: "เบิก" }),
+    ];
+    const text = buildSalesAutoBlocks(report(rows)).join("\n\n");
+
+    expect(text).toContain("1,200.00 บาท");
+    expect(text).toContain(SALES_SOLD_OUT_NO_RETURN_LABEL);
+    expect(text).toContain(`✅ ${SALES_SOLD_OUT_NO_RETURN_LABEL} — 1 รายการ`);
+    expect(text).not.toContain("missing_return_evidence");
+    expect(text).not.toContain("ยังไม่มีข้อมูลชั่งคืน");
+  });
+
+  test("B: an automatic report with no qualifying rows omits the sold-out line", () => {
+    const text = buildSalesAutoBlocks(report(TRUSTED_ROWS)).join("\n\n");
+    expect(text).not.toContain(SALES_SOLD_OUT_NO_RETURN_LABEL);
+  });
+
+  test("C: the same product sold out in two markets counts as two identities", () => {
+    const rows = [
+      row({ productName: "หมอนทอง", unit: "โล", quantity: 10, transactionType: "เบิก" }),
+      row({
+        marketName: "ตลาดน้อย",
+        sessionId: "s-b",
+        productName: "หมอนทอง",
+        unit: "โล",
+        quantity: 5,
+        transactionType: "เบิก",
+      }),
+    ];
+    const text = buildSalesAutoBlocks(report(rows)).join("\n\n");
+    expect(text).toContain(`✅ ${SALES_SOLD_OUT_NO_RETURN_LABEL} — 2 รายการ`);
+  });
+
+  test("D: multiple withdrawal rows for one identity count once", () => {
+    const rows = [
+      row({ productName: "หมอนทอง", unit: "โล", quantity: 6, transactionType: "เบิก" }),
+      row({
+        productName: "หมอนทอง",
+        unit: "โล",
+        quantity: 4,
+        transactionType: "เบิกเพิ่ม",
+        sessionId: "session-additional",
+        sessionKind: "additional",
+      }),
+    ];
+    const text = buildSalesAutoBlocks(report(rows)).join("\n\n");
+    expect(text).toContain(`✅ ${SALES_SOLD_OUT_NO_RETURN_LABEL} — 1 รายการ`);
+  });
+
+  test("E: a withdrawal-only row with a missing central price still counts as sold out", () => {
+    const rows = [row({ productName: "ชะอม", unit: "กำ", quantity: 8, transactionType: "เบิก" })];
+    const built = report(rows);
+    const text = buildSalesAutoBlocks(built).join("\n\n");
+
+    expect(built.markets[0].rows[0].status).toBe("VALUE_BLOCKED");
+    expect(built.markets[0].rows[0].soldQuantity).toBe(8);
+    expect(text).toContain(`✅ ${SALES_SOLD_OUT_NO_RETURN_LABEL} — 1 รายการ`);
+    expect(text).toContain(SALES_VALUE_UNAVAILABLE);
+  });
+
+  test("F: a withdrawal-only row with a central-price conflict still counts as sold out", () => {
+    const rows = [row({ quantity: 8, transactionType: "เบิก" })];
+    const built = report(rows, {
+      priceConflicts: new Set([centralPriceMapKey("หมอนทอง", "โล")]),
+    });
+    const text = buildSalesAutoBlocks(built).join("\n\n");
+
+    expect(built.markets[0].rows[0].status).toBe("VALUE_BLOCKED");
+    expect(built.markets[0].rows[0].expectedSalesSatang).toBeNull();
+    expect(text).toContain(`✅ ${SALES_SOLD_OUT_NO_RETURN_LABEL} — 1 รายการ`);
+  });
+
+  test("G: quantity-blocked rows never count as sold out", () => {
+    const rows = [
+      // Return without withdrawal.
+      row({ productName: "ชะอม", unit: "กำ", quantity: 4, transactionType: "คืน" }),
+      // Returns exceeding withdrawal.
+      row({ productName: "คะน้า", unit: "กำ", quantity: 5, transactionType: "เบิก" }),
+      row({ productName: "คะน้า", unit: "กำ", quantity: 8, transactionType: "คืน" }),
+      // Session parser errors.
+      row({
+        productName: "ผักบุ้ง",
+        unit: "กำ",
+        quantity: 10,
+        transactionType: "เบิก",
+        sessionIssues: ["session_parser_errors"],
+      }),
+    ];
+    const built = report(rows);
+    const text = buildSalesAutoBlocks(built).join("\n\n");
+
+    expect(built.markets[0].rows.every((r) => r.status === "QUANTITY_BLOCKED")).toBe(true);
+    expect(text).not.toContain(SALES_SOLD_OUT_NO_RETURN_LABEL);
+  });
+
+  test("H: manual detail states no-return wording for a qualifying row", () => {
+    const rows = [row({ quantity: 50, transactionType: "เบิก" })];
+    const text = buildSalesSummaryBlocks(report(rows)).join("\n\n");
+
+    expect(text).toContain(`เบิก 50 • ${SALES_NO_RETURN_ROW_LABEL}`);
+    expect(text).toContain(`ขาย 50 กิโล (${SALES_SOLD_OUT_NO_RETURN_SUFFIX})`);
+    expect(text).not.toContain("คืน 0");
+  });
+
+  test("I: a row with real return data keeps the normal เบิก/คืน/เสีย presentation", () => {
+    const text = buildSalesSummaryBlocks(report(TRUSTED_ROWS)).join("\n\n");
+
+    expect(text).toContain("เบิก 10 • คืน 2 • เสีย 1");
+    expect(text).toContain("ขาย 7 กิโล");
+    expect(text).not.toContain(SALES_NO_RETURN_ROW_LABEL);
+    expect(text).not.toContain(SALES_SOLD_OUT_NO_RETURN_SUFFIX);
   });
 });

@@ -327,7 +327,10 @@ describe("daily sales summary cron — debug mode", () => {
   });
 
   test("reports blocked entries instead of hiding them", async () => {
-    tables.produce_transactions = [tables.produce_transactions[0]]; // withdrawal only
+    // A return row with no withdrawal of its own: still fail-closed under the
+    // "no return rows means sold out" rule — a withdrawal alone would now be
+    // a trusted sold-out row instead of a blocker.
+    tables.produce_transactions = [tables.produce_transactions[1]]; // return only
     tables.produce_sessions = [{ id: "session-1", total_items: 1, parser_errors: null }];
     process.env.SALES_SUMMARY_LINE_TARGETS = "Cgroup1";
 
@@ -335,7 +338,7 @@ describe("daily sales summary cron — debug mode", () => {
 
     expect(body.blockedCount).toBe(1);
     expect(body.valueAuthoritative).toBe(false);
-    expect(body.messages.join("\n")).toContain("ยังไม่มีข้อมูลชั่งคืน");
+    expect(body.messages.join("\n")).toContain("มีคืนแต่ไม่มีเบิก");
   });
 });
 

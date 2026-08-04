@@ -176,22 +176,22 @@ describe("P1 sold quantity — W − R − D", () => {
   });
 });
 
-// ── Fail-closed quantity rules ──────────────────────────────────────────────
+// ── No return rows means sold out ───────────────────────────────────────────
 
-describe("P1 quantity blocking — never assume", () => {
-  test("a withdrawal with no good return is QUANTITY_BLOCKED, never sold out", () => {
+describe("P1 absence of return rows means sold out", () => {
+  test("A: withdrawal only is TRUSTED with sold = withdrawal, no missing_return_evidence", () => {
     const report = build([row({ quantity: 10, transactionType: TX_WITHDRAW })], {
       centralPrices: DURIAN_PRICE,
     });
 
     const result = onlyRow(report);
-    expect(result.status).toBe("QUANTITY_BLOCKED");
-    expect(result.reasons).toContain("missing_return_evidence");
-    expect(result.soldQuantity).toBeNull();
-    expect(result.expectedSalesSatang).toBeNull();
+    expect(result.status).toBe("TRUSTED");
+    expect(result.soldQuantity).toBe(10);
+    expect(result.reasons).not.toContain("missing_return_evidence");
+    expect(result.expectedSalesSatang).toBe(120_000);
   });
 
-  test("damage alone does not close the loop for a withdrawal", () => {
+  test("B: withdrawal + damaged only, sold = W - D, not blocked for missing return evidence", () => {
     const report = build(
       [
         row({ quantity: 10, transactionType: TX_WITHDRAW }),
@@ -201,10 +201,90 @@ describe("P1 quantity blocking — never assume", () => {
     );
 
     const result = onlyRow(report);
-    expect(result.status).toBe("QUANTITY_BLOCKED");
-    expect(result.reasons).toContain("missing_return_evidence");
+    expect(result.status).toBe("TRUSTED");
+    expect(result.soldQuantity).toBe(8);
+    expect(result.reasons).not.toContain("missing_return_evidence");
   });
 
+  test("C: withdrawal + good return only, sold = W - R", () => {
+    const report = build(
+      [
+        row({ quantity: 10, transactionType: TX_WITHDRAW }),
+        row({ quantity: 3, transactionType: TX_RETURN }),
+      ],
+      { centralPrices: DURIAN_PRICE },
+    );
+    expect(onlyRow(report).soldQuantity).toBe(7);
+  });
+
+  test("D: withdrawal + both return types, sold = W - R - D", () => {
+    const report = build(
+      [
+        row({ quantity: 10, transactionType: TX_WITHDRAW }),
+        row({ quantity: 3, transactionType: TX_RETURN }),
+        row({ quantity: 2, transactionType: TX_DAMAGED }),
+      ],
+      { centralPrices: DURIAN_PRICE },
+    );
+    expect(onlyRow(report).soldQuantity).toBe(5);
+  });
+
+  test("E: returns exceeding the withdrawal still quantity-block", () => {
+    const report = build(
+      [
+        row({ quantity: 10, transactionType: TX_WITHDRAW }),
+        row({ quantity: 6, transactionType: TX_RETURN }),
+        row({ quantity: 5, transactionType: TX_DAMAGED }),
+      ],
+      { centralPrices: DURIAN_PRICE },
+    );
+
+    const result = onlyRow(report);
+    expect(result.status).toBe("QUANTITY_BLOCKED");
+    expect(result.reasons).toContain("returns_exceed_withdrawal");
+    expect(result.soldQuantity).toBeNull();
+  });
+
+  test("F: a return with no withdrawal still quantity-blocks", () => {
+    const report = build([row({ quantity: 4, transactionType: TX_RETURN })], {
+      centralPrices: DURIAN_PRICE,
+    });
+
+    const result = onlyRow(report);
+    expect(result.status).toBe("QUANTITY_BLOCKED");
+    expect(result.reasons).toContain("return_without_withdrawal");
+  });
+
+  test("G: withdrawal-only row with a missing central price stays quantity-trusted", () => {
+    const report = build([row({ quantity: 10, transactionType: TX_WITHDRAW })]);
+
+    const result = onlyRow(report);
+    expect(result.status).toBe("VALUE_BLOCKED");
+    expect(result.reasons).toContain("missing_central_price");
+    expect(result.soldQuantity).toBe(10);
+    expect(result.expectedSalesSatang).toBeNull();
+  });
+
+  test("G: withdrawal-only row with a central-price conflict stays quantity-trusted", () => {
+    const report = build(
+      [row({ quantity: 10, transactionType: TX_WITHDRAW })],
+      {
+        centralPrices: DURIAN_PRICE,
+        priceConflicts: new Set([centralPriceMapKey("หมอนทอง", "โล")]),
+      },
+    );
+
+    const result = onlyRow(report);
+    expect(result.status).toBe("VALUE_BLOCKED");
+    expect(result.reasons).toContain("central_price_conflict");
+    expect(result.soldQuantity).toBe(10);
+    expect(result.expectedSalesSatang).toBeNull();
+  });
+});
+
+// ── Fail-closed quantity rules ──────────────────────────────────────────────
+
+describe("P1 quantity blocking — never assume", () => {
   test("a good return with no withdrawal is QUANTITY_BLOCKED", () => {
     const report = build([row({ quantity: 4, transactionType: TX_RETURN })], {
       centralPrices: DURIAN_PRICE,
@@ -515,13 +595,11 @@ describe("P1 product and unit identity", () => {
       { centralPrices: DURIAN_PRICE },
     );
 
-    expect(report.blocked).toHaveLength(2);
-    expect(report.blocked.map((blocked) => blocked.reasons).flat()).toContain(
-      "missing_return_evidence",
-    );
-    expect(report.blocked.map((blocked) => blocked.reasons).flat()).toContain(
-      "return_without_withdrawal",
-    );
+    // หมอนทอง is withdrawal-only and priced, so it is TRUSTED and sold out —
+    // only ชะนี (a return with no withdrawal of its own) stays blocked.
+    expect(report.blocked).toHaveLength(1);
+    expect(report.blocked[0].productName).toBe("ชะนี");
+    expect(report.blocked[0].reasons).toContain("return_without_withdrawal");
   });
 
   test("a verified unit conversion lands both sides in one identity", () => {
@@ -548,7 +626,15 @@ describe("P1 product and unit identity", () => {
       ],
       { centralPrices: DURIAN_PRICE },
     );
-    expect(report.blocked).toHaveLength(2);
+
+    // Two separate identities — never merged — but only the return-without-
+    // withdrawal one (ลูก) stays blocked; the withdrawal-only โล identity is
+    // TRUSTED and sold out.
+    const rows = report.markets.flatMap((market) => market.rows);
+    expect(rows).toHaveLength(2);
+    expect(report.blocked).toHaveLength(1);
+    expect(report.blocked[0].unit).toBe("ลูก");
+    expect(report.blocked[0].reasons).toContain("return_without_withdrawal");
   });
 
   test("a spelling alias for a unit normalizes without rescaling", () => {
@@ -692,9 +778,13 @@ describe("P1 expected sales value", () => {
   });
 
   test("a quantity-blocked row never reports a value", () => {
-    const report = build([row({ quantity: 10, transactionType: TX_WITHDRAW })], {
-      centralPrices: DURIAN_PRICE,
-    });
+    const report = build(
+      [
+        row({ quantity: 10, transactionType: TX_WITHDRAW }),
+        row({ quantity: 15, transactionType: TX_RETURN }),
+      ],
+      { centralPrices: DURIAN_PRICE },
+    );
 
     const result = onlyRow(report);
     expect(result.status).toBe("QUANTITY_BLOCKED");
@@ -781,7 +871,9 @@ describe("P1 aggregation authority", () => {
     const market = report.markets[0];
     expect(market.total.valueAuthoritative).toBe(false);
     expect(market.total.trustedRowCount).toBe(1);
-    expect(market.total.quantityBlockedRowCount).toBe(1);
+    // ชะอม is withdrawal-only and unpriced: quantity-trusted, value-blocked.
+    expect(market.total.quantityBlockedRowCount).toBe(0);
+    expect(market.total.valueBlockedRowCount).toBe(1);
     // The partial figure is still the sum of what IS verified.
     expect(market.total.expectedSalesSatang).toBe(72_000);
   });
@@ -791,11 +883,12 @@ describe("P1 aggregation authority", () => {
       [
         row({ quantity: 10, transactionType: TX_WITHDRAW }),
         row({ quantity: 4, transactionType: TX_RETURN }),
+        // A return with no withdrawal of its own in MARKET_B: still not sold.
         row({
           marketName: MARKET_B,
           sessionId: "s-b",
           quantity: 5,
-          transactionType: TX_WITHDRAW,
+          transactionType: TX_RETURN,
         }),
       ],
       { centralPrices: DURIAN_PRICE },
@@ -821,11 +914,12 @@ describe("P1 aggregation authority", () => {
       [
         row({ quantity: 10, transactionType: TX_WITHDRAW }),
         row({ quantity: 4, transactionType: TX_RETURN }),
+        // A return with no withdrawal of its own in MARKET_B: still not sold.
         row({
           marketName: MARKET_B,
           sessionId: "s-b",
           quantity: 5,
-          transactionType: TX_WITHDRAW,
+          transactionType: TX_RETURN,
         }),
       ],
       { centralPrices: DURIAN_PRICE },
@@ -845,14 +939,13 @@ describe("P1 aggregation authority", () => {
   });
 
   test("every blocked identity is listed, never sampled", () => {
-    const report = build(
-      [
-        row({ quantity: 1, transactionType: TX_WITHDRAW, productName: "หมอนทอง" }),
-        row({ quantity: 1, transactionType: TX_WITHDRAW, productName: "ชะอม", unit: "กำ" }),
-        row({ quantity: 1, transactionType: TX_WITHDRAW, productName: "คะน้า", unit: "กำ" }),
-      ],
-      { centralPrices: DURIAN_PRICE },
-    );
+    // All three are withdrawal-only and unpriced: quantity-trusted but
+    // VALUE_BLOCKED, which still lists them in full.
+    const report = build([
+      row({ quantity: 1, transactionType: TX_WITHDRAW, productName: "หมอนทอง" }),
+      row({ quantity: 1, transactionType: TX_WITHDRAW, productName: "ชะอม", unit: "กำ" }),
+      row({ quantity: 1, transactionType: TX_WITHDRAW, productName: "คะน้า", unit: "กำ" }),
+    ]);
     expect(report.blocked).toHaveLength(3);
   });
 });
@@ -923,8 +1016,8 @@ describe("P1 quantity trust is independent of value trust", () => {
       [
         row({ quantity: 12, transactionType: TX_WITHDRAW }),
         row({ quantity: 2, transactionType: TX_RETURN }),
-        // Withdrawal with no return evidence in the other market: not sold out.
-        row({ sourceId: SOURCE_B, marketName: MARKET_B, sessionId: "s-b", quantity: 8, transactionType: TX_WITHDRAW }),
+        // A return with no withdrawal of its own in the other market: not sold.
+        row({ sourceId: SOURCE_B, marketName: MARKET_B, sessionId: "s-b", quantity: 8, transactionType: TX_RETURN }),
       ],
       { centralPrices: DURIAN_PRICE },
     );

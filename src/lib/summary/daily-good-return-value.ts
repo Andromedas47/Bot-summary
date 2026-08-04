@@ -171,20 +171,42 @@ type DeliveredGroup = { kind: "product"; entries: Entry[]; text: string } | { ki
  * under the 4,000 code-point LINE hard limit. Real Good Return messages were
  * hitting LINE's client-side "See more" collapse (~5-6 visible entries) long
  * before the hard limit, so packing is driven by this instead of a fixed
- * entry count. HEADING_RESERVE is a conservative estimate of the heading +
- * "รายการ N-M จากทั้งหมด ..." continuation lines, which can't be computed
- * exactly until packing (and thus total part count) is finished.
+ * entry count. Every check against this target uses the actual rendered
+ * text (see rebalanceParts below) rather than an estimated reserve.
  */
 const GOOD_RETURN_READABLE_MAX_CODE_POINTS = 850;
-const HEADING_RESERVE = 200;
-const HARD_LIMIT_RESERVE = 450;
 
 /**
- * Packs whole product blocks and whole anomaly blocks by rendered code-point
- * length, never splitting an entry. This is a P0-specific readability
- * adjustment — see GOOD_RETURN_READABLE_MAX_CODE_POINTS above — and is
- * deliberately scoped to this report rather than the shared line-chunking
- * helpers.
+ * Rebalances an initial greedy packing so every multi-entry part's ACTUAL
+ * rendered text (real heading + real total-part count) fits the readability
+ * target — not an estimate. Headings depend on final part count/index, which
+ * isn't known until packing is done, so this repeatedly re-renders each part
+ * with its current position and, whenever a multi-entry part is still over
+ * target, moves its last entry to the front of the next part (creating one
+ * if needed) and re-checks. A single-entry part is left alone here even if
+ * it's over target — an entry is never split, and the hard-limit check for
+ * an oversized singleton happens separately, against the real 4,000 limit.
+ * Moving only ever shifts the tail entry forward by one part, so entries
+ * never change relative order.
+ */
+function rebalanceParts<T>(initialParts: readonly (readonly T[])[], renderPart: (group: readonly T[], partIndex: number, totalParts: number) => string): T[][] {
+  const parts: T[][] = initialParts.map((group) => [...group]);
+  for (let guard = 0; guard < parts.length * 50 + 50; guard++) {
+    const overIndex = parts.findIndex((group, index) => group.length > 1 && countCodePoints(renderPart(group, index, parts.length)) > GOOD_RETURN_READABLE_MAX_CODE_POINTS);
+    if (overIndex === -1) break;
+    const moved = parts[overIndex]!.pop()!;
+    if (overIndex + 1 < parts.length) parts[overIndex + 1]!.unshift(moved);
+    else parts.push([moved]);
+  }
+  return parts;
+}
+
+/**
+ * Packs whole product blocks and whole anomaly blocks by their actual
+ * fully-rendered code-point length (heading included), never splitting an
+ * entry. This is a P0-specific readability adjustment — see
+ * GOOD_RETURN_READABLE_MAX_CODE_POINTS above — and is deliberately scoped to
+ * this report rather than the shared line-chunking helpers.
  *
  * Every generated part is delivered: this scheduled report pushes each part
  * via its own retry-keyed pushLineMessage call, so LINE_REPLY_MAX_MESSAGES
@@ -204,36 +226,65 @@ export function buildDailyGoodReturnValueMessages(report: GoodReturnValueReport,
     return [["📦 สรุปของดีชั่งคืนประจำวัน", `ข้อมูลวันที่ ${date}`, "หมายเหตุ: รายงานนี้สรุปเฉพาะของดีที่ชั่งคืน ไม่ใช่สต๊อกตรวจนับจริง", `ยังไม่พบข้อมูลชั่งคืนประจำวันที่ ${date}`, latestDataBlock(options.latest ?? { status: "unavailable" }, "ยังไม่พบข้อมูลชั่งคืนในระบบ")].filter(Boolean).join("\n\n")];
   }
 
-  // Greedy packing by rendered code-point length: before adding the next
-  // whole entry, check whether it would push the in-progress part over the
-  // readability target. If a single entry alone already exceeds the target
-  // (but stays under the LINE hard limit), it ships alone rather than being
-  // split or shortened — only the hard-limit fallback below shortens an entry.
-  const productParts: Entry[][] = []; let currentProduct: Entry[] = []; let shortenedProduct = 0;
+  // Each entry's own global number is already baked into its block text
+  // (productBlock/marketAnomalyBlock render it from the report-wide index),
+  // so regrouping entries between parts never disturbs numbering.
+  const entryNumber = (block: string, fallback: number) => Number(block.match(/^(\d+)\./)?.[1] ?? fallback);
+
+  const renderProductPart = (group: readonly Entry[], index: number, total: number): string => {
+    const first = entryNumber(group[0]!.block, 1);
+    return [...header(report, index + 1, total, first, first + group.length - 1), lines(group)].join("\n");
+  };
+  const renderAnomalyPart = (group: readonly RowEntry[], index: number, total: number): string => {
+    const heading = total > 1 ? `${ANOMALY_HEADING} (ต่อ ${index + 1}/${total})` : ANOMALY_HEADING;
+    return [heading, group.map((e) => e.block).join("\n\n")].join("\n\n");
+  };
+
+  // Initial greedy pack on body length alone (heading isn't known yet — it
+  // depends on the final part count, which packing itself determines).
+  const initialProductParts: Entry[][] = []; let currentProduct: Entry[] = [];
   for (const [index, row] of report.products.entries()) {
     const entry: Entry = { category: stockCategoryFor(row.productName), block: productBlock(row, index + 1), shortened: false };
-    if (countCodePoints(lines([entry])) + HARD_LIMIT_RESERVE > LINE_MESSAGE_MAX_CODE_POINTS) {
-      productParts.push([{ category: entry.category, block: `${index + 1}. รายการยาวเกินขีดจำกัด LINE จึงไม่แสดงรายละเอียด`, shortened: true }]);
-      shortenedProduct++;
-      continue;
-    }
-    if (currentProduct.length && countCodePoints(lines([...currentProduct, entry])) + HEADING_RESERVE > GOOD_RETURN_READABLE_MAX_CODE_POINTS) { productParts.push(currentProduct); currentProduct = []; }
+    if (currentProduct.length && countCodePoints(lines([...currentProduct, entry])) > GOOD_RETURN_READABLE_MAX_CODE_POINTS) { initialProductParts.push(currentProduct); currentProduct = []; }
     currentProduct.push(entry);
   }
-  if (currentProduct.length) productParts.push(currentProduct);
+  if (currentProduct.length) initialProductParts.push(currentProduct);
 
-  const anomalyParts: RowEntry[][] = []; let currentAnomaly: RowEntry[] = []; let shortenedAnomaly = 0;
+  const initialAnomalyParts: RowEntry[][] = []; let currentAnomaly: RowEntry[] = [];
   for (const [index, row] of report.anomalies.entries()) {
     const entry: RowEntry = { block: marketAnomalyBlock(row, index + 1), shortened: false };
-    if (countCodePoints(entry.block) + HARD_LIMIT_RESERVE > LINE_MESSAGE_MAX_CODE_POINTS) {
-      anomalyParts.push([{ block: `${index + 1}. รายละเอียดยาวเกินขีดจำกัด LINE จึงไม่แสดง`, shortened: true }]);
-      shortenedAnomaly++;
-      continue;
-    }
-    if (currentAnomaly.length && countCodePoints([...currentAnomaly, entry].map((e) => e.block).join("\n\n")) + HEADING_RESERVE > GOOD_RETURN_READABLE_MAX_CODE_POINTS) { anomalyParts.push(currentAnomaly); currentAnomaly = []; }
+    if (currentAnomaly.length && countCodePoints([...currentAnomaly, entry].map((e) => e.block).join("\n\n")) > GOOD_RETURN_READABLE_MAX_CODE_POINTS) { initialAnomalyParts.push(currentAnomaly); currentAnomaly = []; }
     currentAnomaly.push(entry);
   }
-  if (currentAnomaly.length) anomalyParts.push(currentAnomaly);
+  if (currentAnomaly.length) initialAnomalyParts.push(currentAnomaly);
+
+  // Rebalance against the ACTUAL rendered text (real heading, real total
+  // part count) so every multi-entry message is at or below the readability
+  // target — not merely an estimate of it.
+  const rebalancedProductParts = rebalanceParts(initialProductParts, renderProductPart);
+  const rebalancedAnomalyParts = rebalanceParts(initialAnomalyParts, renderAnomalyPart);
+
+  // Only now — with real headings and a stable part count — can an
+  // individually oversized entry be judged against the real 4,000-code-point
+  // LINE hard limit. It's a singleton part at this point (rebalancing pulls
+  // any sibling entries away from it), so replacing it in place doesn't
+  // change part count/headings, and no further rebalancing is required.
+  let shortenedProduct = 0;
+  const productParts = rebalancedProductParts.map((group, index): Entry[] => {
+    if (group.length === 1 && countCodePoints(renderProductPart(group, index, rebalancedProductParts.length)) > LINE_MESSAGE_MAX_CODE_POINTS) {
+      shortenedProduct++;
+      return [{ category: group[0]!.category, block: `${entryNumber(group[0]!.block, index + 1)}. รายการยาวเกินขีดจำกัด LINE จึงไม่แสดงรายละเอียด`, shortened: true }];
+    }
+    return group;
+  });
+  let shortenedAnomaly = 0;
+  const anomalyParts = rebalancedAnomalyParts.map((group, index): RowEntry[] => {
+    if (group.length === 1 && countCodePoints(renderAnomalyPart(group, index, rebalancedAnomalyParts.length)) > LINE_MESSAGE_MAX_CODE_POINTS) {
+      shortenedAnomaly++;
+      return [{ block: `${entryNumber(group[0]!.block, index + 1)}. รายละเอียดยาวเกินขีดจำกัด LINE จึงไม่แสดง`, shortened: true }];
+    }
+    return group;
+  });
 
   // This scheduled report delivers every generated part (see function doc) —
   // no LINE_REPLY_MAX_MESSAGES budgeting/dropping here.
@@ -243,14 +294,8 @@ export function buildDailyGoodReturnValueMessages(report: GoodReturnValueReport,
   const deliveredProductTotal = productParts.length;
   const deliveredAnomalyTotal = anomalyParts.length;
   const groups: DeliveredGroup[] = [
-    ...productParts.map((entries, index): DeliveredGroup => {
-      const first = Number(entries[0]!.block.match(/^(\d+)\./)?.[1] ?? 1);
-      return { kind: "product", entries, text: [...header(report, index + 1, deliveredProductTotal, first, first + entries.length - 1), lines(entries)].join("\n") };
-    }),
-    ...anomalyParts.map((entries, index): DeliveredGroup => {
-      const heading = deliveredAnomalyTotal > 1 ? `${ANOMALY_HEADING} (ต่อ ${index + 1}/${deliveredAnomalyTotal})` : ANOMALY_HEADING;
-      return { kind: "anomaly", entries, text: [heading, entries.map((e) => e.block).join("\n\n")].join("\n\n") };
-    }),
+    ...productParts.map((entries, index): DeliveredGroup => ({ kind: "product", entries, text: renderProductPart(entries, index, deliveredProductTotal) })),
+    ...anomalyParts.map((entries, index): DeliveredGroup => ({ kind: "anomaly", entries, text: renderAnomalyPart(entries, index, deliveredAnomalyTotal) })),
   ];
 
   const messages = groups.map((g) => g.text);

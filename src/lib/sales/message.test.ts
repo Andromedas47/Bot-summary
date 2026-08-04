@@ -85,17 +85,19 @@ describe("P1 manual message", () => {
     expect(text).toContain(SALES_PARTIAL_HEADING);
     // The all-market figure must not carry the "total sales" heading …
     expect(text).not.toContain(`${SALES_TOTAL_HEADING}\n840.00`);
-    // … and the blocked entry has to say why.
+    // … and the blocked entry has to say why. ชะอม is withdrawal-only and
+    // unpriced, so it is quantity-trusted but has no central price.
     expect(text).toContain(SALES_BLOCKED_HEADING);
-    expect(text).toContain("ยังไม่มีข้อมูลชั่งคืน");
+    expect(text).toContain("ไม่มีราคากลาง");
   });
 
   test("a blocked row shows no sold quantity and no value", () => {
     const text = buildSalesSummaryBlocks(
-      report([row({ quantity: 5, transactionType: "เบิก" })]),
+      report([row({ quantity: 5, transactionType: "คืน" })]),
     ).join("\n\n");
 
-    expect(text).toContain("ขาย — (ยังไม่มีข้อมูลชั่งคืน)");
+    expect(text).toContain("ขาย —");
+    expect(text).toContain("มีคืนแต่ไม่มีเบิก");
     expect(text).not.toContain("ราคากลาง");
   });
 
@@ -189,7 +191,8 @@ describe("P1 automatic message — executive summary", () => {
     expect(built.blocked).toHaveLength(40);
     expect(text).toContain(SALES_BLOCKED_HEADING);
     expect(text).toContain("1 รายการอาจพบมากกว่า 1 สาเหตุ");
-    expect(text).toContain("• ยังไม่มีข้อมูลชั่งคืน — 40 รายการ");
+    // Each is withdrawal-only and unpriced: quantity-trusted, value-blocked.
+    expect(text).toContain("• ไม่มีราคากลาง — 40 รายการ");
     // The rows themselves are the manual command's job, not the morning push.
     expect(text).not.toContain("สินค้า0 (กำ)");
   });
@@ -316,7 +319,11 @@ describe("P1 message wording", () => {
 
   test("a quantity-blocked day does not claim the quantity is complete", () => {
     const text = buildSalesSummaryBlocks(
-      report([...TRUSTED_ROWS, row({ productName: "ชะอม", unit: "กำ", quantity: 5 })]),
+      report([
+        ...TRUSTED_ROWS,
+        // A return with no withdrawal of its own: genuinely quantity-blocked.
+        row({ productName: "ชะอม", unit: "กำ", quantity: 5, transactionType: "คืน" }),
+      ]),
     ).join("\n\n");
 
     expect(text).not.toContain(SALES_QUANTITY_ONLY_NOTICE);

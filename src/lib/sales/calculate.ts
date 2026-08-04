@@ -19,8 +19,11 @@ import { centralPriceMapKey } from "@/lib/white-sheet/pricing";
  *   sold_quantity  = W − R − D          (withdrawal − good return − damaged return)
  *   expected_sales = sold_quantity × authoritative central selling price
  *
+ * Absence of a return row means the corresponding return quantity is zero —
+ * a withdrawal with no good-return row and no damaged-return row is a closed,
+ * fully sold-out identity, not missing evidence.
+ *
  * FAIL CLOSED. Every rule below blocks rather than guesses:
- *   - a withdrawal with no good-return evidence is NOT "sold out"
  *   - a return with no withdrawal is not a negative sale
  *   - R + D > W is not a negative quantity
  *   - structurally invalid rows never contribute a number
@@ -54,6 +57,11 @@ export type SalesBlockReason =
   | "invalid_quantity"
   | "unknown_transaction_type"
   | "market_unresolved"
+  /**
+   * No longer produced by the calculator: absence of a return row now means
+   * the return quantity is zero, not missing evidence. Kept in the union (and
+   * in message.ts's REASON_LABELS) for type/API compatibility only.
+   */
   | "missing_return_evidence"
   | "return_without_withdrawal"
   | "returns_exceed_withdrawal"
@@ -568,12 +576,10 @@ export function calculateSalesReport(input: SalesCalculationInput): SalesReport 
   const identityRows: SalesIdentityRow[] = aggregateList.map((aggregate) => {
     const reasons = new Set(aggregate.reasons);
 
-    // Quantity evidence rules. A withdrawal with no ชั่งคืน is never "sold out",
-    // a return with no withdrawal is never a negative sale, and returns that
-    // exceed the withdrawal are never a negative quantity.
-    if (aggregate.hasWithdrawal && !aggregate.hasGoodReturn) {
-      addReason(reasons, "missing_return_evidence");
-    }
+    // Quantity evidence rules. Absence of a return row means the corresponding
+    // return quantity is zero — a withdrawal alone is a closed, sold-out
+    // identity. A return with no withdrawal is never a negative sale, and
+    // returns that exceed the withdrawal are never a negative quantity.
     if (!aggregate.hasWithdrawal && (aggregate.hasGoodReturn || aggregate.hasDamaged)) {
       addReason(reasons, "return_without_withdrawal");
     }

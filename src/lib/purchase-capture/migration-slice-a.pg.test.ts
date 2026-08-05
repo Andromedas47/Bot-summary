@@ -4,9 +4,13 @@
  * - Creates a disposable DB, applies bootstrap + Slice A migration + hardening
  *   SQL via psql, mirroring src/lib/physical-inventory/migration-0047.pg.test.ts.
  * - Runs REAL multi-connection concurrency cases (≥2 independent psql processes).
- * - SKIP (not green PASS) when psql/connection is unavailable.
+ * - SKIPs (not a green functional PASS) when psql/connection is unavailable, UNLESS
+ *   REQUIRE_POSTGRES_TESTS=1 is set, in which case an unavailable PostgreSQL
+ *   connection is a hard FAIL — CI must not report green without actually
+ *   running this suite.
  *
- * Env: PGPASSWORD=postgres (default), PGHOST=localhost, PGUSER=postgres
+ * Env: PGPASSWORD=postgres (default), PGHOST=localhost, PGUSER=postgres,
+ *      REQUIRE_POSTGRES_TESTS=1 (CI-only; unset for ordinary local dev runs)
  */
 import { describe, expect, test, afterAll } from "bun:test";
 import { existsSync } from "fs";
@@ -17,6 +21,7 @@ const PGHOST = process.env.PGHOST ?? "localhost";
 const PGUSER = process.env.PGUSER ?? "postgres";
 const PGPASSWORD = process.env.PGPASSWORD ?? "postgres";
 const PGPORT = process.env.PGPORT ?? "5432";
+const REQUIRE_POSTGRES_TESTS = process.env.REQUIRE_POSTGRES_TESTS === "1";
 
 const WIN_PSQL = "C:\\Program Files\\PostgreSQL\\17\\bin\\psql.exe";
 const REPO_ROOT = join(import.meta.dir, "..", "..", "..");
@@ -172,11 +177,13 @@ describe.skipIf(!pgAvailable)("Purchase capture Slice A migration PostgreSQL har
     async () => {
       expect(ready).toBe(true);
       const tag = randomBytes(3).toString("hex");
+      const source = `G-conc-item-${tag}`;
+      const sender = `U-conc-item-${tag}`;
       const open = await psqlJson(
         psqlPath,
         dbName,
         `SELECT public.open_purchase_capture_session(
-          'group', ${sqlLiteral(`G-conc-item-${tag}`)}, ${sqlLiteral(`U-conc-item-${tag}`)},
+          'group', ${sqlLiteral(source)}, ${sqlLiteral(sender)},
           ${sqlLiteral(`evt-conc-item-h-${tag}`)}, 2000, 'header'
         )::text`,
       );
@@ -184,11 +191,11 @@ describe.skipIf(!pgAvailable)("Purchase capture Slice A migration PostgreSQL har
       const gen = String(open.session_generation);
 
       const sqlA = `SELECT public.admit_purchase_capture_event(
-        ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid,
+        ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid, 'group', ${sqlLiteral(source)}, ${sqlLiteral(sender)},
         ${sqlLiteral(`evt-conc-item-a-${tag}`)}, 2100, 'item', 'item A', NULL, NULL
       )::text`;
       const sqlB = `SELECT public.admit_purchase_capture_event(
-        ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid,
+        ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid, 'group', ${sqlLiteral(source)}, ${sqlLiteral(sender)},
         ${sqlLiteral(`evt-conc-item-b-${tag}`)}, 2101, 'item', 'item B', NULL, NULL
       )::text`;
 
@@ -228,11 +235,13 @@ describe.skipIf(!pgAvailable)("Purchase capture Slice A migration PostgreSQL har
     async () => {
       expect(ready).toBe(true);
       const tag = randomBytes(3).toString("hex");
+      const source = `G-conc-inv-${tag}`;
+      const sender = `U-conc-inv-${tag}`;
       const open = await psqlJson(
         psqlPath,
         dbName,
         `SELECT public.open_purchase_capture_session(
-          'group', ${sqlLiteral(`G-conc-inv-${tag}`)}, ${sqlLiteral(`U-conc-inv-${tag}`)},
+          'group', ${sqlLiteral(source)}, ${sqlLiteral(sender)},
           ${sqlLiteral(`evt-conc-inv-h-${tag}`)}, 3000, 'header'
         )::text`,
       );
@@ -242,7 +251,7 @@ describe.skipIf(!pgAvailable)("Purchase capture Slice A migration PostgreSQL har
         psqlPath,
         dbName,
         `SELECT public.admit_purchase_capture_event(
-          ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid,
+          ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid, 'group', ${sqlLiteral(source)}, ${sqlLiteral(sender)},
           ${sqlLiteral(`evt-conc-inv-t1-${tag}`)}, 3100, 'item', 'T1', NULL, NULL
         )::text`,
       );
@@ -250,11 +259,11 @@ describe.skipIf(!pgAvailable)("Purchase capture Slice A migration PostgreSQL har
       // T3's own timestamp (3300) is AFTER the close boundary T2 (3200) will
       // set — a race where the still-in-flight item request loses to close.
       const itemSql = `SELECT public.admit_purchase_capture_event(
-        ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid,
+        ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid, 'group', ${sqlLiteral(source)}, ${sqlLiteral(sender)},
         ${sqlLiteral(`evt-conc-inv-t3-${tag}`)}, 3300, 'item', 'T3', NULL, NULL
       )::text`;
       const closeSql = `SELECT public.admit_purchase_capture_event(
-        ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid,
+        ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid, 'group', ${sqlLiteral(source)}, ${sqlLiteral(sender)},
         ${sqlLiteral(`evt-conc-inv-close-${tag}`)}, 3200, 'close', 'ปิดซื้อ 1 รายการ', NULL, NULL
       )::text`;
 
@@ -276,7 +285,9 @@ describe.skipIf(!pgAvailable)("Purchase capture Slice A migration PostgreSQL har
       const cand = await psqlJson(
         psqlPath,
         dbName,
-        `SELECT public.get_purchase_capture_finalize_candidate(${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid)::text`,
+        `SELECT public.get_purchase_capture_finalize_candidate(
+          ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid, 'group', ${sqlLiteral(source)}, ${sqlLiteral(sender)}
+        )::text`,
       );
       const ingests = (cand.ingests as Array<{ line_event_id: string }>) ?? [];
       const t3Id = `evt-conc-inv-t3-${tag}`;
@@ -333,23 +344,174 @@ describe.skipIf(!pgAvailable)("Purchase capture Slice A migration PostgreSQL har
   );
 
   test(
+    "REAL concurrency: concurrent identical duplicate open → one insert, one idempotent replay",
+    async () => {
+      expect(ready).toBe(true);
+      const tag = randomBytes(3).toString("hex");
+      const evt = `evt-conc-dup-open-${tag}`;
+      const sqlSame = `SELECT public.open_purchase_capture_session(
+        'group', ${sqlLiteral(`G-conc-dup-${tag}`)}, ${sqlLiteral(`U-conc-dup-${tag}`)},
+        ${sqlLiteral(evt)}, 1000, 'identical header text'
+      )::text`;
+      const [a, b] = await concurrentPsql(psqlPath, dbName, sqlSame, sqlSame);
+      expect(a.code, a.stderr).toBe(0);
+      expect(b.code, b.stderr).toBe(0);
+      const ra = JSON.parse(a.stdout.trim()) as Record<string, unknown>;
+      const rb = JSON.parse(b.stdout.trim()) as Record<string, unknown>;
+      const openedCount = [ra, rb].filter((r) => r.opened === true).length;
+      const idempotentCount = [ra, rb].filter((r) => r.idempotent === true).length;
+      expect(openedCount).toBe(1);
+      expect(idempotentCount).toBe(1);
+      expect(ra.session_id).toBe(rb.session_id);
+      const n = await psqlScalar(
+        psqlPath,
+        dbName,
+        `SELECT count(*)::text FROM public.purchase_capture_session_ingests WHERE line_event_id = ${sqlLiteral(evt)}`,
+      );
+      expect(n).toBe("1");
+      console.info("concurrency identical duplicate open: PASS (2 connections)");
+    },
+    { timeout: 60_000 },
+  );
+
+  test(
+    "REAL concurrency: concurrent conflicting duplicate open (different raw_text) → one insert, one line_event_conflict",
+    async () => {
+      expect(ready).toBe(true);
+      const tag = randomBytes(3).toString("hex");
+      const evt = `evt-conc-conflict-open-${tag}`;
+      const source = `G-conc-conflict-${tag}`;
+      const sender = `U-conc-conflict-${tag}`;
+      const sqlA = `SELECT public.open_purchase_capture_session(
+        'group', ${sqlLiteral(source)}, ${sqlLiteral(sender)}, ${sqlLiteral(evt)}, 1000, 'text A'
+      )::text`;
+      const sqlB = `SELECT public.open_purchase_capture_session(
+        'group', ${sqlLiteral(source)}, ${sqlLiteral(sender)}, ${sqlLiteral(evt)}, 1000, 'text B (conflicting)'
+      )::text`;
+      const [a, b] = await concurrentPsql(psqlPath, dbName, sqlA, sqlB);
+      const results = [a, b];
+      const succeeded = results.filter((r) => r.code === 0);
+      const failed = results.filter((r) => r.code !== 0);
+      expect(succeeded.length).toBe(1);
+      expect(failed.length).toBe(1);
+      expect(failed[0]!.stderr + failed[0]!.stdout).toContain("line_event_conflict");
+
+      const n = await psqlScalar(
+        psqlPath,
+        dbName,
+        `SELECT count(*)::text FROM public.purchase_capture_session_ingests WHERE line_event_id = ${sqlLiteral(evt)}`,
+      );
+      expect(n).toBe("1"); // exactly the winner's content, never both, never neither
+      console.info("concurrency conflicting duplicate open: PASS (2 connections)");
+    },
+    { timeout: 60_000 },
+  );
+
+  test(
+    "REAL concurrency: concurrent identical duplicate admit → one insert, one idempotent replay",
+    async () => {
+      expect(ready).toBe(true);
+      const tag = randomBytes(3).toString("hex");
+      const source = `G-conc-dup-admit-${tag}`;
+      const sender = `U-conc-dup-admit-${tag}`;
+      const open = await psqlJson(
+        psqlPath,
+        dbName,
+        `SELECT public.open_purchase_capture_session(
+          'group', ${sqlLiteral(source)}, ${sqlLiteral(sender)}, ${sqlLiteral(`evt-conc-dup-admit-h-${tag}`)}, 2000, 'header'
+        )::text`,
+      );
+      const sid = String(open.session_id);
+      const gen = String(open.session_generation);
+      const evt = `evt-conc-dup-admit-item-${tag}`;
+      const sqlSame = `SELECT public.admit_purchase_capture_event(
+        ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid, 'group', ${sqlLiteral(source)}, ${sqlLiteral(sender)},
+        ${sqlLiteral(evt)}, 2100, 'item', 'identical item text', NULL, NULL
+      )::text`;
+      const [a, b] = await concurrentPsql(psqlPath, dbName, sqlSame, sqlSame);
+      expect(a.code, a.stderr).toBe(0);
+      expect(b.code, b.stderr).toBe(0);
+      const ra = JSON.parse(a.stdout.trim()) as Record<string, unknown>;
+      const rb = JSON.parse(b.stdout.trim()) as Record<string, unknown>;
+      const insertedCount = [ra, rb].filter((r) => r.inserted === true).length;
+      const dupCount = [ra, rb].filter((r) => r.reason === "duplicate_event").length;
+      expect(insertedCount).toBe(1);
+      expect(dupCount).toBe(1);
+      const n = await psqlScalar(
+        psqlPath,
+        dbName,
+        `SELECT count(*)::text FROM public.purchase_capture_session_ingests WHERE line_event_id = ${sqlLiteral(evt)}`,
+      );
+      expect(n).toBe("1");
+      console.info("concurrency identical duplicate admit: PASS (2 connections)");
+    },
+    { timeout: 60_000 },
+  );
+
+  test(
+    "REAL concurrency: concurrent conflicting duplicate admit (different raw_text) → one insert, one line_event_conflict",
+    async () => {
+      expect(ready).toBe(true);
+      const tag = randomBytes(3).toString("hex");
+      const source = `G-conc-conflict-admit-${tag}`;
+      const sender = `U-conc-conflict-admit-${tag}`;
+      const open = await psqlJson(
+        psqlPath,
+        dbName,
+        `SELECT public.open_purchase_capture_session(
+          'group', ${sqlLiteral(source)}, ${sqlLiteral(sender)}, ${sqlLiteral(`evt-conc-conflict-admit-h-${tag}`)}, 2000, 'header'
+        )::text`,
+      );
+      const sid = String(open.session_id);
+      const gen = String(open.session_generation);
+      const evt = `evt-conc-conflict-admit-item-${tag}`;
+      const sqlA = `SELECT public.admit_purchase_capture_event(
+        ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid, 'group', ${sqlLiteral(source)}, ${sqlLiteral(sender)},
+        ${sqlLiteral(evt)}, 2100, 'item', 'text A', NULL, NULL
+      )::text`;
+      const sqlB = `SELECT public.admit_purchase_capture_event(
+        ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid, 'group', ${sqlLiteral(source)}, ${sqlLiteral(sender)},
+        ${sqlLiteral(evt)}, 2100, 'item', 'text B (conflicting)', NULL, NULL
+      )::text`;
+      const [a, b] = await concurrentPsql(psqlPath, dbName, sqlA, sqlB);
+      const results = [a, b];
+      const succeeded = results.filter((r) => r.code === 0);
+      const failed = results.filter((r) => r.code !== 0);
+      expect(succeeded.length).toBe(1);
+      expect(failed.length).toBe(1);
+      expect(failed[0]!.stderr + failed[0]!.stdout).toContain("line_event_conflict");
+
+      const n = await psqlScalar(
+        psqlPath,
+        dbName,
+        `SELECT count(*)::text FROM public.purchase_capture_session_ingests WHERE line_event_id = ${sqlLiteral(evt)}`,
+      );
+      expect(n).toBe("1");
+      console.info("concurrency conflicting duplicate admit: PASS (2 connections)");
+    },
+    { timeout: 60_000 },
+  );
+
+  test(
     "REAL concurrency: redelivered close_purchase_capture_open_event → idempotent, boundary unchanged",
     async () => {
       expect(ready).toBe(true);
       const tag = randomBytes(3).toString("hex");
       const evt = `evt-conc-close-${tag}`;
+      const source = `G-conc-close-${tag}`;
+      const sender = `U-conc-close-${tag}`;
       const open = await psqlJson(
         psqlPath,
         dbName,
         `SELECT public.open_purchase_capture_session(
-          'group', ${sqlLiteral(`G-conc-close-${tag}`)}, ${sqlLiteral(`U-conc-close-${tag}`)},
+          'group', ${sqlLiteral(source)}, ${sqlLiteral(sender)},
           ${sqlLiteral(evt)}, 4000, 'complete one-message document'
         )::text`,
       );
       const sid = String(open.session_id);
       const gen = String(open.session_generation);
       const closeSql = `SELECT public.close_purchase_capture_open_event(
-        ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid, ${sqlLiteral(evt)}
+        ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid, 'group', ${sqlLiteral(source)}, ${sqlLiteral(sender)}, ${sqlLiteral(evt)}
       )::text`;
 
       const [a, b] = await concurrentPsql(psqlPath, dbName, closeSql, closeSql);
@@ -384,11 +546,13 @@ describe.skipIf(!pgAvailable)("Purchase capture Slice A migration PostgreSQL har
     async () => {
       expect(ready).toBe(true);
       const tag = randomBytes(3).toString("hex");
+      const source = `G-cand-${tag}`;
+      const sender = `U-cand-${tag}`;
       const open = await psqlJson(
         psqlPath,
         dbName,
         `SELECT public.open_purchase_capture_session(
-          'group', ${sqlLiteral(`G-cand-${tag}`)}, ${sqlLiteral(`U-cand-${tag}`)},
+          'group', ${sqlLiteral(source)}, ${sqlLiteral(sender)},
           ${sqlLiteral(`evt-cand-h-${tag}`)}, 6000, 'header'
         )::text`,
       );
@@ -398,16 +562,16 @@ describe.skipIf(!pgAvailable)("Purchase capture Slice A migration PostgreSQL har
         psqlPath,
         dbName,
         `SELECT public.admit_purchase_capture_event(
-          ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid,
+          ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid, 'group', ${sqlLiteral(source)}, ${sqlLiteral(sender)},
           ${sqlLiteral(`evt-cand-i1-${tag}`)}, 6100, 'item', '1', NULL, NULL
         )::text`,
       );
 
       const candSql = `SELECT public.get_purchase_capture_finalize_candidate(
-        ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid
+        ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid, 'group', ${sqlLiteral(source)}, ${sqlLiteral(sender)}
       )::text`;
       const admitSql = `SELECT public.admit_purchase_capture_event(
-        ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid,
+        ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid, 'group', ${sqlLiteral(source)}, ${sqlLiteral(sender)},
         ${sqlLiteral(`evt-cand-i2-${tag}`)}, 6200, 'item', '2', NULL, NULL
       )::text`;
 
@@ -459,8 +623,14 @@ describe.skipIf(!pgAvailable)("Purchase capture Slice A migration PostgreSQL har
 });
 
 describe.skipIf(pgAvailable)("Purchase capture Slice A migration PostgreSQL unavailable", () => {
-  test("explicit SKIP (not a green functional PASS)", () => {
+  test("explicit SKIP (not a green functional PASS), or hard FAIL under REQUIRE_POSTGRES_TESTS=1", () => {
     console.warn(pgSkipReason);
     expect(pgSkipReason).toContain("SKIPPED");
+    if (REQUIRE_POSTGRES_TESTS) {
+      throw new Error(
+        `REQUIRE_POSTGRES_TESTS=1 but PostgreSQL is unavailable (${pgSkipReason}). ` +
+          "CI must not report green without actually running the real PostgreSQL suite.",
+      );
+    }
   });
 });

@@ -36,6 +36,23 @@
 -- (public, extensions, pg_temp), REVOKE PUBLIC/anon/authenticated,
 -- GRANT EXECUTE TO service_role only. Tables: service_role SELECT only,
 -- mutation only via these RPCs.
+--
+-- Identity hardening (plan §6.4/§17): every mutating RPC below re-verifies
+-- (source_type, source_id, sender_line_user_id, session_generation) against
+-- the locked session row before making any change, refusing
+-- `ownership_mismatch` otherwise — a caller cannot mutate a session it does
+-- not already know the full identity of, even if it somehow learned the raw
+-- session_id/session_generation. get_purchase_capture_finalize_candidate (a
+-- read) is included for the same reason, since it returns the session's full
+-- ingest content.
+--
+-- Redelivery hardening: a repeated line_event_id is treated as idempotent
+-- ONLY when its immutable fingerprint (session identity, timestamp, kind,
+-- raw_text, LINE message/raw-message ids) matches the original admission
+-- exactly. Any differing field raises `line_event_conflict` rather than
+-- silently accepting or overwriting different content under a reused id —
+-- see purchase_capture_ingest_fingerprint_matches /
+-- purchase_capture_open_fingerprint_matches below.
 
 CREATE SCHEMA IF NOT EXISTS extensions;
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
@@ -143,7 +160,9 @@ CREATE TABLE public.purchase_capture_session_ingests (
     CHECK (length(btrim(raw_text)) > 0),
   -- Admission-order/audit-only counter (plan §8.2/§16.1). Never read by the
   -- parser adapter to determine document order — that is always derived by
-  -- sorting on (line_timestamp_ms, line_event_id) at query time.
+  -- sorting on (line_timestamp_ms, line_event_id) at query time, and the
+  -- authoritative hash below is computed in that same canonical order, never
+  -- in admission order.
   ingest_ordinal     bigint      NOT NULL
     CHECK (ingest_ordinal > 0),
   created_at         timestamptz NOT NULL DEFAULT now(),
@@ -161,7 +180,9 @@ COMMENT ON TABLE public.purchase_capture_session_ingests IS
 
 COMMENT ON COLUMN public.purchase_capture_session_ingests.ingest_ordinal IS
   'Admission-order/audit-only. The parser adapter (Slice B) derives document '
-  'order by sorting on (line_timestamp_ms, line_event_id), never on this value.';
+  'order by sorting on (line_timestamp_ms, line_event_id), never on this value '
+  '— the authoritative ingest-set hash is computed in that same canonical '
+  'order, so it is independent of the order events happened to be admitted in.';
 
 -- ── Lifecycle audit (append-only) ────────────────────────────────────────────
 
@@ -253,9 +274,11 @@ CREATE TRIGGER purchase_capture_sessions_terminal_guard
   FOR EACH ROW EXECUTE FUNCTION public.purchase_capture_forbid_terminal_session_mutation();
 
 -- ── Ingest set hash (deterministic, ordered, close-boundary eligible only) ───
--- Mirrors physical_inventory_compute_ingest_set_hash (0047) exactly, adapted
--- to this table. Excludes non-close rows with line_timestamp_ms strictly
--- after the frozen close_event_timestamp_ms; evidence rows themselves remain.
+-- Ordered by (line_timestamp_ms ASC, line_event_id ASC) — the same canonical
+-- document order the parser adapter (Slice B) will use — NEVER by
+-- ingest_ordinal (admission order). Two sessions admitting the identical
+-- logical set of events in different arrival orders must produce the same
+-- hash; ingest_ordinal only ever affects the audit trail, never this value.
 
 CREATE OR REPLACE FUNCTION public.purchase_capture_compute_ingest_set_hash(
   p_session_id uuid
@@ -274,7 +297,7 @@ AS $$
               || E'\x1f' || i.kind
               || E'\x1f' || i.raw_text,
             E'\n'
-            ORDER BY i.ingest_ordinal ASC, i.line_event_id ASC
+            ORDER BY i.line_timestamp_ms ASC, i.line_event_id ASC
           )
           FROM public.purchase_capture_session_ingests i
           JOIN public.purchase_capture_sessions s ON s.id = i.session_id
@@ -298,6 +321,80 @@ REVOKE ALL ON FUNCTION public.purchase_capture_compute_ingest_set_hash(uuid)
 GRANT EXECUTE ON FUNCTION public.purchase_capture_compute_ingest_set_hash(uuid)
   TO service_role;
 
+-- ── Duplicate LINE-event fingerprint comparison ──────────────────────────────
+-- A repeated line_event_id is idempotent ONLY when every immutable field of
+-- the redelivered event matches the originally-admitted row exactly. Any
+-- differing field is a conflicting reuse of the same line_event_id — should
+-- be impossible (LINE event ids are immutable) but guarded defensively,
+-- exactly as the Physical Inventory precedent guards line_event_conflict.
+
+CREATE OR REPLACE FUNCTION public.purchase_capture_ingest_fingerprint_matches(
+  p_existing            public.purchase_capture_session_ingests,
+  p_session_id          uuid,
+  p_session_generation  uuid,
+  p_line_timestamp_ms   bigint,
+  p_kind                text,
+  p_raw_text            text,
+  p_line_message_id     text,
+  p_raw_message_id      uuid
+) RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  SELECT p_existing.session_id IS NOT DISTINCT FROM p_session_id
+    AND p_existing.session_generation IS NOT DISTINCT FROM p_session_generation
+    AND p_existing.line_timestamp_ms IS NOT DISTINCT FROM p_line_timestamp_ms
+    AND p_existing.kind IS NOT DISTINCT FROM p_kind
+    AND p_existing.raw_text IS NOT DISTINCT FROM p_raw_text
+    AND p_existing.line_message_id IS NOT DISTINCT FROM p_line_message_id
+    AND p_existing.raw_message_id IS NOT DISTINCT FROM p_raw_message_id;
+$$;
+
+REVOKE ALL ON FUNCTION public.purchase_capture_ingest_fingerprint_matches(
+  public.purchase_capture_session_ingests, uuid, uuid, bigint, text, text, text, uuid
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.purchase_capture_ingest_fingerprint_matches(
+  public.purchase_capture_session_ingests, uuid, uuid, bigint, text, text, text, uuid
+) TO service_role;
+
+-- Same idea for the opening (header) event, where the caller has no
+-- session_id/session_generation to compare against yet — the identity to
+-- verify is the owning session's (source_type, source_id, sender_line_user_id)
+-- instead, plus kind='header' fixed.
+
+CREATE OR REPLACE FUNCTION public.purchase_capture_open_fingerprint_matches(
+  p_existing_ingest      public.purchase_capture_session_ingests,
+  p_existing_source_type text,
+  p_existing_source_id   text,
+  p_existing_sender      text,
+  p_source_type          text,
+  p_source_id            text,
+  p_sender_line_user_id  text,
+  p_line_timestamp_ms    bigint,
+  p_raw_text             text,
+  p_line_message_id      text,
+  p_raw_message_id       uuid
+) RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  SELECT p_existing_ingest.kind IS NOT DISTINCT FROM 'header'
+    AND p_existing_ingest.line_timestamp_ms IS NOT DISTINCT FROM p_line_timestamp_ms
+    AND p_existing_ingest.raw_text IS NOT DISTINCT FROM p_raw_text
+    AND p_existing_ingest.line_message_id IS NOT DISTINCT FROM p_line_message_id
+    AND p_existing_ingest.raw_message_id IS NOT DISTINCT FROM p_raw_message_id
+    AND p_existing_source_type IS NOT DISTINCT FROM p_source_type
+    AND p_existing_source_id IS NOT DISTINCT FROM p_source_id
+    AND p_existing_sender IS NOT DISTINCT FROM p_sender_line_user_id;
+$$;
+
+REVOKE ALL ON FUNCTION public.purchase_capture_open_fingerprint_matches(
+  public.purchase_capture_session_ingests, text, text, text, text, text, text, bigint, text, text, uuid
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.purchase_capture_open_fingerprint_matches(
+  public.purchase_capture_session_ingests, text, text, text, text, text, text, bigint, text, text, uuid
+) TO service_role;
+
 -- ── Open session (atomic + header idempotent) ────────────────────────────────
 
 CREATE OR REPLACE FUNCTION public.open_purchase_capture_session(
@@ -315,11 +412,12 @@ SECURITY DEFINER
 SET search_path = public, extensions, pg_temp
 AS $$
 DECLARE
-  v_sender   text;
-  v_event    text;
-  v_session  public.purchase_capture_sessions%ROWTYPE;
-  v_ingest   public.purchase_capture_session_ingests%ROWTYPE;
-  v_now      timestamptz := clock_timestamp();
+  v_sender     text;
+  v_source_id  text;
+  v_event      text;
+  v_session    public.purchase_capture_sessions%ROWTYPE;
+  v_ingest     public.purchase_capture_session_ingests%ROWTYPE;
+  v_now        timestamptz := clock_timestamp();
 BEGIN
   IF p_source_type IS NULL OR p_source_type NOT IN ('user', 'group', 'room') THEN
     RAISE EXCEPTION 'invalid source_type';
@@ -327,6 +425,7 @@ BEGIN
   IF p_source_id IS NULL OR length(btrim(p_source_id)) = 0 THEN
     RAISE EXCEPTION 'source_id required';
   END IF;
+  v_source_id := btrim(p_source_id);
   v_sender := btrim(coalesce(p_sender_line_user_id, ''));
   IF length(v_sender) = 0 THEN
     RAISE EXCEPTION 'sender_line_user_id required';
@@ -343,6 +442,7 @@ BEGIN
   END IF;
 
   -- Global LINE event identity first (idempotent redelivery after terminal).
+  -- Idempotent ONLY when the redelivered event's fingerprint matches exactly.
   SELECT * INTO v_ingest
   FROM public.purchase_capture_session_ingests
   WHERE line_event_id = v_event;
@@ -351,6 +451,16 @@ BEGIN
     SELECT * INTO v_session
     FROM public.purchase_capture_sessions
     WHERE id = v_ingest.session_id;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'purchase capture session not found';
+    END IF;
+    IF NOT public.purchase_capture_open_fingerprint_matches(
+      v_ingest, v_session.source_type, v_session.source_id, v_session.sender_line_user_id,
+      p_source_type, v_source_id, v_sender, p_line_timestamp_ms, p_raw_text,
+      p_line_message_id, p_raw_message_id
+    ) THEN
+      RAISE EXCEPTION 'line_event_conflict';
+    END IF;
     RETURN jsonb_build_object(
       'opened', false,
       'idempotent', true,
@@ -367,6 +477,11 @@ BEGIN
   WHERE opened_line_event_id = v_event;
 
   IF FOUND THEN
+    IF v_session.source_type IS DISTINCT FROM p_source_type
+       OR v_session.source_id IS DISTINCT FROM v_source_id
+       OR v_session.sender_line_user_id IS DISTINCT FROM v_sender THEN
+      RAISE EXCEPTION 'line_event_conflict';
+    END IF;
     RETURN jsonb_build_object(
       'opened', false,
       'idempotent', true,
@@ -390,7 +505,7 @@ BEGIN
       updated_at
     ) VALUES (
       p_source_type,
-      btrim(p_source_id),
+      v_source_id,
       v_sender,
       v_event,
       'open',
@@ -411,6 +526,16 @@ BEGIN
         SELECT * INTO v_session
         FROM public.purchase_capture_sessions
         WHERE id = v_ingest.session_id;
+        IF NOT FOUND THEN
+          RAISE;
+        END IF;
+        IF NOT public.purchase_capture_open_fingerprint_matches(
+          v_ingest, v_session.source_type, v_session.source_id, v_session.sender_line_user_id,
+          p_source_type, v_source_id, v_sender, p_line_timestamp_ms, p_raw_text,
+          p_line_message_id, p_raw_message_id
+        ) THEN
+          RAISE EXCEPTION 'line_event_conflict';
+        END IF;
         RETURN jsonb_build_object(
           'opened', false,
           'idempotent', true,
@@ -426,6 +551,11 @@ BEGIN
       FROM public.purchase_capture_sessions
       WHERE opened_line_event_id = v_event;
       IF FOUND THEN
+        IF v_session.source_type IS DISTINCT FROM p_source_type
+           OR v_session.source_id IS DISTINCT FROM v_source_id
+           OR v_session.sender_line_user_id IS DISTINCT FROM v_sender THEN
+          RAISE EXCEPTION 'line_event_conflict';
+        END IF;
         RETURN jsonb_build_object(
           'opened', false,
           'idempotent', true,
@@ -439,7 +569,7 @@ BEGIN
 
       SELECT * INTO v_session
       FROM public.purchase_capture_sessions
-      WHERE source_id = btrim(p_source_id)
+      WHERE source_id = v_source_id
         AND sender_line_user_id = v_sender
         AND status IN ('open', 'closing', 'awaiting_confirmation', 'confirming')
       LIMIT 1;
@@ -488,8 +618,10 @@ COMMENT ON FUNCTION public.open_purchase_capture_session(
   text, text, text, text, bigint, text, text, uuid
 ) IS
   'SECURITY DEFINER. Atomically open a purchase-capture session for a header '
-  'LINE event. Same opened_line_event_id is idempotent (duplicate_open_event); '
-  'a second sender/source active session is refused distinctly (already_open).';
+  'LINE event. Same opened_line_event_id with an identical fingerprint is '
+  'idempotent (duplicate_open_event); a differing fingerprint under the same '
+  'event id is refused (line_event_conflict); a second sender/source active '
+  'session for a different event is refused distinctly (already_open).';
 
 REVOKE ALL ON FUNCTION public.open_purchase_capture_session(
   text, text, text, text, bigint, text, text, uuid
@@ -501,30 +633,46 @@ GRANT EXECUTE ON FUNCTION public.open_purchase_capture_session(
 -- ── Admit event with close barrier (DB clock) ────────────────────────────────
 
 CREATE OR REPLACE FUNCTION public.admit_purchase_capture_event(
-  p_session_id            uuid,
-  p_expected_generation   uuid,
-  p_line_event_id         text,
-  p_line_timestamp_ms     bigint,
-  p_kind                  text,
-  p_raw_text              text,
-  p_line_message_id       text DEFAULT NULL,
-  p_raw_message_id        uuid DEFAULT NULL
+  p_session_id                    uuid,
+  p_expected_generation           uuid,
+  p_expected_source_type          text,
+  p_expected_source_id            text,
+  p_expected_sender_line_user_id  text,
+  p_line_event_id                 text,
+  p_line_timestamp_ms             bigint,
+  p_kind                          text,
+  p_raw_text                      text,
+  p_line_message_id               text DEFAULT NULL,
+  p_raw_message_id                uuid DEFAULT NULL
 ) RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, extensions, pg_temp
 AS $$
 DECLARE
-  v_session   public.purchase_capture_sessions%ROWTYPE;
-  v_existing  public.purchase_capture_session_ingests%ROWTYPE;
-  v_next_ord  bigint;
-  v_now       timestamptz := clock_timestamp();
-  v_event     text;
-  v_excluded  int := 0;
-  v_reason    text := 'admitted';
+  v_session             public.purchase_capture_sessions%ROWTYPE;
+  v_existing            public.purchase_capture_session_ingests%ROWTYPE;
+  v_expected_source_id  text;
+  v_expected_sender     text;
+  v_next_ord            bigint;
+  v_now                 timestamptz := clock_timestamp();
+  v_event                text;
+  v_excluded             int := 0;
+  v_reason               text := 'admitted';
 BEGIN
   IF p_session_id IS NULL OR p_expected_generation IS NULL THEN
     RAISE EXCEPTION 'session_id and expected_generation required';
+  END IF;
+  IF p_expected_source_type IS NULL OR p_expected_source_type NOT IN ('user', 'group', 'room') THEN
+    RAISE EXCEPTION 'invalid expected_source_type';
+  END IF;
+  IF p_expected_source_id IS NULL OR length(btrim(p_expected_source_id)) = 0 THEN
+    RAISE EXCEPTION 'expected_source_id required';
+  END IF;
+  v_expected_source_id := btrim(p_expected_source_id);
+  v_expected_sender := btrim(coalesce(p_expected_sender_line_user_id, ''));
+  IF length(v_expected_sender) = 0 THEN
+    RAISE EXCEPTION 'expected_sender_line_user_id required';
   END IF;
   v_event := btrim(coalesce(p_line_event_id, ''));
   IF length(v_event) = 0 THEN
@@ -558,6 +706,17 @@ BEGIN
     IF v_session.session_generation IS DISTINCT FROM p_expected_generation THEN
       RAISE EXCEPTION 'generation_conflict';
     END IF;
+    IF v_session.source_type IS DISTINCT FROM p_expected_source_type
+       OR v_session.source_id IS DISTINCT FROM v_expected_source_id
+       OR v_session.sender_line_user_id IS DISTINCT FROM v_expected_sender THEN
+      RAISE EXCEPTION 'ownership_mismatch';
+    END IF;
+    IF NOT public.purchase_capture_ingest_fingerprint_matches(
+      v_existing, p_session_id, p_expected_generation, p_line_timestamp_ms, p_kind,
+      p_raw_text, p_line_message_id, p_raw_message_id
+    ) THEN
+      RAISE EXCEPTION 'line_event_conflict';
+    END IF;
     RETURN jsonb_build_object(
       'accepted', true,
       'inserted', false,
@@ -583,6 +742,12 @@ BEGIN
     RAISE EXCEPTION 'generation_conflict';
   END IF;
 
+  IF v_session.source_type IS DISTINCT FROM p_expected_source_type
+     OR v_session.source_id IS DISTINCT FROM v_expected_source_id
+     OR v_session.sender_line_user_id IS DISTINCT FROM v_expected_sender THEN
+    RAISE EXCEPTION 'ownership_mismatch';
+  END IF;
+
   IF v_session.status NOT IN ('open', 'closing') THEN
     RAISE EXCEPTION 'session_closed';
   END IF;
@@ -594,6 +759,12 @@ BEGIN
 
   IF FOUND THEN
     IF v_existing.session_id IS DISTINCT FROM p_session_id THEN
+      RAISE EXCEPTION 'line_event_conflict';
+    END IF;
+    IF NOT public.purchase_capture_ingest_fingerprint_matches(
+      v_existing, p_session_id, p_expected_generation, p_line_timestamp_ms, p_kind,
+      p_raw_text, p_line_message_id, p_raw_message_id
+    ) THEN
       RAISE EXCEPTION 'line_event_conflict';
     END IF;
     RETURN jsonb_build_object(
@@ -658,7 +829,8 @@ BEGIN
   EXCEPTION
     WHEN unique_violation THEN
       -- Concurrent identical delivery lost the race after lock serialization
-      -- edge cases (or ordinal collision). Preserve idempotent semantics.
+      -- edge cases (or ordinal collision). Preserve idempotent semantics —
+      -- but only when the row that won the race is a genuine fingerprint match.
       SELECT * INTO v_existing
       FROM public.purchase_capture_session_ingests
       WHERE line_event_id = v_event;
@@ -666,6 +838,12 @@ BEGIN
         RAISE;
       END IF;
       IF v_existing.session_id IS DISTINCT FROM p_session_id THEN
+        RAISE EXCEPTION 'line_event_conflict';
+      END IF;
+      IF NOT public.purchase_capture_ingest_fingerprint_matches(
+        v_existing, p_session_id, p_expected_generation, p_line_timestamp_ms, p_kind,
+        p_raw_text, p_line_message_id, p_raw_message_id
+      ) THEN
         RAISE EXCEPTION 'line_event_conflict';
       END IF;
       SELECT * INTO v_session
@@ -718,19 +896,23 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.admit_purchase_capture_event(
-  uuid, uuid, text, bigint, text, text, text, uuid
+  uuid, uuid, text, text, text, text, bigint, text, text, text, uuid
 ) IS
   'SECURITY DEFINER. Admit a purchase-capture LINE event with DB-clock close '
-  'barrier. Global line_event_id uniqueness; concurrent duplicate delivery is '
-  'idempotent (re-check under session lock + unique_violation handler). First '
-  'close excludes already-admitted post-boundary non-close evidence from the '
-  'authoritative finalizable set without deleting ingest rows.';
+  'barrier. Re-verifies (source_type, source_id, sender_line_user_id, '
+  'session_generation) against the locked session before any mutation, '
+  'refusing ownership_mismatch otherwise. Global line_event_id uniqueness; '
+  'concurrent identical-fingerprint delivery is idempotent (re-check under '
+  'session lock + unique_violation handler); a differing fingerprint under '
+  'the same event id is refused (line_event_conflict). First close excludes '
+  'already-admitted post-boundary non-close evidence from the authoritative '
+  'finalizable set without deleting ingest rows.';
 
 REVOKE ALL ON FUNCTION public.admit_purchase_capture_event(
-  uuid, uuid, text, bigint, text, text, text, uuid
+  uuid, uuid, text, text, text, text, bigint, text, text, text, uuid
 ) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.admit_purchase_capture_event(
-  uuid, uuid, text, bigint, text, text, text, uuid
+  uuid, uuid, text, text, text, text, bigint, text, text, text, uuid
 ) TO service_role;
 
 -- ── Close the already-persisted opening event (one-message documents) ───────
@@ -740,21 +922,37 @@ GRANT EXECUTE ON FUNCTION public.admit_purchase_capture_event(
 -- (20260803122757_priced_house_stock.sql).
 
 CREATE OR REPLACE FUNCTION public.close_purchase_capture_open_event(
-  p_session_id uuid,
-  p_expected_generation uuid,
-  p_opened_line_event_id text
+  p_session_id                    uuid,
+  p_expected_generation           uuid,
+  p_expected_source_type          text,
+  p_expected_source_id            text,
+  p_expected_sender_line_user_id  text,
+  p_opened_line_event_id          text
 ) RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, extensions, pg_temp
 AS $$
 DECLARE
-  v_session public.purchase_capture_sessions%ROWTYPE;
-  v_ingest  public.purchase_capture_session_ingests%ROWTYPE;
-  v_now     timestamptz := clock_timestamp();
+  v_session             public.purchase_capture_sessions%ROWTYPE;
+  v_ingest              public.purchase_capture_session_ingests%ROWTYPE;
+  v_now                 timestamptz := clock_timestamp();
+  v_expected_source_id  text;
+  v_expected_sender     text;
 BEGIN
   IF p_session_id IS NULL OR p_expected_generation IS NULL THEN
     RAISE EXCEPTION 'session_id and expected_generation required';
+  END IF;
+  IF p_expected_source_type IS NULL OR p_expected_source_type NOT IN ('user', 'group', 'room') THEN
+    RAISE EXCEPTION 'invalid expected_source_type';
+  END IF;
+  IF p_expected_source_id IS NULL OR length(btrim(p_expected_source_id)) = 0 THEN
+    RAISE EXCEPTION 'expected_source_id required';
+  END IF;
+  v_expected_source_id := btrim(p_expected_source_id);
+  v_expected_sender := btrim(coalesce(p_expected_sender_line_user_id, ''));
+  IF length(v_expected_sender) = 0 THEN
+    RAISE EXCEPTION 'expected_sender_line_user_id required';
   END IF;
 
   SELECT * INTO v_session
@@ -765,6 +963,11 @@ BEGIN
   IF NOT FOUND THEN RAISE EXCEPTION 'purchase capture session not found'; END IF;
   IF v_session.session_generation IS DISTINCT FROM p_expected_generation THEN
     RAISE EXCEPTION 'generation_conflict';
+  END IF;
+  IF v_session.source_type IS DISTINCT FROM p_expected_source_type
+     OR v_session.source_id IS DISTINCT FROM v_expected_source_id
+     OR v_session.sender_line_user_id IS DISTINCT FROM v_expected_sender THEN
+    RAISE EXCEPTION 'ownership_mismatch';
   END IF;
   IF v_session.opened_line_event_id IS DISTINCT FROM btrim(coalesce(p_opened_line_event_id, '')) THEN
     RAISE EXCEPTION 'line_event_conflict';
@@ -812,22 +1015,27 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.close_purchase_capture_open_event(uuid, uuid, text) IS
-  'SECURITY DEFINER. Sets the close boundary from the already-persisted '
-  'opening ingest row for the one-message (header+items+costs+close) case, '
-  'without inserting a second ingest row for the same line_event_id. '
-  'Idempotent on redelivery (boundary fields are immutable once set).';
+COMMENT ON FUNCTION public.close_purchase_capture_open_event(uuid, uuid, text, text, text, text) IS
+  'SECURITY DEFINER. Re-verifies (source_type, source_id, sender_line_user_id, '
+  'session_generation) against the locked session before any mutation, '
+  'refusing ownership_mismatch otherwise. Sets the close boundary from the '
+  'already-persisted opening ingest row for the one-message case, without '
+  'inserting a second ingest row for the same line_event_id. Idempotent on '
+  'redelivery (boundary fields are immutable once set).';
 
-REVOKE ALL ON FUNCTION public.close_purchase_capture_open_event(uuid, uuid, text)
+REVOKE ALL ON FUNCTION public.close_purchase_capture_open_event(uuid, uuid, text, text, text, text)
   FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.close_purchase_capture_open_event(uuid, uuid, text)
+GRANT EXECUTE ON FUNCTION public.close_purchase_capture_open_event(uuid, uuid, text, text, text, text)
   TO service_role;
 
 -- ── Finalize candidate (one SQL statement = one snapshot) ────────────────────
 
 CREATE OR REPLACE FUNCTION public.get_purchase_capture_finalize_candidate(
-  p_session_id          uuid,
-  p_expected_generation uuid
+  p_session_id                    uuid,
+  p_expected_generation           uuid,
+  p_expected_source_type          text,
+  p_expected_source_id            text,
+  p_expected_sender_line_user_id  text
 ) RETURNS jsonb
 LANGUAGE plpgsql
 STABLE
@@ -835,15 +1043,31 @@ SECURITY DEFINER
 SET search_path = public, extensions, pg_temp
 AS $$
 DECLARE
-  v_result jsonb;
+  v_result              jsonb;
+  v_expected_source_id  text;
+  v_expected_sender     text;
 BEGIN
   IF p_session_id IS NULL OR p_expected_generation IS NULL THEN
     RAISE EXCEPTION 'session_id and expected_generation required';
   END IF;
+  IF p_expected_source_type IS NULL OR p_expected_source_type NOT IN ('user', 'group', 'room') THEN
+    RAISE EXCEPTION 'invalid expected_source_type';
+  END IF;
+  IF p_expected_source_id IS NULL OR length(btrim(p_expected_source_id)) = 0 THEN
+    RAISE EXCEPTION 'expected_source_id required';
+  END IF;
+  v_expected_source_id := btrim(p_expected_source_id);
+  v_expected_sender := btrim(coalesce(p_expected_sender_line_user_id, ''));
+  IF length(v_expected_sender) = 0 THEN
+    RAISE EXCEPTION 'expected_sender_line_user_id required';
+  END IF;
 
   -- Single SQL statement → one PostgreSQL snapshot for generation, revision,
   -- ordered eligible ingests, hash, and quiet/deadline eligibility. No long
-  -- locks; the caller (finalize RPC, added in Slice B) re-verifies.
+  -- locks; the caller (finalize RPC, added in Slice B) re-verifies. Ownership
+  -- is part of the WHERE clause itself, not a separate post-check, so a
+  -- mismatched caller sees no row at all — the NULL-handling below then
+  -- distinguishes not-found / generation_conflict / ownership_mismatch.
   SELECT jsonb_build_object(
     'session_id', s.id,
     'session_generation', s.session_generation,
@@ -859,7 +1083,7 @@ BEGIN
                 || E'\x1f' || i.kind
                 || E'\x1f' || i.raw_text,
               E'\n'
-              ORDER BY i.ingest_ordinal ASC, i.line_event_id ASC
+              ORDER BY i.line_timestamp_ms ASC, i.line_event_id ASC
             )
             FROM public.purchase_capture_session_ingests i
             WHERE i.session_id = s.id
@@ -884,9 +1108,13 @@ BEGIN
       (s.close_quiet_until IS NOT NULL AND clock_timestamp() >= s.close_quiet_until)
       OR (s.close_deadline_at IS NOT NULL AND clock_timestamp() >= s.close_deadline_at)
     ),
+    -- Canonical (line_timestamp_ms, line_event_id) order — the same order the
+    -- hash above is computed in — never ingest_ordinal (admission order).
+    -- Slice B's parser adapter must still sort defensively rather than trust
+    -- this ordering as a contract (plan §8.2/§9.1).
     'ingests', coalesce(
       (
-        SELECT jsonb_agg(row_to_json(x)::jsonb ORDER BY x.ingest_ordinal)
+        SELECT jsonb_agg(row_to_json(x)::jsonb ORDER BY x.line_timestamp_ms, x.line_event_id)
         FROM (
           SELECT
             i.line_event_id,
@@ -903,7 +1131,7 @@ BEGIN
               OR i.kind = 'close'
               OR i.line_timestamp_ms <= s.close_event_timestamp_ms
             )
-          ORDER BY i.ingest_ordinal ASC
+          ORDER BY i.line_timestamp_ms ASC, i.line_event_id ASC
         ) x
       ),
       '[]'::jsonb
@@ -912,7 +1140,10 @@ BEGIN
   INTO v_result
   FROM public.purchase_capture_sessions s
   WHERE s.id = p_session_id
-    AND s.session_generation = p_expected_generation;
+    AND s.session_generation = p_expected_generation
+    AND s.source_type = p_expected_source_type
+    AND s.source_id = v_expected_source_id
+    AND s.sender_line_user_id = v_expected_sender;
 
   IF v_result IS NULL THEN
     IF NOT EXISTS (
@@ -920,21 +1151,30 @@ BEGIN
     ) THEN
       RAISE EXCEPTION 'purchase capture session not found';
     END IF;
-    RAISE EXCEPTION 'generation_conflict';
+    IF NOT EXISTS (
+      SELECT 1 FROM public.purchase_capture_sessions
+      WHERE id = p_session_id AND session_generation = p_expected_generation
+    ) THEN
+      RAISE EXCEPTION 'generation_conflict';
+    END IF;
+    RAISE EXCEPTION 'ownership_mismatch';
   END IF;
 
   RETURN v_result;
 END;
 $$;
 
-COMMENT ON FUNCTION public.get_purchase_capture_finalize_candidate(uuid, uuid) IS
-  'SECURITY DEFINER. One SQL-statement snapshot of generation/revision/hash/'
-  'ordered close-boundary-eligible ingests plus quiet/deadline eligibility, '
-  'for the caller (parser adapter + finalize RPC, added in Slice B) to act on.';
+COMMENT ON FUNCTION public.get_purchase_capture_finalize_candidate(uuid, uuid, text, text, text) IS
+  'SECURITY DEFINER. Re-verifies (source_type, source_id, sender_line_user_id, '
+  'session_generation) as part of the lookup itself, refusing ownership_mismatch '
+  'otherwise. One SQL-statement snapshot of generation/revision/hash/ordered '
+  'close-boundary-eligible ingests (canonical timestamp/event order, never '
+  'admission order) plus quiet/deadline eligibility, for the caller (parser '
+  'adapter + finalize RPC, added in Slice B) to act on.';
 
-REVOKE ALL ON FUNCTION public.get_purchase_capture_finalize_candidate(uuid, uuid)
+REVOKE ALL ON FUNCTION public.get_purchase_capture_finalize_candidate(uuid, uuid, text, text, text)
   FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.get_purchase_capture_finalize_candidate(uuid, uuid)
+GRANT EXECUTE ON FUNCTION public.get_purchase_capture_finalize_candidate(uuid, uuid, text, text, text)
   TO service_role;
 
 -- ── Cancel (open/closing/awaiting_confirmation → cancelled) ──────────────────
@@ -943,19 +1183,35 @@ GRANT EXECUTE ON FUNCTION public.get_purchase_capture_finalize_candidate(uuid, u
 -- CHECK-guarded transition table are defined once, here (plan §16.4).
 
 CREATE OR REPLACE FUNCTION public.cancel_purchase_capture_session(
-  p_session_id          uuid,
-  p_expected_generation uuid
+  p_session_id                    uuid,
+  p_expected_generation           uuid,
+  p_expected_source_type          text,
+  p_expected_source_id            text,
+  p_expected_sender_line_user_id  text
 ) RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, extensions, pg_temp
 AS $$
 DECLARE
-  v_session public.purchase_capture_sessions%ROWTYPE;
-  v_now     timestamptz := clock_timestamp();
+  v_session             public.purchase_capture_sessions%ROWTYPE;
+  v_now                 timestamptz := clock_timestamp();
+  v_expected_source_id  text;
+  v_expected_sender     text;
 BEGIN
   IF p_session_id IS NULL OR p_expected_generation IS NULL THEN
     RAISE EXCEPTION 'session_id and expected_generation required';
+  END IF;
+  IF p_expected_source_type IS NULL OR p_expected_source_type NOT IN ('user', 'group', 'room') THEN
+    RAISE EXCEPTION 'invalid expected_source_type';
+  END IF;
+  IF p_expected_source_id IS NULL OR length(btrim(p_expected_source_id)) = 0 THEN
+    RAISE EXCEPTION 'expected_source_id required';
+  END IF;
+  v_expected_source_id := btrim(p_expected_source_id);
+  v_expected_sender := btrim(coalesce(p_expected_sender_line_user_id, ''));
+  IF length(v_expected_sender) = 0 THEN
+    RAISE EXCEPTION 'expected_sender_line_user_id required';
   END IF;
 
   SELECT * INTO v_session
@@ -966,6 +1222,11 @@ BEGIN
   IF NOT FOUND THEN RAISE EXCEPTION 'purchase capture session not found'; END IF;
   IF v_session.session_generation IS DISTINCT FROM p_expected_generation THEN
     RAISE EXCEPTION 'generation_conflict';
+  END IF;
+  IF v_session.source_type IS DISTINCT FROM p_expected_source_type
+     OR v_session.source_id IS DISTINCT FROM v_expected_source_id
+     OR v_session.sender_line_user_id IS DISTINCT FROM v_expected_sender THEN
+    RAISE EXCEPTION 'ownership_mismatch';
   END IF;
 
   IF v_session.status = 'cancelled' THEN
@@ -1002,14 +1263,17 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.cancel_purchase_capture_session(uuid, uuid) IS
-  'SECURITY DEFINER. Cancels an open/closing/awaiting_confirmation session. '
-  'Idempotent if already cancelled; refuses invalid_state from any other '
-  'status (confirming/posted/failed_closed are never cancellable).';
+COMMENT ON FUNCTION public.cancel_purchase_capture_session(uuid, uuid, text, text, text) IS
+  'SECURITY DEFINER. Re-verifies (source_type, source_id, sender_line_user_id, '
+  'session_generation) against the locked session before any mutation, '
+  'refusing ownership_mismatch otherwise. Cancels an open/closing/'
+  'awaiting_confirmation session. Idempotent if already cancelled; refuses '
+  'invalid_state from any other status (confirming/posted/failed_closed are '
+  'never cancellable).';
 
-REVOKE ALL ON FUNCTION public.cancel_purchase_capture_session(uuid, uuid)
+REVOKE ALL ON FUNCTION public.cancel_purchase_capture_session(uuid, uuid, text, text, text)
   FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.cancel_purchase_capture_session(uuid, uuid)
+GRANT EXECUTE ON FUNCTION public.cancel_purchase_capture_session(uuid, uuid, text, text, text)
   TO service_role;
 
 -- ── Explicit table privileges ────────────────────────────────────────────────

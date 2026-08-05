@@ -1,5 +1,15 @@
 name: finalize-purchase-capture
 
+# Disabled by default. This workflow calls the Slice A eligibility-sweep cron
+# route, which requires the purchase_capture_* migration to already be
+# applied to Production. Activation order (see PR description):
+#   1. merge reviewed code
+#   2. apply the migration deliberately
+#   3. verify the Production route safely
+#   4. set the repository/environment variable PURCHASE_CAPTURE_CRON_ENABLED=true
+# Until that variable is set to the literal string "true", both the schedule
+# and a manual workflow_dispatch run are no-ops (the job is skipped).
+
 on:
   schedule:
     - cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
@@ -7,6 +17,7 @@ on:
 
 jobs:
   finalize:
+    if: ${{ vars.PURCHASE_CAPTURE_CRON_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Call Purchase Capture eligibility sweep cron

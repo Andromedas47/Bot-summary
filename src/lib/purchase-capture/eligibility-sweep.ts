@@ -60,6 +60,9 @@ export async function sweepPurchaseCaptureEligibility(
       const candidate = await service.getFinalizeCandidate({
         sessionId: session.id,
         expectedGeneration: session.session_generation,
+        expectedSourceType: session.source_type,
+        expectedSourceId: session.source_id,
+        expectedSenderLineUserId: session.sender_line_user_id,
       });
       if (candidate.eligibleForFinalize) {
         result.eligible += 1;

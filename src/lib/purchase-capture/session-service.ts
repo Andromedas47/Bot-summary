@@ -94,11 +94,26 @@ export class PurchaseCaptureInvalidStateError extends Error {
   }
 }
 
+export class PurchaseCaptureOwnershipMismatchError extends Error {
+  constructor(message = "ownership_mismatch") {
+    super(message);
+    this.name = "PurchaseCaptureOwnershipMismatchError";
+  }
+}
+
+/** Shared ownership re-check every mutating (and the one reading) RPC below requires. */
+type PurchaseCaptureExpectedOwnership = {
+  expectedSourceType: "user" | "group" | "room";
+  expectedSourceId: string;
+  expectedSenderLineUserId: string;
+};
+
 function mapRpcError(
   message: string,
   kind: "open" | "admit" | "close" | "candidate" | "cancel",
 ): Error {
   if (message.includes("generation_conflict")) return new PurchaseCaptureGenerationConflictError();
+  if (message.includes("ownership_mismatch")) return new PurchaseCaptureOwnershipMismatchError();
   if (message.includes("session_closed")) return new PurchaseCaptureSessionClosedError();
   if (message.includes("after_close_boundary") || message.includes("deadline_elapsed")) {
     return new PurchaseCaptureAfterCloseBoundaryError(
@@ -193,7 +208,7 @@ export class PurchaseCaptureSessionService {
     rawMessageId?: string | null;
     kind: PurchaseCaptureIngestKind;
     rawText: string;
-  }): Promise<{
+  } & PurchaseCaptureExpectedOwnership): Promise<{
     accepted: boolean;
     inserted: boolean;
     reason: string;
@@ -202,6 +217,9 @@ export class PurchaseCaptureSessionService {
     const { data, error } = await this.supabase.rpc("admit_purchase_capture_event", {
       p_session_id: params.sessionId,
       p_expected_generation: params.expectedGeneration,
+      p_expected_source_type: params.expectedSourceType,
+      p_expected_source_id: params.expectedSourceId,
+      p_expected_sender_line_user_id: params.expectedSenderLineUserId,
       p_line_event_id: params.lineEventId,
       p_line_timestamp_ms: params.lineTimestampMs,
       p_kind: params.kind,
@@ -223,10 +241,13 @@ export class PurchaseCaptureSessionService {
     sessionId: string;
     expectedGeneration: string;
     openedLineEventId: string;
-  }): Promise<{ idempotent: boolean; session: PurchaseCaptureSessionRow }> {
+  } & PurchaseCaptureExpectedOwnership): Promise<{ idempotent: boolean; session: PurchaseCaptureSessionRow }> {
     const { data, error } = await this.supabase.rpc("close_purchase_capture_open_event", {
       p_session_id: params.sessionId,
       p_expected_generation: params.expectedGeneration,
+      p_expected_source_type: params.expectedSourceType,
+      p_expected_source_id: params.expectedSourceId,
+      p_expected_sender_line_user_id: params.expectedSenderLineUserId,
       p_opened_line_event_id: params.openedLineEventId,
     });
     if (error) throw mapRpcError(error.message ?? "", "close");
@@ -239,10 +260,13 @@ export class PurchaseCaptureSessionService {
   async getFinalizeCandidate(params: {
     sessionId: string;
     expectedGeneration: string;
-  }): Promise<PurchaseCaptureFinalizeCandidate> {
+  } & PurchaseCaptureExpectedOwnership): Promise<PurchaseCaptureFinalizeCandidate> {
     const { data, error } = await this.supabase.rpc("get_purchase_capture_finalize_candidate", {
       p_session_id: params.sessionId,
       p_expected_generation: params.expectedGeneration,
+      p_expected_source_type: params.expectedSourceType,
+      p_expected_source_id: params.expectedSourceId,
+      p_expected_sender_line_user_id: params.expectedSenderLineUserId,
     });
     if (error) throw mapRpcError(error.message ?? "", "candidate");
     const row = data as {
@@ -275,24 +299,17 @@ export class PurchaseCaptureSessionService {
     };
   }
 
-  async listIngestTexts(sessionId: string): Promise<string[]> {
-    const { data, error } = await this.supabase
-      .from("purchase_capture_session_ingests")
-      .select("raw_text, ingest_ordinal")
-      .eq("session_id", sessionId)
-      .order("ingest_ordinal", { ascending: true });
-    if (error) throw new Error(`listIngestTexts failed: ${error.message}`);
-    return (data ?? []).map((r) => r.raw_text);
-  }
-
   /** Cancel from open/closing/awaiting_confirmation; idempotent if already cancelled. */
   async cancelSession(params: {
     sessionId: string;
     expectedGeneration: string;
-  }): Promise<{ idempotent: boolean; session: PurchaseCaptureSessionRow }> {
+  } & PurchaseCaptureExpectedOwnership): Promise<{ idempotent: boolean; session: PurchaseCaptureSessionRow }> {
     const { data, error } = await this.supabase.rpc("cancel_purchase_capture_session", {
       p_session_id: params.sessionId,
       p_expected_generation: params.expectedGeneration,
+      p_expected_source_type: params.expectedSourceType,
+      p_expected_source_id: params.expectedSourceId,
+      p_expected_sender_line_user_id: params.expectedSenderLineUserId,
     });
     if (error) throw mapRpcError(error.message ?? "", "cancel");
     const row = data as { idempotent: boolean; session_id: string };

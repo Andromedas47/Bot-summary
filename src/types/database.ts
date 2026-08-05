@@ -2016,36 +2016,48 @@ export interface Database {
       };
       admit_purchase_capture_event: {
         Args: {
-          p_session_id:          string;
-          p_expected_generation: string;
-          p_line_event_id:       string;
-          p_line_timestamp_ms:   number;
-          p_kind:                string;
-          p_raw_text:            string;
-          p_line_message_id?:    string | null;
-          p_raw_message_id?:     string | null;
+          p_session_id:                    string;
+          p_expected_generation:           string;
+          p_expected_source_type:          string;
+          p_expected_source_id:            string;
+          p_expected_sender_line_user_id:  string;
+          p_line_event_id:                 string;
+          p_line_timestamp_ms:             number;
+          p_kind:                          string;
+          p_raw_text:                      string;
+          p_line_message_id?:              string | null;
+          p_raw_message_id?:               string | null;
         };
         Returns: Json;
       };
       close_purchase_capture_open_event: {
         Args: {
-          p_session_id:           string;
-          p_expected_generation:  string;
-          p_opened_line_event_id: string;
+          p_session_id:                    string;
+          p_expected_generation:           string;
+          p_expected_source_type:          string;
+          p_expected_source_id:            string;
+          p_expected_sender_line_user_id:  string;
+          p_opened_line_event_id:          string;
         };
         Returns: Json;
       };
       get_purchase_capture_finalize_candidate: {
         Args: {
-          p_session_id:          string;
-          p_expected_generation: string;
+          p_session_id:                    string;
+          p_expected_generation:           string;
+          p_expected_source_type:          string;
+          p_expected_source_id:            string;
+          p_expected_sender_line_user_id:  string;
         };
         Returns: Json;
       };
       cancel_purchase_capture_session: {
         Args: {
-          p_session_id:          string;
-          p_expected_generation: string;
+          p_session_id:                    string;
+          p_expected_generation:           string;
+          p_expected_source_type:          string;
+          p_expected_source_id:            string;
+          p_expected_sender_line_user_id:  string;
         };
         Returns: Json;
       };

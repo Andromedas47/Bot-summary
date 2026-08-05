@@ -31,3 +31,49 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun install
       - run: bun run test:pg:0059
+
+  purchase-capture-slice-a:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ALLOW_DISPOSABLE_POSTGRES_TESTS: "1"
+      # Real PostgreSQL must actually run here, not silently skip — an
+      # unavailable connection is a hard failure of this job, not a green
+      # SKIP (plan §21 Slice A / PR hardening round).
+      REQUIRE_POSTGRES_TESTS: "1"
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGPORT: "5432"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - name: Slice A real-PostgreSQL migration/hardening/concurrency suite
+        run: bunx bun test src/lib/purchase-capture/migration-slice-a.pg.test.ts
+      - name: Slice A eligibility-sweep + cron route unit tests
+        run: >-
+          bunx bun test
+          src/lib/purchase-capture/eligibility-sweep.test.ts
+          src/app/api/cron/finalize-purchase-capture/route.test.ts
+      - name: Relevant Physical Inventory session tests (regression guard)
+        run: bunx bun test src/lib/physical-inventory
+      - name: Typecheck
+        run: npm run type-check
+      - name: git diff --check against the PR base
+        run: git diff --check "origin/${{ github.base_ref }}...HEAD"

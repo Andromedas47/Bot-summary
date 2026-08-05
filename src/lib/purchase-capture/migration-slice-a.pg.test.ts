@@ -130,6 +130,12 @@ if (pgSkipReason) {
   console.warn(`Purchase capture Slice A PG tests ${pgSkipReason}`);
 }
 
+if (REQUIRE_POSTGRES_TESTS && !pgAvailable) {
+  throw new Error(
+    `PostgreSQL tests are required but unavailable at ${PGHOST}:${PGPORT}: ${probe.detail}`,
+  );
+}
+
 describe.skipIf(!pgAvailable)("Purchase capture Slice A migration PostgreSQL hardening", () => {
   const dbName = `pc_slice_a_${randomBytes(4).toString("hex")}`;
   const psqlPath = resolvedPsql as string;
@@ -618,19 +624,6 @@ describe.skipIf(!pgAvailable)("Purchase capture Slice A migration PostgreSQL har
         `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${dbName}' AND pid <> pg_backend_pid();`,
       ]);
       await runPsql(psqlPath, ["-d", "postgres", "-c", `DROP DATABASE IF EXISTS ${dbName}`]);
-    }
-  });
-});
-
-describe.skipIf(pgAvailable)("Purchase capture Slice A migration PostgreSQL unavailable", () => {
-  test("explicit SKIP (not a green functional PASS), or hard FAIL under REQUIRE_POSTGRES_TESTS=1", () => {
-    console.warn(pgSkipReason);
-    expect(pgSkipReason).toContain("SKIPPED");
-    if (REQUIRE_POSTGRES_TESTS) {
-      throw new Error(
-        `REQUIRE_POSTGRES_TESTS=1 but PostgreSQL is unavailable (${pgSkipReason}). ` +
-          "CI must not report green without actually running the real PostgreSQL suite.",
-      );
     }
   });
 });

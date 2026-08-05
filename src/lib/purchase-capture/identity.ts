@@ -6,7 +6,6 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/database";
-import { capturePurchaseText } from "@/lib/purchases/text-chunks";
 import type {
   PurchaseIdentityStatus,
   PurchasePriceUnitStatus,
@@ -41,7 +40,7 @@ export type ResolvedPriceUnitIdentity = {
 };
 
 export function normalizeRegistryText(raw: string): string {
-  return capturePurchaseText(raw).normalized;
+  return raw.normalize("NFC").replace(/\s+/g, " ").trim();
 }
 
 /** Deterministic placeholder when registry lookup fails (§10.3). */

@@ -115,7 +115,10 @@ jobs:
           src/lib/purchase-capture/identity.test.ts
           src/lib/purchase-capture/parser-adapter.test.ts
           src/lib/purchase-capture/preview.test.ts
+          src/lib/purchase-capture/preview-confirmation.test.ts
+          src/lib/purchase-capture/finalizer.test.ts
           src/lib/purchase-capture/notification-push-worker.test.ts
+          src/app/api/cron/finalize-purchase-capture/route.test.ts
       - name: Slice A regression + purchase parser/receipt tests
         run: >-
           bunx bun test

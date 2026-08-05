@@ -9,9 +9,7 @@ import type {
   PurchaseConfirmationPayload,
   PurchaseReceiptDraftInput,
 } from "@/lib/purchase-receipts/types";
-import { PURCHASE_CONFIRMATION_CONTRACT_VERSION } from "@/lib/purchase-receipts/types";
-import { PURCHASE_INTENDED_WAREHOUSE_MAIN } from "@/lib/purchases";
-import { itemHasBlockingIdentity } from "./identity";
+import { buildPreviewConfirmationFromDraft } from "./preview-confirmation";
 
 function formatDisplayBusinessDate(isoDate: string): string {
   const [year, month, day] = isoDate.split("-");
@@ -46,6 +44,9 @@ function itemBlockingLabel(item: PurchaseConfirmationItem): string {
   ) {
     return " ⚠️ หน่วยราคาต่างจากหน่วยจำนวน";
   }
+  if (item.unit_cost == null) {
+    return " ⚠️ ไม่ทราบราคาต่อหน่วย";
+  }
   return "";
 }
 
@@ -59,17 +60,21 @@ function itemBlockingDetail(item: PurchaseConfirmationItem): string | null {
   ) {
     return `รายการที่ ${item.item_ordinal}: หน่วย "${item.raw_unit}" กับ "${item.price_unit_text ?? "—"}" ต้องเป็นหน่วยเดียวกัน หรือยังไม่ได้ลงทะเบียนหน่วยนี้`;
   }
+  if (item.unit_cost == null) {
+    return `รายการที่ ${item.item_ordinal}: ไม่ทราบราคาต่อหน่วย — ต้องระบุราคาก่อนยืนยัน`;
+  }
   return null;
 }
 
-function hasBlockingItems(payload: PurchaseConfirmationPayload): boolean {
-  return payload.items.some((item) =>
-    itemHasBlockingIdentity({
-      productIdentityStatus: item.product_identity_status,
-      unitIdentityStatus: item.unit_identity_status,
-      priceUnitStatus: item.price_unit_status,
-    })
-  );
+function reviewFlagLines(payload: PurchaseConfirmationPayload): string[] {
+  const reviewBlocker = payload.blockers.find((blocker) => blocker.code === "SOURCE_REVIEW_FLAGS");
+  if (!reviewBlocker?.flags || !Array.isArray(reviewBlocker.flags)) return [];
+  return reviewBlocker.flags.map((flag) => {
+    if (typeof flag === "object" && flag != null && "code" in flag) {
+      return `  - ${String((flag as { code: string }).code)}`;
+    }
+    return `  - ${String(flag)}`;
+  });
 }
 
 export function renderPurchaseCapturePreviewText(
@@ -78,7 +83,8 @@ export function renderPurchaseCapturePreviewText(
   const blockers = payload.items
     .map((item) => itemBlockingDetail(item))
     .filter((line): line is string => line != null);
-  const blocking = hasBlockingItems(payload);
+  const blocking = payload.has_blocking_blockers;
+  const reviewLines = reviewFlagLines(payload);
 
   const lines: string[] = [
     blocking ? "สรุปใบซื้อ (มีรายการต้องแก้ไข)" : "สรุปใบซื้อ (รอยืนยัน)",
@@ -110,9 +116,15 @@ export function renderPurchaseCapturePreviewText(
       ? "ภาษีมูลค่าเพิ่ม: ไม่มี"
       : `ภาษีมูลค่าเพิ่ม: ${formatBahtFromSatangString(payload.totals.vat_satang)}`,
     "",
-    `ยอดชำระสุทธิ: ${formatBahtFromSatangString(payload.totals.payable_total_satang)}`,
+    payload.totals.payable_total_satang == null
+      ? "ยอดชำระสุทธิ: ไม่สามารถคำนวณ"
+      : `ยอดชำระสุทธิ: ${formatBahtFromSatangString(payload.totals.payable_total_satang)}`,
     "",
   );
+
+  if (reviewLines.length > 0) {
+    lines.push("หมายเหตุจากการตรวจสอบ (ไม่บล็อกการยืนยัน):", ...reviewLines, "");
+  }
 
   if (blocking) {
     lines.push(
@@ -136,103 +148,7 @@ export function renderPurchaseCapturePreviewText(
   return lines.join("\n");
 }
 
-export function buildPreviewConfirmationFromDraft(
-  draft: PurchaseReceiptDraftInput,
-): PurchaseConfirmationPayload {
-  const items: PurchaseConfirmationItem[] = draft.items.map((item, index) => ({
-    receipt_item_id: `preview-${index + 1}`,
-    item_ordinal: index + 1,
-    item_number: item.itemNumber ?? null,
-    product_key: item.productKey,
-    raw_product_text: item.rawProductText,
-    product_identity_status: item.productIdentityStatus ?? "UNRESOLVED",
-    quantity: item.quantity,
-    unit_key: item.unitKey,
-    raw_unit: item.rawUnit,
-    unit_identity_status: item.unitIdentityStatus ?? "UNRESOLVED",
-    unit_cost: item.unitCost ?? null,
-    price_unit_text: item.priceUnitText ?? null,
-    price_unit_status: item.priceUnitStatus ?? "NOT_APPLICABLE",
-    line_amount_satang: item.unitCost
-      ? multiplyDecimalStrings(item.quantity, item.unitCost)
-      : null,
-    source_evidence: item.sourceEvidence ?? {},
-  }));
-
-  const lineSubtotal = items.reduce((sum, item) => {
-    if (item.line_amount_satang == null) return sum;
-    return sum + BigInt(item.line_amount_satang);
-  }, BigInt(0));
-
-  const freight = BigInt(draft.freightSatang ?? "0");
-  const handling = BigInt(draft.handlingSatang ?? "0");
-  const discount = BigInt(draft.discountSatang ?? "0");
-  const vat = draft.vat?.kind === "AMOUNT" ? BigInt(draft.vat.satang) : BigInt(0);
-  const payable = lineSubtotal + freight + handling - discount
-    + (draft.vat?.kind === "AMOUNT" && !draft.vat.includedInItemPrices ? vat : BigInt(0));
-
-  return {
-    contract_version: PURCHASE_CONFIRMATION_CONTRACT_VERSION,
-    receipt_id: "preview",
-    document_namespace: draft.documentNamespace,
-    document_key: draft.documentKey,
-    parser_contract_version: draft.contractVersion,
-    source: {
-      source_type: draft.sourceType ?? null,
-      source_id: draft.sourceId ?? null,
-      sender_line_user_id: draft.senderLineUserId ?? null,
-      source_line_event_id: draft.sourceLineEventId ?? null,
-      source_raw_message_id: draft.sourceRawMessageId ?? null,
-      source_evidence: draft.sourceEvidence ?? {},
-    },
-    business_date: draft.businessDate,
-    purchase_time: draft.purchaseTime ?? null,
-    supplier_key: draft.supplierKey ?? null,
-    supplier_raw: draft.supplierRaw ?? null,
-    supplier_ref: draft.supplierRef ?? null,
-    reference_text: draft.referenceText ?? null,
-    intended_warehouse_code: PURCHASE_INTENDED_WAREHOUSE_MAIN,
-    vat_kind: draft.vat?.kind === "AMOUNT" ? "AMOUNT" : "NONE",
-    vat_included_in_item_prices: draft.vat?.kind === "AMOUNT" ? draft.vat.includedInItemPrices : null,
-    vat_recoverable: draft.vat?.kind === "AMOUNT" ? draft.vat.recoverable : null,
-    item_count: items.length,
-    items,
-    totals: {
-      line_subtotal_satang: items.some((item) => item.line_amount_satang == null)
-        ? null
-        : lineSubtotal.toString(),
-      freight_satang: freight.toString(),
-      handling_satang: handling.toString(),
-      discount_satang: discount.toString(),
-      vat_satang: draft.vat?.kind === "AMOUNT" ? vat.toString() : null,
-      payable_total_satang: items.some((item) => item.line_amount_satang == null)
-        ? null
-        : payable.toString(),
-      declared_total_satang: null,
-      reconciliation_status: items.some((item) => item.line_amount_satang == null)
-        ? "NOT_COMPUTABLE_MISSING_UNIT_COST"
-        : "COMPUTED_NO_DECLARED_TOTAL_IN_SOURCE",
-    },
-    blockers: [],
-    has_blocking_blockers: items.some((item) =>
-      item.product_identity_status !== "RESOLVED"
-      || item.unit_identity_status !== "RESOLVED"
-      || (item.price_unit_status !== "NOT_APPLICABLE" && item.price_unit_status !== "RESOLVED")),
-    posts_inventory_movement: false,
-    posts_valuation: false,
-  };
-}
-
-function multiplyDecimalStrings(quantity: string, unitCost: string): string | null {
-  const [qWhole, qFrac = ""] = quantity.split(".");
-  const [cWhole, cFrac = ""] = unitCost.split(".");
-  const q = BigInt(`${qWhole}${qFrac}`);
-  const c = BigInt(`${cWhole}${cFrac}`);
-  const scale = BigInt(10) ** BigInt(qFrac.length + cFrac.length);
-  const product = q * c;
-  const satang = product * BigInt(100) / scale;
-  return satang.toString();
-}
+export { buildPreviewConfirmationFromDraft } from "./preview-confirmation";
 
 export function renderPurchaseCapturePreviewPayloadTextsFromDraft(
   draft: PurchaseReceiptDraftInput,

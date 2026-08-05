@@ -2192,6 +2192,9 @@ export interface Database {
         Args: {
           p_session_id: string;
           p_expected_generation: string;
+          p_expected_source_type: string;
+          p_expected_source_id: string;
+          p_expected_sender_line_user_id: string;
           p_expected_ingest_revision: number;
           p_expected_ingest_hash: string;
           p_assembly_status: string;

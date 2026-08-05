@@ -67,9 +67,14 @@ function completeAssembly(itemTwo = ITEM_TWO_UNKNOWN) {
   );
 }
 
+const ITEM_TWO_RESOLVED = `ซื้อรายการ 2
+สินค้า: องุ่นเขียวตะกร้าแดง
+จำนวน: 6 ตะกร้า
+ราคา: 120 บาท/ตะกร้า`;
+
 describe("purchase capture preview rendering", () => {
   test("shows รอยืนยัน when identities resolve", () => {
-    const assembly = completeAssembly();
+    const assembly = completeAssembly(ITEM_TWO_RESOLVED);
     const draft = buildPurchaseReceiptDraftInput({
       assembly,
       context,

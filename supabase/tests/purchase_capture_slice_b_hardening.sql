@@ -234,7 +234,8 @@ BEGIN
   v_draft_rev := (r_draft->>'draft_revision')::bigint;
 
   r_finalize := public.finalize_purchase_capture_session(
-    v_sid, v_gen, v_rev, v_hash, 'success',
+    v_sid, v_gen, 'group', 'G-b-finalize-ok', 'U-b-finalize-ok',
+    v_rev, v_hash, 'success',
     v_receipt, v_draft_rev, ARRAY['preview line 1'], NULL
   );
   PERFORM pg_temp.pc_b_assert((r_finalize->>'status') = 'awaiting_confirmation', 'closing → awaiting_confirmation');
@@ -248,7 +249,8 @@ BEGIN
   PERFORM pg_temp.pc_b_assert(n_preview = 1, 'preview parts created atomically with finalize');
 
   r_finalize := public.finalize_purchase_capture_session(
-    v_sid, v_gen, v_rev, v_hash, 'success',
+    v_sid, v_gen, 'group', 'G-b-finalize-ok', 'U-b-finalize-ok',
+    v_rev, v_hash, 'success',
     v_receipt, v_draft_rev, ARRAY['preview line 1'], NULL
   );
   PERFORM pg_temp.pc_b_assert(COALESCE((r_finalize->>'idempotent')::boolean, false), 'idempotent retry');
@@ -270,7 +272,8 @@ BEGIN
    WHERE id = v_sid;
 
   r_fail := public.finalize_purchase_capture_session(
-    v_sid, v_gen, v_rev, v_hash, 'failed', NULL, NULL, NULL, 'missing_items'
+    v_sid, v_gen, 'group', 'G-b-finalize-fail', 'U-b-finalize-fail',
+    v_rev, v_hash, 'failed', NULL, NULL, NULL, 'missing_items'
   );
   PERFORM pg_temp.pc_b_assert((r_fail->>'status') = 'failed_closed', 'closing → failed_closed');
   PERFORM pg_temp.pc_b_assert(
@@ -293,13 +296,15 @@ BEGIN
     FROM public.purchase_capture_sessions
    WHERE id = v_sid;
 
-  r_fail := public.finalize_purchase_capture_session(
-    v_sid, v_gen, v_rev, v_hash, 'failed', v_receipt, v_draft_rev, ARRAY['x'], 'bad'
-  );
-  PERFORM pg_temp.pc_b_assert((r_fail->>'status') = 'failed_closed', 'failed path ignores receipt args');
-  PERFORM pg_temp.pc_b_assert(
-    (SELECT receipt_id IS NULL FROM public.purchase_capture_sessions WHERE id = v_sid),
-    'failed finalize never links receipt_id'
+  PERFORM pg_temp.pc_b_expect_error(
+    format(
+      $q$SELECT public.finalize_purchase_capture_session(
+        %L::uuid, %L::uuid, 'group', 'G-b-finalize-fail2', 'U-b-finalize-fail2',
+        %s, %L, 'failed', %L::uuid, 1, ARRAY['x'], 'bad')$q$,
+      v_sid, v_gen, v_rev, v_hash, v_receipt
+    ),
+    'receipt_id forbidden',
+    'failed assembly rejects receipt_id'
   );
 END;
 $$;
@@ -331,7 +336,8 @@ BEGIN
   PERFORM pg_temp.pc_b_expect_error(
     format(
       $q$SELECT public.finalize_purchase_capture_session(
-        %L::uuid, %L::uuid, %s, %L, 'failed', NULL, NULL, NULL, 'x')$q$,
+        %L::uuid, %L::uuid, 'group', 'G-b-stale', 'U-b-stale',
+        %s, %L, 'failed', NULL, NULL, NULL, 'x')$q$,
       v_sid, v_gen, v_rev + 1, v_hash
     ),
     'stale_ingest_revision',
@@ -341,7 +347,8 @@ BEGIN
   PERFORM pg_temp.pc_b_expect_error(
     format(
       $q$SELECT public.finalize_purchase_capture_session(
-        %L::uuid, %L::uuid, %s, %L, 'failed', NULL, NULL, NULL, 'x')$q$,
+        %L::uuid, %L::uuid, 'group', 'G-b-stale', 'U-b-stale',
+        %s, %L, 'failed', NULL, NULL, NULL, 'x')$q$,
       v_sid, v_gen, v_rev, 'deadbeef'
     ),
     'stale_ingest_hash',
@@ -351,7 +358,8 @@ BEGIN
   PERFORM pg_temp.pc_b_expect_error(
     format(
       $q$SELECT public.finalize_purchase_capture_session(
-        %L::uuid, %L::uuid, %s, %L, 'failed', NULL, NULL, NULL, 'x')$q$,
+        %L::uuid, %L::uuid, 'group', 'G-b-stale', 'U-b-stale',
+        %s, %L, 'failed', NULL, NULL, NULL, 'x')$q$,
       v_sid, v_gen, v_rev, v_hash
     ),
     'close_quiet_window',
@@ -403,7 +411,8 @@ BEGIN
   v_old_version := v_draft_rev::text;
 
   r_finalize := public.finalize_purchase_capture_session(
-    v_sid, v_gen, v_rev, v_hash, 'success',
+    v_sid, v_gen, 'group', 'G-b-replace', 'U-b-replace',
+    v_rev, v_hash, 'success',
     v_receipt, v_draft_rev, ARRAY['preview v1'], NULL
   );
   PERFORM pg_temp.pc_b_assert((r_finalize->>'status') = 'awaiting_confirmation', 'fixture awaiting_confirmation');
@@ -476,11 +485,11 @@ BEGIN
   PERFORM pg_temp.pc_b_assert(NOT v_anon_select, 'anon cannot SELECT notifications');
 
   PERFORM pg_temp.pc_b_assert(
-    has_function_privilege('service_role', 'public.finalize_purchase_capture_session(uuid,uuid,bigint,text,text,uuid,bigint,text[],text)', 'EXECUTE'),
+    has_function_privilege('service_role', 'public.finalize_purchase_capture_session(uuid,uuid,text,text,text,bigint,text,text,uuid,bigint,text[],text)', 'EXECUTE'),
     'service_role can execute finalize RPC'
   );
   PERFORM pg_temp.pc_b_assert(
-    NOT has_function_privilege('anon', 'public.finalize_purchase_capture_session(uuid,uuid,bigint,text,text,uuid,bigint,text[],text)', 'EXECUTE'),
+    NOT has_function_privilege('anon', 'public.finalize_purchase_capture_session(uuid,uuid,text,text,text,bigint,text,text,uuid,bigint,text[],text)', 'EXECUTE'),
     'anon cannot execute finalize RPC'
   );
 END;

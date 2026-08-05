@@ -363,6 +363,9 @@ export class PurchaseCaptureSessionService {
   async finalizeSession(params: {
     sessionId: string;
     expectedGeneration: string;
+    expectedSourceType: "user" | "group" | "room";
+    expectedSourceId: string;
+    expectedSenderLineUserId: string;
     expectedIngestRevision: number;
     expectedIngestHash: string;
     assemblyStatus: "success" | "failed";
@@ -382,6 +385,9 @@ export class PurchaseCaptureSessionService {
     const { data, error } = await this.supabase.rpc("finalize_purchase_capture_session", {
       p_session_id: params.sessionId,
       p_expected_generation: params.expectedGeneration,
+      p_expected_source_type: params.expectedSourceType,
+      p_expected_source_id: params.expectedSourceId,
+      p_expected_sender_line_user_id: params.expectedSenderLineUserId,
       p_expected_ingest_revision: params.expectedIngestRevision,
       p_expected_ingest_hash: params.expectedIngestHash,
       p_assembly_status: params.assemblyStatus,

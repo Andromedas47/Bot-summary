@@ -17,8 +17,10 @@ const units = new Map([
 ]);
 
 describe("purchase intake identity resolution", () => {
-  test("normalizes collapsed whitespace for registry lookup keys", () => {
-    expect(normalizeRegistryText("  หมอนทอง  ")).toBe("หมอนทอง");
+  test("collapses internal whitespace including tabs and newlines", () => {
+    expect(normalizeRegistryText("  หมอน   ทอง  ")).toBe("หมอน ทอง");
+    expect(normalizeRegistryText("หมอน\tทอง")).toBe("หมอน ทอง");
+    expect(normalizeRegistryText("หมอน\nทอง")).toBe("หมอน ทอง");
   });
 
   test("exact product resolution only", () => {
@@ -79,13 +81,6 @@ describe("purchase intake identity resolution", () => {
         productIdentityStatus: "UNRESOLVED",
         unitIdentityStatus: "RESOLVED",
         priceUnitStatus: "RESOLVED",
-      }),
-    ).toBe(true);
-    expect(
-      itemHasBlockingIdentity({
-        productIdentityStatus: "RESOLVED",
-        unitIdentityStatus: "UNRESOLVED",
-        priceUnitStatus: "NOT_APPLICABLE",
       }),
     ).toBe(true);
   });

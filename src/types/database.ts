@@ -1587,6 +1587,129 @@ export interface Database {
         Relationships: [];
       };
 
+      purchase_intake_product_registry: {
+        Row: {
+          id: string;
+          raw_product_text: string;
+          product_key: string;
+          active: boolean;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          raw_product_text: string;
+          product_key: string;
+          active?: boolean;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          raw_product_text?: string;
+          product_key?: string;
+          active?: boolean;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+
+      purchase_intake_unit_alias_registry: {
+        Row: {
+          id: string;
+          raw_unit_text: string;
+          unit_key: string;
+          active: boolean;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          raw_unit_text: string;
+          unit_key: string;
+          active?: boolean;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          raw_unit_text?: string;
+          unit_key?: string;
+          active?: boolean;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+
+      purchase_capture_notifications: {
+        Row: {
+          id: string;
+          session_id: string;
+          notification_kind: "preview_ready" | "posted_success" | "stuck_escalation";
+          notification_version: string;
+          part_index: number;
+          part_count: number;
+          payload_text: string;
+          payload_hash: string;
+          retry_key: string;
+          delivery_status: "pending" | "sending" | "delivered" | "failed" | "superseded";
+          claim_token: string | null;
+          claim_expires_at: string | null;
+          attempt_count: number;
+          last_attempt_at: string | null;
+          delivered_at: string | null;
+          superseded_at: string | null;
+          last_error: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          session_id: string;
+          notification_kind: "preview_ready" | "posted_success" | "stuck_escalation";
+          notification_version: string;
+          part_index: number;
+          part_count: number;
+          payload_text: string;
+          payload_hash: string;
+          retry_key?: string;
+          delivery_status?: "pending" | "sending" | "delivered" | "failed" | "superseded";
+          claim_token?: string | null;
+          claim_expires_at?: string | null;
+          attempt_count?: number;
+          last_attempt_at?: string | null;
+          delivered_at?: string | null;
+          superseded_at?: string | null;
+          last_error?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          session_id?: string;
+          notification_kind?: "preview_ready" | "posted_success" | "stuck_escalation";
+          notification_version?: string;
+          part_index?: number;
+          part_count?: number;
+          payload_text?: string;
+          payload_hash?: string;
+          retry_key?: string;
+          delivery_status?: "pending" | "sending" | "delivered" | "failed" | "superseded";
+          claim_token?: string | null;
+          claim_expires_at?: string | null;
+          attempt_count?: number;
+          last_attempt_at?: string | null;
+          delivered_at?: string | null;
+          superseded_at?: string | null;
+          last_error?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+
       purchase_receipts: {
         Row: {
           id:                     string;
@@ -2064,6 +2187,70 @@ export interface Database {
       purchase_capture_compute_ingest_set_hash: {
         Args: { p_session_id: string };
         Returns: string;
+      };
+      finalize_purchase_capture_session: {
+        Args: {
+          p_session_id: string;
+          p_expected_generation: string;
+          p_expected_source_type: string;
+          p_expected_source_id: string;
+          p_expected_sender_line_user_id: string;
+          p_expected_ingest_revision: number;
+          p_expected_ingest_hash: string;
+          p_assembly_status: string;
+          p_receipt_id_or_null?: string | null;
+          p_draft_revision_or_null?: number | null;
+          p_preview_payload_texts_or_null?: string[] | null;
+          p_fail_reason_or_null?: string | null;
+        };
+        Returns: Json;
+      };
+      replace_purchase_capture_draft: {
+        Args: {
+          p_session_id: string;
+          p_expected_generation: string;
+          p_expected_receipt_id: string;
+          p_expected_draft_revision: number;
+          p_source_type: string;
+          p_source_id: string;
+          p_sender_line_user_id: string;
+          p_draft_payload: Json;
+          p_preview_payload_texts: string[];
+        };
+        Returns: Json;
+      };
+      create_purchase_capture_notification_parts: {
+        Args: {
+          p_session_id: string;
+          p_notification_kind: string;
+          p_notification_version: string;
+          p_payload_texts: string[];
+        };
+        Returns: Json;
+      };
+      claim_next_purchase_capture_notification_part: {
+        Args: {
+          p_session_id: string;
+          p_notification_kind: string;
+          p_notification_version: string;
+          p_claim_lease_seconds?: number;
+        };
+        Returns: Json;
+      };
+      record_purchase_capture_notification_part_attempt: {
+        Args: {
+          p_notification_part_id: string;
+          p_claim_token: string;
+          p_error_or_null?: string | null;
+        };
+        Returns: Json;
+      };
+      mark_purchase_capture_notification_part_delivered: {
+        Args: {
+          p_notification_part_id: string;
+          p_claim_token: string;
+        };
+        Returns: Json;
       };
       upsert_purchase_receipt_draft: {
         Args: {

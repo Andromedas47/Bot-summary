@@ -12,7 +12,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Database } from "@/types/database";
+import type { Database, Json } from "@/types/database";
 
 type Supabase = SupabaseClient<Database>;
 
@@ -94,6 +94,41 @@ export class PurchaseCaptureInvalidStateError extends Error {
   }
 }
 
+export class PurchaseCaptureStaleIngestRevisionError extends Error {
+  constructor(message = "stale_ingest_revision") {
+    super(message);
+    this.name = "PurchaseCaptureStaleIngestRevisionError";
+  }
+}
+
+export class PurchaseCaptureStaleIngestHashError extends Error {
+  constructor(message = "stale_ingest_hash") {
+    super(message);
+    this.name = "PurchaseCaptureStaleIngestHashError";
+  }
+}
+
+export class PurchaseCaptureCloseQuietWindowError extends Error {
+  constructor(message = "close_quiet_window") {
+    super(message);
+    this.name = "PurchaseCaptureCloseQuietWindowError";
+  }
+}
+
+export class PurchaseCaptureStaleRevisionError extends Error {
+  constructor(message = "stale_revision") {
+    super(message);
+    this.name = "PurchaseCaptureStaleRevisionError";
+  }
+}
+
+export class PurchaseCaptureReceiptNotDraftError extends Error {
+  constructor(message = "receipt_not_draft") {
+    super(message);
+    this.name = "PurchaseCaptureReceiptNotDraftError";
+  }
+}
+
 export class PurchaseCaptureOwnershipMismatchError extends Error {
   constructor(message = "ownership_mismatch") {
     super(message);
@@ -122,6 +157,13 @@ function mapRpcError(
   }
   if (message.includes("line_event_conflict")) return new PurchaseCaptureLineEventConflictError();
   if (message.includes("invalid_state")) return new PurchaseCaptureInvalidStateError();
+  if (message.includes("stale_ingest_revision")) return new PurchaseCaptureStaleIngestRevisionError();
+  if (message.includes("stale_ingest_hash")) return new PurchaseCaptureStaleIngestHashError();
+  if (message.includes("close_quiet_window")) return new PurchaseCaptureCloseQuietWindowError();
+  if (message.includes("stale_revision") || message.includes("draft_revision moved")) {
+    return new PurchaseCaptureStaleRevisionError();
+  }
+  if (message.includes("receipt_not_draft")) return new PurchaseCaptureReceiptNotDraftError();
   return new Error(`${kind} failed: ${message}`);
 }
 
@@ -317,7 +359,95 @@ export class PurchaseCaptureSessionService {
     if (!session) throw new Error("session missing after cancel");
     return { idempotent: row.idempotent, session };
   }
+
+  async finalizeSession(params: {
+    sessionId: string;
+    expectedGeneration: string;
+    expectedSourceType: "user" | "group" | "room";
+    expectedSourceId: string;
+    expectedSenderLineUserId: string;
+    expectedIngestRevision: number;
+    expectedIngestHash: string;
+    assemblyStatus: "success" | "failed";
+    receiptId?: string | null;
+    draftRevision?: string | null;
+    previewPayloadTexts?: readonly string[] | null;
+    failReason?: string | null;
+  }): Promise<{
+    ok: boolean;
+    idempotent: boolean;
+    status: PurchaseCaptureSessionStatus;
+    sessionId: string;
+    receiptId?: string;
+    draftRevision?: string;
+    failReason?: string | null;
+  }> {
+    const { data, error } = await this.supabase.rpc("finalize_purchase_capture_session", {
+      p_session_id: params.sessionId,
+      p_expected_generation: params.expectedGeneration,
+      p_expected_source_type: params.expectedSourceType,
+      p_expected_source_id: params.expectedSourceId,
+      p_expected_sender_line_user_id: params.expectedSenderLineUserId,
+      p_expected_ingest_revision: params.expectedIngestRevision,
+      p_expected_ingest_hash: params.expectedIngestHash,
+      p_assembly_status: params.assemblyStatus,
+      p_receipt_id_or_null: params.receiptId ?? null,
+      p_draft_revision_or_null: params.draftRevision ? Number(params.draftRevision) : null,
+      p_preview_payload_texts_or_null: params.previewPayloadTexts
+        ? [...params.previewPayloadTexts]
+        : null,
+      p_fail_reason_or_null: params.failReason ?? null,
+    });
+    if (error) throw mapRpcError(error.message ?? "", "candidate");
+    const row = data as Record<string, unknown>;
+    return {
+      ok: row.ok === true,
+      idempotent: row.idempotent === true,
+      status: row.status as PurchaseCaptureSessionStatus,
+      sessionId: String(row.session_id),
+      receiptId: row.receipt_id == null ? undefined : String(row.receipt_id),
+      draftRevision: row.draft_revision == null ? undefined : String(row.draft_revision),
+      failReason: row.fail_reason == null ? null : String(row.fail_reason),
+    };
+  }
+
+  async replaceDraft(params: {
+    sessionId: string;
+    expectedGeneration: string;
+    expectedReceiptId: string;
+    expectedDraftRevision: string;
+    sourceType: "user" | "group" | "room";
+    sourceId: string;
+    senderLineUserId: string;
+    draftPayload: Record<string, unknown>;
+    previewPayloadTexts: readonly string[];
+  }): Promise<{
+    sessionId: string;
+    status: PurchaseCaptureSessionStatus;
+    receiptId: string;
+    draftRevision: string;
+  }> {
+    const { data, error } = await this.supabase.rpc("replace_purchase_capture_draft", {
+      p_session_id: params.sessionId,
+      p_expected_generation: params.expectedGeneration,
+      p_expected_receipt_id: params.expectedReceiptId,
+      p_expected_draft_revision: Number(params.expectedDraftRevision),
+      p_source_type: params.sourceType,
+      p_source_id: params.sourceId,
+      p_sender_line_user_id: params.senderLineUserId,
+      p_draft_payload: params.draftPayload as Json,
+      p_preview_payload_texts: [...params.previewPayloadTexts],
+    });
+    if (error) throw mapRpcError(error.message ?? "", "candidate");
+    const row = data as Record<string, unknown>;
+    return {
+      sessionId: String(row.session_id),
+      status: row.status as PurchaseCaptureSessionStatus,
+      receiptId: String(row.receipt_id),
+      draftRevision: String(row.draft_revision),
+    };
+  }
 }
 
-/** Explicit Slice A boundary: parser/draft/confirm/post are NOT implemented here. */
-export const PURCHASE_CAPTURE_SLICE = "A" as const;
+/** Slice B extends Slice A with parser adapter, draft finalization, and outbox delivery. */
+export const PURCHASE_CAPTURE_SLICE = "B" as const;

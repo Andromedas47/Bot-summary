@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { checkCronAuth } from "@/app/api/cron/finalize-slip-batches/auth";
-import { sweepPurchaseCaptureEligibility } from "@/lib/purchase-capture/eligibility-sweep";
+import { sweepPurchaseCaptureFinalization } from "@/lib/purchase-capture/finalization-sweep";
 import { createServiceClient } from "@/lib/supabase/server";
 import { logger } from "@/lib/logger";
 
@@ -9,11 +9,8 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 /**
- * Slice A scope only (plan §21): discovers `closing` purchase-capture
- * sessions past quiet/deadline and logs finalize-candidate eligibility.
- * Never parses, never creates a receipt, never transitions a session, never
- * sends a LINE message. Slice B/C extend this into the real finalize/posting
- * recovery sweep.
+ * Slice B: finalizes eligible closing sessions into awaiting_confirmation or
+ * failed_closed, then recovers undelivered preview_ready outbox parts.
  */
 export async function GET(req: NextRequest) {
   const auth = checkCronAuth(
@@ -32,8 +29,8 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const result = await sweepPurchaseCaptureEligibility(createServiceClient());
-    logger.info("Purchase capture eligibility sweep completed", { ...result });
+    const result = await sweepPurchaseCaptureFinalization(createServiceClient());
+    logger.info("Purchase capture finalization cron completed", { ...result });
     return NextResponse.json({
       ok: true,
       ...result,
@@ -41,7 +38,7 @@ export async function GET(req: NextRequest) {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    logger.error("Purchase capture eligibility sweep failed", { error: message });
+    logger.error("Purchase capture finalization cron failed", { error: message });
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

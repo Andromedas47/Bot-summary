@@ -18,7 +18,9 @@ The repository already has three of the four pieces a first real purchase postin
 
 What does **not** exist yet, anywhere in the repo or Production, is the fourth piece: a **durable multi-message LINE capture session** that sits in front of the P2B parser — the thing that lets one purchase document arrive as several LINE messages, survives webhook redelivery/reordering/crashes, and hands the parser exactly one clean, ordered chunk set. This document designs that missing piece by direct adaptation of the Physical Inventory session/barrier pattern (`physical_inventory_sessions`, migration `0047_physical_inventory_capture.sql`), which is structurally the closest existing precedent and is itself explicitly modeled on the even older Produce pending-session barrier (`0032_pending_session_finalization_barrier.sql`).
 
-The one genuine **BLOCKER** discovered is not architectural: **no product/unit resolver or "Product Master" exists anywhere in this codebase or Production** (§10). `purchase_receipt_items.product_identity_status`/`unit_identity_status` default to `'RESOLVED'` if the caller does not set them explicitly — the ledger's RPC-level refusal of `UNRESOLVED` items (CONFIRMED, §3/§10) only protects the system if the P2B adapter is disciplined enough to never rely on that default. This document proposes the smallest safe registry to close that gap (§10, §16) and treats it as a **hard prerequisite**, not an implementation detail to defer.
+The one genuine **BLOCKER** discovered is not architectural: **no product resolver, unit-alias resolver, or "Product Master" exists anywhere in this codebase or Production** (§10). `purchase_receipt_items.product_identity_status`/`unit_identity_status`/`price_unit_status` default to `'RESOLVED'`/`'RESOLVED'`/`'NOT_APPLICABLE'` if the caller does not set them explicitly — the ledger's RPC-level refusal of `UNRESOLVED` items (CONFIRMED, §3/§10) only protects the system if the P2B adapter is disciplined enough to never rely on any of those defaults, for the product key, the quantity unit, **and** the price unit separately (§10). This document proposes the smallest safe registry pair to close that gap (§10, §16) and treats it as a **hard prerequisite**, not an implementation detail to defer.
+
+P2C posting is receipt-level and all-or-nothing (CONFIRMED, §2.3) — a confirmed receipt is posted whole or not at all, and a confirmed receipt is immutable (CONFIRMED, §2.2). This design therefore gates `ยืนยันซื้อ` itself on zero blocking blockers: a draft with any `UNRESOLVED` product, quantity unit, or price unit cannot be confirmed at all, not merely posted partially (§7, §11-§12) — confirming a blocked draft would otherwise create a permanently unpostable, immutable receipt. A new operator command, `ตรวจใบซื้อใหม่`, lets staff re-run the draft against the current registry state after fixing a registration gap, without re-sending the whole document (§11.3).
 
 **Final recommendation: GO WITH PREREQUISITE.** See §25.
 
@@ -214,9 +216,9 @@ Both the session `open` RPC and every subsequent `admit`/`close`/`finalize` RPC 
 
 | State | Permitted incoming messages | Permitted commands | DB transition owner | Terminal? | Retry behavior | User-visible reply |
 |---|---|---|---|---|---|---|
-| `open` | header (already consumed to open), item, costs | none (implicit: any recognized purchase block) | `admit_purchase_capture_event` RPC | No | Redelivered `line_event_id` → no-op (unique ledger) | Ack per admitted block ("รับรายการที่ N แล้ว") or structural-error reply if the block itself is malformed |
-| `closing` | late items/costs *before* `close_event_timestamp_ms`, redelivered close | `ปิดซื้อ N รายการ` (already received, sets the boundary) | `admit_purchase_capture_event` (late-admit path) / `close_purchase_capture_open_event` | No | Same event redelivered → no-op; late item after boundary → `after_close_boundary` rejection | None until quiet/deadline elapses, then the preview (§11) |
-| `awaiting_confirmation` | none accepted as document content (session is closed); `ยืนยันซื้อ` / `ยกเลิกซื้อ` only | `ยืนยันซื้อ`, `ยกเลิกซื้อ` | Preview/draft already written by the finalize step transitioning `closing`→`awaiting_confirmation` | No | Redelivered finalize → idempotent (same `ingest_revision`/hash check as §2.4) | Full preview (§11) |
+| `open` | header (already consumed to open), item, costs, **or** a single message containing all blocks including close (§8.4) | none (implicit: any recognized purchase block) | `admit_purchase_capture_event` RPC / `close_purchase_capture_open_event` for the one-message case | No | Redelivered `line_event_id` → no-op (unique ledger). **No idle-expiration timer exists.** A session that never receives `ปิดซื้อ N รายการ` simply stays `open` indefinitely — this is a deliberate V1 choice (§8.5), not an oversight; there is no `failed_closed`-on-timeout path | Ack per admitted block ("รับรายการที่ N แล้ว") or structural-error reply if the block itself is malformed |
+| `closing` | late items/costs *before* `close_event_timestamp_ms`, redelivered close | `ปิดซื้อ N รายการ` (already received, sets the boundary) | `admit_purchase_capture_event` (late-admit path) / `close_purchase_capture_open_event` | No | Same event redelivered → no-op; late item after boundary → `after_close_boundary` rejection | None until quiet/deadline elapses, then the preview (§11) or a structural-failure summary |
+| `awaiting_confirmation` | none accepted as document content (session is closed); `ยืนยันซื้อ`, `ตรวจใบซื้อใหม่`, `ยกเลิกซื้อ` only | `ยืนยันซื้อ` (accepted only if the current draft has **zero blocking blockers** — otherwise refused, session stays `awaiting_confirmation`, `PurchaseReceiptService.confirm` is never called, §11.3/§12), `ตรวจใบซื้อใหม่` (re-runs the resolver + parser against the original ingest set, full-replaces the draft, stays `awaiting_confirmation` with a new `draft_revision`, §11.3), `ยกเลิกซื้อ` | Preview/draft written by `finalize_purchase_capture_session` (`closing`→`awaiting_confirmation`, Slice B, §21) or re-written by `recheck_purchase_capture_draft` (`awaiting_confirmation`→`awaiting_confirmation`, §16.3) | No | Redelivered finalize → idempotent (same `ingest_revision`/hash check as §2.4); redelivered `ตรวจใบซื้อใหม่` with an unchanged registry → new draft revision with identical content, still idempotent at the P2B layer (§2.2's full-replace guarantee) | Full preview (§11), labeled either "รอยืนยัน" (zero blockers) or "รายการที่ต้องแก้ไขก่อนบันทึกเข้าสต๊อก" (blockers present, confirm refused) |
 | `confirming` | none (further document text ignored/rejected with "purchase already confirmed, awaiting posting") | none (confirm already issued; not re-issuable) | `PurchaseReceiptService.confirm` then `InventoryLedgerService.postPurchaseReceipt`, both called from this state | No | Crash before posting → cron sweep resumes posting using the same frozen `confirmationKey`/`receiptId` (§13) | "กำลังยืนยัน..." immediately, then final confirmation once posting completes |
 | `posted` | none | none | — | **Yes** | Redelivered `ยืนยันซื้อ` → replayed confirm + replayed post, same result, no new state change | Final receipt summary + "บันทึกเข้าสต๊อกแล้ว" |
 | `failed_closed` | none | none | `close_purchase_capture_open_event`/finalize path on structural failure (mirrors Physical Inventory's `fail_reason`, `0047:86-87`) | **Yes** | None — a new document must be opened | Structural error summary (which blocks/errors) |
@@ -225,16 +227,20 @@ Both the session `open` RPC and every subsequent `admit`/`close`/`finalize` RPC 
 State-transition edges:
 
 ```
-open ──(close event admitted)──▶ closing
+open ──(close event admitted, or one message carrying header+items+costs+close, §8.4)──▶ closing
 closing ──(quiet/deadline elapsed, parse.status=COMPLETE, draft saved)──▶ awaiting_confirmation
 closing ──(quiet/deadline elapsed, parse.status=INCOMPLETE)──▶ failed_closed
 open/closing/awaiting_confirmation ──(ยกเลิกซื้อ)──▶ cancelled
-awaiting_confirmation ──(ยืนยันซื้อ)──▶ confirming
+awaiting_confirmation ──(ตรวจใบซื้อใหม่: re-resolve + re-parse + re-save draft)──▶ awaiting_confirmation (new draft_revision, same state)
+awaiting_confirmation ──(ยืนยันซื้อ, draft has zero blocking blockers)──▶ confirming
+awaiting_confirmation ──(ยืนยันซื้อ, draft has ≥1 blocking blocker)──▶ awaiting_confirmation (refused; confirm() never called, §12)
 confirming ──(P2B confirm + P2C post both succeed)──▶ posted
 confirming ──(crash, resumed later by cron)──▶ confirming (no state change; recovery re-enters the same state and completes it)
 ```
 
-There is no `confirming` → `failed_closed` edge: once `PurchaseReceiptService.confirm` has committed, the receipt is permanently confirmed (§2.2) — the only remaining work is posting, which is retried to success, never abandoned, because P2C's RPC-level identity-status refusal (§2.3) already guarantees posting cannot corrupt the ledger even under indefinite retry. If posting is *impossible* (e.g. an item's identity is `UNRESOLVED` — should never happen if §10's prerequisite is respected, but is a real failure mode if it is not), the session must surface a distinct operator-visible stuck state rather than silently retrying forever; this is flagged as an **OWNER DECISION REQUIRED** in §24 rather than a new state, since it is a should-never-happen path guarded by §10, not a designed-for outcome.
+**No idle-expiration edge exists from `open` or `closing`.** A session that never receives a close event, or whose close never reaches quiet/deadline eligibility, simply remains in that state; only an explicit `ปิดซื้อ N รายการ` (or the one-message open+close path, §8.4) or `ยกเลิกซื้อ` moves it forward (§8.5). This document does not design or claim an idle-timeout `failed_closed` transition.
+
+There is no `confirming` → `failed_closed` edge: once `PurchaseReceiptService.confirm` has committed, the receipt is permanently confirmed (§2.2) — the only remaining work is posting, which is retried to success, never abandoned, because P2C's RPC-level identity-status refusal (§2.3) already guarantees posting cannot corrupt the ledger even under indefinite retry, and this design's own confirm-gate (§12) already refuses confirmation while any item is `UNRESOLVED`, so posting should never encounter that refusal in the first place. If it does anyway (a should-never-happen path — e.g. the registry changed between the last `ตรวจใบซื้อใหม่` and confirm, a race this document does not fully close), the session must surface a distinct operator-visible stuck state rather than silently retrying forever; this is flagged as an **OWNER DECISION REQUIRED** in §24 rather than a new state.
 
 ---
 
@@ -242,7 +248,7 @@ There is no `confirming` → `failed_closed` edge: once `PurchaseReceiptService.
 
 ### 8.1 Options considered
 
-- **Option A — reuse/adapt the Physical Inventory 8s quiet / 30s deadline pattern.** Directly reuses a pattern already running in Production for a structurally identical problem (multi-message LINE document, redelivery, out-of-order arrival, close-vs-late-item race). Cost: one new migration adding 2-3 tables closely mirroring `0047`.
+- **Option A — reuse/adapt the Physical Inventory 8s quiet / 30s deadline pattern.** Directly reuses a pattern already running in Production for a structurally identical problem (multi-message LINE document, redelivery, out-of-order arrival, close-vs-late-item race). Cost: three new migrations (§16, one per implementation slice) adding 3 session-layer tables closely mirroring `0047` plus 2 identity-registry tables.
 - **Option B — immediate close without a durable barrier.** Rejected: the task explicitly requires safety under "close message arriving before an earlier item request finishes" and "messages arriving out of HTTP processing order." Without a quiet window, a close event processed by a fast worker while an earlier item's request is still in flight on a slower worker would finalize an incomplete document — exactly the race `0047`/`0032` were built to prevent. There is no cheaper mechanism in this repo that already solves this; inventing an ad hoc alternative would be strictly worse than reusing a pattern already proven in Production.
 - **Option C — single-message-only purchase documents.** Rejected as a *requirement* (it would contradict §2.1's confirmed multi-message support and the task's explicit "block split across messages" test requirement), but is worth noting as **already a supported degenerate case** of Option A: a document sent entirely in one LINE message still opens a session, admits everything in one event, and closes on the same event — the quiet window elapses trivially fast in that case. No special-casing is needed.
 
@@ -257,9 +263,9 @@ There is no `confirming` → `failed_closed` edge: once `PurchaseReceiptService.
 | Conflicting reuse of one LINE event ID | If the same `line_event_id` is presented with different `raw_text`/`kind` than the first admission (should be impossible — LINE event ids are immutable — but guarded defensively exactly as `0047` does), reject with a distinct error rather than silently overwriting |
 | LINE message ID | `line_message_id` column, stored alongside the event (mirrors `p_line_message_id` param on `admit_physical_inventory_event`) |
 | Event timestamp | `line_timestamp_ms bigint`, the LINE-supplied event timestamp — used for late-item admission ordering, never server receipt time |
-| Deterministic chunk ordinal | `ingest_ordinal` assigned by the RPC as `ingest_revision` increments — mirrors `PurchaseTextChunk.chunkOrdinal` (§2.1) so the parser adapter (§9) receives chunks pre-ordered |
-| Ingest revision | `ingest_revision bigint DEFAULT 0` on the session row, incremented per admitted event (mirrors `0047`) |
-| Ingest-set hash | `purchase_capture_compute_ingest_set_hash(session_id)` — same SHA-256-over-ordered-tuples construction as `physical_inventory_compute_ingest_set_hash` (`0047:400-434`), used as the optimistic-concurrency guard on finalize |
+| Deterministic chunk ordinal | **Two separate, non-interchangeable concepts.** `ingest_ordinal` is an **admission-order/audit-only** counter, assigned by the RPC as `ingest_revision` increments — it records the order the DB happened to admit events in and is never used as document order. The parser adapter (§9) instead assigns `PurchaseTextChunk.chunkOrdinal` itself, by sorting the candidate ingest set by `(line_timestamp_ms ASC, line_event_id ASC)` — `line_timestamp_ms` first (the LINE-supplied event time), `line_event_id` as the deterministic tie-breaker when two events share a timestamp. Request-arrival order and `ingest_revision`/`ingest_ordinal` are never used as semantic document order |
+| Ingest revision | `ingest_revision bigint DEFAULT 0` on the session row, incremented per admitted event (mirrors `0047`) — **concurrency/version counter only**, never a proxy for document order |
+| Ingest-set hash | `purchase_capture_compute_ingest_set_hash(session_id)` — same SHA-256-over-ordered-tuples construction as `physical_inventory_compute_ingest_set_hash` (`0047:400-434`), computed over tuples sorted by the same `(line_timestamp_ms, line_event_id)` key as the chunk ordinal above (not by `ingest_ordinal`), so the hash is stable under any admission-order variation and changes only when the actual document content changes; used as the optimistic-concurrency guard on finalize |
 | Close boundary | First `ปิดซื้อ` admission sets immutable `close_event_timestamp_ms`, `close_quiet_until = clock_timestamp() + interval '8 seconds'`, `close_deadline_at = clock_timestamp() + interval '30 seconds'` |
 | Late item whose LINE timestamp is before the close timestamp | Admitted if `line_timestamp_ms <= close_event_timestamp_ms` and `now() < close_deadline_at`, exactly as `0047:749-756` |
 | Event admitted after close | Rejected `after_close_boundary` if its own timestamp is after `close_event_timestamp_ms`, even if arriving before the deadline — this is what stops a race where a late-processed but *logically-after-close* item sneaks in |
@@ -271,6 +277,27 @@ There is no `confirming` → `failed_closed` edge: once `PurchaseReceiptService.
 
 Finalize (the `closing` → `awaiting_confirmation`/`failed_closed` transition) requires the caller to present `p_expected_ingest_revision`/`p_expected_ingest_hash` matching the *current* row state under `FOR UPDATE` — if any event was admitted between when the candidate was read and when finalize is called, the hash no longer matches and finalize is refused (retryable, mirrors `0047:1085-1092`). Combined with the DB-clock quiet/deadline check, no code path can call the P2B draft-save step (§9) before the ingest set is provably stable. This is the same guarantee that already protects Physical Inventory in Production.
 
+### 8.4 One-message documents — the all-blocks-in-one-opening-event path
+
+**PROPOSED.** §2.1 confirms the pure parser already accepts a single LINE message containing Header + Items + Costs + Close as one chunk with several blocks. The capture session must support that shape **without inserting the same LINE event twice.**
+
+- `open_purchase_capture_session` persists the complete opening raw message as the session's **first and only** ingest row for that event, exactly once — identical to the multi-message case (§16.3).
+- Application code (the webhook handler, after calling `open`) runs the pure parser's `segment`/`classify` step (read-only, no new DB write) against that same raw text to discover whether it also contains a `ปิดซื้อ` block.
+- If it does, the handler calls a distinct RPC:
+
+  ```
+  close_purchase_capture_open_event(p_session_id, p_expected_generation, p_opened_line_event_id)
+  ```
+
+  which sets `close_event_timestamp_ms`/`close_quiet_until`/`close_deadline_at` from the **already-persisted** opening ingest row (looked up by `p_opened_line_event_id`, re-verified under `FOR UPDATE` to belong to this session/generation) — it does **not** call `admit_purchase_capture_event` and does **not** insert a second ingest row for the same `line_event_id`. `purchase_capture_session_ingests.line_event_id UNIQUE` (§13) makes a second insert attempt fail closed rather than silently duplicating the event.
+- Redelivery of the same opening message: `open_purchase_capture_session` is already idempotent on `opened_line_event_id UNIQUE` (§6.1/§16.1); a redelivered `close_purchase_capture_open_event` call for the same session/event is idempotent because the boundary fields it sets are immutable once written (mirrors `0047`'s `close_event_timestamp_ms` immutability, §2.4) — a second call with the same arguments observes the fields already set and returns the existing boundary, not an error.
+- The same event can never conflict with itself as both "open" and "close" in two different rows, because there is only ever one row for it — `close_purchase_capture_open_event` mutates boundary columns on the session, not the ingest table.
+- **Convergence**: once the boundary is set, the one-message path and the multi-message path are indistinguishable to everything downstream — `get_purchase_capture_finalize_candidate` (§16.3), the quiet/deadline check (§8.2), and the parser adapter (§9) all operate on "the session's ingest set plus its boundary fields," with no branch anywhere for "was this a one-message or five-message document."
+
+### 8.5 Missing close — V1 behavior (no idle-expiration state)
+
+**PROPOSED, deliberately simple.** A session that never receives a `ปิดซื้อ N รายการ` (and is not the one-message case of §8.4) has no close boundary and therefore cannot become eligible for finalize — there is nothing for the quiet/deadline check to measure from. V1 does **not** design or claim an idle-timeout: the session simply remains `open` until the sender sends a valid close block or `ยกเลิกซื้อ`. No new state, no background job, no expiration column is added to satisfy an operational "missing close" test — see §19.1/§19.2 for how this is actually tested (parser-level `MISSING_CLOSE` vs. an operational "still open" assertion are two different things). If an idle-expiration contract is wanted later, it needs its own design pass (bound, notification, and — critically — what happens to any items already admitted); this document does not attempt one.
+
 ---
 
 ## 9. Parser-to-draft mapping
@@ -279,13 +306,14 @@ Finalize (the `closing` → `awaiting_confirmation`/`failed_closed` transition) 
 
 ### 9.1 Admitted LINE messages → parser types
 
-1. Each admitted `purchase_capture_session_ingests` row (§8) is converted 1:1 into a `PurchaseTextChunkInput` (`chunkId` = the ingest row's id, `chunkOrdinal` = `ingest_ordinal`, `rawText` = the stored raw message text, `evidence` = `{lineEventId, lineMessageId, lineTimestampMs, rawMessageId}` — all already captured by §8's ingest ledger).
+1. The finalize candidate's ingest rows (§8.2's `get_purchase_capture_finalize_candidate`) are sorted **in application code, not in SQL and not by admission order**, by `(line_timestamp_ms ASC, line_event_id ASC)`. Each sorted row is converted 1:1 into a `PurchaseTextChunkInput` (`chunkId` = the ingest row's id, `chunkOrdinal` = the row's **position in this sorted array** — never `ingest_ordinal`, never the RPC/HTTP-arrival order, §8.2 — `rawText` = the stored raw message text, `evidence` = `{lineEventId, lineMessageId, lineTimestampMs, rawMessageId}` — all already captured by §8's ingest ledger).
 2. `src/lib/purchases/text-adapter.ts`'s existing chunk-construction path (already tested, §2.1) turns each into a `PurchaseTextChunk`, applying NFC normalization and BOM/whitespace handling exactly as today — **no change to this step**.
-3. `classify` + `segment` + `parse` (unchanged, §2.1) produce `PurchaseCommandEnvelope[]` per chunk, in **deterministic chunk order** (`chunkOrdinal`, which is `ingest_ordinal`, which is assigned server-side by the admit RPC — never client/webhook-arrival order).
+3. `classify` + `segment` + `parse` (unchanged, §2.1) produce `PurchaseCommandEnvelope[]` per chunk, in the **deterministic chunk order assigned in step 1** — `(line_timestamp_ms, line_event_id)` order, never client/webhook-arrival order and never `ingest_revision`/`ingest_ordinal`.
 4. `assemble` (unchanged) combines all envelopes across all chunks into one `PurchaseAssemblyResult`.
-5. Raw evidence (every original LINE message text, per chunk) is preserved by construction — it is never discarded, only ever added to `PurchaseEvidenceDraft.rawTextChunks` (§2.1) and, separately, kept in `purchase_capture_session_ingests` as the append-only audit trail (never deleted, mirrors `0047`'s ingest ledger).
-6. **Close-count validation and structural errors are the parser's existing job, untouched** (§2.1) — the adapter does not re-implement or duplicate any of this logic; it only decides, based on `PurchaseAssemblyResult.status`, whether to proceed to draft-save (`COMPLETE`) or transition the session to `failed_closed` (`INCOMPLETE`), carrying the `errors`/`reviewFlags` arrays into the terminal reply.
-7. **Review flags** (§2.1, non-blocking) are carried through unchanged into `PurchaseReceiptDraftInput.reviewFlags` (§2.2's field exists for exactly this) and surfaced in the preview (§11) as non-blocking notes, never as reasons to refuse the draft.
+5. **Identity resolution (new adapter logic, §10.3).** For every parsed item, the adapter looks up `rawProductText` against `purchase_intake_product_registry` and `rawUnit`/`priceUnitText` (when present) against `purchase_intake_unit_alias_registry`, producing `productKey`/`productIdentityStatus`, `quantityUnitKey`/`unitIdentityStatus`, and `priceUnitKey`/`priceUnitStatus` **explicitly for every item, every field, every time** — none of the three is ever left unset and allowed to fall back to `0052`'s column defaults (§10.2). Canonical quantity-unit-key/price-unit-key equality is enforced here per §10.3's exact rule.
+6. Raw evidence (every original LINE message text, per chunk) is preserved by construction — it is never discarded, only ever added to `PurchaseEvidenceDraft.rawTextChunks` (§2.1) and, separately, kept in `purchase_capture_session_ingests` as the append-only audit trail (never deleted, mirrors `0047`'s ingest ledger).
+7. **Close-count validation and structural errors are the parser's existing job, untouched** (§2.1) — the adapter does not re-implement or duplicate any of this logic; it only decides, based on `PurchaseAssemblyResult.status`, whether to proceed to draft-save (`COMPLETE`) or transition the session to `failed_closed` (`INCOMPLETE`), carrying the `errors`/`reviewFlags` arrays into the terminal reply. **A `COMPLETE` assembly is always saved as a draft**, regardless of whether step 5 found any `UNRESOLVED` identity — identity blockers never prevent a draft from existing or being previewed; they only prevent `ยืนยันซื้อ` from succeeding later (§12). There is no partial draft and no partial posting anywhere in this pipeline.
+8. **Review flags** (§2.1, non-blocking) are carried through unchanged into `PurchaseReceiptDraftInput.reviewFlags` (§2.2's field exists for exactly this) and surfaced in the preview (§11) as non-blocking notes, never as reasons to refuse the draft. They remain distinct from the blocking identity statuses computed in step 5.
 
 The pure parser under `src/lib/purchases` remains database-free — this adapter is the *only* new code that touches both a database session and the parser, and it lives outside `src/lib/purchases/`, satisfying the task's explicit constraint.
 
@@ -297,41 +325,58 @@ The pure parser under `src/lib/purchases` remains database-free — this adapter
 
 ### 10.1 What exists today
 
-- `purchase_receipt_items.product_identity_status`/`unit_identity_status` are real, enforced columns (`0052:472-511`, confirmed present in Production, §3) with CHECK constraints restricting values to `RESOLVED`/`UNRESOLVED`.
+- `purchase_receipt_items.product_identity_status`/`unit_identity_status`/`price_unit_status` are real, enforced columns (`0052:472-511`, confirmed present in Production, §3) with CHECK constraints restricting values to `RESOLVED`/`UNRESOLVED` (identity/unit) and `NOT_APPLICABLE`/`RESOLVED`/`UNRESOLVED` (price unit).
 - P2C's `post_purchase_receipt_inventory_movement` RPC **does** refuse to post any item whose frozen `product_identity_status`/`unit_identity_status` is not exactly `'RESOLVED'` (`0053:955-967`, confirmed present in Production). This part of the system is already safe by construction.
-- **But**: `PurchaseReceiptItemInput.productIdentityStatus`/`unitIdentityStatus` **default to `'RESOLVED'` if the TypeScript caller does not set them explicitly** (`receipt-service.ts:164,168`, confirmed by direct read of `0052:472-511`'s column defaults, `DEFAULT 'RESOLVED'`). This means the safety of the entire system currently rests entirely on every future caller of `saveDraft` remembering to set the status honestly — there is no code anywhere that actually verifies a raw product/unit string against anything.
-- A repository-wide search for `product_master`, `product_catalog`, `resolveProduct`, `ProductIdentity`, `ProductMaster`, `CatalogProduct` returns **zero SQL tables and zero resolver functions**. The only two hits in the entire repo are explicit warnings that no such thing exists: `src/lib/physical-inventory/types.ts:17` ("Must NOT be treated by P2C as an authoritative product master key") and `src/lib/physical-inventory/types.ts:38` ("Capture-only NFC + whitespace collapse — never fuzzy / P0 aliases / product master"). Production's table list (§3) independently confirms no such table exists there either.
-- `normalizeProductName`-style functions that do exist elsewhere in the repo (e.g. for weigh-session parsing) are **NFC/whitespace normalization only** — they do not resolve a raw string to a canonical, verified product identity, and the task's instruction not to "pretend normalizeProductName alone is a Product Master" is correct: nothing in this repo currently does that job, under any name.
+- **But**: `PurchaseReceiptItemInput.productIdentityStatus`/`unitIdentityStatus`/`priceUnitStatus` **default (`RESOLVED`/`RESOLVED`/`NOT_APPLICABLE`) if the TypeScript caller does not set them explicitly** (`receipt-service.ts:164,168`, confirmed by direct read of `0052:472-511`'s column defaults). This means the safety of the entire system currently rests entirely on every future caller of `saveDraft` remembering to set all three statuses honestly — there is no code anywhere that actually verifies a raw product string, a raw quantity-unit string, or a raw price-unit string against anything.
+- A repository-wide search for `product_master`, `product_catalog`, `resolveProduct`, `ProductIdentity`, `ProductMaster`, `CatalogProduct`, and separately for a unit-alias resolver scoped to purchases, returns **zero SQL tables and zero resolver functions**. The only two hits in the entire repo are explicit warnings that no such thing exists: `src/lib/physical-inventory/types.ts:17` ("Must NOT be treated by P2C as an authoritative product master key") and `src/lib/physical-inventory/types.ts:38` ("Capture-only NFC + whitespace collapse — never fuzzy / P0 aliases / product master"). Production's table list (§3) independently confirms no such table exists there either.
+- `normalizeProductName`-style functions that do exist elsewhere in the repo (e.g. for weigh-session parsing) are **NFC/whitespace normalization only** — they do not resolve a raw string to a canonical, verified product or unit identity, and the task's instruction not to "pretend normalizeProductName alone is a Product Master" is correct: nothing in this repo currently does that job, under any name, for products or for units.
+- Each purchase item carries **two, independently-sourced raw unit strings**: the quantity unit from `จำนวน <qty> <unit>`, and the price unit from `ราคา <rate> บาท/<unit>` (§2.1) — they are captured as separate fields (`rawUnit`, `priceUnitText`) and are not guaranteed to be written the same way even when they mean the same thing (e.g. `กก.` vs `โล`).
 
 ### 10.2 Why this blocks unrestricted posting
 
-If the P2B adapter (§9) simply forwards raw parsed `สินค้า`/`จำนวน <unit>` text as `productKey`/`unitKey` without setting an explicit status, every item defaults to `RESOLVED` and P2C's refusal check (§2.3) becomes a no-op — the one safety net this system has would never fire, defeating its purpose. This is a **design discipline requirement on the adapter**, not a missing database feature: the adapter must **never** allow a status to default; it must compute it explicitly for every item.
+If the P2B adapter (§9) simply forwards raw parsed text as `productKey`/`unitKey` without setting explicit statuses, every item defaults to `RESOLVED`/`RESOLVED`/`NOT_APPLICABLE` and P2C's refusal check (§2.3) becomes a no-op — the one safety net this system has would never fire, defeating its purpose. This is a **design discipline requirement on the adapter**, not a missing database feature: the adapter must **never** allow `productIdentityStatus`, `unitIdentityStatus`, or `priceUnitStatus` to default; it must compute all three explicitly for every item (§9.1 step 5).
 
 ### 10.3 Proposed smallest safe resolution contract
 
-**PROPOSED — a small, explicit, additive registry**, scoped only to what V1 needs, not a general product catalog:
+**PROPOSED — two small, explicit, additive registries**, scoped only to what V1 needs, not a general product catalog. One registry resolves the product name; one resolves unit text — and the same unit registry is queried **twice per item** (once for the quantity unit, once for the price unit, when present), because a unit alias's meaning does not depend on which field it came from. This is the smallest design that still lets the two be compared: a single combined product+unit table (as originally proposed) cannot express "this quantity unit and this price unit must resolve to the *same* canonical key," because it would tie one unit string to one product row instead of letting any unit string resolve independently.
 
 ```sql
-CREATE TABLE public.purchase_intake_product_unit_registry (
+CREATE TABLE public.purchase_intake_product_registry (
   id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  raw_product_text  text NOT NULL,   -- normalized (NFC + collapsed whitespace), matched exactly
-  raw_unit_text     text NOT NULL,   -- normalized the same way
+  raw_product_text  text NOT NULL UNIQUE,  -- normalized (NFC + collapsed whitespace), matched exactly
   product_key       text NOT NULL,
-  unit_key          text NOT NULL,
   active            boolean NOT NULL DEFAULT true,
   created_at        timestamptz NOT NULL DEFAULT now(),
-  updated_at        timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (raw_product_text, raw_unit_text)
+  updated_at        timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE public.purchase_intake_unit_alias_registry (
+  id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  raw_unit_text  text NOT NULL UNIQUE,  -- normalized the same way
+  unit_key       text NOT NULL,          -- canonical key, e.g. 'kg'
+  active         boolean NOT NULL DEFAULT true,
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  updated_at     timestamptz NOT NULL DEFAULT now()
 );
 ```
 
-- Modeled directly on the existing allowlist pattern already proven for `line_guided_menu_markets`/`line_guided_menu_sellers` (§2.6: a small, manually-curated, `active`-flagged table, read via a `SECURITY INVOKER` lookup RPC or direct `service_role` `SELECT` — no elevated write path needed since this table is maintained by an operator/admin flow, not by the LINE bot itself).
-- The adapter (§9) looks up each item's normalized `(rawProductText, rawUnitText)` pair: a match with `active=true` → `productIdentityStatus/unitIdentityStatus = 'RESOLVED'`, `productKey/unitKey` = the registry's canonical keys; no match (or `active=false`) → `'UNRESOLVED'`, `productKey/unitKey` = a deterministic placeholder derived from the raw text (never null — `0052`'s CHECK requires non-blank `product_key`/`unit_key` even when unresolved, confirmed §2.2).
-- An `UNRESOLVED` item does **not** block draft creation or the preview (§11) — the draft/preview surfaces it as a visible blocker in the "blocking blockers" section (per the task's UX requirement, §11) so staff see it *before* attempting to confirm, but confirmation itself is not blocked by identity status (only posting is, per §2.3's RPC-level check) — this matches the existing separation between P2B (permissive draft) and P2C (strict posting refusal).
-- **Scope for first posting**: seed the registry with only the exact product/unit pairs used in the UAT document (§20) — a handful of rows, not a general catalog. This keeps the migration trivially small and reviewable while still closing the safety gap honestly (no item is ever silently marked `RESOLVED` by default).
-- Migration impact: one new additive table, no changes to `0052`/`0053`. Proposed as part of **Slice B** (§21), since it is needed exactly where the adapter decides identity status, not before.
+Both modeled directly on the existing allowlist pattern already proven for `line_guided_menu_markets`/`line_guided_menu_sellers` (§2.6: a small, manually-curated, `active`-flagged table, read via a `SECURITY INVOKER` lookup RPC or direct `service_role` `SELECT` — no elevated write path needed since these tables are maintained by an operator/admin flow, not by the LINE bot itself).
 
-**OWNER DECISION REQUIRED**: whether a manually-curated registry (staff/admin edits rows directly, or a future tiny admin UI) is acceptable for V1, versus wanting a LINE-driven "register this product" flow before any purchase can post. This document's default recommendation is the former — smallest safe thing, per the task's explicit instruction not to over-build.
+**Exact lookup algorithm, run by the adapter (§9.1 step 5) for every item:**
+
+1. Normalize `rawProductText` (NFC + collapsed whitespace — the same normalization `CapturedText` already applies, §2.1) and look it up in `purchase_intake_product_registry.raw_product_text`. A match with `active=true` → `productKey` = the row's `product_key`, `productIdentityStatus = 'RESOLVED'`. No match, or `active=false` → `productIdentityStatus = 'UNRESOLVED'`, `productKey` = a deterministic placeholder derived from the normalized raw text (never null — `0052`'s CHECK requires non-blank `product_key` even when unresolved, confirmed §2.2).
+2. Normalize `rawUnit` (the quantity unit) the same way and look it up in `purchase_intake_unit_alias_registry.raw_unit_text`. Match + active → `quantityUnitKey` = the row's `unit_key`, `unitIdentityStatus = 'RESOLVED'`. No match/inactive → `unitIdentityStatus = 'UNRESOLVED'`, `quantityUnitKey` = a deterministic placeholder, same construction as step 1.
+3. If the item has no `priceUnitText` at all (unit cost is `ไม่ทราบ`, §2.1) → `priceUnitStatus = 'NOT_APPLICABLE'`, no lookup performed. Otherwise, normalize `priceUnitText` and look it up in the **same** `purchase_intake_unit_alias_registry`, independently of step 2's result. Match + active → `priceUnitKey` = the row's `unit_key`, tentatively `priceUnitStatus = 'RESOLVED'`. No match/inactive → `priceUnitStatus = 'UNRESOLVED'`.
+4. **Canonical equality rule (V1):** if both `unitIdentityStatus` and the tentative `priceUnitStatus` from step 3 are `RESOLVED`, compare `quantityUnitKey === priceUnitKey`. Equal → `priceUnitStatus` stays `RESOLVED`. Not equal → `priceUnitStatus` is overwritten to `'UNRESOLVED'` (0052's existing three-value enum has no "mismatch" value, so a mismatch is represented as unresolved — it is exactly as blocking as an unknown unit, which is correct: V1 does not invent a conversion ratio between different units, so a mismatch is not postable). Exact aliases resolving to the same canonical key (e.g. `กก.` → `kg`, `โล` → `kg`) are therefore accepted as equal; no conversion arithmetic is ever performed.
+5. **Blocking rule**: an item is postable only if `productIdentityStatus = 'RESOLVED'` **and** `unitIdentityStatus = 'RESOLVED'` **and** (`priceUnitStatus = 'NOT_APPLICABLE'` **or** `priceUnitStatus = 'RESOLVED'`). Any other combination is a blocking blocker for that item, which — per §12 — makes the *entire receipt* unconfirmable (all-or-nothing, not per-item).
+
+**Unique constraints**: `raw_product_text` and `raw_unit_text` are each declared `UNIQUE` directly on their column (no composite key needed, since each registry now resolves exactly one raw string to exactly one canonical key, independent of context) — this also means the same alias row (e.g. `โล` → `kg`) is reused for both quantity-unit and price-unit lookups with no duplication.
+
+- An `UNRESOLVED` item (any of the three statuses) does **not** block draft creation or the preview (§11/§9.1 step 7) — the draft/preview surfaces it as a visible blocker so staff see it *before* attempting to confirm — but it **does** block `ยืนยันซื้อ` for the whole receipt (§12), which corrects the earlier design's claim that only posting was blocked.
+- **Scope for first posting**: seed both registries with only the exact product/unit pairs used in the UAT document (§20) — a handful of rows each, not a general catalog. This keeps the migration trivially small and reviewable while still closing the safety gap honestly (no item is ever silently marked `RESOLVED`/`NOT_APPLICABLE` by default).
+- Migration impact: two new additive tables, no changes to `0052`/`0053`. Proposed as part of **Slice B** (§21), since they are needed exactly where the adapter decides identity status, not before.
+
+**OWNER DECISION REQUIRED**: whether manually-curated registries (staff/admin edits rows directly, or a future tiny admin UI) are acceptable for V1, versus wanting a LINE-driven "register this product/unit" flow before any purchase can post. This document's default recommendation is the former — smallest safe thing, per the task's explicit instruction not to over-build.
 
 ---
 
@@ -374,10 +419,10 @@ Sent after the session transitions `closing` → `awaiting_confirmation`:
 พิมพ์ "ยกเลิกซื้อ" เพื่อยกเลิก
 ```
 
-### 11.2 Preview with a blocker (unresolved identity, §10) and a review flag
+### 11.2 Preview with blockers (unresolved product, unresolved/mismatched unit)
 
 ```
-สรุปใบซื้อ (รอยืนยัน)
+สรุปใบซื้อ (มีรายการต้องแก้ไข)
 
 วันที่ซื้อ: 4/8/2569 09:30
 ผู้ขาย: ตลาดไท
@@ -389,8 +434,8 @@ Sent after the session transitions `closing` → `awaiting_confirmation`:
   ราคา: 100 บาท/โล
   รวม: 5,000.00 บาท
 
-รายการที่ 2: ส้มไต้หวัน
-  จำนวน: 20 กก. ⚠️ หน่วยราคาต่างจากหน่วยจำนวน กรุณาตรวจสอบ
+รายการที่ 2: ส้มไต้หวัน ⚠️ หน่วยราคาต่างจากหน่วยจำนวน
+  จำนวน: 20 กก.
   ราคา: 40 บาท/โล
   รวม: 800.00 บาท
 
@@ -403,17 +448,24 @@ Sent after the session transitions `closing` → `awaiting_confirmation`:
 
 รายการที่ต้องแก้ไขก่อนบันทึกเข้าสต๊อก:
   - รายการที่ 1: "หมอนทองพันธุ์ใหม่" ยังไม่ได้ลงทะเบียนสินค้า
+  - รายการที่ 2: หน่วย "กก." กับ "โล" ต้องเป็นหน่วยเดียวกัน หรือยังไม่ได้ลงทะเบียนหน่วยนี้
 
-ท่านสามารถพิมพ์ "ยืนยันซื้อ" เพื่อบันทึกใบซื้อได้ แต่รายการที่ 1
-จะไม่ถูกตัดเข้าสต๊อกจนกว่าจะลงทะเบียนสินค้านี้ก่อน
+ใบซื้อนี้ยังไม่สามารถยืนยันเข้าสต๊อกได้ จนกว่ารายการที่มีปัญหาจะได้รับการแก้ไขครบ
+
+หลังแก้ไขข้อมูลลงทะเบียนแล้ว พิมพ์ "ตรวจใบซื้อใหม่" เพื่อตรวจสอบอีกครั้ง
 พิมพ์ "ยกเลิกซื้อ" เพื่อยกเลิก
 ```
 
-Every field the task requires is present: purchase date/time, supplier, reference, destination `MAIN`, every item with quantity/unit/unit cost/price unit, line amount (computable — freight/handling/discount/VAT are document-level, not per-line, so they are shown once, not per item, matching `0052`'s schema, §2.2), freight/handling/discount/VAT, payable total (computed client-side from `ExactDocumentMoney`/satang fields, never re-derived by a second, drifting calculation), blocking blockers, and review flags — shown separately and labeled differently so staff can distinguish "must fix before this item posts" from "worth double-checking."
+Every field the task requires is present: purchase date/time, supplier, reference, destination `MAIN`, every item with quantity/unit/unit cost/price unit, line amount (computable — freight/handling/discount/VAT are document-level, not per-line, so they are shown once, not per item, matching `0052`'s schema, §2.2), freight/handling/discount/VAT, payable total (computed client-side from `ExactDocumentMoney`/satang fields, never re-derived by a second, drifting calculation), and blocking blockers, shown as a single list that gates the whole receipt — there is no "review flag, still confirmable" case shown here because both example issues are blocking (§10.3); a non-blocking review flag (e.g. `ไม่ทราบเวลา`, §2.1) would appear as a separate, non-blocking note and would **not** prevent `ยืนยันซื้อ` (§11.1 shows the all-clear case). **This design never describes, and never allows, partial ledger posting** — a receipt with any blocking blocker cannot be confirmed at all, let alone posted partially (§12).
 
 ### 11.3 Confirmation commands
 
-**PROPOSED**: `ยืนยันซื้อ` / `ยกเลิกซื้อ`, exactly the task's candidate V1 commands — no ambiguity handling is needed beyond what §6.2 already guarantees: because only one active session can exist per `(source_id, sender_line_user_id)`, and confirmation is only accepted from `awaiting_confirmation`, there is never more than one candidate document for a given sender to confirm against. The command is bound to `(source, sender, session_generation, receiptId, expectedDraftRevision)` — all five, matching §7's `confirming`-state contract and §2.2's `confirm()` signature — so a stale or cross-session confirm attempt is refused by the RPC itself (`PurchaseReceiptStaleRevisionError`/generation mismatch), not merely by UI-level trust. **Raw database UUIDs are never shown in the LINE reply** — the preview references items by their 1-based `รายการที่ N` ordinal, matching the parser's own numbering (§2.1's `ซื้อรายการ N`), never `receiptId`/`item id`.
+**PROPOSED**: `ยืนยันซื้อ`, `ตรวจใบซื้อใหม่`, `ยกเลิกซื้อ` — the task's candidate V1 commands plus one addition (`ตรวจใบซื้อใหม่`) needed to make the confirm-gate (§12) usable in practice. No ambiguity handling is needed beyond what §6.2 already guarantees: because only one active session can exist per `(source_id, sender_line_user_id)`, and confirmation is only accepted from `awaiting_confirmation`, there is never more than one candidate document for a given sender to act on.
+
+- **`ยืนยันซื้อ`** is accepted only when the current draft has **zero blocking blockers** (§10.3's blocking rule, evaluated against the draft's current `product_identity_status`/`unit_identity_status`/`price_unit_status` per item). If any blocking blocker exists: the handler refuses the command, does **not** call `PurchaseReceiptService.confirm`, does **not** transition the session to `confirming`, and replies explaining that the whole receipt — not one line — is waiting on the listed items (the §11.2 copy). When zero blocking blockers exist, the command is bound to `(source, sender, session_generation, receiptId, expectedDraftRevision)` — all five, matching §7's `confirming`-state contract and §2.2's `confirm()` signature — so a stale or cross-session confirm attempt is refused by the RPC itself (`PurchaseReceiptStaleRevisionError`/generation mismatch), not merely by UI-level trust.
+- **`ตรวจใบซื้อใหม่`** ("recheck the purchase") is the operator's path forward after fixing a registry gap (§10.3). It calls `recheck_purchase_capture_draft` (§16.3): re-reads the session's original, unchanged durable ingest set (§8), re-runs the unchanged pure parser (§9.1 steps 1-4) and identity resolution (§9.1 step 5) against the *current* registry state, performs another full-replace `saveDraft` (§2.2) under the *same* `documentNamespace`/`documentKey` (§6.3 — this is still the same document, not a new one), stores the resulting new `draft_revision` on the session, and sends a fresh preview (§11.1 or §11.2, depending on whether blockers remain). It never calls `confirm()` — recheck only ever produces a new draft, never a confirmation, even if every blocker happens to clear.
+- Because `expectedDraftRevision` changes on every recheck, a later `ยืนยันซื้อ` always binds to the **newest** `draft_revision` the session has recorded — an operator cannot accidentally confirm a stale, already-superseded preview, because the RPC's optimistic-concurrency check (§2.2) would refuse a mismatched revision.
+- **Raw database UUIDs are never shown in the LINE reply** — the preview references items by their 1-based `รายการที่ N` ordinal, matching the parser's own numbering (§2.1's `ซื้อรายการ N`), never `receiptId`/`item id`.
 
 ---
 
@@ -423,41 +475,57 @@ Every field the task requires is present: purchase date/time, supplier, referenc
 
 ```
 1. Staff sends "ยืนยันซื้อ" while session.status = 'awaiting_confirmation'.
-2. Handler transitions session → 'confirming' (durable, via purchase_capture RPC,
+2. Handler evaluates the current draft's blocking-blocker state per item
+   (§10.3's blocking rule: productIdentityStatus, unitIdentityStatus, and
+   priceUnitStatus all resolved/not-applicable). If ANY item has a blocking
+   blocker, the command is refused here: no RPC transition is called, the
+   session stays 'awaiting_confirmation', and the reply is the §11.2-style
+   "ใบซื้อนี้ยังไม่สามารถยืนยันเข้าสต๊อกได้ ..." message. Processing stops.
+3. Only if step 2 found zero blocking blockers: handler transitions session →
+   'confirming' (durable, via transition_purchase_capture_session_confirming,
    under FOR UPDATE, re-checking generation/identity — §6.4).
-3. confirmationKey = 'purchase-capture:v1:' || session.opened_line_event_id
+4. confirmationKey = 'purchase-capture:v1:' || session.opened_line_event_id
      (deterministic, derivable again on retry without any new state to remember —
       mirrors §6.3's reasoning for documentKey; identical retries always recompute
       the identical key).
-4. actor = 'line:' || sender_line_user_id   (matches the existing `actor` field
+5. actor = 'line:' || sender_line_user_id   (matches the existing `actor` field
      shape already accepted by both confirm() and postPurchaseReceipt(), §2.2/§2.3).
-5. result = PurchaseReceiptService.confirm({ receiptId, confirmationKey,
+6. result = PurchaseReceiptService.confirm({ receiptId, confirmationKey,
      expectedDraftRevision, actor }).
+   - expectedDraftRevision is always the NEWEST recorded draft_revision (§11.3) —
+     the last successful save, whether from the original finalize or from a later
+     ตรวจใบซื้อใหม่ recheck. A stale value is refused by §2.2's optimistic-
+     concurrency check, not silently accepted.
+   - Because step 2 already required zero blocking blockers on this exact draft
+     revision, confirm() is never called against a draft containing an
+     UNRESOLVED item under normal operation — the RPC-level refusal at posting
+     time (§2.3) remains a defense-in-depth backstop, not the primary gate.
    - If this is a replay (same confirmationKey, already confirmed): result.replayed
-     = true, no new row written (§2.2). Proceed to step 6 regardless — posting must
+     = true, no new row written (§2.2). Proceed to step 7 regardless — posting must
      still be attempted/verified, because confirm succeeding does not imply posting
      succeeded (this is exactly the partial-success case the task requires handling).
-6. postResult = InventoryLedgerService.postPurchaseReceipt({ receiptId, actor }).
+7. postResult = InventoryLedgerService.postPurchaseReceipt({ receiptId, actor }).
    - dedupeKey is P2B's own frozen p2c_dedupe_key (§2.3) — the ledger service does
      not need confirmationKey at all; it reads the frozen confirmation payload.
    - If this is a replay (same dedupeKey, already posted): postResult.replayed =
      true, no new movement (§2.3).
-7. Session → 'posted' (terminal), recording postResult.movementId.
-8. LINE reply sent per §14 (reply if still in the original request/response cycle,
-   push otherwise), using postResult.movementId's implied receipt state as the
-   idempotent notification key.
+   - postPurchaseReceipt posts the ENTIRE receipt or fails entirely (§2.3) — there
+     is no per-item partial posting path anywhere in this sequence.
+8. Session → 'posted' (terminal), recording postResult.movementId.
+9. LINE reply sent per §14/§18 (reply if still in the original request/response
+   cycle, push using the phase-specific posted_retry_key otherwise, §18).
 ```
 
-### 12.1 Partial-success recovery (crash between step 5 and step 7)
+### 12.1 Partial-success recovery (crash between step 3 and step 8)
 
-**Required property, satisfied by construction**: a retry must resume posting the *same* frozen confirmation and must not create a second receipt or movement.
+**Required property, satisfied by construction**: a retry must resume posting the *same* frozen confirmation and must not create a second receipt or movement. Recovery re-enters at step 4 of §12 (recomputing `confirmationKey`) — it never re-runs step 2's blocker check or step 3's transition, because by the time a session reaches `confirming` that check has already passed once and the transition has already committed; recovery is only ever finishing steps 4-9, never re-deciding whether to start.
 
-- Step 5's idempotency (`confirmationKey` unique per receipt, §2.2) means retrying step 5 after a crash either replays the existing confirmation or is a no-op if it already succeeded — it can never create a second receipt.
-- Step 6's idempotency (`dedupeKey` derived from the *confirmed* payload's hash, §2.3) means retrying step 6 either replays the existing movement or is a no-op if it already succeeded — it can never create a second movement.
-- **Recovery trigger**: the same cron sweep proposed in §8.2 (or a dedicated companion route — implementation detail for Slice C) additionally scans `purchase_capture_sessions WHERE status = 'confirming' AND updated_at < now() - interval '1 minute'` and re-runs steps 3-8 exactly as above, using the same deterministic `confirmationKey`. No new column is needed to "remember" the key, because it is a pure function of `opened_line_event_id`, which is already immutable and stored.
-- **What the user sees during retry**: nothing new is sent unless/until the sequence reaches step 8 — a crash mid-sequence produces no visible LINE message (the last message the user saw was the `awaiting_confirmation` preview or a transient "กำลังยืนยัน..." ack); the eventual success message (or, after some bounded number of cron sweeps, an operator-visible stuck notice — **OWNER DECISION REQUIRED**, §24, on the exact bound and escalation path) arrives once recovery completes.
-- **When the session becomes terminal**: only in step 7, after `postResult` is confirmed non-error (whether freshly posted or replayed) — never earlier, so a crash before step 7 leaves the session correctly non-terminal and eligible for the recovery sweep.
-- **Movement ID persistence/rediscovery**: written to the session row in step 7 on success; if it is not yet known (crash before step 7 on this attempt), it is *rediscovered*, not regenerated, by calling `postPurchaseReceipt` again — the RPC's own dedupe lookup (§2.3, keyed on `dedupe_key`/`(source_document_type, source_document_id)`) returns the already-existing `movementId` with `replayed:true`, which the recovery path then persists onto the session row it was missing from.
+- Step 6's idempotency (`confirmationKey` unique per receipt, §2.2) means retrying step 6 after a crash either replays the existing confirmation or is a no-op if it already succeeded — it can never create a second receipt.
+- Step 7's idempotency (`dedupeKey` derived from the *confirmed* payload's hash, §2.3) means retrying step 7 either replays the existing movement or is a no-op if it already succeeded — it can never create a second movement.
+- **Recovery trigger**: the same cron sweep proposed in §8.2 (or a dedicated companion route — implementation detail for Slice C) additionally scans `purchase_capture_sessions WHERE status = 'confirming' AND updated_at < now() - interval '1 minute'` and re-runs steps 4-9 exactly as above, using the same deterministic `confirmationKey`. No new column is needed to "remember" the key, because it is a pure function of `opened_line_event_id`, which is already immutable and stored.
+- **What the user sees during retry**: nothing new is sent unless/until the sequence reaches step 9 — a crash mid-sequence produces no visible LINE message (the last message the user saw was the `awaiting_confirmation` preview or a transient "กำลังยืนยัน..." ack); the eventual success message (or, after some bounded number of cron sweeps, an operator-visible stuck notice — **OWNER DECISION REQUIRED**, §24, on the exact bound and escalation path) arrives once recovery completes, using the phase-specific `posted_retry_key` (§18).
+- **When the session becomes terminal**: only in step 8, after `postResult` is confirmed non-error (whether freshly posted or replayed) — never earlier, so a crash before step 8 leaves the session correctly non-terminal and eligible for the recovery sweep.
+- **Movement ID persistence/rediscovery**: written to the session row in step 8 on success; if it is not yet known (crash before step 8 on this attempt), it is *rediscovered*, not regenerated, by calling `postPurchaseReceipt` again — the RPC's own dedupe lookup (§2.3, keyed on `dedupe_key`/`(source_document_type, source_document_id)`) returns the already-existing `movementId` with `replayed:true`, which the recovery path then persists onto the session row it was missing from.
 - **Inventory balance verification**: because `inventory_balances` is a derived `SUM(signed_quantity)` view (§2.3), no separate verification step is needed or possible to get "out of sync" — the balance reflects whatever movement lines actually exist, which posting's own idempotency already guarantees is exactly one set per receipt.
 
 ---
@@ -471,9 +539,11 @@ Every field the task requires is present: purchase date/time, supplier, referenc
 | `documentKey` | `opened_line_event_id` (§6.3) | Per purchase document, namespace `line-text` | `0052`'s `(document_namespace, document_key)` uniqueness + source-binding fail-closed check (§2.2, CONFIRMED) |
 | `confirmationKey` | `'purchase-capture:v1:' \|\| opened_line_event_id` (§12) | Per receipt confirm attempt | `purchase_receipts.confirmation_key UNIQUE` (§2.2, CONFIRMED) |
 | `p2c_dedupe_key` | `'purchase-receipt-confirmation:v1:' \|\| receipt_id \|\| ':' \|\| confirmation_hash` (§2.3, exact quote from `0052:1428`) | Per ledger posting attempt | `inventory_movements.dedupe_key UNIQUE` + source-posting partial unique index (§2.3, CONFIRMED) |
-| `X-Line-Retry-Key` (outbound) | `session_generation` (mirrors Physical Inventory, §2.4) | Per outbound push/notification | LINE's own retry-key 409 semantics (§2.5, CONFIRMED mechanism, reused not modified) |
-| `session_generation` | `gen_random_uuid()` at session open | Per live session lifetime | Session row uniqueness + `p_expected_generation` re-check on every RPC (§6.4, PROPOSED, mirrors `0047`) |
-| `ingest_revision`/`ingest_set_hash` | Monotonic counter / SHA-256 over ordered ingest tuples (§8.2) | Per finalize attempt | Optimistic-concurrency check inside the finalize RPC (§8.3, PROPOSED, mirrors `0047:1085-1092`) |
+| `preview_retry_key` (outbound) | `gen_random_uuid()`, generated exactly once the first time a preview push is needed (§18) | Per session, scoped to the `preview_ready` logical notification only | New `purchase_capture_sessions.preview_retry_key` column, generated lazily and reused on retry (§16.1, §18, PROPOSED) |
+| `posted_retry_key` (outbound) | `gen_random_uuid()`, generated exactly once the first time a posted-confirmation push is needed | Per session, scoped to the `posted_success` logical notification only | New `purchase_capture_sessions.posted_retry_key` column (§16.1, §18, PROPOSED) |
+| `stuck_retry_key` (outbound) | `gen_random_uuid()`, generated exactly once the first time a stuck-escalation push is needed | Per session, scoped to the `stuck_escalation` logical notification only | New `purchase_capture_sessions.stuck_retry_key` column (§16.1, §18, PROPOSED) |
+| `session_generation` | `gen_random_uuid()` at session open | Per live session lifetime; identity/ownership re-check only — **no longer reused as a push retry key** (§18) | Session row uniqueness + `p_expected_generation` re-check on every RPC (§6.4, PROPOSED, mirrors `0047`) |
+| `ingest_revision`/`ingest_set_hash` | Monotonic admission counter / SHA-256 over ingest tuples sorted by `(line_timestamp_ms, line_event_id)` (§8.2) | Per finalize attempt — concurrency guard only, never document order (§8.2, §9.1) | Optimistic-concurrency check inside the finalize RPC (§8.3, PROPOSED, mirrors `0047:1085-1092`) |
 
 ---
 
@@ -483,12 +553,14 @@ Every field the task requires is present: purchase date/time, supplier, referenc
 |---|---|---|
 | LINE webhook redelivers an already-admitted event | `line_event_id` unique-violation inside `admit_purchase_capture_event` | RPC returns the existing ingest row idempotently; no duplicate content, no error surfaced to the user |
 | Concurrent webhook requests for two events in the same session | `SELECT ... FOR UPDATE` on the session row inside the admit RPC | Serialized by the row lock; second request waits, then proceeds against the now-current `ingest_revision` |
-| Messages arrive out of HTTP processing order | `ingest_ordinal` assigned server-side from `line_timestamp_ms`, never request-arrival order | Parser adapter (§9) always sorts by `chunkOrdinal` before calling `assemble`, so arrival order is irrelevant to the result |
+| Messages arrive out of HTTP processing order | `ingest_ordinal`/`ingest_revision` record admission order only; the parser adapter independently sorts the finalize candidate by `(line_timestamp_ms, line_event_id)` before assigning `chunkOrdinal` (§8.2, §9.1) | Parser adapter (§9) always derives `chunkOrdinal` from the sorted array, never from admission order or request-arrival order, so arrival order is irrelevant to the result |
 | Close message arrives before an earlier item request finishes | Close sets `close_event_timestamp_ms` from its own LINE timestamp; the in-flight item, once it lands, is checked against that boundary, not against wall-clock "did close already happen" | If the item's own timestamp is before the close boundary, it is still admitted (quiet window exists precisely for this); the finalize RPC's hash re-check (§8.3) additionally refuses to finalize on stale state |
-| Repeated confirmation (`ยืนยันซื้อ` sent twice) | `confirmationKey` uniqueness (§2.2) | Second call replays the frozen snapshot, `replayed:true`, no new receipt |
+| `ยืนยันซื้อ` sent while a blocking blocker exists | Blocker check evaluated against the draft's identity statuses before any RPC transition (§12 step 2) | Refused: session stays `awaiting_confirmation`, no `confirm()` call, reply explains the whole receipt is waiting; staff fix the registry and send `ตรวจใบซื้อใหม่` (§11.3) |
+| Repeated confirmation (`ยืนยันซื้อ` sent twice after blockers already cleared) | `confirmationKey` uniqueness (§2.2) | Second call replays the frozen snapshot, `replayed:true`, no new receipt |
+| Repeated `ตรวจใบซื้อใหม่` (sent twice, registry unchanged between calls) | Full-replace `saveDraft` under the same `documentKey` (§2.2) | Second call re-saves identical content as a new `draft_revision`; idempotent in effect (same items, same statuses), not a no-op at the row level but produces no observable difference to staff |
 | Database retry (any RPC call retried by the client after a network timeout, actual server-side success) | Every mutating RPC in this design is idempotent under its own key (§13) | Retry is safe by construction; no special client-side dedup needed beyond calling the same RPC again with the same key |
 | Application failure after receipt confirmation but before ledger posting | Session stuck in `confirming` past a threshold | Cron sweep resumes posting using the same deterministic `confirmationKey`/derived `dedupeKey` (§12.1) |
-| LINE reply/push failure | `pushLineMessage`'s existing 409/retry-key handling (§2.5, reused unmodified) | Retry with the same `X-Line-Retry-Key` (`session_generation`); LINE's own 409 semantics prevent a duplicate send |
+| LINE reply/push failure | `pushLineMessage`'s existing 409/retry-key handling (§2.5, reused unmodified) | Retry with the phase-specific key for that logical notification (`preview_retry_key`/`posted_retry_key`/`stuck_retry_key`, §18) — never `session_generation`; LINE's own 409 semantics prevent a duplicate send of that same message, while a different logical notification always uses its own key and cannot be mistaken for a retry of the first |
 | Staff accidentally opens another purchase while one is active | Partial unique index (§6.2) | `open` RPC returns `already_open`; webhook replies with the existing session's state instead of opening a second one |
 
 ---
@@ -508,35 +580,46 @@ Every field the task requires is present: purchase date/time, supplier, referenc
 
 **PROPOSED.** All additive, forward-only, matching Production's actual timestamped migration convention (§3). **Migration `0054` is not used (reserved for P2D).** Filenames follow the `YYYYMMDDHHMMSS_description.sql` pattern Production's ledger actually records for everything after `0050` — proposed identifiers (illustrative; the implementation PR must generate real current timestamps, not reuse these):
 
-- `20260805000000_purchase_capture_sessions.sql` (Slice A)
-- `20260805010000_purchase_intake_product_unit_registry.sql` (Slice B)
+- `20260805000000_purchase_capture_sessions.sql` (Slice A — tables + Slice A RPCs only, §21)
+- `20260805010000_purchase_capture_draft_finalization.sql` (Slice B — `finalize_purchase_capture_session`, `recheck_purchase_capture_draft`, both product/unit registry tables, §21)
+- `20260805020000_purchase_capture_confirm_post.sql` (Slice C — `transition_purchase_capture_session_confirming`, `mark_purchase_capture_session_posted`, §21)
 
 No changes to `0052`/`0053` are proposed — both are reused exactly as they exist today.
 
 ### 16.1 Tables (Slice A)
 
-- **`purchase_capture_sessions`** — mirrors `physical_inventory_sessions` (§2.4) field-for-field where applicable: `id`, `source_type` (CHECK `user|group|room`), `source_id`, `sender_line_user_id`, `opened_line_event_id` (UNIQUE, NOT NULL), `session_generation` (`gen_random_uuid()`), `status` (CHECK IN `'open','closing','awaiting_confirmation','confirming','posted','failed_closed','cancelled'`), `close_event_timestamp_ms`, `close_quiet_until`, `close_deadline_at`, `ingest_revision` (`DEFAULT 0`), `receipt_id` (nullable FK → `purchase_receipts(id)`, set once the draft is saved), `movement_id` (nullable, set once posting succeeds, §12.1), `fail_reason`, `warnings jsonb`, `created_at`, `updated_at`.
-  - Constraints: `UNIQUE(source_id, sender_line_user_id, session_generation)`; partial unique `purchase_capture_sessions_one_active_per_sender_idx ON (source_id, sender_line_user_id) WHERE status IN ('open','closing','awaiting_confirmation','confirming')` (§6.2); a terminal-state immutability trigger mirroring `physical_inventory_forbid_terminal_session_mutation` (`0047:332-373`).
-- **`purchase_capture_session_ingests`** — mirrors `physical_inventory_session_ingests`: `id`, `session_id` (FK), `session_generation`, `line_event_id` (UNIQUE globally), `line_message_id`, `line_timestamp_ms`, `ingest_ordinal`, `raw_text`, `raw_message_id` (FK → `raw_messages`), `created_at`. Append-only (forbid-mutation trigger), `UNIQUE(session_id, ingest_ordinal)`.
+- **`purchase_capture_sessions`** — mirrors `physical_inventory_sessions` (§2.4) field-for-field where applicable: `id`, `source_type` (CHECK `user|group|room`), `source_id`, `sender_line_user_id`, `opened_line_event_id` (UNIQUE, NOT NULL), `session_generation` (`gen_random_uuid()`), `status` (CHECK IN `'open','closing','awaiting_confirmation','confirming','posted','failed_closed','cancelled'`), `close_event_timestamp_ms`, `close_quiet_until`, `close_deadline_at`, `ingest_revision` (`DEFAULT 0`), `receipt_id` (nullable FK → `purchase_receipts(id)`, **stays NULL through all of Slice A**, first set in Slice B's `finalize_purchase_capture_session`), `draft_revision` (nullable, mirrors `receipt_id` — first set in Slice B, updated by every later `ตรวจใบซื้อใหม่`), `movement_id` (nullable, set once posting succeeds, §12.1 — first set in Slice C), `fail_reason`, `warnings jsonb`, `preview_retry_key`/`posted_retry_key`/`stuck_retry_key` (each nullable `uuid`, lazily generated exactly once per session the first time that logical notification needs a push, §18), `created_at`, `updated_at`.
+  - Constraints: `UNIQUE(source_id, sender_line_user_id, session_generation)`; partial unique `purchase_capture_sessions_one_active_per_sender_idx ON (source_id, sender_line_user_id) WHERE status IN ('open','closing','awaiting_confirmation','confirming')` (§6.2); a terminal-state immutability trigger mirroring `physical_inventory_forbid_terminal_session_mutation` (`0047:332-373`). The `status` CHECK permits all seven values from Slice A's migration (schema is defined once); which RPC can actually *write* `awaiting_confirmation`/`posted` is a Slice B/C code question, not a Slice A schema question (§21).
+- **`purchase_capture_session_ingests`** — mirrors `physical_inventory_session_ingests`: `id`, `session_id` (FK), `session_generation`, `line_event_id` (UNIQUE globally), `line_message_id`, `line_timestamp_ms`, `ingest_ordinal`, `raw_text`, `raw_message_id` (FK → `raw_messages`), `created_at`. Append-only (forbid-mutation trigger), `UNIQUE(session_id, ingest_ordinal)`. **`ingest_ordinal` is admission-order/audit-only** — it records the sequence the DB happened to admit rows in and is never read by the parser adapter, which instead derives its own order by sorting on `(line_timestamp_ms, line_event_id)` at query time (§8.2, §9.1). It is retained here purely as an audit/debugging aid (e.g. "was this event admitted before or after that one, regardless of its LINE timestamp"), not because anything downstream depends on it.
 - **`purchase_capture_lifecycle_events`** — mirrors `physical_inventory_lifecycle_events`: append-only audit of every state transition, `id`, `session_id`, `event`, `detail jsonb`, `created_at`.
 
-### 16.2 Table (Slice B)
+### 16.2 Tables (Slice B)
 
-- **`purchase_intake_product_unit_registry`** — as specified in §10.3.
+- **`purchase_intake_product_registry`** and **`purchase_intake_unit_alias_registry`** — as specified in §10.3 (two tables, not one; the unit registry is queried once for the quantity unit and once for the price unit per item).
 
-### 16.3 RPCs (Slice A, `SECURITY DEFINER`, `search_path = public, extensions, pg_temp`, `service_role`-EXECUTE-only, mirroring §2.2/§2.4's exact grant pattern)
+### 16.3 RPCs (`SECURITY DEFINER`, `search_path = public, extensions, pg_temp`, `service_role`-EXECUTE-only, mirroring §2.2/§2.4's exact grant pattern), grouped by the slice that introduces them
+
+**Slice A** — session lifecycle up to a stable, eligible-for-finalize `closing` state; no parser, no draft, no `awaiting_confirmation`:
 
 - `open_purchase_capture_session(p_source_type, p_source_id, p_sender_line_user_id, p_opened_line_event_id, p_line_timestamp_ms, p_raw_text, p_line_message_id, p_raw_message_id)` — mirrors `open_physical_inventory_session`; returns `already_open` if the partial unique index would be violated.
-- `admit_purchase_capture_event(p_session_id, p_expected_generation, p_line_event_id, p_line_timestamp_ms, p_kind, p_raw_text, p_line_message_id, p_raw_message_id)` — mirrors `admit_physical_inventory_event`; handles both `item`/`costs` admits and the close-boundary-setting admit.
-- `get_purchase_capture_finalize_candidate(p_session_id, p_expected_generation)` — mirrors `get_physical_inventory_finalize_candidate`; returns the current ingest set + revision + hash for the caller to run the parser adapter (§9) against.
-- `finalize_purchase_capture_session(p_session_id, p_expected_generation, p_expected_ingest_revision, p_expected_ingest_hash, p_assembly_status, p_receipt_id_or_null, p_fail_reason_or_null)` — mirrors `finalize_physical_inventory_session`; transitions `closing` → `awaiting_confirmation` (with `receipt_id` set, draft already saved by the caller via `upsert_purchase_receipt_draft`) or → `failed_closed`.
-- `transition_purchase_capture_session_confirming(p_session_id, p_expected_generation)` — new, `awaiting_confirmation` → `confirming`, re-checking identity under `FOR UPDATE` (§6.4).
-- `mark_purchase_capture_session_posted(p_session_id, p_expected_generation, p_movement_id)` — new, `confirming` → `posted` (terminal), records `movement_id`.
-- `cancel_purchase_capture_session(p_session_id, p_expected_generation)` — new, any of `open/closing/awaiting_confirmation` → `cancelled`.
+- `admit_purchase_capture_event(p_session_id, p_expected_generation, p_line_event_id, p_line_timestamp_ms, p_kind, p_raw_text, p_line_message_id, p_raw_message_id)` — mirrors `admit_physical_inventory_event`; handles `item`/`costs` admits and the multi-message close-boundary-setting admit (`p_kind = 'close'`).
+- `close_purchase_capture_open_event(p_session_id, p_expected_generation, p_opened_line_event_id)` — **new (§8.4)**; sets the close boundary from the *already-persisted* opening ingest row for the one-message (Header+Items+Costs+Close-in-a-single-message) case, without inserting a second ingest row for the same `line_event_id`; idempotent on redelivery (the boundary fields are immutable once set, so a repeat call observes the existing boundary rather than erroring).
+- `get_purchase_capture_finalize_candidate(p_session_id, p_expected_generation)` — mirrors `get_physical_inventory_finalize_candidate`; returns the current ingest set (rows only — ordering for parsing is the caller's job per §8.2/§9.1) + revision + hash + quiet/deadline eligibility flags, for the caller to run the parser adapter (§9) against. **Slice A's own tests exercise this RPC directly and assert eligibility is computed correctly; Slice A does not call any RPC that writes `awaiting_confirmation`.**
+- `cancel_purchase_capture_session(p_session_id, p_expected_generation)` — any of `open/closing` → `cancelled` in Slice A (the `awaiting_confirmation` branch of this same RPC becomes reachable once Slice B exists, but the RPC signature and CHECK-guarded transition table are defined once, here).
+
+**Slice B** — parser adapter, identity resolution, and real draft persistence become available; this is the *only* slice that may write `awaiting_confirmation`:
+
+- `finalize_purchase_capture_session(p_session_id, p_expected_generation, p_expected_ingest_revision, p_expected_ingest_hash, p_assembly_status, p_receipt_id_or_null, p_draft_revision_or_null, p_fail_reason_or_null)` — mirrors `finalize_physical_inventory_session`; transitions `closing` → `awaiting_confirmation` **only when the caller supplies a real, non-null `receipt_id`/`draft_revision` already written by a preceding `upsert_purchase_receipt_draft` call** (§2.2) — the RPC does not accept a stub/placeholder outcome; a `NULL` receipt_id is only valid on the `→ failed_closed` branch. This is the RPC that Slice A's schema defines space for but Slice A never calls with an `awaiting_confirmation` target (§21).
+- `recheck_purchase_capture_draft(p_session_id, p_expected_generation, p_receipt_id, p_draft_revision)` — **new (§11.3)**; `awaiting_confirmation` → `awaiting_confirmation` only (a self-transition, not a new state), re-recording `receipt_id` (unchanged — same document) and the new `draft_revision` after the caller has already re-run the resolver + parser + `saveDraft` against the session's original, untouched ingest set. Refuses if called from any state other than `awaiting_confirmation`.
+
+**Slice C** — confirmation and posting:
+
+- `transition_purchase_capture_session_confirming(p_session_id, p_expected_generation)` — `awaiting_confirmation` → `confirming`, re-checking identity under `FOR UPDATE` (§6.4). The caller (confirm-flow, §12) is responsible for having already verified zero blocking blockers (§12 step 2) *before* calling this RPC — the RPC itself trusts that check has been performed, exactly as `0052`'s `confirm_purchase_receipt` trusts its own caller for non-identity business rules.
+- `mark_purchase_capture_session_posted(p_session_id, p_expected_generation, p_movement_id)` — `confirming` → `posted` (terminal), records `movement_id`.
 
 ### 16.4 RLS posture
 
-RLS **enabled** on all four new tables, **no policies defined** — identical to `0047`'s posture (§2.4) — access exists only through the `SECURITY DEFINER` RPCs above, exactly matching the established convention.
+RLS **enabled** on all five new tables (three from Slice A, two registries from Slice B), **no policies defined** — identical to `0047`'s posture (§2.4) — access exists only through the `SECURITY DEFINER` RPCs above, exactly matching the established convention.
 
 ### 16.5 Append-only/audit behavior
 
@@ -558,7 +641,7 @@ RLS **enabled** on all four new tables, **no policies defined** — identical to
 - **Source/sender ownership checks inside the authoritative mutation boundary**: every admit/finalize/confirm/post RPC re-verifies `(source_type, source_id, sender_line_user_id, session_generation)` under row lock, never trusting the caller's claim without a DB-side check (§6.4) — this is the same discipline `0047`/`0052` already apply.
 - **Replay protection before mutation**: every RPC checks its relevant unique key (§13) before performing any write, not after — a duplicate call is detected and short-circuited, never allowed to attempt-then-rollback.
 - **No secrets in logs**: this design introduces no new secret material; `CRON_SECRET` (reused, §8.2) is handled exactly as the existing Physical Inventory cron route already handles it (Bearer/header comparison, never logged).
-- **No client-controlled trusted labels or identities**: mirroring `0051`'s `line_menu_states_payload_no_trusted_labels` constraint (§2.6) — `productKey`/`unitKey` are never taken from client-supplied "resolved" claims; they are always derived server-side from the registry lookup (§10.3), never trusted from the LINE message text itself beyond the raw string used as a lookup key.
+- **No client-controlled trusted labels or identities**: mirroring `0051`'s `line_menu_states_payload_no_trusted_labels` constraint (§2.6) — `productKey`, `quantityUnitKey`, and `priceUnitKey` are never taken from client-supplied "resolved" claims; all three are always derived server-side from the two registry lookups (§10.3), never trusted from the LINE message text itself beyond the raw strings used as lookup keys.
 - **No direct table DML from webhook application code where an RPC owns the contract**: the webhook handler (future integration point, §2.7) calls only the RPCs in §16.3 plus the existing `PurchaseReceiptService`/`InventoryLedgerService` methods (§2.2/§2.3) — it never issues a direct `.from(...).insert/update/delete(...)` against any of the new or existing tables in this flow, matching the repo-wide convention already enforced for `purchase_receipts`/`inventory_movements` (§2.2/§2.3, confirmed zero DML grants outside `postgres`).
 
 ---
@@ -567,12 +650,17 @@ RLS **enabled** on all four new tables, **no policies defined** — identical to
 
 **PROPOSED, reusing existing conventions unmodified (§2.4, §2.5).**
 
-- **Webhook reply vs. push**: while still inside the original webhook HTTP request/response cycle (i.e., the close event that triggers immediate finalize, or the confirm event that triggers immediate posting, both complete within the request), use LINE's `reply` API exactly as the current handlers do. Once work has been deferred past the response (background finalize via `after()`, or a cron-sweep-driven recovery, §8.2/§12.1), use `pushLineMessage` — identical fallback structure to Physical Inventory's `finalizer.ts`.
-- **Terminal notification retry key**: `session_generation` (§13), reusing the exact mechanism already proven for Physical Inventory (`finalizer.ts:159-171`) — no new retry-key scheme is invented.
+- **Webhook reply vs. push**: while still inside the original webhook HTTP request/response cycle (i.e., the close event that triggers immediate finalize, or the confirm event that triggers immediate posting, both complete within the request), use LINE's `reply` API exactly as the current handlers do. Replies **never** consume or need a push retry key — LINE's reply API has no redelivery-collision problem the way push does, so this is purely a push concern. Once work has been deferred past the response (background finalize via `after()`, or a cron-sweep-driven recovery, §8.2/§12.1), use `pushLineMessage` with the retry key for that phase, below.
+- **One retry key per logical notification, not one per session.** A single session can produce up to three independent outbound notifications over its lifetime — `preview_ready` (the §11 preview once `awaiting_confirmation` is reached, or re-sent after `ตรวจใบซื้อใหม่`), `posted_success` (§12 step 9), and `stuck_escalation` (§12.1's operator-visible notice) — and reusing one key (`session_generation`, as the earlier draft of this document proposed) across all three risks LINE treating a later, genuinely different message as a retry of an earlier one, or vice versa. This design instead uses three separately-persisted, immutable `uuid` columns on `purchase_capture_sessions` (§16.1): `preview_retry_key`, `posted_retry_key`, `stuck_retry_key`.
+  - Each key is generated with `gen_random_uuid()` **exactly once** — lazily, the first time that specific logical notification actually needs a push (not at session-open time, so a session that never needs a `stuck_escalation` push never allocates that key).
+  - **Retries of the same logical notification reuse the same key** (e.g. the cron sweep re-attempting an undelivered `posted_success` push always reads and reuses the session's existing `posted_retry_key`, never generating a new one).
+  - **Different logical notifications always use different keys** — `preview_ready` and `posted_success` for the same session are never sent with the same `X-Line-Retry-Key`, even though both may need a push for the same session.
+  - If `ตรวจใบซื้อใหม่` requires a second preview push for the same session, it reuses the *same* `preview_retry_key` already recorded (it is still, logically, "the preview notification" for this session, just re-sent with new content) — this is a deliberate simplification, not a gap: the operator-visible effect of a stale 409 here is at worst "the older preview text is what LINE dedupes against," which is caught the moment staff reply with `ยืนยันซื้อ`/`ตรวจใบซื้อใหม่` against the actual current draft state (the RPCs, not the LINE message, are authoritative for what's confirmable).
+- **DB success vs. LINE delivery status stay separate columns**: the session's `status`/`receipt_id`/`movement_id` (durable, DB-authoritative) are never conflated with whether a given push actually reached LINE — delivery outcome is tracked only by whether the retry key exists and whether a later cron pass still finds the terminal state undelivered (below), never by mutating `status`.
 - **Processed-marker timing**: `raw_messages.is_processed` set only after the admit/finalize/confirm/post step it corresponds to has durably committed — mirrors `markRawMessageProcessed`'s existing "leaving it unprocessed is the safe direction" philosophy (§2.5).
-- **Behavior if DB succeeds but LINE delivery fails**: the DB-side state (`posted`, `movement_id` set) is already correct and terminal; only the notification is missing. The cron sweep's "recent terminal sessions with an undelivered close message" pattern (`finalizer.ts:319-334`, §2.4) is directly reusable — extended to also check for `posted` sessions whose confirmation reply was never successfully sent.
-- **Scheduler recovery**: same cron route proposed in §8.2/§12.1 covers this — one sweep, multiple responsibilities (finalize-due, resume-posting, redeliver-notification), mirroring how the existing Physical Inventory sweep already does more than one job per pass (`finalizer.ts:336-394`).
-- **Duplicate notification prevention**: LINE's own `X-Line-Retry-Key` 409 semantics (§2.5, reused unmodified) — a redelivery attempt with the same `session_generation` either succeeds once or 409s harmlessly.
+- **Behavior if DB succeeds but LINE delivery fails**: the DB-side state (`posted`, `movement_id` set) is already correct and terminal; only the notification is missing. The cron sweep's "recent terminal sessions with an undelivered close message" pattern (`finalizer.ts:319-334`, §2.4) is directly reusable — extended to check, per session, which of `preview_retry_key`/`posted_retry_key` was allocated but never confirmed delivered, and redeliver using that same key, durable enough that a cron pass days later still finds and completes it.
+- **Scheduler recovery**: same cron route proposed in §8.2/§12.1 covers this — one sweep, multiple responsibilities (finalize-due, resume-posting, redeliver-notification per phase-specific key), mirroring how the existing Physical Inventory sweep already does more than one job per pass (`finalizer.ts:336-394`).
+- **Duplicate notification prevention**: LINE's own `X-Line-Retry-Key` 409 semantics (§2.5, reused unmodified) — a redelivery attempt with the same phase-specific key either succeeds once or 409s harmlessly; a different phase's key is never at risk of colliding with it.
 
 ---
 
@@ -581,14 +669,21 @@ RLS **enabled** on all four new tables, **no policies defined** — identical to
 **PROPOSED** as the required focused-test list for the later implementation PR. Grouped exactly per the task's four categories; no category is skipped.
 
 ### 19.1 Parser/application integration
-- Valid complete multi-message document (5 separate messages) → `awaiting_confirmation` with a correct preview.
-- All blocks in one message → identical result (§2.1 confirms the parser already supports this; the test proves the capture-session layer doesn't accidentally impose a one-block-per-message assumption).
-- Missing header / missing costs / missing close → `failed_closed` with the correct structural error surfaced.
+- Valid complete multi-message document (5 separate messages) → `awaiting_confirmation` with a correct preview, zero blocking blockers.
+- All blocks in one message, via `close_purchase_capture_open_event` (§8.4) → identical result to the 5-message case, with exactly one ingest row for the whole document (the test proves the capture-session layer doesn't accidentally impose a one-block-per-message assumption, and doesn't create a duplicate ingest for the opening event).
+- Missing header (close otherwise present, so the session does reach `closing`) → `failed_closed`, `MISSING_HEADER` surfaced.
+- Missing costs (close otherwise present) → `failed_closed`, `MISSING_COSTS` surfaced.
+- **Missing close is NOT tested as an operational `failed_closed` transition.** A session that never receives a close event (and isn't the one-message case) never reaches `closing` at all, so finalize is never invoked — the operational test asserts the session **remains `open`** indefinitely (§8.5), distinct from the existing parser-level unit test (already in `src/lib/purchases`, §2.1) that proves `MISSING_CLOSE` when the parser is called directly on incomplete evidence. These are two different test subjects and this document does not claim the operational one produces `failed_closed`.
 - Close count mismatch → `failed_closed`, `CLOSE_COUNT_MISMATCH`.
 - Malformed quantity / malformed unit cost / unknown unit cost (i.e., `ราคา: ไม่ทราบ`) → correct review-flag vs. error classification per §2.1.
 - VAT variants (`ไม่มี`, amount + both boolean fields) → correct draft VAT mapping.
-- Out-of-order block evidence (item message's HTTP request lands before the header message's, despite header being sent first) → correct assembly via `chunkOrdinal`, not arrival order (§9).
+- Out-of-order block evidence (item message's HTTP request lands before the header message's, despite header being sent first) → correct assembly, because `chunkOrdinal` is derived from sorting the ingest set by `(line_timestamp_ms, line_event_id)`, not from arrival order or `ingest_revision` (§9).
+- Two ingests sharing the same `line_timestamp_ms` (clock-resolution collision) → tie-broken deterministically by `line_event_id`, same result on every replay.
 - Block split across messages (a field's value literally cut mid-line across two LINE messages) → `BLOCK_SPLIT_ACROSS_CHUNKS`, not silently merged (§2.1 confirms this is already a distinct, tested error path in the pure parser; the integration test proves the adapter surfaces it correctly).
+- Product resolved, quantity unit resolved, price unit resolved, canonical keys equal (e.g. `จำนวน ... กก.` / `ราคา ... บาท/โล`, both alias to `kg`) → zero blockers, `ยืนยันซื้อ` accepted.
+- Product resolved, quantity unit resolved, price unit resolved but canonical keys differ (e.g. quantity unit resolves to `kg`, price unit resolves to a different canonical unit) → `price_unit_status = 'UNRESOLVED'`, blocking blocker, `ยืนยันซื้อ` refused.
+- Unregistered raw unit text on either the quantity or the price side → that side's status `UNRESOLVED`, blocking blocker.
+- No unit cost present (`ราคา: ไม่ทราบ`) → `price_unit_status = 'NOT_APPLICABLE'`, not a blocker by itself.
 
 ### 19.2 Session/concurrency
 - Duplicate open event (same `opened_line_event_id` redelivered) → idempotent, no second session.
@@ -603,18 +698,23 @@ RLS **enabled** on all four new tables, **no policies defined** — identical to
 - Stale generation — an RPC call carrying a superseded `session_generation` is refused.
 - Stale revision/hash — finalize refused if the ingest set changed since the candidate was read (§8.3).
 - Finalizer retry — cron sweep resumes a `closing` session past its deadline and reaches the correct terminal state.
+- Redelivered `close_purchase_capture_open_event` for the one-message case (§8.4) → idempotent, boundary fields unchanged on the second call, no second ingest row.
+- `open_purchase_capture_session` followed immediately by a redelivered copy of the *same* opening message → exactly one ingest row exists, not two, whether or not `close_purchase_capture_open_event` has been called yet.
 
 ### 19.3 Persistence/posting
 - Draft full-replace idempotency (repeated identical draft save → same content, no duplication) — reusing `0052`'s existing guarantee (§2.2), tested at the adapter-integration level.
-- Stale draft confirmation rejected (`expectedDraftRevision` mismatch).
-- Confirmation replay (`ยืนยันซื้อ` sent twice) → same receipt, `replayed:true`, no duplicate.
-- Blocking blocker prevents posting — an item still `UNRESOLVED` at confirm time is confirmed (P2B allows it, §10.3) but posting fails closed at the P2C RPC boundary (§2.3) rather than silently skipping the line.
-- Unresolved identity prevents posting — direct test of §2.3's existing RPC-level refusal, exercised through this new flow's actual call path (not just the existing `0053` unit tests) to prove the adapter never accidentally defaults to `RESOLVED` (§10.2).
+- **Blocking blocker prevents confirmation, not just posting** — a draft with a still-`UNRESOLVED` item, when `ยืนยันซื้อ` is sent: `PurchaseReceiptService.confirm` is never called, no receipt is created, session stays `awaiting_confirmation`, correct refusal reply sent (§12 step 2). This replaces any earlier notion of "confirm succeeds, only posting is blocked."
+- `ตรวจใบซื้อใหม่` clears a blocker — seed the registry, send `ตรวจใบซื้อใหม่` on a session with a prior blocking item, assert: resolver re-run against the *original* durable ingest set (no re-parsing of new LINE text), new `draft_revision` recorded, previously-blocking item now `RESOLVED`, fresh preview sent, session still `awaiting_confirmation` (never auto-confirmed).
+- `ยืนยันซื้อ` after `ตรวจใบซื้อใหม่` binds to the newest `draft_revision` — an attempt using a stale (pre-recheck) revision is refused by the same optimistic-concurrency check as any other stale-revision confirm attempt.
+- Stale draft confirmation rejected (`expectedDraftRevision` mismatch) — including the case where the mismatch comes from an intervening `ตรวจใบซื้อใหม่`, not just a concurrent write.
+- Confirmation replay (`ยืนยันซื้อ` sent twice after blockers are already clear) → same receipt, `replayed:true`, no duplicate.
+- **Defense-in-depth**: unresolved identity is still refused at the P2C RPC boundary even if somehow reached — direct test of §2.3's existing RPC-level refusal, exercised through this new flow's actual call path (not just the existing `0053` unit tests) by constructing a test harness that bypasses the confirm-gate (§12 step 2) to prove the RPC-level backstop still fires independently; this is a should-never-happen path under normal operation (§10.2), not a documented user-reachable one.
 - Confirmed receipt posts exactly once.
 - Repeated posting returns the same movement (`replayed:true`, same `movementId`).
 - Inventory balance increases exactly once (via the derived view, §2.3).
 - Application crash after confirm before post → recovery sweep completes posting without a second receipt or movement (§12.1).
-- Notification retry does not duplicate the LINE message (§18).
+- `preview_retry_key` and `posted_retry_key` for the same session are different UUIDs, and a redelivered push for one never collides with or is mistaken for the other (§18).
+- Notification retry (same phase, same key) does not duplicate the LINE message (§18).
 
 ### 19.4 Migration/security
 - Grants: `anon`/`authenticated` have zero access to every new table/RPC.
@@ -631,7 +731,7 @@ RLS **enabled** on all four new tables, **no policies defined** — identical to
 **PROPOSED — designed here, not performed in this task, per the explicit instruction.**
 
 ### 20.1 Setup
-- Seed `purchase_intake_product_unit_registry` (§10.3) with exactly the product/unit pairs the UAT document will use (e.g. `หมอนทอง`/`โล`, `ส้มไต้หวัน`/`โล`) — nothing else, keeping the blast radius minimal.
+- Seed `purchase_intake_product_registry` and `purchase_intake_unit_alias_registry` (§10.3) with exactly the product/unit pairs the UAT document will use (e.g. products `หมอนทอง`, `ส้มไต้หวัน`; unit alias `โล` → `kg`) — nothing else, keeping the blast radius minimal.
 - Use a dedicated test LINE group/user not used for real operations, or a clearly-marked test business date, per whatever convention the team already uses for UAT (not specified in the inspected repo — **OWNER DECISION REQUIRED** on the exact isolation mechanism if one doesn't already exist for other features' UATs).
 
 ### 20.2 Execution (one purchase document, exactly the example in the task)
@@ -639,7 +739,7 @@ Send the header/2-items/costs/close sequence from the task's own example, either
 
 ### 20.3 Verification queries (read-only)
 - **Exactly one `purchase_receipts` row** for the document's `documentKey`, `status = 'confirmed'`.
-- **Expected `purchase_receipt_items` rows** — exactly 2, matching the two `ซื้อรายการ` blocks, both `product_identity_status = 'RESOLVED'` (since the registry was seeded for exactly these two).
+- **Expected `purchase_receipt_items` rows** — exactly 2, matching the two `ซื้อรายการ` blocks, both `product_identity_status = 'RESOLVED'`, `unit_identity_status = 'RESOLVED'`, and `price_unit_status` either `'RESOLVED'` (with matching canonical quantity/price unit keys) or `'NOT_APPLICABLE'` (since both registries were seeded for exactly these product/unit pairs).
 - **Frozen confirmation** — `confirmation_payload`/`confirmation_hash` present and non-null, `confirmed_at`/`confirmed_by` set.
 - **Exactly one `PURCHASE_RECEIPT` `inventory_movements` row**, `source_document_id = ` the receipt's id, `dedupe_key` matching the derived `p2c_dedupe_key` formula (§2.3).
 - **One `inventory_movement_lines` row per item** (2 rows), `location_code = 'MAIN'`, `signed_quantity` positive and equal to the declared quantities.
@@ -660,26 +760,26 @@ Send the header/2-items/costs/close sequence from the task's own example, either
 **PROPOSED**, per the task's recommended shape, confirmed as the right shape by this discovery (no evidence found that combining slices would be safer).
 
 ### Slice A — Durable purchase capture session + ingest barrier
-- **Files/components**: new `supabase/migrations/<timestamp>_purchase_capture_sessions.sql` (§16.1, §16.3 minus `transition_..._confirming`/`mark_..._posted`, which belong to Slice C); new `src/lib/purchase-capture/session-service.ts` (mirrors `src/lib/physical-inventory/session-service.ts` shape); new cron route `src/app/api/cron/finalize-purchase-capture/route.ts` + GitHub Actions schedule.
+- **Files/components**: new `supabase/migrations/<timestamp>_purchase_capture_sessions.sql` (§16.1; RPCs `open_purchase_capture_session`, `admit_purchase_capture_event`, `close_purchase_capture_open_event`, `get_purchase_capture_finalize_candidate`, `cancel_purchase_capture_session` only — **not** `finalize_purchase_capture_session`, `recheck_purchase_capture_draft`, `transition_..._confirming`, or `mark_..._posted`, all of which belong to later slices, §16.3); new `src/lib/purchase-capture/session-service.ts` (mirrors `src/lib/physical-inventory/session-service.ts` shape, covering only the RPCs above); new cron route `src/app/api/cron/finalize-purchase-capture/route.ts` scoped in this slice to computing/logging quiet-window and deadline eligibility only (no finalize call yet) + GitHub Actions schedule.
 - **Migration dependency**: none (purely additive, new tables only).
 - **Tests**: §19.2 in full, plus the migration/security tests in §19.4 scoped to the new tables/RPCs only.
-- **Definition of Done**: a session can be opened, admitted to, closed, and finalized to `awaiting_confirmation`/`failed_closed` entirely through RPC calls exercised by tests against a disposable local Postgres — with **no parser or P2B/P2C wiring yet** (finalize in this slice writes a stub/placeholder outcome, not a real draft).
-- **Explicit non-goals**: no parser integration, no draft persistence, no LINE webhook wiring, no confirm/post sequence.
+- **Definition of Done**: a session can be opened, admitted to (multi-message and the one-message open+close path, §8.4), and reach a stable, correctly-ordered `closing` state whose finalize candidate (ingest set + `ingest_revision` + `ingest_set_hash` + quiet/deadline eligibility, §8.2-§8.3) is provably correct under concurrency, replay, and ownership tests (§19.2) — entirely through RPC calls exercised against a disposable local Postgres. **This slice never creates a session in `awaiting_confirmation`, never writes a `receipt_id`, and never calls a finalize RPC that would do either** — there is no stub/placeholder outcome anywhere in this slice, because there is no finalize-to-`awaiting_confirmation` RPC available to call yet.
+- **Explicit non-goals**: no parser integration, no identity resolution, no draft persistence, no `awaiting_confirmation`/`posted` transitions of any kind (real or stubbed), no LINE webhook wiring, no confirm/post sequence.
 - **Rollback/recovery**: purely additive migration — rollback is "do not ship the migration"; no existing table or RPC is touched, so there is no forward-compatibility risk to any other feature.
 
-### Slice B — Parser adapter + draft persistence + preview
-- **Files/components**: new `src/lib/purchase-capture/parser-adapter.ts` (§9); new `supabase/migrations/<timestamp>_purchase_intake_product_unit_registry.sql` (§10.3, §16.2); new `src/lib/purchase-capture/preview.ts` (§11); wiring Slice A's finalize path to actually call the adapter → `PurchaseReceiptService.saveDraft` → `finalize_purchase_capture_session` with a real `receipt_id`.
-- **Migration dependency**: Slice A's tables must exist; the new registry table is independent of both.
-- **Tests**: §19.1 in full; §19.3's draft-related cases (full-replace idempotency, stale revision); §19.4 scoped to the registry table.
-- **Definition of Done**: a finalized session produces a real `purchase_receipts` draft row with a correct, fully-populated preview reply, including correct `RESOLVED`/`UNRESOLVED` identity status per §10.3 — still **no confirm/posting wiring**.
-- **Explicit non-goals**: no `ยืนยันซื้อ`/`ยกเลิกซื้อ` handling yet, no P2C posting.
-- **Rollback/recovery**: additive only; if the registry is empty, every item is correctly `UNRESOLVED` (fail-safe default direction) rather than broken.
+### Slice B — Parser adapter + identity resolution + draft persistence + preview
+- **Files/components**: new `supabase/migrations/<timestamp>_purchase_capture_draft_finalization.sql` adding `finalize_purchase_capture_session` and `recheck_purchase_capture_draft` (§16.3) plus both `purchase_intake_product_registry`/`purchase_intake_unit_alias_registry` tables (§10.3, §16.2); new `src/lib/purchase-capture/parser-adapter.ts` (§9, including the `(line_timestamp_ms, line_event_id)` chunk-ordering step and the identity-resolution step); new `src/lib/purchase-capture/preview.ts` (§11); wiring the cron route (from Slice A) so an eligible `closing` session now actually calls the adapter → resolver → `PurchaseReceiptService.saveDraft` → `finalize_purchase_capture_session` with a **real, non-null** `receipt_id`/`draft_revision`.
+- **Migration dependency**: Slice A's tables and RPCs must exist; the new registry tables are independent of both and of each other.
+- **Tests**: §19.1 in full; §19.3's draft/recheck-related cases (full-replace idempotency, stale revision, `ตรวจใบซื้อใหม่` clearing a blocker); §19.4 scoped to the two registry tables.
+- **Definition of Done**: a `closing` session that reaches quiet/deadline eligibility is finalized to a real `purchase_receipts` draft row (`COMPLETE` assembly) or `failed_closed` (`INCOMPLETE` assembly) — **this is the first slice in which `closing` → `awaiting_confirmation` can happen at all**, and it happens only after parser status is `COMPLETE`, identity resolution has run for every item, and `saveDraft` has succeeded with a real `receipt_id`/`draft_revision`. The preview reply is correct, including per-item `RESOLVED`/`UNRESOLVED`/`NOT_APPLICABLE` status per §10.3, and correctly labels whether the receipt has any blocking blocker. `ตรวจใบซื้อใหม่` (RPC-level only in this slice — see Slice C for the LINE command wiring) re-runs the same pipeline against the original ingest set and records a new `draft_revision`. Still **no confirm/posting wiring**.
+- **Explicit non-goals**: no `ยืนยันซื้อ`/`ยกเลิกซื้อ`/`ตรวจใบซื้อใหม่` LINE command handling yet (that is webhook wiring, Slice C's exclusive territory per §2.7), no P2C posting.
+- **Rollback/recovery**: additive only; if either registry is empty, every item is correctly `UNRESOLVED` (fail-safe default direction) rather than broken.
 
-### Slice C — Confirmation + idempotent P2C posting + recovery
-- **Files/components**: `transition_purchase_capture_session_confirming`/`mark_purchase_capture_session_posted` RPCs added to Slice A's migration file *or* a small follow-up migration (implementer's choice, both additive); `src/lib/purchase-capture/confirm-flow.ts` implementing §12's exact sequence; extending the Slice A cron route to also perform §12.1's recovery sweep and §18's notification-redelivery sweep; the single new call site into `webhook-service.ts`'s `processOne` chain (§2.7) — this is the only slice that touches the existing webhook file, and only by adding one call, not modifying existing branches.
+### Slice C — Confirmation gate + idempotent P2C posting + recovery
+- **Files/components**: new `supabase/migrations/<timestamp>_purchase_capture_confirm_post.sql` adding `transition_purchase_capture_session_confirming`/`mark_purchase_capture_session_posted` RPCs (§16.3); `src/lib/purchase-capture/confirm-flow.ts` implementing §12's exact sequence, including step 2's blocking-blocker gate (evaluated in application code against the draft's current identity statuses before calling any RPC) and the `ตรวจใบซื้อใหม่`/`ยืนยันซื้อ`/`ยกเลิกซื้อ` LINE command dispatch; extending the Slice A cron route to also perform §12.1's recovery sweep and §18's phase-specific notification-redelivery sweep (`preview_retry_key`/`posted_retry_key`/`stuck_retry_key`); the single new call site into `webhook-service.ts`'s `processOne` chain (§2.7) — this is the only slice that touches the existing webhook file, and only by adding one call, not modifying existing branches.
 - **Migration dependency**: Slices A and B.
-- **Tests**: §19.3 in full (posting-specific cases); the crash-recovery case exercised explicitly (kill the process between confirm and post in a test harness, then run the recovery sweep).
-- **Definition of Done**: the full journey in the task's stated goal works end-to-end against a disposable local Postgres, including the crash-recovery case; `webhook-service.ts`'s existing routing order/behavior for every other feature is unchanged (regression-tested by the existing suite, §2.4's test list).
+- **Tests**: §19.3 in full (posting-specific and confirm-gate cases); the crash-recovery case exercised explicitly (kill the process between confirm and post in a test harness, then run the recovery sweep).
+- **Definition of Done**: the full journey in the task's stated goal works end-to-end against a disposable local Postgres, including a blocked draft correctly refusing `ยืนยันซื้อ`, `ตรวจใบซื้อใหม่` clearing the block, and the crash-recovery case; `webhook-service.ts`'s existing routing order/behavior for every other feature is unchanged (regression-tested by the existing suite, §2.4's test list).
 - **Explicit non-goals**: no cancellation-after-posting, no correction/supersession LINE UX (§15).
 - **Rollback/recovery**: the webhook call-site addition is the only slice with any blast radius on existing behavior; it must be reviewed against the existing ordering comment (`webhook-service.ts:726-727`) to confirm no vocabulary collision with Physical Inventory or Produce routing, exactly as that comment already warns future authors to check.
 
@@ -697,12 +797,14 @@ Send the header/2-items/costs/close sequence from the task's own example, either
 
 **PROPOSED.** All of the following, together:
 
-1. A staff member can send the task's example purchase document (any supported message shape, §5) through LINE and receive a preview matching §11.
-2. `ยืนยันซื้อ` posts exactly one `PURCHASE_RECEIPT` movement with exactly one line per item, increasing the MAIN balance by exactly the declared quantities, exactly once, even under redelivery/retry/crash (§12, §14 all pass as tests, §19 in full).
-3. No item is ever posted with `UNRESOLVED` product/unit identity (§10's RPC-level refusal, exercised end-to-end through this flow, not just at the existing unit-test level).
-4. `webhook-service.ts`'s existing behavior for every other feature is unchanged (full existing test suite green, §2.4's concurrency/idempotency test list specifically re-verified).
-5. §20's UAT checklist passes against Production for one real document.
-6. Grants/RLS/search_path on every new table and RPC match §17 exactly, verified the same way §3 verified the existing ones (live `pg_proc`/`information_schema` query, not just migration-file inspection).
+1. A staff member can send the task's example purchase document (any supported message shape, §5, including the one-message open+close path, §8.4) through LINE and receive a preview matching §11.
+2. `ยืนยันซื้อ` is refused, with no state change and no `confirm()` call, whenever the current draft has any blocking blocker (§12 step 2); it succeeds only when zero blocking blockers exist. There is no path in this design by which a receipt with a blocking blocker is ever confirmed, and no path by which a receipt is posted partially — posting is always whole-receipt, all-or-nothing (§2.3, §12).
+3. After a registry fix, `ตรวจใบซื้อใหม่` re-resolves the original ingest set and produces a new draft revision without requiring the document to be re-sent, and a subsequent `ยืนยันซื้อ` correctly binds to that newest revision (§11.3).
+4. Once confirmed, `ยืนยันซื้อ` posts exactly one `PURCHASE_RECEIPT` movement with exactly one line per item, increasing the MAIN balance by exactly the declared quantities, exactly once, even under redelivery/retry/crash (§12, §14 all pass as tests, §19 in full).
+5. No item is ever posted with `UNRESOLVED` product identity, quantity-unit identity, or price-unit identity, and no item is ever posted with mismatched canonical quantity/price unit keys (§10.3's resolution contract, backstopped by §2.3's RPC-level refusal, exercised end-to-end through this flow, not just at the existing unit-test level).
+6. `webhook-service.ts`'s existing behavior for every other feature is unchanged (full existing test suite green, §2.4's concurrency/idempotency test list specifically re-verified).
+7. §20's UAT checklist passes against Production for one real document.
+8. Grants/RLS/search_path on every new table and RPC match §17 exactly, verified the same way §3 verified the existing ones (live `pg_proc`/`information_schema` query, not just migration-file inspection).
 
 ---
 
@@ -719,7 +821,7 @@ Additionally, out of scope for this document specifically (though noted where re
 ## 24. Open decisions requiring owner approval
 
 1. **§5**: Is a friendlier opener alias (`เปิดใบซื้อ`) worth building as a pre-parser adapter for V1, or does `เริ่มซื้อ` ship as-is? Default: ship as-is.
-2. **§10.3**: Is a manually-curated `purchase_intake_product_unit_registry` (no LINE-driven self-service registration) acceptable for first posting, or is a registration flow required before go-live? Default: manual curation, scoped to UAT's exact SKUs.
+2. **§10.3**: Are manually-curated `purchase_intake_product_registry`/`purchase_intake_unit_alias_registry` tables (no LINE-driven self-service registration) acceptable for first posting, or is a registration flow required before go-live? Default: manual curation, scoped to UAT's exact SKUs/units.
 3. **§7/§12.1**: What is the bound (number of cron sweeps / elapsed time) after which a session stuck in `confirming` should surface an operator-visible stuck notice rather than silently keep retrying, and who receives that notice? Default not specified — needs an owner's operational input, not an engineering guess.
 4. **§20.1**: What isolation mechanism (dedicated test LINE group, marked business date, or something else already used for this team's other UATs) should the purchase-capture UAT use? Not discoverable from the repo; needs the team's existing UAT convention, if any exists outside this repo.
 5. **§15**: Should a correction-document LINE UX (using the existing `supersedesReceiptId` contract) be scoped as a near-term follow-up slice, or deferred indefinitely? Not required for first posting either way, but affects backlog sequencing.
@@ -730,8 +832,8 @@ Additionally, out of scope for this document specifically (though noted where re
 
 **GO WITH PREREQUISITE.**
 
-The durable-session, parser, persistence, and ledger layers this flow needs are either already fully built and Production-verified (P2B parser, P2B persistence, P2C ledger — §2.1-§2.3, §3) or are a direct, low-risk adaptation of a pattern already running successfully in Production for a structurally identical problem (the Physical Inventory close barrier — §2.4, §8). No part of this design requires inventing a new safety mechanism from scratch; every idempotency and ownership guarantee in §13/§17 is either reused verbatim or built by copying an existing, tested shape.
+The durable-session, parser, persistence, and ledger layers this flow needs are either already fully built and Production-verified (P2B parser, P2B persistence, P2C ledger — §2.1-§2.3, §3) or are a direct, low-risk adaptation of a pattern already running successfully in Production for a structurally identical problem (the Physical Inventory close barrier — §2.4, §8, extended with the one-message inline-close path, §8.4). No part of this design requires inventing a new safety mechanism from scratch; every idempotency and ownership guarantee in §13/§17 is either reused verbatim or built by copying an existing, tested shape. The confirm-time all-or-nothing gate (§12) and the phase-specific notification retry keys (§18) close the two correctness gaps a prior draft of this document left open — a blocked receipt can no longer be confirmed at all, and one session's notifications can no longer collide with each other.
 
-The single prerequisite is §10: **build the minimal `purchase_intake_product_unit_registry` (Slice B) before allowing any item to be marked `RESOLVED`.** Without it, the adapter has no honest way to decide identity status, and the system's one real safety net (P2C's RPC-level refusal of `UNRESOLVED` items, §2.3, already CONFIRMED present and working in Production) would either never fire (if the adapter defaults to `RESOLVED`) or always fire (if the adapter defaults to `UNRESOLVED` for everything, which is safe but means nothing can ever post — not a usable V1). The registry is small, additive, and scoped to exactly the SKUs needed for first posting (§10.3, §20.1) — it is not a general Product Master and does not need to become one before this feature can ship.
+The single prerequisite is §10: **build the minimal `purchase_intake_product_registry` and `purchase_intake_unit_alias_registry` (Slice B) before allowing any item to be marked `RESOLVED`/`RESOLVED`/anything other than the honest computed status.** Without them, the adapter has no honest way to decide product, quantity-unit, or price-unit identity, and the system's one real safety net (P2C's RPC-level refusal of `UNRESOLVED` items, §2.3, already CONFIRMED present and working in Production, backstopped now by the confirm-time gate itself, §12) would either never fire (if the adapter defaults every status to resolved) or always fire (if the adapter defaults everything to unresolved, which is safe but means nothing can ever post — not a usable V1). The registries are small, additive, and scoped to exactly the SKUs/units needed for first posting (§10.3, §20.1) — neither is a general Product Master and neither needs to become one before this feature can ship.
 
-With that one prerequisite satisfied, implementation may proceed through Slices A → B → C → D (§21) in order, each independently reviewable and each leaving the system safe if work stops after that slice (a half-built capture session with no confirm wiring cannot post anything; a half-built registry with zero rows fails safe to `UNRESOLVED`, not to `RESOLVED`).
+With that one prerequisite satisfied, implementation may proceed through Slices A → B → C → D (§21) in order, each independently reviewable and each leaving the system safe if work stops after that slice: a half-built capture session with no finalize RPC yet (end of Slice A) cannot create a draft, let alone post anything; a half-built registry with zero rows (during Slice B) fails safe to `UNRESOLVED`, not to `RESOLVED`, and the confirm-gate (introduced fully in Slice C) means an empty registry simply blocks every `ยืนยันซื้อ` rather than allowing an unsafe confirmation.

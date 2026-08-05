@@ -1,0 +1,17 @@
+name: finalize-purchase-capture
+
+on:
+  schedule:
+    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
+  workflow_dispatch:
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call Purchase Capture eligibility sweep cron
+        run: |
+          curl -sf --max-time 45 \
+            -X GET \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            https://bot-summary.vercel.app/api/cron/finalize-purchase-capture

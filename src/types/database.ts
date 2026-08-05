@@ -1446,6 +1446,147 @@ export interface Database {
         };
         Relationships: [];
       };
+      purchase_capture_sessions: {
+        Row: {
+          id:                    string;
+          source_type:           "user" | "group" | "room";
+          source_id:             string;
+          sender_line_user_id:   string;
+          opened_line_event_id:  string;
+          session_generation:    string;
+          status: "open" | "closing" | "awaiting_confirmation" | "confirming"
+            | "posted" | "failed_closed" | "cancelled";
+          close_event_timestamp_ms: number | null;
+          close_quiet_until:     string | null;
+          close_deadline_at:     string | null;
+          ingest_revision:       number;
+          receipt_id:            string | null;
+          draft_revision:        number | null;
+          movement_id:           string | null;
+          fail_reason:           string | null;
+          warnings:              Json;
+          created_at:            string;
+          updated_at:            string;
+        };
+        Insert: {
+          id?:                    string;
+          source_type:            "user" | "group" | "room";
+          source_id:              string;
+          sender_line_user_id:    string;
+          opened_line_event_id:   string;
+          session_generation?:    string;
+          status?: "open" | "closing" | "awaiting_confirmation" | "confirming"
+            | "posted" | "failed_closed" | "cancelled";
+          close_event_timestamp_ms?: number | null;
+          close_quiet_until?:     string | null;
+          close_deadline_at?:     string | null;
+          ingest_revision?:       number;
+          receipt_id?:            string | null;
+          draft_revision?:        number | null;
+          movement_id?:           string | null;
+          fail_reason?:           string | null;
+          warnings?:              Json;
+          created_at?:            string;
+          updated_at?:            string;
+        };
+        Update: {
+          id?:                    string;
+          source_type?:           "user" | "group" | "room";
+          source_id?:             string;
+          sender_line_user_id?:   string;
+          opened_line_event_id?:  string;
+          session_generation?:    string;
+          status?: "open" | "closing" | "awaiting_confirmation" | "confirming"
+            | "posted" | "failed_closed" | "cancelled";
+          close_event_timestamp_ms?: number | null;
+          close_quiet_until?:     string | null;
+          close_deadline_at?:     string | null;
+          ingest_revision?:       number;
+          receipt_id?:            string | null;
+          draft_revision?:        number | null;
+          movement_id?:           string | null;
+          fail_reason?:           string | null;
+          warnings?:              Json;
+          created_at?:            string;
+          updated_at?:            string;
+        };
+        Relationships: [];
+      };
+
+      purchase_capture_session_ingests: {
+        Row: {
+          id:                 string;
+          session_id:         string;
+          session_generation: string;
+          line_event_id:      string;
+          line_message_id:    string | null;
+          line_timestamp_ms:  number;
+          raw_message_id:     string | null;
+          kind:               "header" | "item" | "costs" | "close" | "other";
+          raw_text:           string;
+          ingest_ordinal:     number;
+          created_at:         string;
+        };
+        Insert: {
+          id?:                 string;
+          session_id:          string;
+          session_generation:  string;
+          line_event_id:       string;
+          line_message_id?:    string | null;
+          line_timestamp_ms:   number;
+          raw_message_id?:     string | null;
+          kind:                "header" | "item" | "costs" | "close" | "other";
+          raw_text:            string;
+          ingest_ordinal:      number;
+          created_at?:         string;
+        };
+        Update: {
+          id?:                 string;
+          session_id?:         string;
+          session_generation?: string;
+          line_event_id?:      string;
+          line_message_id?:    string | null;
+          line_timestamp_ms?:  number;
+          raw_message_id?:     string | null;
+          kind?:               "header" | "item" | "costs" | "close" | "other";
+          raw_text?:           string;
+          ingest_ordinal?:     number;
+          created_at?:         string;
+        };
+        Relationships: [];
+      };
+
+      purchase_capture_lifecycle_events: {
+        Row: {
+          id:          string;
+          session_id:  string;
+          event: "opened" | "closing" | "awaiting_confirmation" | "confirming"
+            | "posted" | "failed_closed" | "cancelled";
+          actor:       string | null;
+          detail:      Json;
+          created_at:  string;
+        };
+        Insert: {
+          id?:          string;
+          session_id:   string;
+          event: "opened" | "closing" | "awaiting_confirmation" | "confirming"
+            | "posted" | "failed_closed" | "cancelled";
+          actor?:       string | null;
+          detail?:      Json;
+          created_at?:  string;
+        };
+        Update: {
+          id?:          string;
+          session_id?:  string;
+          event?: "opened" | "closing" | "awaiting_confirmation" | "confirming"
+            | "posted" | "failed_closed" | "cancelled";
+          actor?:       string | null;
+          detail?:      Json;
+          created_at?:  string;
+        };
+        Relationships: [];
+      };
+
       purchase_receipts: {
         Row: {
           id:                     string;
@@ -1857,6 +1998,58 @@ export interface Database {
         Returns: Json;
       };
       physical_inventory_compute_ingest_set_hash: {
+        Args: { p_session_id: string };
+        Returns: string;
+      };
+      open_purchase_capture_session: {
+        Args: {
+          p_source_type:          string;
+          p_source_id:            string;
+          p_sender_line_user_id:  string;
+          p_opened_line_event_id: string;
+          p_line_timestamp_ms:    number;
+          p_raw_text:             string;
+          p_line_message_id?:     string | null;
+          p_raw_message_id?:      string | null;
+        };
+        Returns: Json;
+      };
+      admit_purchase_capture_event: {
+        Args: {
+          p_session_id:          string;
+          p_expected_generation: string;
+          p_line_event_id:       string;
+          p_line_timestamp_ms:   number;
+          p_kind:                string;
+          p_raw_text:            string;
+          p_line_message_id?:    string | null;
+          p_raw_message_id?:     string | null;
+        };
+        Returns: Json;
+      };
+      close_purchase_capture_open_event: {
+        Args: {
+          p_session_id:           string;
+          p_expected_generation:  string;
+          p_opened_line_event_id: string;
+        };
+        Returns: Json;
+      };
+      get_purchase_capture_finalize_candidate: {
+        Args: {
+          p_session_id:          string;
+          p_expected_generation: string;
+        };
+        Returns: Json;
+      };
+      cancel_purchase_capture_session: {
+        Args: {
+          p_session_id:          string;
+          p_expected_generation: string;
+        };
+        Returns: Json;
+      };
+      purchase_capture_compute_ingest_set_hash: {
         Args: { p_session_id: string };
         Returns: string;
       };

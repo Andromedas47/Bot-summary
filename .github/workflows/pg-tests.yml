@@ -132,3 +132,47 @@ jobs:
         run: npm run type-check
       - name: git diff --check against the PR base
         run: git diff --check "origin/${{ github.base_ref }}...HEAD"
+
+  purchase-capture-slice-c:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ALLOW_DISPOSABLE_POSTGRES_TESTS: "1"
+      REQUIRE_POSTGRES_TESTS: "1"
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGPORT: "5432"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - name: Slice C1 real-PostgreSQL migration/hardening/concurrency suite
+        run: bunx bun test src/lib/purchase-capture/migration-slice-c.pg.test.ts
+      - name: Slice A PostgreSQL regression suite
+        run: bunx bun test src/lib/purchase-capture/migration-slice-a.pg.test.ts
+      - name: Slice B PostgreSQL regression suite
+        run: bunx bun test src/lib/purchase-capture/migration-slice-b.pg.test.ts
+      - name: Migration 0052 PostgreSQL regression suite
+        run: bunx bun test src/lib/purchase-receipts/migration-0052.pg.test.ts
+      - name: Migration 0053 PostgreSQL regression suite
+        run: bunx bun test src/lib/inventory-ledger/migration-0053.pg.test.ts
+      - name: Typecheck
+        run: npm run type-check
+      - name: git diff --check against the PR base
+        run: git diff --check "origin/${{ github.base_ref }}...HEAD"

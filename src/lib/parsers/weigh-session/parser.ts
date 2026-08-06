@@ -178,9 +178,15 @@ export function parseWeighSession(
 
     // ── Items state ────────────────────────────────────────────────────────
 
-    // Bare line (no prefix) — quantity, item, name-only header, price
-    // continuation, or tx-type marker
-    if (!prefixMatch) {
+    // Quantity, item, name-only header, price continuation, or tx-type
+    // marker. Applies identically whether this line carries a LINE-export
+    // "HH:MM sender" prefix or not — `content` is already prefix-stripped
+    // above, and a prefixed continuation line (e.g. a price-only or
+    // quantity-only line inside a pasted chat export) needs the same general
+    // multiline handling as an unprefixed one. Previously this general logic
+    // only ran for `!prefixMatch` lines, so a multiline item split across
+    // TIME_PREFIX-prefixed lines was silently rejected line-by-line.
+    {
       const qm = content.match(RE.QUANTITY);
       if (qm && qm[2] !== "บาท") {
         if (pendingItem?.product_name && pendingItem.price_per_unit !== undefined) {
@@ -236,7 +242,7 @@ export function parseWeighSession(
         pendingItemLines = [];
         parseErrors.push(`orphan basis line (no product name): "${line}"`);
       } else if (parsedItem) {
-        // Item line sent without LINE export timestamp (direct typed message)
+        // A new single-line item header — with or without a LINE-export prefix.
         closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
         pendingItem = parsedItem;
         pendingItemLines = [line];
@@ -278,36 +284,6 @@ export function parseWeighSession(
         }
       }
       continue;
-    }
-
-    // Staff-prefixed line: try item pattern first
-    const parsedItem = parseItemLine(content, nextItemNumber(items, pendingItem));
-    if (parsedItem === "orphan_basis") {
-      closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
-      pendingItem = null;
-      pendingItemLines = [];
-      parseErrors.push(`orphan basis line (no product name): "${line}"`);
-      continue;
-    }
-    if (parsedItem) {
-      closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
-      pendingItem = parsedItem;
-      pendingItemLines = [line];
-      continue;
-    }
-
-    // Staff-prefixed non-item line → section / transaction-type marker
-    closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
-    pendingItem = null;
-    pendingItemLines = [];
-    const nextTxType = detectTxType(content);
-    if (nextTxType && sessionKind === "additional") {
-      parseErrors.push(`section change not allowed in additional session: "${line}"`);
-    } else if (nextTxType) {
-      currentSection = content;
-      currentTxType  = nextTxType;
-    } else {
-      parseErrors.push(`unrecognized line: "${line}"`);
     }
   }
 

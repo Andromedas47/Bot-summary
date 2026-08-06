@@ -192,6 +192,55 @@ describe("general multiline item split — format variations", () => {
   });
 });
 
+describe("multiline item split — LINE-export-prefixed lines", () => {
+  // Regression for a real UAT run: parseWeighSession had two parallel
+  // item-line branches, one for a bare line and one for a line carrying a
+  // "HH:MM sender" LINE-export prefix (see TIME_PREFIX). The general
+  // multiline-split fallback (name-only header, price-only continuation,
+  // quantity-only continuation) was only wired into the bare-line branch, so
+  // the exact same three-line item that parses fine unprefixed was silently
+  // rejected line-by-line when every line carried a prefix.
+  function prefixed(...contentLines: string[]): string {
+    return [HEADER, ...contentLines]
+      .map((content) => `12:00 พนักงาน ${content}`)
+      .join("\n");
+  }
+
+  it("parses a three-line item split across TIME_PREFIX-prefixed lines", () => {
+    const result = parseWeighSession(prefixed("15ปลาหวานงา", "100บาท", "6ถุง"));
+
+    expect(result.parse_errors).toHaveLength(0);
+    expect(result.items).toEqual([
+      expect.objectContaining({
+        item_number: 15,
+        product_name: "ปลาหวานงา",
+        price_per_unit: 100,
+        quantity: 6,
+        unit: "ถุง",
+      }),
+    ]);
+  });
+
+  it("parses the real UAT 3-item excerpt across prefixed lines with no drops", () => {
+    const result = parseWeighSession(prefixed(
+      "1ปลาอินทรี120บาท", "5กระปุก",
+      "2ปลาหวานงา", "100บาท", "6ถุง",
+      "3ปลาหวานไม่งา100บาท", "4ถุง",
+    ));
+
+    expect(result.parse_errors).toHaveLength(0);
+    expect(result.items).toHaveLength(3);
+    expect(() => assertWeighSessionFinalizable(result)).not.toThrow();
+
+    // 5*120 + 6*100 + 4*100 = 600 + 600 + 400 = 1600
+    const total = result.items.reduce(
+      (sum, item) => sum + item.price_per_unit * (item.quantity ?? 0),
+      0,
+    );
+    expect(total).toBe(1600);
+  });
+});
+
 describe("incomplete item — fail closed, never a fake complete row", () => {
   it("reports a parse error and produces no valid item when the quantity line never arrives", () => {
     const result = parseWeighSession(withHeader("15ปลาหวานงา", "100บาท"));

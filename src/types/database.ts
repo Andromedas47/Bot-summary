@@ -317,6 +317,8 @@ export interface Database {
           last_resend_requested_at:          string | null;
           created_at:                        string;
           updated_at:                        string;
+          /** 0061: environment ownership — see src/lib/runtime-environment.ts. */
+          runtime_environment:               "production" | "preview" | "development" | null;
         };
         Insert: {
           id?:                                string;
@@ -340,6 +342,7 @@ export interface Database {
           last_resend_requested_at?:          string | null;
           created_at?:                        string;
           updated_at?:                        string;
+          runtime_environment?:               "production" | "preview" | "development" | null;
         };
         Update: {
           id?:                                string;
@@ -363,6 +366,7 @@ export interface Database {
           last_resend_requested_at?:          string | null;
           created_at?:                        string;
           updated_at?:                        string;
+          runtime_environment?:               "production" | "preview" | "development" | null;
         };
         Relationships: [];
       };

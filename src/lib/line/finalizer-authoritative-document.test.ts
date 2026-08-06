@@ -132,6 +132,7 @@ function structuredSnapshot(overrides: Row = {}): PendingSession {
     declared_transaction_type: null,
     additional_opener: null,
     opened_line_event_id: "evt-open",
+    runtime_environment: "development",
     ...overrides,
   } as unknown as PendingSession;
 }

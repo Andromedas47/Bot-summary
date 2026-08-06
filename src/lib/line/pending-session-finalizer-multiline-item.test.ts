@@ -105,6 +105,7 @@ function snapshot(accumulatedText: string, generation = GENERATION): PendingSess
     close_session_generation: generation,
     expected_item_count: null,
     ingest_revision: MESSAGES.length + 1,
+    runtime_environment: "development",
   };
 }
 

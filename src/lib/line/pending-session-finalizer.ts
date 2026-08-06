@@ -34,6 +34,7 @@ import {
 import { RE } from "@/lib/parsers/weigh-session/regex";
 import { logger } from "@/lib/logger";
 import { seedCentralPricesFromPersistedWithdrawals } from "@/lib/white-sheet/seed-from-withdrawal";
+import { getRuntimeEnvironment } from "@/lib/runtime-environment";
 
 type Supabase = SupabaseClient<Database>;
 type PushMessage = (to: string, text: string) => Promise<unknown>;
@@ -219,11 +220,32 @@ async function findCloseRawMessageId(
   return data?.id ?? null;
 }
 
+// A Production worker may finalize a legacy row (no ownership stamp, predates
+// 0061) to preserve current Production behavior with zero backfill, but never
+// a row explicitly stamped for another environment. A Preview/development
+// worker must match exactly — NULL is never treated as "mine". This check is
+// deliberately re-run here, not just in the sweep's SELECT, so a wrongly
+// scoped or racing caller can never finalize a foreign-environment row.
+function ownsSnapshotEnvironment(snapshot: PendingSession): boolean {
+  const current = getRuntimeEnvironment();
+  const owner = snapshot.runtime_environment ?? null;
+  // Production alone gets the legacy-NULL compatibility exception (rows that
+  // predate 0061). Every other environment, including development, requires
+  // an exact match — NULL is never "mine". A test that needs a row to be
+  // claimable must stamp it, not rely on development silently owning
+  // everything; that would no longer be genuine isolation.
+  if (current === "production") return owner === "production" || owner === null;
+  return owner === current;
+}
+
 export async function finalizePendingGeneration(
   supabase: Supabase,
   snapshot: PendingSession,
   push: PushMessage = defaultPush,
 ): Promise<TryFinalizeResult> {
+  if (!ownsSnapshotEnvironment(snapshot)) {
+    return { status: "skipped", reason: "wrong_environment" };
+  }
   const finalizationStartedAt = new Date().toISOString();
   // The authoritative ingest identity, derived in one place (0036).
   const correlationId =
@@ -449,12 +471,26 @@ export async function finalizeDuePendingGenerations(
 ): Promise<PendingFinalizerRun> {
   // pending_sessions is part of the production baseline described by migration
   // 0031 but is not represented in the hand-maintained Database type yet.
-  const { data, error } = await (supabase as SupabaseClient)
+  //
+  // 0061: Preview and Production share this database with no other isolation,
+  // so the sweep must never select a row owned by a different environment —
+  // this is what actually stopped a Production worker from claiming and
+  // finalizing a Preview-created session with the wrong parser code. NULL
+  // (pre-0061 legacy rows) counts as Production's own; a Preview/development
+  // sweep never matches NULL. finalizePendingGeneration re-checks ownership
+  // independently, so this filter is a query-efficiency guard, not the only
+  // enforcement point.
+  const currentEnvironment = getRuntimeEnvironment();
+  let query = (supabase as SupabaseClient)
     .from("pending_sessions")
     .select("*")
     .eq("terminalized", false)
     .not("next_attempt_at", "is", null)
-    .lte("next_attempt_at", new Date().toISOString())
+    .lte("next_attempt_at", new Date().toISOString());
+  query = currentEnvironment === "production"
+    ? query.or("runtime_environment.eq.production,runtime_environment.is.null")
+    : query.eq("runtime_environment", currentEnvironment);
+  const { data, error } = await query
     .order("next_attempt_at", { ascending: true })
     .limit(limit);
 

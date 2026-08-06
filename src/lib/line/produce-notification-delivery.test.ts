@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import {
   LinePushError,
 } from "./reply";
@@ -8,6 +8,12 @@ import {
   resendProduceNotification,
   type ProduceNotificationRecord,
 } from "./produce-notification-delivery";
+
+const originalVercelEnv = process.env.VERCEL_ENV;
+afterEach(() => {
+  if (originalVercelEnv === undefined) delete process.env.VERCEL_ENV;
+  else process.env.VERCEL_ENV = originalVercelEnv;
+});
 
 const NOW = new Date("2026-07-03T00:00:00.000Z");
 
@@ -306,6 +312,47 @@ describe("operator resend", () => {
   });
 });
 
+describe("notification claim — runtime environment ownership", () => {
+  // Regression: Preview successfully finalizing a session creates a
+  // produce_session_notifications row. Production's globally scoped claim
+  // RPC could dequeue it and push using Production's LINE credentials before
+  // this fix — the write would succeed while the originating (Preview/Test
+  // OA) channel never receives the summary. The actual claim-time isolation
+  // is enforced inside claim_due_produce_notifications (SQL, see
+  // 0061_pending_session_runtime_environment.sql) — this only verifies the
+  // TypeScript caller always tells the RPC which environment it is.
+
+  it("passes p_environment='production' when running as Production", async () => {
+    process.env.VERCEL_ENV = "production";
+    const client = makeDueClient([[]]);
+
+    await processDueProduceNotifications(client as never);
+
+    const call = client.calls.find((c) => c.name === "claim_due_produce_notifications");
+    expect(call?.args).toMatchObject({ p_environment: "production" });
+  });
+
+  it("passes p_environment='preview' when running as Preview", async () => {
+    process.env.VERCEL_ENV = "preview";
+    const client = makeDueClient([[]]);
+
+    await processDueProduceNotifications(client as never);
+
+    const call = client.calls.find((c) => c.name === "claim_due_produce_notifications");
+    expect(call?.args).toMatchObject({ p_environment: "preview" });
+  });
+
+  it("fails safe to p_environment='development' when VERCEL_ENV is unset", async () => {
+    delete process.env.VERCEL_ENV;
+    const client = makeDueClient([[]]);
+
+    await processDueProduceNotifications(client as never);
+
+    const call = client.calls.find((c) => c.name === "claim_due_produce_notifications");
+    expect(call?.args).toMatchObject({ p_environment: "development" });
+  });
+});
+
 describe("notification migration contract", () => {
   const migrationPath = new URL(
     "../../../supabase/migrations/0034_produce_notification_delivery.sql",
@@ -370,5 +417,66 @@ describe("notification migration contract", () => {
     expect(sql).not.toContain("cron.schedule");
     expect(sql).not.toContain("append_pending_session");
     expect(sql).not.toContain("interval '8 seconds'");
+  });
+});
+
+describe("notification environment ownership migration contract (0061)", () => {
+  const envMigrationPath = new URL(
+    "../../../supabase/migrations/0061_pending_session_runtime_environment.sql",
+    import.meta.url,
+  );
+
+  it("stamps notification ownership from the locked pending_sessions row, not re-derived independently", async () => {
+    const sql = await Bun.file(envMigrationPath).text();
+    const finalizer = sql.slice(sql.indexOf(
+      "CREATE OR REPLACE FUNCTION public.try_finalize_pending_generation",
+    ));
+
+    expect(finalizer).toContain("SELECT * INTO v_row");
+    expect(finalizer).toContain("FOR UPDATE");
+    const insert = finalizer.slice(
+      finalizer.indexOf("INSERT INTO public.produce_session_notifications"),
+      finalizer.indexOf("RETURNING id INTO v_notification_id"),
+    );
+    expect(insert).toContain("runtime_environment");
+    expect(insert).toContain("v_row.runtime_environment");
+  });
+
+  it("claim RPC requires an explicit environment and never trusts a caller-supplied default of production", async () => {
+    const sql = await Bun.file(envMigrationPath).text();
+    const claim = sql.slice(
+      sql.indexOf("CREATE OR REPLACE FUNCTION public.claim_due_produce_notifications"),
+    );
+
+    expect(claim).toContain("RAISE EXCEPTION");
+    expect(claim).toContain("p_environment IS NULL OR p_environment NOT IN");
+    expect(claim).toContain("n.runtime_environment = 'production' OR n.runtime_environment IS NULL");
+    expect(claim).toContain("n.runtime_environment = p_environment");
+    expect(claim).toContain("FOR UPDATE SKIP LOCKED");
+  });
+
+  it("keeps the legacy 1-arg claim RPC for rollout safety, hardcoded to production only", async () => {
+    const sql = await Bun.file(envMigrationPath).text();
+
+    // Never dropped mid-rollout — Production's currently running cron still
+    // calls the 1-arg signature until it is itself redeployed onto the new
+    // code that calls the 2-arg RPC.
+    expect(sql).not.toContain("DROP FUNCTION IF EXISTS public.claim_due_produce_notifications(integer)");
+
+    const wrapper = sql.slice(
+      sql.lastIndexOf("CREATE OR REPLACE FUNCTION public.claim_due_produce_notifications(\n  p_limit integer DEFAULT 25\n)"),
+    );
+    expect(wrapper).toContain(
+      "SELECT * FROM public.claim_due_produce_notifications(p_limit, 'production');",
+    );
+    // Fixed to 'production', not parameterized — this wrapper can never be
+    // made to claim a 'preview' or 'development' row regardless of caller.
+    expect(wrapper).not.toContain("p_environment text");
+  });
+
+  it("grants both the legacy 1-arg and new 2-arg signatures to service_role only", async () => {
+    const sql = await Bun.file(envMigrationPath).text();
+    expect(sql).toContain("GRANT EXECUTE ON FUNCTION public.claim_due_produce_notifications(integer, text) TO service_role;");
+    expect(sql).toContain("GRANT EXECUTE ON FUNCTION public.claim_due_produce_notifications(integer) TO service_role;");
   });
 });

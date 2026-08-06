@@ -84,6 +84,7 @@ function snapshot(generation = GENERATION): PendingSession {
     close_session_generation: generation,
     expected_item_count: 1,
     ingest_revision: ADDITIONAL_TEXT.length,
+    runtime_environment: "development",
   };
 }
 

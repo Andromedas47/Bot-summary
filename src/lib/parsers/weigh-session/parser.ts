@@ -68,6 +68,9 @@ export function parseWeighSession(
   const items:       WeighSessionItem[]        = [];
   const parseErrors: string[]                  = [];
   let   pendingItem: Partial<WeighSessionItem> | null = null;
+  // Raw source lines that built the current pendingItem — surfaced in the
+  // "no price line" error below so the user can find and resend it.
+  let   pendingItemLines: string[]              = [];
 
   for (const line of lines) {
     const prefixMatch = line.match(RE.TIME_PREFIX);
@@ -101,11 +104,9 @@ export function parseWeighSession(
 
     // ── Session end ────────────────────────────────────────────────────────
     if (RE.SESSION_END.test(content)) {
-      if (pendingItem?.product_name) {
-        const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
-        pushOrMergeItem(items, finalizedItem);
-        pendingItem = null;
-      }
+      closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
+      pendingItem = null;
+      pendingItemLines = [];
       // Closer/opener discipline: an additional batch must close with its own
       // matching จบรายการ<type>เพิ่ม closer, and additional closers are invalid
       // for main sessions.
@@ -133,6 +134,7 @@ export function parseWeighSession(
       }
       if (headerItem) {
         pendingItem = headerItem;
+        pendingItemLines = [line];
         state = "items";
         continue;
       }
@@ -176,11 +178,16 @@ export function parseWeighSession(
 
     // ── Items state ────────────────────────────────────────────────────────
 
-    // Bare line (no prefix) — quantity, item, or tx-type marker
+    // Bare line (no prefix) — quantity, item, name-only header, price
+    // continuation, or tx-type marker
     if (!prefixMatch) {
       const qm = content.match(RE.QUANTITY);
       if (qm && qm[2] !== "บาท") {
-        if (pendingItem?.product_name) {
+        if (pendingItem?.product_name && pendingItem.price_per_unit !== undefined) {
+          // Pending item already has a price and is awaiting quantity — this
+          // is the only shape allowed to match ANY unit text (known or not),
+          // matching prior behavior exactly. Never reached with an item that
+          // still needs a price (see the branches below).
           applyQuantity(pendingItem, parseFloat(qm[1]), qm[2]);
           if (pendingItem.basis_unit && pendingItem.unit !== pendingItem.basis_unit) {
             parseErrors.push(
@@ -191,31 +198,73 @@ export function parseWeighSession(
           const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
           pushOrMergeItem(items, finalizedItem);
           pendingItem = null;
-        } else {
-          parseErrors.push(`quantity with no preceding item: "${line}"`);
+          pendingItemLines = [];
+          continue;
         }
-      } else {
-        const parsedItem = parseItemLine(content, nextItemNumber(items, pendingItem));
-        if (parsedItem === "orphan_basis") {
+        if (isKnownUnit(qm[2])) {
+          // A recognized unit with nothing (correctly) awaiting quantity —
+          // either a genuine orphan, or the pending item is still missing
+          // its own price. Never silently misattributed onto the wrong item.
           if (pendingItem?.product_name) {
-            pushOrMergeItem(items, finalize(pendingItem, currentSection, currentTxType));
+            parseErrors.push(
+              `item #${pendingItem.item_number} ${pendingItem.product_name} is missing a price line ` +
+              `before its quantity: "${line}"`,
+            );
             pendingItem = null;
+            pendingItemLines = [];
+          } else {
+            parseErrors.push(`quantity with no preceding item: "${line}"`);
           }
-          parseErrors.push(`orphan basis line (no product name): "${line}"`);
-        } else if (parsedItem) {
-          // Item line sent without LINE export timestamp (direct typed message)
-          if (pendingItem?.product_name) {
-            const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
-            pushOrMergeItem(items, finalizedItem);
-          }
-          pendingItem = parsedItem;
+          continue;
+        }
+        // Unknown unit with no item awaiting quantity — falls through to be
+        // read as a name-only item header below (general multiline split).
+      }
+
+      // Standalone price line for an item whose name arrived with no price.
+      const priceOnly = normalizeItemLinePunctuation(content).match(RE.PRICE_ONLY);
+      if (priceOnly && pendingItem?.product_name && pendingItem.price_per_unit === undefined) {
+        pendingItem.price_per_unit = parseFloat(priceOnly[1]);
+        pendingItemLines.push(line);
+        continue;
+      }
+
+      const parsedItem = parseItemLine(content, nextItemNumber(items, pendingItem));
+      if (parsedItem === "orphan_basis") {
+        closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
+        pendingItem = null;
+        pendingItemLines = [];
+        parseErrors.push(`orphan basis line (no product name): "${line}"`);
+      } else if (parsedItem) {
+        // Item line sent without LINE export timestamp (direct typed message)
+        closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
+        pendingItem = parsedItem;
+        pendingItemLines = [line];
+      } else {
+        // General multiline split: product name arrives on its own line,
+        // price and quantity follow on later lines. Never a special-case for
+        // any specific product — any name whose trailing token isn't a known
+        // unit word qualifies (see units.ts).
+        const nameOnly = content.match(RE.ITEM_NAME_ONLY);
+        if (nameOnly && !isKnownUnit(nameOnly[2].trim())) {
+          closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
+          pendingItem = {
+            item_number:    parseInt(nameOnly[1], 10),
+            product_name:   nameOnly[2].trim(),
+            quantity:       null,
+            unit:           null,
+            pricing_mode:   "unit",
+            basis_quantity: null,
+            basis_unit:     null,
+            basis_price:    null,
+            // price_per_unit intentionally omitted — awaiting a price line.
+          };
+          pendingItemLines = [line];
         } else if (content.length > 0) {
           // Non-item bare line → section / transaction-type marker
-          if (pendingItem?.product_name) {
-            const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
-            pushOrMergeItem(items, finalizedItem);
-            pendingItem = null;
-          }
+          closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
+          pendingItem = null;
+          pendingItemLines = [];
           const nextTxType = detectTxType(content);
           if (nextTxType && sessionKind === "additional") {
             // An additional batch carries exactly one declared type end-to-end.
@@ -234,26 +283,23 @@ export function parseWeighSession(
     // Staff-prefixed line: try item pattern first
     const parsedItem = parseItemLine(content, nextItemNumber(items, pendingItem));
     if (parsedItem === "orphan_basis") {
-      if (pendingItem?.product_name) {
-        pushOrMergeItem(items, finalize(pendingItem, currentSection, currentTxType));
-        pendingItem = null;
-      }
+      closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
+      pendingItem = null;
+      pendingItemLines = [];
       parseErrors.push(`orphan basis line (no product name): "${line}"`);
       continue;
     }
     if (parsedItem) {
-      if (pendingItem?.product_name) {
-        pushOrMergeItem(items, finalize(pendingItem, currentSection, currentTxType));
-      }
+      closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
       pendingItem = parsedItem;
+      pendingItemLines = [line];
       continue;
     }
 
     // Staff-prefixed non-item line → section / transaction-type marker
-    if (pendingItem?.product_name) {
-      pushOrMergeItem(items, finalize(pendingItem, currentSection, currentTxType));
-      pendingItem = null;
-    }
+    closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
+    pendingItem = null;
+    pendingItemLines = [];
     const nextTxType = detectTxType(content);
     if (nextTxType && sessionKind === "additional") {
       parseErrors.push(`section change not allowed in additional session: "${line}"`);
@@ -266,10 +312,7 @@ export function parseWeighSession(
   }
 
   // Trailing pending item (missing session-end marker)
-  if (pendingItem?.product_name) {
-    const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
-    pushOrMergeItem(items, finalizedItem);
-  }
+  closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
 
   return {
     // Additional sessions must carry an explicit date — never fall back to
@@ -330,6 +373,10 @@ export function assertWeighSessionFinalizable(session: WeighSession): void {
 }
 
 export function buildWeighSessionValidationReply(session: WeighSession): string {
+  const invalidItemCount = session.items.filter(isIncompleteItem).length;
+  const successCount     = session.items.length - invalidItemCount;
+  const failCount        = session.parse_errors.length + invalidItemCount;
+
   const details = getWeighSessionFinalizationErrors(session).map((error) => {
     const quotedLine = error.match(/"([^"]+)"/)?.[1];
     if (quotedLine) return `- ${quotedLine}`;
@@ -342,12 +389,41 @@ export function buildWeighSessionValidationReply(session: WeighSession): string 
 
   return [
     "อ่านรายการไม่ครบ จึงยังไม่บันทึก",
+    `อ่านสำเร็จ ${successCount} รายการ`,
+    `อ่านไม่สำเร็จ ${failCount} รายการ`,
     "กรุณาตรวจสอบบรรทัดสินค้าและจำนวน แล้วส่งใหม่",
     ...details,
   ].join("\n");
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * Closes out whatever the parser currently has pending, at any point another
+ * line would otherwise replace or discard it (a new item header, a section
+ * marker, the session-end line, or end of input). An item with a price is
+ * finalized as before; an item still awaiting its price is never silently
+ * dropped or turned into a fake complete row — it becomes a parse error that
+ * quotes its own source line(s) so the user can find and resend it.
+ */
+function closePendingItem(
+  items:            WeighSessionItem[],
+  parseErrors:      string[],
+  pendingItem:       Partial<WeighSessionItem> | null,
+  pendingItemLines: string[],
+  section:          string,
+  txType:           TransactionType,
+): void {
+  if (!pendingItem?.product_name) return;
+  if (pendingItem.price_per_unit === undefined) {
+    parseErrors.push(
+      `item #${pendingItem.item_number} ${pendingItem.product_name} has no price line: ` +
+      `"${pendingItemLines.join(" ")}"`,
+    );
+    return;
+  }
+  pushOrMergeItem(items, finalize(pendingItem, section, txType));
+}
 
 function applyQuantity(
   item: Partial<WeighSessionItem>,

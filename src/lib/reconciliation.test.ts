@@ -21,6 +21,12 @@ function makeFullSupabase(cfg: {
   scopedOrder?:    number[];
   globalError?:    { message: string } | null;
   upserts?:        UpsertCapture[];
+  /** produce_sessions rows with non-null parser_errors for this business date. */
+  incompleteSessions?: Array<{ id: string; raw_message_id: string }>;
+  /** raw_messages ids that resolve to sourceId (drives the incomplete-session match). */
+  incompleteSessionSourceMatch?: boolean;
+  /** pending_sessions rows with terminalized=true, finalization_status='failed_closed'. */
+  failedClosedPendingSessions?: Array<{ close_event_timestamp_ms: number }>;
 }) {
   let manualSessionCallCount = 0;
 
@@ -105,6 +111,49 @@ function makeFullSupabase(cfg: {
             in: async () => ({
               data: cfg.entryAmounts.map(a => ({ amount: a })),
               error: null,
+            }),
+          }),
+        };
+      }
+
+      if (table === "produce_sessions") {
+        return {
+          select: () => ({
+            eq: () => ({
+              not: async () => ({
+                data: cfg.incompleteSessions ?? [],
+                error: null,
+              }),
+            }),
+          }),
+        };
+      }
+
+      if (table === "pending_sessions") {
+        return {
+          select: () => ({
+            eq: () => ({
+              eq: () => ({
+                eq: () => ({
+                  not: async () => ({
+                    data: cfg.failedClosedPendingSessions ?? [],
+                    error: null,
+                  }),
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+
+      if (table === "raw_messages") {
+        return {
+          select: () => ({
+            in: () => ({
+              eq: async () => ({
+                data: cfg.incompleteSessionSourceMatch ? [{ id: "raw-1" }] : [],
+                error: null,
+              }),
             }),
           }),
         };
@@ -213,6 +262,60 @@ describe("reconcile", () => {
     });
     const result = await reconcile(db as never, "grp1", "2026-06-17", 1000);
     expect(result.blocked).toBe(true);
+  });
+
+  it("blocks when a produce session for this source/date has recorded parser errors", async () => {
+    const db = makeFullSupabase({
+      openSession: false, transferAmounts: [], closedSessions: [], entryAmounts: [],
+      incompleteSessions: [{ id: "sess-1", raw_message_id: "raw-1" }],
+      incompleteSessionSourceMatch: true,
+    });
+    const result = await reconcile(db as never, "grp1", "2026-06-17", 1000);
+    expect(result.blocked).toBe(true);
+    if (result.blocked) {
+      expect(result.reason).toContain("ยังตรวจสอบไม่สมบูรณ์");
+    }
+  });
+
+  it("blocks when a pending session for this source failed closed with zero produce writes, on the matching business date", async () => {
+    const closeTimestampMs = Date.parse("2026-06-17T12:00:00+07:00"); // Bangkok noon → business date 2026-06-17
+    const db = makeFullSupabase({
+      openSession: false, transferAmounts: [], closedSessions: [], entryAmounts: [],
+      failedClosedPendingSessions: [{ close_event_timestamp_ms: closeTimestampMs }],
+    });
+    const result = await reconcile(db as never, "grp1", "2026-06-17", 1000);
+    expect(result.blocked).toBe(true);
+    if (result.blocked) {
+      expect(result.reason).toContain("ปิดไม่สำเร็จ");
+    }
+  });
+
+  it("does not block on a failed-closed pending session whose close event falls on a different business date", async () => {
+    const closeTimestampMs = Date.parse("2026-06-16T12:00:00+07:00"); // business date 2026-06-16, not 2026-06-17
+    const db = makeFullSupabase({
+      openSession:     false,
+      transferAmounts: [500, 300],
+      transferRefs:    ["REF-A", "REF-B"],
+      closedSessions:  ["sess1"],
+      entryAmounts:    [200],
+      failedClosedPendingSessions: [{ close_event_timestamp_ms: closeTimestampMs }],
+    });
+    const result = await reconcile(db as never, "grp1", "2026-06-17", 1000);
+    expect(result.blocked).toBe(false);
+  });
+
+  it("does not block on an incomplete session belonging to a different source", async () => {
+    const db = makeFullSupabase({
+      openSession: false,
+      transferAmounts: [500, 300],
+      transferRefs:    ["REF-A", "REF-B"],
+      closedSessions:  ["sess1"],
+      entryAmounts:    [200],
+      incompleteSessions: [{ id: "sess-1", raw_message_id: "raw-1" }],
+      incompleteSessionSourceMatch: false, // raw message belongs to another source
+    });
+    const result = await reconcile(db as never, "grp1", "2026-06-17", 1000);
+    expect(result.blocked).toBe(false);
   });
 
   it("returns matched=true when submitted equals checked total", async () => {
@@ -349,6 +452,53 @@ describe("reconcile", () => {
       submitted_transfer_total: 0,
     });
     expect(Object.prototype.hasOwnProperty.call(upserts[0]!.row, "work_round_id")).toBe(false);
+  });
+});
+
+// Reproduces the exact sequence raised in review: a source/date already has
+// produce data reconciliation could otherwise compute a normal result from,
+// a NEW session for that same source/date fails closed (2 valid items + 1
+// incomplete item -> try_finalize_pending_generation returns failed_closed,
+// writing zero produce_sessions/produce_items rows), and reconciliation is
+// then attempted. It must not reuse the pre-existing data as though the
+// failed attempt never happened, and must not create/update
+// transfer_reconciliations.
+describe("reconcile — failed-closed session must not be masked by prior data (review scenario)", () => {
+  it("blocks and writes nothing to transfer_reconciliations even though prior produce data exists for the same source/date", async () => {
+    const db = new RoundFakeDatabase();
+    const sourceId = "grp-review-scenario";
+    const businessDate = "2026-06-29";
+
+    // Step 1: existing produce data for source/date — without the gate below,
+    // reconcile() would happily compute a (wrong) matched/unmatched result
+    // from this alone.
+    db.seedKnownMarket({ sourceId, businessDate, marketName: "ตลาดทดสอบ" });
+
+    // Steps 2-4: a new issued-inventory session for the same source/date closes
+    // with 2 valid items and 1 incomplete item. try_finalize_pending_generation
+    // detects the invalid item, sets terminalized=true and
+    // finalization_status='failed_closed' on pending_sessions, and inserts
+    // NOTHING into produce_sessions/produce_items (see 0050_produce_finalization_hold.sql
+    // lines 588-606) — that absence of a produce_sessions row is exactly why a
+    // gate keyed on produce_sessions.parser_errors alone cannot see this case.
+    db.seed("pending_sessions", [{
+      session_key: `group:${sourceId}:user:u1`,
+      source_id: sourceId,
+      terminalized: true,
+      finalization_status: "failed_closed",
+      close_event_timestamp_ms: Date.parse("2026-06-29T12:00:00+07:00"),
+    }]);
+
+    // Step 5: settlement/reconciliation is attempted.
+    const result = await reconcile(db.asClient(), sourceId, businessDate, 999);
+
+    expect(result.blocked).toBe(true);
+    if (result.blocked) {
+      expect(result.reason).toContain("ปิดไม่สำเร็จ");
+    }
+    // reconcile() returned before ever calling .from("transfer_reconciliations") —
+    // the table was never even touched, let alone created or updated.
+    expect(db.tables.transfer_reconciliations).toBeUndefined();
   });
 });
 

@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
 import { normalizedMarketLabel } from "@/lib/market";
 import { normalizeTransactionId, resolveGloballyAcceptedCheckIds } from "@/lib/slips/transaction-dedupe";
 import type { Database, TransferReconciliationRow } from "@/types/database";
@@ -355,6 +356,67 @@ export async function reconcile(
       blocked: true,
       reason: "มี session สลิปมือที่ยังเปิดอยู่ กรุณาพิมพ์ จบสลิปมือ ก่อน",
     };
+  }
+
+  // Block if a produce session for this source failed to close (fail-closed:
+  // validation/parse errors, missing declared items, or an unconfirmed
+  // structured review) for THIS business date. try_finalize_pending_generation
+  // writes ZERO produce_sessions/produce_items rows on failed_closed — the only
+  // surviving trace is on pending_sessions itself (terminalized=true,
+  // finalization_status='failed_closed'). This is the PRIMARY forward-looking
+  // gate: it is what actually fires for a freshly-failed session, since a
+  // failed attempt never reaches produce_sessions at all. Business date isn't
+  // persisted on a failed pending_sessions row (no session was ever built), so
+  // it's derived from the same close-event timestamp the finalizer itself uses
+  // to decide "not_closing" vs "closing" — no schema change needed.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: failedClosedSessions } = await (supabase as any)
+    .from("pending_sessions")
+    .select("close_event_timestamp_ms")
+    .eq("source_id", sourceId)
+    .eq("terminalized", true)
+    .eq("finalization_status", "failed_closed")
+    .not("close_event_timestamp_ms", "is", null);
+
+  const hasFailedClosedForDate = ((failedClosedSessions ?? []) as Array<{ close_event_timestamp_ms: number }>)
+    .some((row) => bangkokBusinessDateFromTimestamp(row.close_event_timestamp_ms) === businessDate);
+
+  if (hasFailedClosedForDate) {
+    return {
+      blocked: true,
+      reason: "รอบเบิก/คืนมีรายการที่ปิดไม่สำเร็จ (บันทึกไม่ครบ) กรุณาแก้ไขและส่งรายการใหม่ก่อนส่งยอด",
+    };
+  }
+
+  // Legacy backstop only: produce_sessions.parser_errors can NOT be non-null
+  // for any row written by either current write path — the RPC
+  // (try_finalize_pending_generation) inserts a literal NULL for this column
+  // on every success, and the pre-RPC legacy persist() path throws inside
+  // assertWeighSessionFinalizable before it ever reaches this insert when
+  // parse_errors is non-empty. This block exists solely to catch rows written
+  // before those guarantees existed (or by a future code path that reintroduces
+  // the column without the same discipline) — it is not expected to ever fire
+  // against current writes, and must not be relied on as the primary gate.
+  const { data: incompleteSessions } = await supabase
+    .from("produce_sessions")
+    .select("id, raw_message_id")
+    .eq("session_date", businessDate)
+    .not("parser_errors", "is", null);
+
+  if (incompleteSessions && incompleteSessions.length > 0) {
+    const rawMessageIds = incompleteSessions.map((s) => s.raw_message_id);
+    const { data: sourceMessages } = await supabase
+      .from("raw_messages")
+      .select("id")
+      .in("id", rawMessageIds)
+      .eq("source_id", sourceId);
+
+    if (sourceMessages && sourceMessages.length > 0) {
+      return {
+        blocked: true,
+        reason: "รอบเบิก/คืนมีรายการที่ยังตรวจสอบไม่สมบูรณ์ กรุณาแก้ไขรายการที่ค้างก่อนส่งยอด",
+      };
+    }
   }
 
   // Amounts are numeric(10,2) in the DB but accumulate as binary floats here —

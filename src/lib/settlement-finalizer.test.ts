@@ -71,6 +71,9 @@ interface DbCfg {
   batches?:          { active: number };
   unbatchedEvIds?:   string[];     // IDs for unbatched evidences
   processingChecks?: boolean;      // whether unbatched checks are PROCESSING
+  incompleteSessions?: Array<{ id: string; raw_message_id: string }>;
+  incompleteSessionSourceMatch?: boolean;
+  failedClosedPendingSessions?: Array<{ close_event_timestamp_ms: number }>;
 }
 
 function makeDb(cfg: DbCfg = {}) {
@@ -186,6 +189,49 @@ function makeDb(cfg: DbCfg = {}) {
         };
       }
 
+      if (table === "produce_sessions") {
+        return {
+          select: () => ({
+            eq: () => ({
+              not: async () => ({
+                data: cfg.incompleteSessions ?? [],
+                error: null,
+              }),
+            }),
+          }),
+        };
+      }
+
+      if (table === "pending_sessions") {
+        return {
+          select: () => ({
+            eq: () => ({
+              eq: () => ({
+                eq: () => ({
+                  not: async () => ({
+                    data: cfg.failedClosedPendingSessions ?? [],
+                    error: null,
+                  }),
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+
+      if (table === "raw_messages") {
+        return {
+          select: () => ({
+            in: () => ({
+              eq: async () => ({
+                data: cfg.incompleteSessionSourceMatch ? [{ id: "raw-1" }] : [],
+                error: null,
+              }),
+            }),
+          }),
+        };
+      }
+
       if (table === "produce_transactions") {
         const chain = (): object => ({ eq: () => chain(), in: async () => ({ data: [], error: null }) });
         return { select: () => chain() };
@@ -219,6 +265,38 @@ describe("tryFinalizeSettlement — readiness", () => {
   it("returns not_ready when a manual slip session is open", async () => {
     const db = makeDb({ sessions: { open: true } });
     expect(await tryFinalizeSettlement(db as never, "grp1", "2026-06-17", noopPush)).toBe("not_ready");
+  });
+
+  it("returns not_ready and never sends รายการส่งเงิน ✅ when a produce session for this source/date has parser errors", async () => {
+    const db = makeDb({
+      incompleteSessions: [{ id: "sess-1", raw_message_id: "raw-1" }],
+      incompleteSessionSourceMatch: true,
+    });
+    const pushed: string[] = [];
+    const result = await tryFinalizeSettlement(db as never, "grp1", "2026-06-17", async (_to, text) => {
+      pushed.push(text);
+    });
+    expect(result).toBe("not_ready");
+    expect(pushed).toHaveLength(0);
+  });
+
+  // Reproduces the gap flagged in review: a session that fails closed
+  // (try_finalize_pending_generation returning failed_closed) writes ZERO rows
+  // to produce_sessions/produce_items, so the parser_errors check above can
+  // never see it — only pending_sessions itself records the failed attempt.
+  // Without a gate reading pending_sessions, settlement would silently ignore
+  // the failed attempt and finalize off whatever data already existed.
+  it("returns not_ready and never sends รายการส่งเงิน ✅ when a pending session for this source/date failed closed with zero produce writes", async () => {
+    const closeTimestampMs = Date.parse("2026-06-17T12:00:00+07:00"); // Bangkok noon → business date 2026-06-17
+    const db = makeDb({
+      failedClosedPendingSessions: [{ close_event_timestamp_ms: closeTimestampMs }],
+    });
+    const pushed: string[] = [];
+    const result = await tryFinalizeSettlement(db as never, "grp1", "2026-06-17", async (_to, text) => {
+      pushed.push(text);
+    });
+    expect(result).toBe("not_ready");
+    expect(pushed).toHaveLength(0);
   });
 
   it("returns not_ready when a slip batch is still active", async () => {

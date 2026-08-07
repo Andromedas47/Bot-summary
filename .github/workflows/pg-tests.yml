@@ -176,3 +176,60 @@ jobs:
         run: npm run type-check
       - name: git diff --check against the PR base
         run: git diff --check "origin/${{ github.base_ref }}...HEAD"
+
+  purchase-capture-slice-c2:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ALLOW_DISPOSABLE_POSTGRES_TESTS: "1"
+      REQUIRE_POSTGRES_TESTS: "1"
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGPORT: "5432"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - name: Slice C2-C5 end-to-end real-PostgreSQL integration suite
+        run: bunx bun test src/lib/purchase-capture/integration-slice-c2.pg.test.ts
+      - name: Slice C2-C5 orchestration unit tests
+        run: >-
+          bunx bun test
+          src/lib/purchase-capture/confirm-flow.test.ts
+          src/lib/purchase-capture/webhook-handler.test.ts
+          src/lib/purchase-capture/confirmation-recovery.test.ts
+          src/lib/purchase-capture/end-to-end.test.ts
+          src/lib/purchase-capture/finalizer.test.ts
+          src/app/api/cron/finalize-purchase-capture/route.test.ts
+      - name: Slice A PostgreSQL regression suite
+        run: bunx bun test src/lib/purchase-capture/migration-slice-a.pg.test.ts
+      - name: Slice B PostgreSQL regression suite
+        run: bunx bun test src/lib/purchase-capture/migration-slice-b.pg.test.ts
+      - name: Slice C1 PostgreSQL regression suite
+        run: bunx bun test src/lib/purchase-capture/migration-slice-c.pg.test.ts
+      - name: Migration 0052 PostgreSQL regression suite
+        run: bunx bun test src/lib/purchase-receipts/migration-0052.pg.test.ts
+      - name: Migration 0053 PostgreSQL regression suite
+        run: bunx bun test src/lib/inventory-ledger/migration-0053.pg.test.ts
+      - name: Cross-feature LINE routing regression guard
+        run: bunx bun test src/lib/line src/lib/physical-inventory
+      - name: Typecheck
+        run: npm run type-check
+      - name: git diff --check against the PR base
+        run: git diff --check "origin/${{ github.base_ref }}...HEAD"

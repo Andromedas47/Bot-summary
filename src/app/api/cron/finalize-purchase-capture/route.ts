@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { checkCronAuth } from "@/app/api/cron/finalize-slip-batches/auth";
+import { isPurchaseCaptureCronEnabled } from "@/lib/purchase-capture/config";
 import { sweepPurchaseCaptureFinalization } from "@/lib/purchase-capture/finalization-sweep";
 import { createServiceClient } from "@/lib/supabase/server";
 import { logger } from "@/lib/logger";
@@ -26,6 +27,15 @@ export async function GET(req: NextRequest) {
   }
   if (!auth.authorized) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  if (!isPurchaseCaptureCronEnabled()) {
+    return NextResponse.json({
+      ok: true,
+      disabled: true,
+      reason: "PURCHASE_CAPTURE_CRON_ENABLED is not enabled",
+      triggeredAt: new Date().toISOString(),
+    });
   }
 
   try {

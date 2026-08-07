@@ -472,9 +472,20 @@ function notificationWorkKey(item: NotificationWorkItem): string {
 
 
 
+/**
+ * Discovers undelivered outbox work.
+ *
+ * `kinds` scopes the result to specific notification kinds. Each kind has
+ * exactly one owner in the sweep — preview_ready belongs to the finalizer
+ * stage, posted_success to the confirmation-recovery stage — so the two never
+ * deliver the same rows twice, and neither can starve the other out of the
+ * shared `limit` (an unfiltered call lets a backlog of one kind consume the
+ * whole budget before the other kind is ever reached).
+ */
 export async function listUndeliveredNotificationWork(
   supabase: Supabase,
   limit: number,
+  kinds?: readonly PurchaseCaptureNotificationKind[],
 ): Promise<NotificationWorkItem[]> {
   const now = new Date().toISOString();
   const { data: notifications, error } = await supabase
@@ -490,14 +501,22 @@ export async function listUndeliveredNotificationWork(
   const sessionIds = [...new Set((notifications ?? []).map((row) => row.session_id))];
   if (sessionIds.length === 0) return [];
 
+  // Widened to include "posted": a posted_success part set belongs to a
+  // session that has already transitioned to "posted" (complete_purchase_
+  // capture_posting moves the session to "posted" and creates the
+  // posted_success parts in the same transaction, §12.1). Filtering only on
+  // "awaiting_confirmation" — which is where preview_ready parts' sessions
+  // live — meant a posted session's undelivered posted_success parts were
+  // never rediscovered by this lookup and stayed stranded in the outbox
+  // forever. Both statuses are legitimate homes for undelivered work here.
   const { data: sessions, error: sessionError } = await supabase
     .from("purchase_capture_sessions")
     .select("id, source_id, status")
     .in("id", sessionIds)
-    .eq("status", "awaiting_confirmation");
+    .in("status", ["awaiting_confirmation", "posted"]);
 
   if (sessionError) {
-    throw new Error(`awaiting_confirmation session lookup failed: ${sessionError.message}`);
+    throw new Error(`undelivered-work session lookup failed: ${sessionError.message}`);
   }
 
   const sessionById = new Map((sessions ?? []).map((session) => [session.id, session]));
@@ -506,6 +525,9 @@ export async function listUndeliveredNotificationWork(
   for (const row of notifications ?? []) {
     const session = sessionById.get(row.session_id);
     if (!session) continue;
+    if (kinds && !kinds.includes(row.notification_kind as PurchaseCaptureNotificationKind)) {
+      continue;
+    }
 
     const status = row.delivery_status;
     if (status === "sending") {
@@ -545,7 +567,10 @@ export async function finalizeDuePurchaseCaptureSessions(
 
     listDueClosingSessions(supabase, limit),
 
-    listUndeliveredNotificationWork(supabase, limit),
+    // preview_ready only — posted_success recovery is owned by
+    // recoverPostedSuccessDeliveries (confirmation-recovery.ts), so the two
+    // sweep stages never claim the same parts or compete for one budget.
+    listUndeliveredNotificationWork(supabase, limit, ["preview_ready"]),
 
   ]);
 

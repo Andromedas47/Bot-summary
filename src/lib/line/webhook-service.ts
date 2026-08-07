@@ -116,6 +116,7 @@ import {
   DefaultDataEntrySessionOwnershipResolver,
   type DataEntrySessionOwnershipResolver,
 } from "@/lib/line/data-entry-session-ownership";
+import { tryHandlePurchaseCaptureMessage } from "@/lib/purchase-capture/webhook-handler";
 
 type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
@@ -848,6 +849,15 @@ export class WebhookService {
       return this.processSlipOpen(msgEvent, slipOpenHeader, guidedMarker, eventId, event.type, log);
     }
 
+    // ── 3.6. P2C Purchase Capture (fail-closed behind PURCHASE_CAPTURE_WEBHOOK_ENABLED) ──
+    // Sits after every existing feature's ownership check so it can never steal a message
+    // owned by Produce, Physical Inventory, Manual Slip, Settlement, or White Sheet; and
+    // before produce pending-session lookup so its own reserved-grammar blocks are claimed.
+    const purchaseCaptureResult = await this.tryProcessPurchaseCapture(
+      msgEvent, text, message.id, rawMessageId, eventId, event.type, log,
+    );
+    if (purchaseCaptureResult !== null) return purchaseCaptureResult;
+
     // ── 4. Pending session flow ───────────────────────────────────────────────
     // Group/room sources are shared by every member — a produce event with no
     // userId cannot be attributed to a sender, so it must not be allowed to
@@ -1473,6 +1483,55 @@ export class WebhookService {
         parsed: false,
         error: message,
       };
+    }
+  }
+
+  // ── P2C Purchase Capture — LINE command/webhook routing ──────────────────
+  // Delegates entirely to tryHandlePurchaseCaptureMessage (fail-closed behind
+  // PURCHASE_CAPTURE_WEBHOOK_ENABLED). A `null` outcome means "not mine" and
+  // the caller keeps routing to every other feature unchanged.
+  private async tryProcessPurchaseCapture(
+    event:         LineMessageEvent,
+    text:          string,
+    lineMessageId: string,
+    rawMessageId:  string,
+    eventId:       string,
+    eventType:     string,
+    log:           ChildLogger,
+  ): Promise<WebhookProcessResult | null> {
+    const replyToken = event.replyToken;
+    try {
+      const outcome = await tryHandlePurchaseCaptureMessage(this.supabase, {
+        sourceType: event.source.type,
+        sourceId: getSourceId(event.source),
+        senderLineUserId: getUserId(event.source),
+        lineEventId: eventId,
+        lineTimestampMs: event.timestamp,
+        lineMessageId,
+        rawMessageId,
+        text,
+      });
+      if (outcome === null) return null;
+
+      if (replyToken && outcome.replyTexts.length > 0) {
+        try {
+          if (outcome.replyTexts.length === 1) {
+            await this.replyMessage(replyToken, outcome.replyTexts[0]);
+          } else {
+            await this.replyMessages(replyToken, outcome.replyTexts);
+          }
+        } catch (replyError) {
+          log.error("purchase capture reply failed", {
+            error: replyError instanceof Error ? replyError.message : String(replyError),
+          });
+        }
+      }
+
+      return { eventId, eventType, status: "saved", parsed: outcome.parsed };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log.error("purchase capture routing failed", { error: message });
+      return { eventId, eventType, status: "error", parsed: false, error: message };
     }
   }
 

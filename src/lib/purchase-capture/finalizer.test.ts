@@ -15,29 +15,41 @@ function mockSupabase(
 ) {
   return {
     from(table: string) {
-      const api: Record<string, unknown> = {};
-      api.select = () => api;
-      api.neq = () => api;
-      api.eq = () => api;
-      api.order = () => api;
-      api.in = () => api;
       if (table === "purchase_capture_notifications") {
+        const api: Record<string, unknown> = {};
+        api.select = () => api;
+        api.neq = () => api;
+        api.order = () => api;
         api.limit = async () => ({ data: notifications, error: null });
-      } else if (table === "purchase_capture_sessions") {
-        api.in = () => ({
-          eq: async () => ({
-            data: Object.entries(sessionStatus).map(([id, session]) => ({
-              id,
-              source_id: session.source_id,
-              status: session.status,
-            })),
-            error: null,
-          }),
-        });
-      } else {
-        throw new Error(`unexpected ${table}`);
+        return api;
       }
-      return api;
+      if (table === "purchase_capture_sessions") {
+        // Mirrors the real (chainable-then-awaitable) PostgrestFilterBuilder:
+        // .in("id", ...) narrows nothing in this fake (id filtering is a
+        // no-op — every row not present in sessionStatus is simply absent),
+        // .in("status", [...]) records the status allow-list, and the
+        // object itself is thenable so `await` resolves after any filter.
+        let statusFilter: string[] | null = null;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const api: any = {
+          select: () => api,
+          in: (column: string, values: string[]) => {
+            if (column === "status") statusFilter = values;
+            return api;
+          },
+          then: (
+            resolve: (value: { data: unknown[]; error: null }) => unknown,
+            reject?: (reason: unknown) => unknown,
+          ) => {
+            const rows = Object.entries(sessionStatus)
+              .filter(([, session]) => statusFilter == null || statusFilter.includes(session.status))
+              .map(([id, session]) => ({ id, source_id: session.source_id, status: session.status }));
+            return Promise.resolve({ data: rows, error: null }).then(resolve, reject);
+          },
+        };
+        return api;
+      }
+      throw new Error(`unexpected ${table}`);
     },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any;

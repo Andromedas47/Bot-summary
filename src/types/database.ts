@@ -2371,6 +2371,41 @@ export interface Database {
         Args: { p_key: string };
         Returns: string;
       };
+      // ─── P2D inventory cost valuation (migration 0054) ─────────────────
+      get_inventory_cost_balances: {
+        Args: {
+          p_location_code?: string | null;
+          p_product_key?:   string | null;
+          p_unit_key?:      string | null;
+          p_include_zero?:  boolean;
+        };
+        Returns: Json;
+      };
+      value_purchase_receipt_movement: {
+        Args: { p_movement_id: string; p_actor?: string | null };
+        Returns: Json;
+      };
+      value_inventory_consumption_movement: {
+        Args: { p_movement_id: string; p_actor?: string | null };
+        Returns: Json;
+      };
+      value_good_return_movement: {
+        Args: {
+          p_movement_id:          string;
+          p_source_cost_line_ids: string[];
+          p_actor?:               string | null;
+        };
+        Returns: Json;
+      };
+      reverse_inventory_cost_movement: {
+        Args: {
+          p_cost_movement_id:     string;
+          p_reversal_movement_id: string;
+          p_reason:               string;
+          p_actor?:               string | null;
+        };
+        Returns: Json;
+      };
     };
     CompositeTypes: { [_ in never]: never };
     Enums: {

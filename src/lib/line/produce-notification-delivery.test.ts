@@ -420,6 +420,13 @@ describe("notification migration contract", () => {
   });
 });
 
+// Migration files are checked out with CRLF line endings when core.autocrlf
+// is enabled; normalize so substring/slice assertions below don't depend on
+// the checkout's line-ending behavior.
+async function readMigrationSql(path: URL): Promise<string> {
+  return (await Bun.file(path).text()).replace(/\r\n/g, "\n");
+}
+
 describe("notification environment ownership migration contract (0061)", () => {
   const envMigrationPath = new URL(
     "../../../supabase/migrations/0061_pending_session_runtime_environment.sql",
@@ -427,7 +434,7 @@ describe("notification environment ownership migration contract (0061)", () => {
   );
 
   it("stamps notification ownership from the locked pending_sessions row, not re-derived independently", async () => {
-    const sql = await Bun.file(envMigrationPath).text();
+    const sql = await readMigrationSql(envMigrationPath);
     const finalizer = sql.slice(sql.indexOf(
       "CREATE OR REPLACE FUNCTION public.try_finalize_pending_generation",
     ));
@@ -443,7 +450,7 @@ describe("notification environment ownership migration contract (0061)", () => {
   });
 
   it("claim RPC requires an explicit environment and never trusts a caller-supplied default of production", async () => {
-    const sql = await Bun.file(envMigrationPath).text();
+    const sql = await readMigrationSql(envMigrationPath);
     const claim = sql.slice(
       sql.indexOf("CREATE OR REPLACE FUNCTION public.claim_due_produce_notifications"),
     );
@@ -456,7 +463,7 @@ describe("notification environment ownership migration contract (0061)", () => {
   });
 
   it("keeps the legacy 1-arg claim RPC for rollout safety, hardcoded to production only", async () => {
-    const sql = await Bun.file(envMigrationPath).text();
+    const sql = await readMigrationSql(envMigrationPath);
 
     // Never dropped mid-rollout — Production's currently running cron still
     // calls the 1-arg signature until it is itself redeployed onto the new
@@ -475,7 +482,7 @@ describe("notification environment ownership migration contract (0061)", () => {
   });
 
   it("grants both the legacy 1-arg and new 2-arg signatures to service_role only", async () => {
-    const sql = await Bun.file(envMigrationPath).text();
+    const sql = await readMigrationSql(envMigrationPath);
     expect(sql).toContain("GRANT EXECUTE ON FUNCTION public.claim_due_produce_notifications(integer, text) TO service_role;");
     expect(sql).toContain("GRANT EXECUTE ON FUNCTION public.claim_due_produce_notifications(integer) TO service_role;");
   });
@@ -488,14 +495,14 @@ describe("notification claim RPC overload disambiguation (0062)", () => {
   );
 
   it("drops the old (integer, text) overload that made 1-arg calls ambiguous", async () => {
-    const sql = await Bun.file(overloadFixPath).text();
+    const sql = await readMigrationSql(overloadFixPath);
     expect(sql).toContain(
       "DROP FUNCTION IF EXISTS public.claim_due_produce_notifications(integer, text);",
     );
   });
 
   it("the scoped function requires p_environment — no DEFAULT — so a 1-arg call can never match it", async () => {
-    const sql = await Bun.file(overloadFixPath).text();
+    const sql = await readMigrationSql(overloadFixPath);
     const scoped = sql.slice(
       sql.indexOf("CREATE FUNCTION public.claim_due_produce_notifications"),
       sql.indexOf("REVOKE ALL ON FUNCTION public.claim_due_produce_notifications(text, integer)"),
@@ -508,7 +515,7 @@ describe("notification claim RPC overload disambiguation (0062)", () => {
   });
 
   it("two-argument calls resolve only to the scoped (text, integer) function", async () => {
-    const sql = await Bun.file(overloadFixPath).text();
+    const sql = await readMigrationSql(overloadFixPath);
     expect(sql).toContain(
       "GRANT EXECUTE ON FUNCTION public.claim_due_produce_notifications(text, integer) TO service_role;",
     );
@@ -519,7 +526,7 @@ describe("notification claim RPC overload disambiguation (0062)", () => {
   });
 
   it("keeps the legacy 1-arg wrapper delegating with a hardcoded 'production' environment", async () => {
-    const sql = await Bun.file(overloadFixPath).text();
+    const sql = await readMigrationSql(overloadFixPath);
     const wrapper = sql.slice(
       sql.lastIndexOf("CREATE OR REPLACE FUNCTION public.claim_due_produce_notifications(\n  p_limit integer DEFAULT 25\n)"),
     );

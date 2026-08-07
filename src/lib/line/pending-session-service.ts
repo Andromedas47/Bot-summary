@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { getRuntimeEnvironment } from "@/lib/runtime-environment";
 
 const TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
@@ -63,6 +64,8 @@ export interface PendingSession {
   finalize_hold_until?:           string | null;
   finalize_confirmed_at?:         string | null;
   finalize_confirm_line_event_id?: string | null;
+  /** 0061: environment ownership — see src/lib/runtime-environment.ts. */
+  runtime_environment?:           "production" | "preview" | "development" | null;
 }
 
 export interface ConfirmFinalizationResult {
@@ -185,6 +188,7 @@ export class PendingSessionService {
         finalization_status:          "pending",
         finalization_error:           null,
         finalized_produce_session_id: null,
+        runtime_environment:          getRuntimeEnvironment(),
       },
       { onConflict: "session_key" },
     );
@@ -228,6 +232,7 @@ export class PendingSessionService {
         finalization_status:          "pending",
         finalization_error:           null,
         finalized_produce_session_id: null,
+        runtime_environment:          getRuntimeEnvironment(),
       })
       .eq("session_key", input.sessionKey)
       .eq("session_generation", input.expectedSessionGeneration)

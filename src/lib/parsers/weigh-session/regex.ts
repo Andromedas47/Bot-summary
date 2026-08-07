@@ -40,6 +40,22 @@ export const RE = {
     `^(\\d+)\\.?\\s*([${TH}][${TH}\\s]*?)(\\d+(?:\\.\\d+)?)\\.?\\s*([${TH}]+?)\\s*(\\d+(?:\\.\\d+)?)\\s*บาท\\s*$`,
   ),
 
+  // Item header split across lines: item number + product name, with no
+  // price on the same line (the price arrives on the next line — see
+  // PRICE_ONLY). Shape is identical to QUANTITY (digit run + Thai run) since
+  // both come off a scale/typed message the same way; the parser tells them
+  // apart by whether the trailing Thai token is a known unit (see units.ts).
+  // Allows internal spaces in the name (unlike QUANTITY's unit token).
+  // Captures: [1]=item_number, [2]=product_name
+  ITEM_NAME_ONLY: new RegExp(`^(\\d+)\\.?\\s*([${TH}][${TH}\\s]*)$`),
+
+  // Standalone price continuation line for an item whose name arrived on a
+  // prior line with no price attached: "100บาท", "100 บาท". Matched against
+  // punctuation-normalized content (see normalizeItemLinePunctuation), so
+  // "100.บาท" / "100บาท." also match.
+  // Captures: [1]=price
+  PRICE_ONLY: /^(\d+(?:\.\d+)?)\s*บาท\s*$/,
+
   // Quantity with unit — trailing dot before unit is optional (scale output format):
   //   "38โล"  "18.5โล"  "38.1.โล"  "28.โล"
   //   "9ลูก"  "23.ลูก"  "6.ลูก"

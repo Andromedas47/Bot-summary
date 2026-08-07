@@ -33,8 +33,11 @@ export async function proxy(req: NextRequest) {
     return res;
   }
 
-  // Webhook must never be blocked by auth
-  if (pathname.startsWith("/api/webhook")) {
+  // Only the LINE webhook may bypass the session guard. Exact match (not a
+  // startsWith prefix) so no other current or future /api/webhook* route is
+  // accidentally exempted from auth — LINE request authenticity is enforced
+  // separately inside the route handler via x-line-signature verification.
+  if (pathname === "/api/webhook/line") {
     return res;
   }
 

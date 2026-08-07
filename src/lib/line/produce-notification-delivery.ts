@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { logger } from "@/lib/logger";
 import { LinePushError, pushLineMessage } from "@/lib/line/reply";
+import { getRuntimeEnvironment } from "@/lib/runtime-environment";
 
 const MAX_CYCLE_ATTEMPTS = 5;
 const BASE_BACKOFF_MS = 5_000;
@@ -37,6 +38,8 @@ export interface ProduceNotificationRecord {
   last_resend_requested_at: string | null;
   created_at: string;
   updated_at: string;
+  /** 0061: environment ownership — see src/lib/runtime-environment.ts. */
+  runtime_environment?: "production" | "preview" | "development" | null;
 }
 
 export type NotificationAttemptResult =
@@ -212,9 +215,13 @@ async function claimDueNotifications(
   supabase: AnyClient,
   limit: number,
 ): Promise<ProduceNotificationRecord[]> {
+  // 0061: claim is scoped to this process's own environment — Production and
+  // Preview share one Supabase project and must never dequeue each other's
+  // notification rows. See claim_due_produce_notifications in
+  // 0061_pending_session_runtime_environment.sql.
   const { data, error } = await supabase.rpc(
     "claim_due_produce_notifications",
-    { p_limit: limit },
+    { p_limit: limit, p_environment: getRuntimeEnvironment() },
   );
   if (error) {
     throw new Error(`due produce notification claim failed: ${error.message}`);

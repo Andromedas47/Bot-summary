@@ -27,7 +27,7 @@ import {
   classifyPurchaseFirstLine,
   startsWithPurchaseReservedPrefix,
 } from "@/lib/purchases/classify";
-import { isPurchaseCaptureWebhookEnabled } from "./config";
+import { isPurchaseCaptureRoutingAllowed } from "./config";
 import {
   PurchaseCaptureInvalidStateError,
   PurchaseCaptureSessionService,
@@ -510,11 +510,17 @@ export async function tryHandlePurchaseCaptureMessage(
     lineMessageId?: string | null;
     rawMessageId?: string | null;
     text: string;
+    /**
+     * Test seam for the whole routing gate. Production callers never pass it,
+     * so routing is decided by isPurchaseCaptureRoutingAllowed: the
+     * PURCHASE_CAPTURE_WEBHOOK_ENABLED flag AND the
+     * PURCHASE_CAPTURE_LINE_GROUP_IDS source allowlist, both fail-closed.
+     */
     enabled?: boolean;
   },
   push: PurchaseCapturePushMessage = pushLineMessage,
 ): Promise<PurchaseCaptureWebhookOutcome | null> {
-  const enabled = params.enabled ?? isPurchaseCaptureWebhookEnabled();
+  const enabled = params.enabled ?? isPurchaseCaptureRoutingAllowed(params.sourceId);
   if (!enabled) return null;
 
   const senderLineUserId = (params.senderLineUserId ?? "").trim();

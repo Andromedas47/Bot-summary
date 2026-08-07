@@ -208,11 +208,20 @@ jobs:
       - run: bun install
       - name: Slice C2-C5 end-to-end real-PostgreSQL integration suite
         run: bunx bun test src/lib/purchase-capture/integration-slice-c2.pg.test.ts
+      # webhook-handler.test.ts runs ALONE, deliberately. It calls
+      # mock.module("./confirm-flow", ...) at module scope, and bun's module
+      # mocks are process-global: the replacement exports only
+      # confirmPurchaseCaptureFromLine, so every other export of that module
+      # disappears for the whole process. confirm-flow.test.ts and
+      # end-to-end.test.ts import the real module, so sharing a process with
+      # them makes the result depend on which file bun happens to evaluate
+      # first — which differs between Linux and Windows. Two processes, no race.
+      - name: Slice C2-C5 orchestration unit tests (module-mocking file, isolated)
+        run: bunx bun test src/lib/purchase-capture/webhook-handler.test.ts
       - name: Slice C2-C5 orchestration unit tests
         run: >-
           bunx bun test
           src/lib/purchase-capture/confirm-flow.test.ts
-          src/lib/purchase-capture/webhook-handler.test.ts
           src/lib/purchase-capture/confirmation-recovery.test.ts
           src/lib/purchase-capture/end-to-end.test.ts
           src/lib/purchase-capture/finalizer.test.ts

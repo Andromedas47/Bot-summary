@@ -7,6 +7,13 @@ import {
 } from "./config";
 
 // ── Module mocks (bun:test mock.module) ─────────────────────────────────────
+// RUN THIS FILE IN ITS OWN BUN PROCESS. bun's module mocks are process-global,
+// and the ./confirm-flow replacement below exports only
+// confirmPurchaseCaptureFromLine — every other export of that module vanishes
+// for the whole process. confirm-flow.test.ts and end-to-end.test.ts import the
+// real module, so sharing a process with them makes the outcome depend on which
+// file bun evaluates first, which differs by platform. The pg-tests workflow
+// keeps this file in a step of its own; do not fold it back in.
 // confirm-flow / finalizer / notification-push-worker are exercised in their
 // own dedicated test files (confirm-flow.test.ts, finalizer.test.ts,
 // notification-push-worker.test.ts). Here we only need to prove that

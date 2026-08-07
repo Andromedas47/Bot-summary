@@ -1487,9 +1487,10 @@ export class WebhookService {
   }
 
   // ── P2C Purchase Capture — LINE command/webhook routing ──────────────────
-  // Delegates entirely to tryHandlePurchaseCaptureMessage (fail-closed behind
-  // PURCHASE_CAPTURE_WEBHOOK_ENABLED). A `null` outcome means "not mine" and
-  // the caller keeps routing to every other feature unchanged.
+  // Delegates entirely to tryHandlePurchaseCaptureMessage, which is fail-closed
+  // behind BOTH PURCHASE_CAPTURE_WEBHOOK_ENABLED and the
+  // PURCHASE_CAPTURE_LINE_GROUP_IDS source allowlist. A `null` outcome means
+  // "not mine" and the caller keeps routing to every other feature unchanged.
   private async tryProcessPurchaseCapture(
     event:         LineMessageEvent,
     text:          string,

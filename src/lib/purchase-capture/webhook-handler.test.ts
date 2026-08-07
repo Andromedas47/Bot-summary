@@ -1,7 +1,19 @@
 import { describe, expect, mock, test } from "bun:test";
-import { isPurchaseCaptureWebhookEnabled } from "./config";
+import {
+  isPurchaseCaptureLineSourceAllowed,
+  isPurchaseCaptureRoutingAllowed,
+  isPurchaseCaptureWebhookEnabled,
+  purchaseCaptureLineSourceIds,
+} from "./config";
 
 // ── Module mocks (bun:test mock.module) ─────────────────────────────────────
+// RUN THIS FILE IN ITS OWN BUN PROCESS. bun's module mocks are process-global,
+// and the ./confirm-flow replacement below exports only
+// confirmPurchaseCaptureFromLine — every other export of that module vanishes
+// for the whole process. confirm-flow.test.ts and end-to-end.test.ts import the
+// real module, so sharing a process with them makes the outcome depend on which
+// file bun evaluates first, which differs by platform. The pg-tests workflow
+// keeps this file in a step of its own; do not fold it back in.
 // confirm-flow / finalizer / notification-push-worker are exercised in their
 // own dedicated test files (confirm-flow.test.ts, finalizer.test.ts,
 // notification-push-worker.test.ts). Here we only need to prove that
@@ -212,6 +224,11 @@ const ONE_MESSAGE_OPEN_CLOSE_TEXT = [
 const ITEM_TEXT = "ซื้อรายการ 2\nชื่อสินค้า: มะนาว\nจำนวน: 5 กก.";
 const CLOSE_ONLY_TEXT = "ปิดซื้อ 3 รายการ";
 
+function restoreEnv(key: string, value: string | undefined) {
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
+}
+
 function baseParams(overrides: Record<string, unknown> = {}) {
   return {
     sourceType: "user" as const,
@@ -228,6 +245,76 @@ function baseParams(overrides: Record<string, unknown> = {}) {
 describe("config gating", () => {
   test("isPurchaseCaptureWebhookEnabled: absent -> false", () => {
     expect(isPurchaseCaptureWebhookEnabled(undefined)).toBe(false);
+  });
+
+  test("source allowlist is fail-closed: absent, empty and blank all allow nothing", () => {
+    for (const value of [undefined, "", "   ", ",", " , , "]) {
+      expect(purchaseCaptureLineSourceIds(value).size).toBe(0);
+      expect(isPurchaseCaptureLineSourceAllowed(SOURCE_ID, value)).toBe(false);
+    }
+  });
+
+  test("source allowlist parses comma and whitespace separated ids and matches exactly", () => {
+    const value = ` ${SOURCE_ID}, Cgroup-two \n Cgroup-three `;
+    expect([...purchaseCaptureLineSourceIds(value)].sort()).toEqual(
+      ["Cgroup-three", "Cgroup-two", SOURCE_ID].sort(),
+    );
+    expect(isPurchaseCaptureLineSourceAllowed(SOURCE_ID, value)).toBe(true);
+    expect(isPurchaseCaptureLineSourceAllowed("Cgroup-two", value)).toBe(true);
+    // No prefix/substring matching — an id must be present in full.
+    expect(isPurchaseCaptureLineSourceAllowed(SOURCE_ID.slice(0, -1), value)).toBe(false);
+    expect(isPurchaseCaptureLineSourceAllowed(`${SOURCE_ID}x`, value)).toBe(false);
+    expect(isPurchaseCaptureLineSourceAllowed("", value)).toBe(false);
+  });
+
+  test("routing needs BOTH gates: the flag alone never opens an unlisted source", () => {
+    const original = {
+      flag: process.env.PURCHASE_CAPTURE_WEBHOOK_ENABLED,
+      ids: process.env.PURCHASE_CAPTURE_LINE_GROUP_IDS,
+    };
+    try {
+      // flag on, allowlist empty — the exact state right after someone flips
+      // PURCHASE_CAPTURE_WEBHOOK_ENABLED in Production and nothing else.
+      process.env.PURCHASE_CAPTURE_WEBHOOK_ENABLED = "true";
+      delete process.env.PURCHASE_CAPTURE_LINE_GROUP_IDS;
+      expect(isPurchaseCaptureRoutingAllowed(SOURCE_ID)).toBe(false);
+
+      // allowlist set, flag off
+      process.env.PURCHASE_CAPTURE_WEBHOOK_ENABLED = "";
+      process.env.PURCHASE_CAPTURE_LINE_GROUP_IDS = SOURCE_ID;
+      expect(isPurchaseCaptureRoutingAllowed(SOURCE_ID)).toBe(false);
+
+      // both set — allowed, but only for the listed source
+      process.env.PURCHASE_CAPTURE_WEBHOOK_ENABLED = "true";
+      expect(isPurchaseCaptureRoutingAllowed(SOURCE_ID)).toBe(true);
+      expect(isPurchaseCaptureRoutingAllowed("Csome-live-market-group")).toBe(false);
+    } finally {
+      restoreEnv("PURCHASE_CAPTURE_WEBHOOK_ENABLED", original.flag);
+      restoreEnv("PURCHASE_CAPTURE_LINE_GROUP_IDS", original.ids);
+    }
+  });
+
+  test("default gate (no test seam) returns null and makes zero supabase calls", async () => {
+    const original = {
+      flag: process.env.PURCHASE_CAPTURE_WEBHOOK_ENABLED,
+      ids: process.env.PURCHASE_CAPTURE_LINE_GROUP_IDS,
+    };
+    try {
+      process.env.PURCHASE_CAPTURE_WEBHOOK_ENABLED = "true";
+      delete process.env.PURCHASE_CAPTURE_LINE_GROUP_IDS;
+
+      const callLog: CallRecord[] = [];
+      const supabase = makeSupabase(null, callLog);
+      const params = baseParams();
+      delete (params as { enabled?: boolean }).enabled;
+
+      const result = await tryHandlePurchaseCaptureMessage(supabase, params, noopPush);
+      expect(result).toBeNull();
+      expect(callLog).toEqual([]);
+    } finally {
+      restoreEnv("PURCHASE_CAPTURE_WEBHOOK_ENABLED", original.flag);
+      restoreEnv("PURCHASE_CAPTURE_LINE_GROUP_IDS", original.ids);
+    }
   });
 
   test("flag disabled -> returns null and makes zero supabase calls", async () => {

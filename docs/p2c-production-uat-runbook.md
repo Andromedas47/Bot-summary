@@ -60,6 +60,20 @@ does nothing.
 | `PURCHASE_CAPTURE_LINE_GROUP_IDS` | *the dedicated UAT group ID* | the source allowlist; empty means no source is allowed |
 | `PURCHASE_CAPTURE_CRON_ENABLED` | leave **unset** for now | enabled only at step 11 |
 
+### The cron has two independent gates with the same name
+
+They live in different systems and both must be set before the sweep runs on a
+schedule. Setting only one is a silent no-op, which is easy to mistake for a
+broken feature.
+
+| Gate | Where | Effect while unset |
+|---|---|---|
+| `PURCHASE_CAPTURE_CRON_ENABLED` **repository variable** | GitHub → repo → Settings → Variables | `.github/workflows/finalize-purchase-capture.yml` has `if: ${{ vars.PURCHASE_CAPTURE_CRON_ENABLED == 'true' }}`, so the scheduled job is **skipped** and never calls the route |
+| `PURCHASE_CAPTURE_CRON_ENABLED` **Vercel env var** | Vercel → Production env | the route returns `{ok:true, disabled:true}`, creates no client and runs no sweep |
+
+Verified 2026-08-07: no repository variables are set at all, and the scheduled
+runs are completing as `skipped`. The cron is off at both layers.
+
 `PURCHASE_CAPTURE_LINE_GROUP_IDS` has no default on purpose. Physical Inventory
 ships a baked-in default group; purchase capture writes stock into MAIN, so its
 permitted sources are always an explicit Production decision.
@@ -141,7 +155,8 @@ time before you begin. Keep every screenshot — see §5.
 | 8 | successful confirmation | `ยืนยันซื้อ` on the session from step 7 | receipt `confirmed`; **exactly one** `inventory_movements` row with `movement_type = 'PURCHASE_RECEIPT'`; session `posted`; posted-success message delivered |
 | 9 | one-message capture | a single message containing header + item + costs + `ปิดซื้อ` blocks separated by blank lines, then confirm | same result as 1–8 in one message; one movement |
 | 10 | duplicate confirm | send `ยืนยันซื้อ` again on the posted session | idempotent replay: same movement id echoed, **no second movement**, **no second MAIN balance increase** |
-| 11 | cron recovery | only now set `PURCHASE_CAPTURE_CRON_ENABLED=true`, redeploy, and invoke the cron route with `CRON_SECRET` | route returns work counts instead of `{ok:true, disabled:true}`; a session left mid-flight is recovered |
+| 11 | cron recovery | only now set the **Vercel** `PURCHASE_CAPTURE_CRON_ENABLED=true` and redeploy, then invoke the route directly with `CRON_SECRET` | route returns work counts instead of `{ok:true, disabled:true}`; a session left mid-flight is recovered |
+| 12 | scheduled cron | only after step 11 passes, set the **GitHub repository variable** `PURCHASE_CAPTURE_CRON_ENABLED=true` | `finalize-purchase-capture` runs instead of reporting `skipped` |
 
 ### Step 6 — registry correction SQL
 

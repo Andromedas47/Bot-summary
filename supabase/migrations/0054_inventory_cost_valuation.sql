@@ -966,12 +966,25 @@ BEGIN
     -- belonging to it can exist yet — the exclusion the contract calls for is
     -- therefore already structurally true, not something this query has to
     -- filter for.
-    SELECT coalesce(b.quantity_balance, 0), coalesce(b.value_balance_satang, 0)
+    SELECT b.quantity_balance, b.value_balance_satang
       INTO v_base_qty, v_base_value
       FROM public.inventory_cost_balances AS b
      WHERE b.location_code = v_line.location_code
        AND b.product_key   = v_line.product_key
-       AND b.unit_key       = v_line.unit_key;
+       AND b.unit_key      = v_line.unit_key;
+
+    -- The coalesce MUST be here, not in the select list above.
+    -- inventory_cost_balances is a GROUP BY view, so a key that has never had
+    -- a cost line written for it produces NO ROW at all — not a row of NULLs.
+    -- SELECT ... INTO then leaves both variables NULL and a coalesce inside the
+    -- select list never runs, because the select list itself never evaluates.
+    -- That NULL is silently poisonous: `v_qty_balance + signed_quantity < 0`
+    -- evaluates to NULL, which IF treats as false, so the insufficiency guard
+    -- is SKIPPED and the function falls through to inserting a NULL value —
+    -- surfacing as a raw NOT NULL violation instead of the documented
+    -- unvalued_source_inventory refusal.
+    v_base_qty   := coalesce(v_base_qty, 0);
+    v_base_value := coalesce(v_base_value, 0);
 
     -- Adjust by what earlier lines in THIS loop already consumed against the
     -- same key, so a second line against one key sees the first line's effect.
@@ -982,23 +995,33 @@ BEGIN
     IF v_qty_balance + v_line.signed_quantity < 0 THEN
       -- inventory_cost_balances is an INNER join, so v_qty_balance above is
       -- the VALUED quantity, not the ledger quantity. Before failing closed,
-      -- check the LEDGER-side balance for the same key (adjusted by the same
-      -- in-loop running total used for v_qty_balance above): if the real
-      -- ledger balance would not go negative, the true cause is unvalued
-      -- stock at this key, not genuinely insufficient stock, and that must be
-      -- reported distinctly rather than sending the reader hunting for
-      -- missing stock that is not actually missing.
+      -- check the LEDGER-side balance for the same key: if the real ledger
+      -- balance is not negative, the true cause is unvalued stock at this key,
+      -- not genuinely insufficient stock, and that must be reported distinctly
+      -- rather than sending the reader hunting for missing stock that is not
+      -- actually missing.
+      --
+      -- No adjustment term is added to v_ledger_qty, deliberately. The quantity
+      -- movement was posted to the ledger BEFORE valuation ran, so every line
+      -- of this movement — including this one and any earlier line in this same
+      -- loop — is ALREADY inside this sum. Adding signed_quantity or the
+      -- running total again would subtract the consumption twice, and an
+      -- unvalued receipt drained by exactly its own quantity would then be
+      -- misreported as insufficient stock.
       SELECT coalesce(sum(signed_quantity), 0) INTO v_ledger_qty
         FROM public.inventory_movement_lines
        WHERE location_code = v_line.location_code
          AND product_key   = v_line.product_key
          AND unit_key      = v_line.unit_key;
 
-      IF v_ledger_qty + (v_adj ->> 'qty')::numeric + v_line.signed_quantity >= 0 THEN
+      IF v_ledger_qty >= 0 THEN
         RAISE EXCEPTION
           'unvalued_source_inventory: movement % line % cannot be valued '
-          'because (%,%,%) has ledger quantity % but only % of it is valued '
-          '— see public.unvalued_inventory_movement_lines',
+          'because (%,%,%) settles at ledger quantity % once this movement is '
+          'counted, so the stock exists — but the valued balance is only %, so '
+          'some earlier movement at this key was never valued. This is a '
+          'valuation gap, not missing stock — see '
+          'public.unvalued_inventory_movement_lines',
           p_movement_id, v_line.line_ordinal, v_line.location_code,
           v_line.product_key, v_line.unit_key, v_ledger_qty, v_qty_balance
           USING ERRCODE = 'invalid_parameter_value';

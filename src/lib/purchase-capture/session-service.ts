@@ -136,6 +136,38 @@ export class PurchaseCaptureOwnershipMismatchError extends Error {
   }
 }
 
+/** begin_purchase_capture_confirmation refused: an item carries a blocking blocker. */
+export class PurchaseCaptureBlockingBlockerError extends Error {
+  constructor(message = "blocking_blocker_present") {
+    super(message);
+    this.name = "PurchaseCaptureBlockingBlockerError";
+  }
+}
+
+/** begin_purchase_capture_confirmation refused: the receipt has no items. */
+export class PurchaseCaptureEmptyReceiptError extends Error {
+  constructor(message = "empty_receipt") {
+    super(message);
+    this.name = "PurchaseCaptureEmptyReceiptError";
+  }
+}
+
+/** begin_purchase_capture_confirmation refused: receipt document identity does not match the session. */
+export class PurchaseCaptureReceiptBindingMismatchError extends Error {
+  constructor(message = "receipt_binding_mismatch") {
+    super(message);
+    this.name = "PurchaseCaptureReceiptBindingMismatchError";
+  }
+}
+
+/** complete_purchase_capture_posting refused: movement does not match the session's receipt. */
+export class PurchaseCaptureInvalidMovementError extends Error {
+  constructor(message = "invalid_movement") {
+    super(message);
+    this.name = "PurchaseCaptureInvalidMovementError";
+  }
+}
+
 /** Shared ownership re-check every mutating (and the one reading) RPC below requires. */
 type PurchaseCaptureExpectedOwnership = {
   expectedSourceType: "user" | "group" | "room";
@@ -145,7 +177,7 @@ type PurchaseCaptureExpectedOwnership = {
 
 function mapRpcError(
   message: string,
-  kind: "open" | "admit" | "close" | "candidate" | "cancel",
+  kind: "open" | "admit" | "close" | "candidate" | "cancel" | "begin" | "complete",
 ): Error {
   if (message.includes("generation_conflict")) return new PurchaseCaptureGenerationConflictError();
   if (message.includes("ownership_mismatch")) return new PurchaseCaptureOwnershipMismatchError();
@@ -156,6 +188,18 @@ function mapRpcError(
     );
   }
   if (message.includes("line_event_conflict")) return new PurchaseCaptureLineEventConflictError();
+  // blocking_blocker_present / empty_receipt / receipt_binding_mismatch / invalid_movement
+  // must be checked before the generic invalid_state fallthrough below — none of them
+  // contain the substring "invalid_state", but they are still business-specific refusals
+  // that must not be flattened into the generic invalid-state error.
+  if (message.includes("blocking_blocker_present")) {
+    return new PurchaseCaptureBlockingBlockerError(message);
+  }
+  if (message.includes("empty_receipt")) return new PurchaseCaptureEmptyReceiptError();
+  if (message.includes("receipt_binding_mismatch")) {
+    return new PurchaseCaptureReceiptBindingMismatchError();
+  }
+  if (message.includes("invalid_movement")) return new PurchaseCaptureInvalidMovementError();
   if (message.includes("invalid_state")) return new PurchaseCaptureInvalidStateError();
   if (message.includes("stale_ingest_revision")) return new PurchaseCaptureStaleIngestRevisionError();
   if (message.includes("stale_ingest_hash")) return new PurchaseCaptureStaleIngestHashError();
@@ -184,6 +228,29 @@ export class PurchaseCaptureSessionService {
       .in("status", ["open", "closing", "awaiting_confirmation", "confirming"])
       .maybeSingle();
     if (error) throw new Error(`findOpenSession failed: ${error.message}`);
+    return data;
+  }
+
+  /**
+   * Most recent session for this owner regardless of status.
+   * Used only to word a reply for a terminal session (posted/cancelled/failed_closed);
+   * never used as an authoritative gate.
+   */
+  async findLatestSession(
+    sourceId: string,
+    senderLineUserId: string,
+  ): Promise<PurchaseCaptureSessionRow | null> {
+    const sender = senderLineUserId.trim();
+    if (!sender) throw new Error("sender_line_user_id required");
+    const { data, error } = await this.supabase
+      .from("purchase_capture_sessions")
+      .select("*")
+      .eq("source_id", sourceId)
+      .eq("sender_line_user_id", sender)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw new Error(`findLatestSession failed: ${error.message}`);
     return data;
   }
 
@@ -445,6 +512,88 @@ export class PurchaseCaptureSessionService {
       status: row.status as PurchaseCaptureSessionStatus,
       receiptId: String(row.receipt_id),
       draftRevision: String(row.draft_revision),
+    };
+  }
+
+  /**
+   * P2C Slice C2 confirm gate: awaiting_confirmation → confirming under the
+   * authoritative blocking-blocker scan. Never called on the confirming or
+   * posted recovery paths.
+   */
+  async beginConfirmation(params: {
+    sessionId: string;
+    expectedGeneration: string;
+    expectedReceiptId: string;
+    expectedDraftRevision: string;
+    expectedSourceType: "user" | "group" | "room";
+    expectedSourceId: string;
+    expectedSenderLineUserId: string;
+    actor?: string | null;
+  }): Promise<{
+    ok: boolean;
+    idempotent: boolean;
+    sessionId: string;
+    status: PurchaseCaptureSessionStatus;
+    receiptId: string;
+    draftRevision: string;
+  }> {
+    const { data, error } = await this.supabase.rpc("begin_purchase_capture_confirmation", {
+      p_session_id: params.sessionId,
+      p_expected_generation: params.expectedGeneration,
+      p_expected_receipt_id: params.expectedReceiptId,
+      p_expected_draft_revision: Number(params.expectedDraftRevision),
+      p_expected_source_type: params.expectedSourceType,
+      p_expected_source_id: params.expectedSourceId,
+      p_expected_sender_line_user_id: params.expectedSenderLineUserId,
+      p_actor: params.actor ?? null,
+    });
+    if (error) throw mapRpcError(error.message ?? "", "begin");
+    const row = data as Record<string, unknown>;
+    return {
+      ok: row.ok === true,
+      idempotent: row.idempotent === true,
+      sessionId: String(row.session_id),
+      status: row.status as PurchaseCaptureSessionStatus,
+      receiptId: String(row.receipt_id),
+      draftRevision: String(row.draft_revision),
+    };
+  }
+
+  /**
+   * P2C Slice C2 posting completion: creates posted_success outbox parts and
+   * transitions confirming → posted with the movement id, atomically.
+   * Idempotent replay when already posted under the same movement id.
+   */
+  async completePosting(params: {
+    sessionId: string;
+    expectedGeneration: string;
+    movementId: string;
+    postedSuccessPayloadTexts: readonly string[];
+    actor?: string | null;
+  }): Promise<{
+    ok: boolean;
+    idempotent: boolean;
+    sessionId: string;
+    status: PurchaseCaptureSessionStatus;
+    movementId: string;
+    notification: unknown;
+  }> {
+    const { data, error } = await this.supabase.rpc("complete_purchase_capture_posting", {
+      p_session_id: params.sessionId,
+      p_expected_generation: params.expectedGeneration,
+      p_movement_id: params.movementId,
+      p_posted_success_payload_texts: [...params.postedSuccessPayloadTexts],
+      p_actor: params.actor ?? null,
+    });
+    if (error) throw mapRpcError(error.message ?? "", "complete");
+    const row = data as Record<string, unknown>;
+    return {
+      ok: row.ok === true,
+      idempotent: row.idempotent === true,
+      sessionId: String(row.session_id),
+      status: row.status as PurchaseCaptureSessionStatus,
+      movementId: String(row.movement_id),
+      notification: row.notification,
     };
   }
 }

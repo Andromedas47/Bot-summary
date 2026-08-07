@@ -2223,6 +2223,29 @@ export interface Database {
         };
         Returns: Json;
       };
+      begin_purchase_capture_confirmation: {
+        Args: {
+          p_session_id: string;
+          p_expected_generation: string;
+          p_expected_receipt_id: string;
+          p_expected_draft_revision: number;
+          p_expected_source_type: string;
+          p_expected_source_id: string;
+          p_expected_sender_line_user_id: string;
+          p_actor?: string | null;
+        };
+        Returns: Json;
+      };
+      complete_purchase_capture_posting: {
+        Args: {
+          p_session_id: string;
+          p_expected_generation: string;
+          p_movement_id: string;
+          p_posted_success_payload_texts: string[];
+          p_actor?: string | null;
+        };
+        Returns: Json;
+      };
       create_purchase_capture_notification_parts: {
         Args: {
           p_session_id: string;

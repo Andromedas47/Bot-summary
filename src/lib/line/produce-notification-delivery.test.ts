@@ -480,3 +480,52 @@ describe("notification environment ownership migration contract (0061)", () => {
     expect(sql).toContain("GRANT EXECUTE ON FUNCTION public.claim_due_produce_notifications(integer) TO service_role;");
   });
 });
+
+describe("notification claim RPC overload disambiguation (0062)", () => {
+  const overloadFixPath = new URL(
+    "../../../supabase/migrations/0062_claim_due_produce_notifications_require_environment.sql",
+    import.meta.url,
+  );
+
+  it("drops the old (integer, text) overload that made 1-arg calls ambiguous", async () => {
+    const sql = await Bun.file(overloadFixPath).text();
+    expect(sql).toContain(
+      "DROP FUNCTION IF EXISTS public.claim_due_produce_notifications(integer, text);",
+    );
+  });
+
+  it("the scoped function requires p_environment — no DEFAULT — so a 1-arg call can never match it", async () => {
+    const sql = await Bun.file(overloadFixPath).text();
+    const scoped = sql.slice(
+      sql.indexOf("CREATE FUNCTION public.claim_due_produce_notifications"),
+      sql.indexOf("REVOKE ALL ON FUNCTION public.claim_due_produce_notifications(text, integer)"),
+    );
+    expect(scoped).toContain("p_environment text,");
+    expect(scoped).not.toContain("p_environment text    DEFAULT NULL");
+    expect(scoped).not.toContain("p_environment text DEFAULT");
+    // p_limit is still optional; only p_environment must always be supplied.
+    expect(scoped).toContain("p_limit       integer DEFAULT 25");
+  });
+
+  it("two-argument calls resolve only to the scoped (text, integer) function", async () => {
+    const sql = await Bun.file(overloadFixPath).text();
+    expect(sql).toContain(
+      "GRANT EXECUTE ON FUNCTION public.claim_due_produce_notifications(text, integer) TO service_role;",
+    );
+    // The old (integer, text) identity is dropped, not reissued or granted.
+    expect(sql).not.toContain("GRANT EXECUTE ON FUNCTION public.claim_due_produce_notifications(integer, text)");
+    expect(sql).not.toContain("CREATE FUNCTION public.claim_due_produce_notifications(\n  p_limit");
+    expect(sql).not.toContain("CREATE OR REPLACE FUNCTION public.claim_due_produce_notifications(\n  p_limit       integer DEFAULT 25,\n  p_environment text    DEFAULT NULL");
+  });
+
+  it("keeps the legacy 1-arg wrapper delegating with a hardcoded 'production' environment", async () => {
+    const sql = await Bun.file(overloadFixPath).text();
+    const wrapper = sql.slice(
+      sql.lastIndexOf("CREATE OR REPLACE FUNCTION public.claim_due_produce_notifications(\n  p_limit integer DEFAULT 25\n)"),
+    );
+    expect(wrapper).toContain(
+      "SELECT * FROM public.claim_due_produce_notifications(p_environment => 'production', p_limit => p_limit);",
+    );
+    expect(wrapper).not.toContain("p_environment text");
+  });
+});

@@ -390,6 +390,24 @@ describe.skipIf(!pgAvailable)("P2D migration 0054 PostgreSQL", () => {
     return parsed === null ? "NONE" : parsed;
   }
 
+  /**
+   * costBalance() legitimately returns "NONE" for a key that has never been
+   * valued, so reading .qty off it does not typecheck. Narrow by FAILING when
+   * the balance is absent rather than by casting: a test that expected a
+   * balance and got none has already found something, and a cast would hide it.
+   */
+  async function costBalanceRow(
+    product: string,
+    unit = "kg",
+    location = "MAIN",
+  ): Promise<{ qty: string; value: string; avg: string | null }> {
+    const balance = await costBalance(product, unit, location);
+    if (balance === "NONE") {
+      throw new Error(`expected a cost balance for (${location},${product},${unit}), got NONE`);
+    }
+    return balance;
+  }
+
   async function ledgerQtySum(product: string, unit = "kg", location = "MAIN"): Promise<string> {
     return sql(
       `SELECT coalesce(sum(signed_quantity), 0)::text FROM public.inventory_movement_lines
@@ -399,10 +417,6 @@ describe.skipIf(!pgAvailable)("P2D migration 0054 PostgreSQL", () => {
 
   async function costMovementCount(movementId: string): Promise<string> {
     return sql(`SELECT count(*)::text FROM public.inventory_cost_movements WHERE movement_id = '${movementId}'`);
-  }
-
-  async function costLineCount(costMovementId: string): Promise<string> {
-    return sql(`SELECT count(*)::text FROM public.inventory_cost_movement_lines WHERE cost_movement_id = '${costMovementId}'`);
   }
 
   function uniqueProduct(prefix: string): string {
@@ -702,7 +716,7 @@ describe.skipIf(!pgAvailable)("P2D migration 0054 PostgreSQL", () => {
       itemJson(product, "10", "1"),
       itemJson(product, "10", "2"),
     ]);
-    expect((await costBalance(product) as { qty: string; value: string }).qty).toBe("20.000000");
+    expect((await costBalanceRow(product)).qty).toBe("20.000000");
 
     const issueId = await insertRawMovement({ type: "ISSUE", lines: [{ productKey: product, qty: "-5" }] });
     const val = await valueConsumption(issueId);
@@ -727,7 +741,7 @@ describe.skipIf(!pgAvailable)("P2D migration 0054 PostgreSQL", () => {
     // 3 units for a total of 100 satang: unit_cost 0.3333 baht/unit -> round(3 * 0.3333 * 100) = round(99.99) = 100.
     const receipt = await makeValuedReceipt(`doc-round-${product}`, [itemJson(product, "3", "0.3333")]);
     expect(receipt.lines[0]?.signed_value_satang).toBe("100");
-    expect((await costBalance(product) as { qty: string; value: string }).value).toBe("100");
+    expect((await costBalanceRow(product)).value).toBe("100");
 
     // Issue 1: not exact-drain (1 != 3). round(100 * 1 / 3) = round(33.333...) = 33.
     const issue1 = await insertRawMovement({ type: "ISSUE", lines: [{ productKey: product, qty: "-1" }] });
@@ -845,7 +859,7 @@ describe.skipIf(!pgAvailable)("P2D migration 0054 PostgreSQL", () => {
       expect(await sql("SELECT count(*)::text FROM public.inventory_cost_movements")).toBe(movementsBefore);
       expect(await sql("SELECT count(*)::text FROM public.inventory_cost_movement_lines")).toBe(linesBefore);
     }
-  });
+  }, 120_000);
 
   // ═══════════════════════════════════════════════════════════════════════
   // 7. Concurrent posting — deterministic proof via withGate
@@ -953,7 +967,7 @@ describe.skipIf(!pgAvailable)("P2D migration 0054 PostgreSQL", () => {
     // The original header now carries the back-link.
     expect(
       await sql(`SELECT reversed_by_cost_movement_id::text FROM public.inventory_cost_movements WHERE id='${receipt.costMovementId}'`),
-    ).toBe(costRev.cost_movement_id);
+    ).toBe(String(costRev.cost_movement_id));
   });
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -1038,7 +1052,7 @@ describe.skipIf(!pgAvailable)("P2D migration 0054 PostgreSQL", () => {
     const return1Id = await insertRawMovement({ type: "GOOD_RETURN", lines: [{ productKey: product, qty: "2" }] });
     const return1Val = await valueGoodReturn(return1Id, [sourceCostLineId]);
     expect((return1Val.lines as CostLine[])[0]?.signed_value_satang).toBe("200");
-    expect((await costBalance(product) as { qty: string; value: string })).toEqual({ qty: "2.000000", value: "200", avg: "100.0000000000000000" });
+    expect(await costBalance(product)).toEqual({ qty: "2.000000", value: "200", avg: "100.0000000000000000" });
 
     // Second return against the SAME source cost line: nothing left to return
     // (2 of 2 already restored) — must refuse, not silently over-restore.
@@ -1046,7 +1060,7 @@ describe.skipIf(!pgAvailable)("P2D migration 0054 PostgreSQL", () => {
     const err = await valueGoodReturnFails(return2Id, [sourceCostLineId]);
     expect(err).toMatch(/unprovable_return_cost/iu);
     expect(await costMovementCount(return2Id)).toBe("0");
-    expect((await costBalance(product) as { qty: string; value: string })).toEqual({ qty: "2.000000", value: "200", avg: "100.0000000000000000" });
+    expect(await costBalance(product)).toEqual({ qty: "2.000000", value: "200", avg: "100.0000000000000000" });
   });
 
   test("a sequence of PARTIAL returns totalling exactly the issued quantity restores exactly the issued value with zero residue", async () => {
@@ -1282,29 +1296,41 @@ describe.skipIf(!pgAvailable)("P2D migration 0054 PostgreSQL", () => {
     ).toBe("0");
   });
 
+  // ONE psql call, not one per (role, object, privilege). Each sql() here spawns
+  // a fresh psql.exe and therefore a fresh TCP connection; the per-triple loop
+  // this replaced made several hundred of them back to back and failed
+  // intermittently on a DIFFERENT object each run, with psql exiting non-zero
+  // and an empty stderr — the signature of local connection/ephemeral-port
+  // exhaustion, not of a privilege actually being granted. Asking the database
+  // once and asserting in TypeScript is faster and deterministic, and the
+  // assertion still names the exact offending grant when it regresses.
   test("anon and authenticated hold NO privilege on any 0054 table, view, or function", async () => {
     expect(ready).toBe(true);
-    for (const role of ["anon", "authenticated"]) {
-      for (const rel of [...COST_TABLES, ...COST_VIEWS]) {
-        for (const priv of ["SELECT", "INSERT", "UPDATE", "DELETE"]) {
-          expect(
-            await sql(`SELECT has_table_privilege('${role}','public.${rel}','${priv}')::text`),
-            `${role} must NOT hold ${priv} on ${rel}`,
-          ).toBe("false");
-        }
-      }
-      for (const fn of [...COST_RPCS, ...COST_INTERNAL_FUNCTIONS]) {
-        expect(
-          await sql(
-            `SELECT coalesce(bool_or(has_function_privilege('${role}', p.oid, 'EXECUTE')), false)::text
-               FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-              WHERE n.nspname='public' AND p.proname='${fn}'`,
-          ),
-          `${role} must NOT execute ${fn}`,
-        ).toBe("false");
-      }
-    }
-  });
+
+    const relList = [...COST_TABLES, ...COST_VIEWS].map((r) => sqlLiteral(r)).join(",");
+    const fnList = [...COST_RPCS, ...COST_INTERNAL_FUNCTIONS].map((f) => sqlLiteral(f)).join(",");
+
+    const granted = JSON.parse(
+      await sql(
+        `SELECT coalesce(jsonb_agg(g ORDER BY g->>'what'), '[]'::jsonb)::text FROM (
+           SELECT jsonb_build_object('role', r.role, 'what', t.rel, 'priv', p.priv) AS g
+             FROM unnest(ARRAY['anon','authenticated']) AS r(role)
+             CROSS JOIN unnest(ARRAY[${relList}]) AS t(rel)
+             CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE']) AS p(priv)
+            WHERE has_table_privilege(r.role, 'public.' || t.rel, p.priv)
+           UNION ALL
+           SELECT jsonb_build_object('role', r.role, 'what', f.fn, 'priv', 'EXECUTE')
+             FROM unnest(ARRAY['anon','authenticated']) AS r(role)
+             CROSS JOIN unnest(ARRAY[${fnList}]) AS f(fn)
+             JOIN pg_proc pr ON pr.proname = f.fn
+             JOIN pg_namespace n ON n.oid = pr.pronamespace AND n.nspname = 'public'
+            WHERE has_function_privilege(r.role, pr.oid, 'EXECUTE')
+         ) AS granted`,
+      ),
+    ) as { role: string; what: string; priv: string }[];
+
+    expect(granted, `unexpected grants leaked: ${JSON.stringify(granted)}`).toEqual([]);
+  }, 120_000);
 
   test("service_role holds SELECT on the tables/views and EXECUTE on the RPCs, but NOT INSERT/UPDATE/DELETE", async () => {
     expect(ready).toBe(true);
@@ -1341,7 +1367,7 @@ describe.skipIf(!pgAvailable)("P2D migration 0054 PostgreSQL", () => {
         `service_role must NOT execute internal helper ${fn}`,
       ).toBe("false");
     }
-  });
+  }, 120_000);
 
   // ═══════════════════════════════════════════════════════════════════════
   // 19. Append-only
@@ -1384,7 +1410,7 @@ describe.skipIf(!pgAvailable)("P2D migration 0054 PostgreSQL", () => {
     const costRev = await reverseCostMovement(receipt.costMovementId, qtyRev.reversalId, "test");
     expect(
       await sql(`SELECT reversed_by_cost_movement_id::text FROM public.inventory_cost_movements WHERE id='${receipt.costMovementId}'`),
-    ).toBe(costRev.cost_movement_id);
+    ).toBe(String(costRev.cost_movement_id));
 
     // And once set, it cannot be changed again.
     expect(
@@ -1455,8 +1481,10 @@ describe.skipIf(!pgAvailable)("P2D migration 0054 PostgreSQL", () => {
           return { movementId: post.movement_id, costMovementId: val.cost_movement_id };
         }
 
-        await runSequence("A");
-        await runSequence("B");
+        // The real database names, not the labels "A"/"B" — runSequence hands
+        // this straight to psql -d.
+        await runSequence(dbA);
+        await runSequence(dbB);
 
         const balanceA = await sqlIn(
           dbA,
@@ -1470,7 +1498,7 @@ describe.skipIf(!pgAvailable)("P2D migration 0054 PostgreSQL", () => {
 
         const linesA = await sqlIn(
           dbA,
-          `SELECT jsonb_agg(jsonb_build_object('value', c.signed_value_satang, 'basis', m.valuation_basis, 'type', m.cost_event_type)
+          `SELECT jsonb_agg(jsonb_build_object('value', c.signed_value_satang::text, 'basis', m.valuation_basis, 'type', m.cost_event_type)
                             ORDER BY c.created_at)::text
              FROM public.inventory_cost_movement_lines c
              JOIN public.inventory_cost_movements m ON m.id = c.cost_movement_id
@@ -1479,7 +1507,7 @@ describe.skipIf(!pgAvailable)("P2D migration 0054 PostgreSQL", () => {
         );
         const linesB = await sqlIn(
           dbB,
-          `SELECT jsonb_agg(jsonb_build_object('value', c.signed_value_satang, 'basis', m.valuation_basis, 'type', m.cost_event_type)
+          `SELECT jsonb_agg(jsonb_build_object('value', c.signed_value_satang::text, 'basis', m.valuation_basis, 'type', m.cost_event_type)
                             ORDER BY c.created_at)::text
              FROM public.inventory_cost_movement_lines c
              JOIN public.inventory_cost_movements m ON m.id = c.cost_movement_id

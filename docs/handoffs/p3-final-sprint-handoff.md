@@ -194,9 +194,11 @@ left is a mechanical release sequence gated on PRs #36 and #38.
 | Integration base | `ad9c37daa19b40dc095182d8650c3441b407cfd3` (`04e5d9f` P2E + `6ea7423` P2D) |
 | Branch | `feat/p3-profit-loss-final` |
 | Head before this sprint | `0f851221fb817752d2d2e0f5eead79d46965227a` |
-| Head after this sprint | the release-package docs commit that adds this section, whose parent is `af135c9` |
+| Head after this sprint | `99a5f7e23899e3b82e95265978e6e1507aefe41c` (plus any later documentation-only commit) |
 
-Eleven P3-only commits after `ad9c37d`, in order:
+The authoritative commit list is always
+`git log --oneline ad9c37d..origin/feat/p3-profit-loss-final`, not this table.
+As of the release-package sprint it is these eleven, in order:
 
 ```
 235b8d5  feat(profitability): P3 COGS and profit/loss snapshots keyed by accountability round
@@ -209,13 +211,12 @@ a43bcae  fix(profitability): refuse to certify a round carrying an unsupported m
 49701a3  docs(profitability): record published branch state
 0f85122  fix(profitability): refuse to certify a cancelled accountability round
 af135c9  test(profitability): prove settlement and White Sheet round isolation
-<HEAD>   docs(profitability): add the Production release runbook and release package
+99a5f7e  docs(profitability): add the Production release runbook and release package
 ```
 
 The earlier "four commits" note in a prior handoff was wrong; nine were required
 before this sprint, and this sprint adds two: the round-isolation regressions and
-this release-package record. Resolve `<HEAD>` with
-`git rev-parse --short feat/p3-profit-loss-final`.
+the release-package record.
 
 ## P3-only delta (15 files, verified against `ad9c37d`)
 
@@ -441,10 +442,10 @@ git merge-base --is-ancestor 6ea7423e85257790964dde6412d52cbcbad0440b origin/mai
 git worktree add -b feat/p3-profit-loss C:\GitHub\_worktrees\Bot-summary-p3-port origin/main
 cd C:\GitHub\_worktrees\Bot-summary-p3-port
 
-# 3. port ONLY the P3 commits, in order (rehearsed clean)
-#    (the two trailing SHAs are this sprint's commits; resolve the last one with
-#     git rev-parse --short feat/p3-profit-loss-final)
-git cherry-pick 235b8d5 a43bcae 163e037 10fee89 73b24f9 3c8c11d 503d891 49701a3 0f85122 af135c9 <HEAD>
+# 3. port ONLY the P3 commits, in order (rehearsed clean). Take the list from git
+#    rather than from this file, so a later docs commit cannot be missed:
+#      git log --reverse --format=%h ad9c37d..origin/feat/p3-profit-loss-final
+git cherry-pick 235b8d5 a43bcae 163e037 10fee89 73b24f9 3c8c11d 503d891 49701a3 0f85122 af135c9 99a5f7e
 
 # 4. prove the delta is P3-only: expect exactly the 15 files listed above
 git diff --name-status origin/main..HEAD

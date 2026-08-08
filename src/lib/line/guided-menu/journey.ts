@@ -62,6 +62,8 @@ export type GuidedJourneyStage =
 
 /** The tuple every stage of the journey is bound to. */
 export type GuidedJourneyContext = {
+  /** Generated economic-cycle identity. NULL means legacy/unbound. */
+  accountabilityRoundId?: string | null;
   sessionKey: string;
   sourceId: string;
   lineUserId: string;
@@ -153,6 +155,7 @@ export class GuidedJourneyService {
     }
 
     const context: GuidedJourneyContext = {
+      accountabilityRoundId: row.accountability_round_id ?? null,
       sessionKey,
       sourceId: identity.sourceId,
       lineUserId: identity.lineUserId,

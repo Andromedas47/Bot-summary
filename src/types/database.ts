@@ -192,6 +192,7 @@ export interface Database {
           voided_by:               string | null;
           void_reason:             string | null;
           replacement_session_id:  string | null;
+          accountability_round_id: string | null;
         };
         Insert: {
           id?:                      string;
@@ -215,6 +216,7 @@ export interface Database {
           voided_by?:               string | null;
           void_reason?:             string | null;
           replacement_session_id?:  string | null;
+          accountability_round_id?: string | null;
         };
         Update: {
           id?:                      string;
@@ -238,6 +240,7 @@ export interface Database {
           voided_by?:               string | null;
           void_reason?:             string | null;
           replacement_session_id?:  string | null;
+          accountability_round_id?: string | null;
         };
         Relationships: [];
       };
@@ -499,6 +502,7 @@ export interface Database {
           source_id:       string | null;
           created_at:      string;
           updated_at:      string;
+          accountability_round_id: string | null;
         };
         Insert: {
           id?:              string;
@@ -514,6 +518,7 @@ export interface Database {
           source_id?:       string | null;
           created_at?:      string;
           updated_at?:      string;
+          accountability_round_id?: string | null;
         };
         Update: {
           id?:              string;
@@ -529,6 +534,7 @@ export interface Database {
           source_id?:       string | null;
           created_at?:      string;
           updated_at?:      string;
+          accountability_round_id?: string | null;
         };
         Relationships: [];
       };
@@ -547,6 +553,7 @@ export interface Database {
           closed_by_line_user_id:  string | null;
           opened_line_message_id:  string | null;
           closed_line_message_id:  string | null;
+          accountability_round_id: string | null;
         };
         Insert: {
           id?:                      string;
@@ -561,6 +568,7 @@ export interface Database {
           closed_by_line_user_id?:  string | null;
           opened_line_message_id?:  string | null;
           closed_line_message_id?:  string | null;
+          accountability_round_id?: string | null;
         };
         Update: {
           id?:                      string;
@@ -575,6 +583,7 @@ export interface Database {
           closed_by_line_user_id?:  string | null;
           opened_line_message_id?:  string | null;
           closed_line_message_id?:  string | null;
+          accountability_round_id?: string | null;
         };
         Relationships: [];
       };
@@ -601,6 +610,7 @@ export interface Database {
           created_at:               string;
           updated_at:               string;
           closed_at:                string | null;
+          accountability_round_id:  string | null;
         };
         Insert: {
           id?:                      string;
@@ -623,6 +633,7 @@ export interface Database {
           created_at?:              string;
           updated_at?:              string;
           closed_at?:               string | null;
+          accountability_round_id?: string | null;
         };
         Update: {
           id?:                      string;
@@ -645,6 +656,7 @@ export interface Database {
           created_at?:              string;
           updated_at?:              string;
           closed_at?:               string | null;
+          accountability_round_id?: string | null;
         };
         Relationships: [];
       };
@@ -696,6 +708,7 @@ export interface Database {
           matched:                   boolean;
           created_at:                string;
           updated_at:                string;
+          accountability_round_id:   string | null;
         };
         Insert: {
           id?:                        string;
@@ -709,6 +722,7 @@ export interface Database {
           matched?:                   boolean;
           created_at?:                string;
           updated_at?:                string;
+          accountability_round_id?:   string | null;
         };
         Update: {
           id?:                        string;
@@ -722,6 +736,7 @@ export interface Database {
           matched?:                   boolean;
           created_at?:                string;
           updated_at?:                string;
+          accountability_round_id?:   string | null;
         };
         Relationships: [];
       };
@@ -914,6 +929,7 @@ export interface Database {
           batch_type:      string;
           finalized_at:    string | null;
           closing_at:      string | null;
+          accountability_round_id: string | null;
         };
         Insert: {
           id?:              string;
@@ -936,6 +952,7 @@ export interface Database {
           batch_type?:      string;
           finalized_at?:    string | null;
           closing_at?:      string | null;
+          accountability_round_id?: string | null;
         };
         Update: {
           id?:              string;
@@ -958,6 +975,7 @@ export interface Database {
           batch_type?:      string;
           finalized_at?:    string | null;
           closing_at?:      string | null;
+          accountability_round_id?: string | null;
         };
         Relationships: [];
       };
@@ -983,6 +1001,7 @@ export interface Database {
           batch_index:     number | null;
           market_label:            string | null;
           market_label_normalized: string | null;
+          accountability_round_id: string | null;
         };
         Insert: {
           id?:              string;
@@ -1004,6 +1023,7 @@ export interface Database {
           batch_index?:     number | null;
           market_label?:            string | null;
           market_label_normalized?: string | null;
+          accountability_round_id?: string | null;
         };
         Update: {
           id?:              string;
@@ -1025,6 +1045,7 @@ export interface Database {
           batch_index?:     number | null;
           market_label?:            string | null;
           market_label_normalized?: string | null;
+          accountability_round_id?: string | null;
         };
         Relationships: [];
       };
@@ -1041,6 +1062,7 @@ export interface Database {
           message_sent_at: string | null;
           last_error:      string | null;
           updated_at:      string;
+          accountability_round_id: string | null;
         };
         Insert: {
           id?:              string;
@@ -1053,6 +1075,7 @@ export interface Database {
           message_sent_at?: string | null;
           last_error?:      string | null;
           updated_at?:      string;
+          accountability_round_id?: string | null;
         };
         Update: {
           id?:              string;
@@ -1065,6 +1088,7 @@ export interface Database {
           message_sent_at?: string | null;
           last_error?:      string | null;
           updated_at?:      string;
+          accountability_round_id?: string | null;
         };
         Relationships: [];
       };
@@ -1855,6 +1879,7 @@ export interface Database {
           voided_by:          string | null;
           void_reason:        string | null;
           replacement_session_id: string | null;
+          accountability_round_id: string | null;
         };
         Insert: never;
         Update: never;
@@ -1893,6 +1918,7 @@ export interface Database {
           voided_by:          string | null;
           void_reason:        string | null;
           replacement_session_id: string | null;
+          accountability_round_id: string | null;
         };
         Insert: never;
         Update: never;
@@ -1900,6 +1926,16 @@ export interface Database {
       };
     };
     Functions: {
+      close_accountability_round: {
+        Args: {
+          p_accountability_round_id: string;
+          p_source_id: string;
+          p_owner_line_user_id: string;
+          p_closed_line_event_id: string;
+          p_status?: "closed" | "cancelled";
+        };
+        Returns: Json;
+      };
       receive_line_webhook_event: {
         Args: {
           p_line_event_id: string;

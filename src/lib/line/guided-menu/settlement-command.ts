@@ -337,12 +337,13 @@ export async function processGuidedSettlementSubmission(input: {
 
   // A round whose settlement message already went out is never rewritten from
   // LINE — the same rule the finalizer applies to itself (`already_done`).
-  const { data: finalization } = await input.supabase
+  let finalizationQuery = input.supabase
     .from("settlement_finalizations")
     .select("status, message_sent_at")
     .eq("source_id", context.sourceId)
-    .eq("business_date", context.businessDate)
-    .maybeSingle();
+    .eq("business_date", context.businessDate);
+  if (context.accountabilityRoundId) finalizationQuery = finalizationQuery.eq("accountability_round_id", context.accountabilityRoundId);
+  const { data: finalization } = await finalizationQuery.maybeSingle();
   if (finalization?.status === "sent" || finalization?.message_sent_at) {
     return {
       messages: [refusal(GUIDED_MENU_COPY.settlementAlreadyClosed)],
@@ -353,11 +354,13 @@ export async function processGuidedSettlementSubmission(input: {
   // Writing a second settlement row for the round would make the finalizer
   // ambiguous forever, so a row under a different key is refused, not upserted
   // beside. A row under OUR key is an update — the API's own upsert rule.
-  const { data: existing, error: existingError } = await input.supabase
+  let existingQuery = input.supabase
     .from("settlement_entries")
     .select("settlement_time, staff_name, market_name")
     .eq("source_id", context.sourceId)
     .eq("settlement_date", context.businessDate);
+  if (context.accountabilityRoundId) existingQuery = existingQuery.eq("accountability_round_id", context.accountabilityRoundId);
+  const { data: existing, error: existingError } = await existingQuery;
   if (existingError) {
     throw new Error(`settlement entry lookup failed: ${existingError.message}`);
   }
@@ -392,7 +395,7 @@ export async function processGuidedSettlementSubmission(input: {
       labor: command.labor,
       notes: "",
     },
-    { finalize: false },
+    { finalize: false, accountabilityRoundId: context.accountabilityRoundId ?? null },
   );
 
   if (result.status === "blocked") {

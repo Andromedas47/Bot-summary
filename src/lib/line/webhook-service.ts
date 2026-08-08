@@ -2428,6 +2428,7 @@ export class WebhookService {
       sourceId,
       sessionKey: getPendingSessionKey(event.source),
     });
+    let accountabilityRoundId: string | null = null;
     if (guidedIdentity) {
       const guard = await guardGuidedSlipOpen({
         journey:  this.guidedJourney,
@@ -2441,11 +2442,14 @@ export class WebhookService {
         if (replyToken) await this.replyMessage(replyToken, guard.message);
         return { eventId, eventType, status: "saved", parsed: false };
       }
+      if (guard.verdict === "allowed") {
+        accountabilityRoundId = guard.context.accountabilityRoundId ?? null;
+      }
     }
 
     try {
       const result = await this.slipSessionService.openSession(
-        sourceId, event.source.type, senderId, header,
+        sourceId, event.source.type, senderId, header, accountabilityRoundId,
       );
 
       if (!result.opened) {
@@ -2847,6 +2851,7 @@ export class WebhookService {
         journey: this.guidedJourney,
         rounds: this.guidedRounds,
         identity,
+        closeLineEventId: eventId,
       });
       if (replyToken) {
         await this.replyMessages(

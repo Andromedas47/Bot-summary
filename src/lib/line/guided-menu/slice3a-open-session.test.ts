@@ -144,8 +144,6 @@ describe("Slice 3A — helpers", () => {
 describe("Slice 3A — confirmation opens a real session", () => {
   const cases: Array<[MenuTransactionTypeCode, string, string]> = [
     ["withdraw", "เบิก", "เปิดรายการเบิกแล้ว ✅"],
-    ["return", "คืน", "เปิดรายการชั่งคืนแล้ว ✅"],
-    ["damaged_return", "คืนเสีย", "เปิดรายการคืนเสียแล้ว ✅"],
   ];
 
   for (const [code, baseType, heading] of cases) {
@@ -188,6 +186,21 @@ describe("Slice 3A — confirmation opens a real session", () => {
       // A freshly opened session is immediately appendable by the parser.
       expect(row.terminalized).toBe(false);
       expect(row.accumulated_text).toBe("");
+    });
+  }
+
+  for (const code of ["return", "damaged_return"] as const) {
+    it(`${code} refuses until the operator explicitly selects a round`, async () => {
+      const db = new GuidedMenuFakeDatabase();
+      const handler = seed(db);
+      const opened = await handler.handlePostback({
+        wireToken: await walkToConfirmToken(db, handler, code),
+        lineEventId: `evt-confirm-${code}`,
+        identity: IDENTITY,
+        lineTimestampMs: TS,
+      });
+      expect(opened.screen).toBe("session_open_conflict");
+      expect(db.tables.pending_sessions ?? []).toHaveLength(0);
     });
   }
 
@@ -583,7 +596,7 @@ describe("Slice 3A — existing open session guard", () => {
     // have observed gen-stale: the optimistic generation no longer matches.
     const originalRpc = db.rpc.bind(db);
     db.rpc = (async (name: string, args: Record<string, unknown>) => {
-      if (name === "open_or_rotate_guided_produce_structured_session") {
+      if (name === "open_accountability_round_produce_session") {
         db.seedPendingSession({
           session_key: SESSION_KEY,
           source_id: "G-1",

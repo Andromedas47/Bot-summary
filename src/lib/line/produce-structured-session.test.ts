@@ -205,6 +205,7 @@ describe("0049 — atomic open / rotate command", () => {
       outcome: "idempotent",
       sessionKey: "dm:U1",
       sessionGeneration: STRUCTURED_MAIN.session_generation,
+      accountabilityRoundId: null,
     });
   });
 

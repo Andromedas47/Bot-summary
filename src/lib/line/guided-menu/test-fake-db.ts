@@ -377,6 +377,19 @@ export class GuidedMenuFakeDatabase {
     if (name === "open_or_rotate_guided_produce_structured_session") {
       return { data: this.openGuided(args), error: null };
     }
+    if (name === "open_accountability_round_produce_session") {
+      const result = this.openGuided(args);
+      const outcome = String(result.outcome ?? "");
+      if (!["opened", "rotated", "idempotent"].includes(outcome)) {
+        return { data: result, error: null };
+      }
+      const round = args.p_accountability_round_id ?? `round:${String(args.p_opened_line_event_id)}`;
+      const row = (this.tables.pending_sessions ?? []).find(
+        (candidate) => candidate.session_generation === result.session_generation,
+      );
+      if (row) row.accountability_round_id = round;
+      return { data: { ...result, accountability_round_id: round }, error: null };
+    }
     if (name === "close_produce_structured_session") {
       return { data: this.closeStructured(args), error: null };
     }

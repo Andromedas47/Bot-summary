@@ -109,6 +109,8 @@ jobs:
       - run: bun install
       - name: Slice B real-PostgreSQL migration/hardening suite
         run: bunx bun test src/lib/purchase-capture/migration-slice-b.pg.test.ts
+      - name: Supplier pairing regression (real PostgreSQL)
+        run: bunx bun test src/lib/purchase-capture/supplier-pairing.pg.test.ts
       - name: Slice B unit tests
         run: >-
           bunx bun test

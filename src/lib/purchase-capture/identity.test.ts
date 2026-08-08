@@ -5,6 +5,7 @@ import {
   resolvePriceUnitIdentity,
   resolveProductIdentity,
   resolveQuantityUnitIdentity,
+  resolveSupplierIdentity,
   unresolvedPlaceholderKey,
 } from "./identity";
 
@@ -83,5 +84,33 @@ describe("purchase intake identity resolution", () => {
         priceUnitStatus: "RESOLVED",
       }),
     ).toBe(true);
+  });
+
+  test("supplier key is the canonical text form of the raw supplier", () => {
+    expect(resolveSupplierIdentity("ร้านทดสอบ UAT")).toEqual({
+      supplierKey: "ร้านทดสอบ UAT",
+      supplierRaw: "ร้านทดสอบ UAT",
+    });
+    // raw stays verbatim; only the key is canonicalized
+    expect(resolveSupplierIdentity("  ร้าน   เจ๊แดง ")).toEqual({
+      supplierKey: "ร้าน เจ๊แดง",
+      supplierRaw: "  ร้าน   เจ๊แดง ",
+    });
+  });
+
+  test("supplier key is idempotent and separates distinct canonical identities", () => {
+    const once = resolveSupplierIdentity("ร้าน   เจ๊แดง").supplierKey as string;
+    expect(resolveSupplierIdentity(once).supplierKey).toBe(once);
+    // Textual variants of one supplier canonicalize onto the same key by design.
+    expect(resolveSupplierIdentity("  ร้าน เจ๊แดง  ").supplierKey).toBe(once);
+    // Distinct canonical identities stay distinct.
+    expect(resolveSupplierIdentity("ร้านเจ๊ดำ").supplierKey).not.toBe(once);
+  });
+
+  test("supplier that normalizes to nothing yields a NULL pair, never a half pair", () => {
+    // purchase_receipts_supplier_pairing: (key IS NULL) = (raw IS NULL).
+    for (const raw of [null, undefined, "", "   ", " "]) {
+      expect(resolveSupplierIdentity(raw)).toEqual({ supplierKey: null, supplierRaw: null });
+    }
   });
 });

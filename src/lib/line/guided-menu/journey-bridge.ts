@@ -17,19 +17,157 @@ import type { WhiteSheetCloseCommand } from "@/lib/line/white-sheet-close-comman
 import {
   GuidedJourneyService,
   buildSlipHeaderTemplate,
-  thaiDateFromIso,
+  buildWhiteSheetTemplate,
   type GuidedJourneyContext,
 } from "./journey";
-import { resolveGuidedOwnership } from "./ownership-guard";
+import {
+  resolveGuidedOwnership,
+  type GuidedOwnershipDebugReason,
+} from "./ownership-guard";
+import type { GuidedMarkerPurpose } from "./provenance";
+import { buildSettlementTemplate } from "./settlement-command";
 import {
   GuidedRoundService,
-  GUIDED_ROUND_BLOCKER_LABEL,
-  summarizeSlipStatuses,
+  GUIDED_ROUND_BLOCKER_ACTION_LABEL,
+  classifyGuidedRoundBlockers,
   type GuidedRoundCloseOutcome,
 } from "./round-close";
-import { buildRoundStatusMessage } from "./messages";
-import { GUIDED_MENU_COPY } from "./ux-types";
-import type { GuidedMenuIdentity } from "./ux-types";
+import {
+  bindMixedQuickReply,
+  bindQuickReply,
+  buildPlainTextMessage,
+} from "./messages";
+import { GUIDED_MENU_COPY, GUIDED_MENU_TRIGGER } from "./ux-types";
+import type {
+  GuidedMenuIdentity,
+  GuidedMenuLineMessage,
+  LineQuickReply,
+} from "./ux-types";
+import type { GuidedMenuStateService } from "./menu-state-service";
+
+/**
+ * Mint a "เริ่มรายการใหม่" token — the `menu_root` action with an empty,
+ * non-cancel payload, exactly what the seller screen's existing "back" button
+ * already uses. Standalone so both the postback-driven UX handler and the
+ * plain-text "ปิดรอบ" reply path (webhook-service.ts, outside the handler)
+ * can offer the same one recovery action without duplicating token creation.
+ */
+export async function mintGuidedStartNewToken(
+  stateService: GuidedMenuStateService,
+  identity: GuidedMenuIdentity,
+): Promise<string | null> {
+  const created = await stateService.createState({
+    actionType: "menu_root",
+    lineUserId: identity.lineUserId,
+    sourceType: identity.sourceType,
+    sourceId: identity.sourceId,
+    sessionKey: identity.sessionKey,
+    payload: {},
+  });
+  return created.status === "created" ? created.wireToken : null;
+}
+
+/** Quick Reply offering only "เริ่มรายการใหม่", for a terminal journey screen. */
+export async function buildGuidedStartNewQuickReply(
+  stateService: GuidedMenuStateService,
+  identity: GuidedMenuIdentity,
+): Promise<LineQuickReply | undefined> {
+  const wireToken = await mintGuidedStartNewToken(stateService, identity);
+  if (!wireToken) return undefined;
+  return bindQuickReply([
+    {
+      label: GUIDED_MENU_COPY.startNewLabel,
+      actionType: "menu_root",
+      payload: {},
+      wireToken,
+    },
+  ]);
+}
+
+/**
+ * Mint a "ดูสถานะ" (`view_status`) token — the SAME re-render every "ดูสถานะ"
+ * button on every stage already uses (ux-handler.ts's viewStatus). It always
+ * re-resolves the journey server-side at press time, so it can never be
+ * stale: pressed early it shows the current stage, pressed after the round
+ * moved on (or closed) it shows THAT instead — never the old stage.
+ */
+async function mintGuidedViewStatusToken(
+  stateService: GuidedMenuStateService,
+  identity: GuidedMenuIdentity,
+): Promise<string | null> {
+  const created = await stateService.createState({
+    actionType: "view_status",
+    lineUserId: identity.lineUserId,
+    sourceType: identity.sourceType,
+    sourceId: identity.sourceId,
+    sessionKey: identity.sessionKey,
+    payload: {},
+  });
+  return created.status === "created" ? created.wireToken : null;
+}
+
+/**
+ * The purpose-specific template builder — the same pure function each
+ * stage's own renderer already calls. Regenerating a stale form means
+ * calling this again with the CURRENT context, never inventing a new path.
+ */
+function buildRegeneratedGuidedForm(
+  purpose: GuidedMarkerPurpose,
+  context: GuidedJourneyContext,
+): string | null {
+  if (purpose === "white_sheet") return buildWhiteSheetTemplate(context);
+  if (purpose === "slip_open") return buildSlipHeaderTemplate(context);
+  return buildSettlementTemplate(context);
+}
+
+function buildStatusOnlyRecoveryQuickReply(): LineQuickReply {
+  return bindMixedQuickReply([
+    { kind: "message", label: "ดูสถานะ", text: GUIDED_MENU_TRIGGER },
+    { kind: "message", label: "ออกจากเมนู", text: "ออกจากเมนู" },
+  ]);
+}
+
+/**
+ * Recovery messages for ownership-guard's `reason: "stale_form"`.
+ *
+ * A LINE `message` action SUBMITS its `text` on press — it is not an editable
+ * draft. Earlier this put the entire regenerated template (a real White Sheet
+ * or settlement form, complete with zero-filled amounts and a valid marker)
+ * inside a "สร้างแบบฟอร์มใหม่" button's text, so pressing it silently
+ * submitted a zero-value close/settlement. That is fixed here: when
+ * `regenerate` is still valid for the caller's current stage, the fresh
+ * template is sent as an ordinary Bot message the operator must copy, edit,
+ * and resend by hand — never as text a button can auto-submit. No button in
+ * this reply ever carries the template.
+ *
+ * `regenerate` absent (or the template failed to build) → the form no longer
+ * applies at all: only a status check is offered, never a false promise of a
+ * new form.
+ */
+export function buildStaleFormRecoveryMessages(
+  fallbackMessage: string,
+  regenerate?: { purpose: GuidedMarkerPurpose; context: GuidedJourneyContext },
+): GuidedMenuLineMessage[] {
+  if (regenerate) {
+    const fresh = buildRegeneratedGuidedForm(regenerate.purpose, regenerate.context);
+    if (fresh) {
+      try {
+        const quickReply = buildStatusOnlyRecoveryQuickReply();
+        return [
+          buildPlainTextMessage(GUIDED_MENU_COPY.regenerateFormNotice),
+          { ...buildPlainTextMessage(fresh), quickReply },
+        ];
+      } catch {
+        // Graceful fallback: an unexpectedly long template (e.g. unusually
+        // long seller/market labels) never crashes the reply — it just falls
+        // back to the plain status-check recovery below.
+      }
+    }
+  }
+  return [
+    { ...buildPlainTextMessage(fallbackMessage), quickReply: buildStatusOnlyRecoveryQuickReply() },
+  ];
+}
 
 /** Exact text that asks the guided flow to close the round. */
 export function isGuidedRoundCloseCommand(text: string): boolean {
@@ -42,7 +180,13 @@ export type GuidedWhiteSheetGuard =
   /** Submission agrees with the round; let the existing command through. */
   | { verdict: "allowed"; context: GuidedJourneyContext }
   /** Submission targets another market/date — refuse, write nothing. */
-  | { verdict: "refused"; message: string };
+  | {
+      verdict: "refused";
+      message: string;
+      reason?: "stale_form";
+      regenerate?: { purpose: GuidedMarkerPurpose; context: GuidedJourneyContext };
+      debugReason?: GuidedOwnershipDebugReason;
+    };
 
 /**
  * Verify a White Sheet closing command against the guided round that owns the
@@ -104,49 +248,78 @@ export function buildSlipHandoffMessages(
 }
 
 export type GuidedRoundCloseReply = {
-  messages: string[];
+  messages: GuidedMenuLineMessage[];
   closed: boolean;
 };
 
+const round2 = (value: number): number =>
+  Math.round((value + Number.EPSILON) * 100) / 100;
+
+function formatBaht(value: number): string {
+  return `${value.toLocaleString("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  })} บาท`;
+}
+
 /**
- * Handle the `ปิดรอบ` command end to end and render the operator's receipt.
+ * "ตรวจและปิดรอบ" — the one authoritative check-and-close action.
  *
- * The decision to close is never made here: closeGuidedRound checks the
- * existing lifecycle blockers and then defers to tryFinalizeSettlement, which
- * remains authoritative and idempotent on retry.
+ * Reuses the exact existing contract unchanged: `GuidedRoundService.close`
+ * (round-close.ts) already checks every lifecycle blocker and, only when none
+ * remain, calls the same idempotent `tryFinalizeSettlement` the legacy
+ * "ปิดรอบ" text command has always used. Nothing here decides whether the
+ * round is allowed to close — it only renders three READ-ONLY outcomes: a
+ * checklist of what is still missing, an amount mismatch, or a closed round.
  */
 export async function processGuidedRoundClose(input: {
   journey: GuidedJourneyService;
   rounds: GuidedRoundService;
   identity: GuidedMenuIdentity;
+  stateService: GuidedMenuStateService;
   push?: (to: string, text: string, retryKey?: string) => Promise<unknown>;
 }): Promise<GuidedRoundCloseReply> {
   const state = await input.journey.resolve(input.identity);
   if (state.stage === "idle") {
-    return { messages: [GUIDED_MENU_COPY.roundCloseNoJourney], closed: false };
+    return {
+      messages: [buildPlainTextMessage(GUIDED_MENU_COPY.roundCloseNoJourney)],
+      closed: false,
+    };
   }
   // An unfinished produce round is never skipped past to close a settlement.
   if (state.stage === "capture" || state.stage === "awaiting_confirm") {
     return {
       messages: [
-        [
-          "ยังปิดรอบไม่ได้ รายการสินค้ายังไม่จบ",
-          'กรุณากด "จบรายการ" และยืนยันให้เรียบร้อยก่อน',
-        ].join("\n"),
+        buildPlainTextMessage(
+          [
+            "ยังปิดรอบไม่ได้ รายการสินค้ายังไม่จบ",
+            'กรุณากด "จบการกรอกสินค้า" และยืนยันให้เรียบร้อยก่อน',
+          ].join("\n"),
+        ),
       ],
       closed: false,
     };
   }
   // Produce rows are not proven to exist yet, or provably do not.
   if (state.stage === "finalizing") {
-    return { messages: [GUIDED_MENU_COPY.produceFinalizing], closed: false };
-  }
-  if (state.stage === "finalize_failed") {
     return {
-      messages: [GUIDED_MENU_COPY.produceFinalizeFailedShort],
+      messages: [buildPlainTextMessage(GUIDED_MENU_COPY.produceFinalizing)],
       closed: false,
     };
   }
+  if (state.stage === "finalize_failed") {
+    const quickReply = await buildGuidedStartNewQuickReply(
+      input.stateService,
+      input.identity,
+    );
+    const base = buildPlainTextMessage(GUIDED_MENU_COPY.produceFailedZeroWrites);
+    return {
+      messages: [quickReply ? { ...base, quickReply } : base],
+      closed: false,
+    };
+  }
+  // A round that already closed is re-checked idempotently below —
+  // tryFinalizeSettlement answers `already_done`, never a second close.
 
   const whiteSheetSubmitted = state.whiteSheet.status !== "not_submitted";
   const outcome: GuidedRoundCloseOutcome = await input.rounds.close(
@@ -155,28 +328,124 @@ export async function processGuidedRoundClose(input: {
     input.push,
   );
 
-  const dateThaiShort =
-    thaiDateFromIso(state.context.businessDate) ?? state.context.businessDate;
-  const blockerLines =
-    outcome.status === "closed"
-      ? []
+  if (outcome.status === "closed") {
+    const quickReply = await buildGuidedStartNewQuickReply(
+      input.stateService,
+      input.identity,
+    );
+    const base = buildPlainTextMessage(GUIDED_MENU_COPY.roundClosed);
+    return { messages: [quickReply ? { ...base, quickReply } : base], closed: true };
+  }
+
+  const blockers =
+    outcome.status === "settlement_refused" ? [] : outcome.report.blockers;
+  const kind =
+    outcome.status === "settlement_refused"
+      ? "missing"
+      : classifyGuidedRoundBlockers(blockers);
+
+  if (kind === "mismatch_only") {
+    const totals = outcome.report.totals;
+    const checked = round2(totals.checkedSlipTotal);
+    const submitted = round2(totals.submittedTransferTotal ?? 0);
+    const difference = round2(totals.difference ?? submitted - checked);
+    const text = [
+      GUIDED_MENU_COPY.roundMismatchHeading,
+      "",
+      `ยอดที่ตรวจแล้ว: ${formatBaht(checked)}`,
+      `ยอดส่งที่บันทึก: ${formatBaht(submitted)}`,
+      `ผลต่าง: ${difference >= 0 ? "+" : ""}${formatBaht(difference)}`,
+      "",
+      GUIDED_MENU_COPY.roundMismatchNextStep,
+    ].join("\n");
+    // ONE primary action, on this ONE message: "แก้ไขยอดส่ง" re-renders the
+    // reconcile screen, which (since difference_non_zero is the sole blocker)
+    // hands back a fresh settlement template on THAT next screen — never
+    // attached here too, so no message ever carries two competing Quick
+    // Replies for the same next step.
+    const quickReply = await buildRoundCloseActionQuickReply(
+      input.stateService,
+      input.identity,
+      GUIDED_MENU_COPY.editSettlementLabel,
+    );
+    const base = buildPlainTextMessage(text);
+    return {
+      messages: [quickReply ? { ...base, quickReply } : base],
+      closed: false,
+    };
+  }
+
+  // "missing": one or more preconditions besides a plain amount mismatch.
+  // Deduplicated and in the report's own priority order, so the FIRST line is
+  // the one primary action — e.g. white-sheet-missing always outranks a slip
+  // or settlement blocker, matching the journey's own stage ordering.
+  const checklist =
+    blockers.length > 0
+      ? [...new Set(blockers.map((b) => GUIDED_ROUND_BLOCKER_ACTION_LABEL[b]))].map(
+          (label) => `• ${label}`,
+        )
       : [
-          ...outcome.report.blockers.map((b) => GUIDED_ROUND_BLOCKER_LABEL[b]),
-          ...(outcome.status === "settlement_refused"
-            ? [`ระบบปิดยอดยังไม่พร้อม (${outcome.settlement})`]
-            : []),
-          `แก้ไขแล้วพิมพ์ "${GUIDED_MENU_COPY.roundCloseCommand}" อีกครั้ง`,
+          `• (${
+            outcome.status === "settlement_refused" ? outcome.settlement : "unknown"
+          })`,
         ];
+  const text = [
+    GUIDED_MENU_COPY.roundNotReadyHeading,
+    "",
+    GUIDED_MENU_COPY.roundNotReadyNextSteps,
+    ...checklist,
+  ].join("\n");
+  // The FIRST blocker in the report's own priority order is the one primary
+  // button — every other blocker stays a plain bullet above, per the required
+  // UX (one authoritative next step, not a wall of buttons).
+  const primaryLabel =
+    blockers.length > 0
+      ? GUIDED_ROUND_BLOCKER_ACTION_LABEL[blockers[0]!]
+      : "ดูสถานะ";
+  const quickReply = await buildRoundCloseActionQuickReply(
+    input.stateService,
+    input.identity,
+    primaryLabel,
+  );
+  const base = buildPlainTextMessage(text);
+  return {
+    messages: [quickReply ? { ...base, quickReply } : base],
+    closed: false,
+  };
+}
 
-  const receipt = buildRoundStatusMessage({
-    sellerLabel: state.context.sellerLabel,
-    marketLabel: state.context.marketLabel,
-    dateThaiShort,
-    totals: outcome.report.totals,
-    slipCounts: summarizeSlipStatuses(outcome.report.slips),
-    blockerLines,
-    closed: outcome.status === "closed",
-  });
-
-  return { messages: [receipt.text], closed: outcome.status === "closed" };
+/**
+ * ONE primary recovery action for a non-terminal ตรวจและปิดรอบ result, always
+ * bound to the SAME "ดูสถานะ" (`view_status`) re-render every stage screen
+ * already uses — it re-resolves the journey server-side at press time, so the
+ * button always lands on whatever is actually next (the White Sheet template,
+ * the still-open slip batch, the settlement template, …), never a stale
+ * screen. `ดูสถานะ` is added as a secondary button only when the primary
+ * label is itself something else, so the same action is never offered twice.
+ * A token-mint failure degrades to no Quick Reply — the checklist text alone
+ * still renders.
+ */
+async function buildRoundCloseActionQuickReply(
+  stateService: GuidedMenuStateService,
+  identity: GuidedMenuIdentity,
+  primaryLabel: string,
+): Promise<LineQuickReply | undefined> {
+  try {
+    const primaryToken = await mintGuidedViewStatusToken(stateService, identity);
+    if (!primaryToken) return undefined;
+    const buttons: Array<{
+      kind: "token";
+      label: string;
+      wireToken: string;
+    }> = [{ kind: "token", label: primaryLabel, wireToken: primaryToken }];
+    if (primaryLabel !== "ดูสถานะ") {
+      const statusToken = await mintGuidedViewStatusToken(stateService, identity);
+      if (statusToken) {
+        buttons.push({ kind: "token", label: "ดูสถานะ", wireToken: statusToken });
+      }
+    }
+    return bindMixedQuickReply(buttons);
+  } catch {
+    return undefined;
+  }
 }

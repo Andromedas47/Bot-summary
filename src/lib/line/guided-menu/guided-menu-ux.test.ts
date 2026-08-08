@@ -650,7 +650,11 @@ describe("0051 Slice 2 — Guided Menu UX", () => {
     expect(JSON.stringify(built.confirm_placeholder)).toContain(
       "ยังไม่ได้เปิดรายการ",
     );
-    expect(JSON.stringify(built.cancelled)).toContain("ยกเลิกแล้ว");
+    // Never claims a cancellation when nothing was cancelled — see §Copy.
+    expect(JSON.stringify(built.cancelled)).not.toContain("ยกเลิกแล้ว");
+    expect((built.cancelled[0] as { text: string }).text).toBe(
+      GUIDED_MENU_COPY.cancelled,
+    );
     expect(JSON.stringify(built.confirm_placeholder)).not.toMatch(/Slice\s*3A/i);
   });
 });

@@ -359,12 +359,13 @@ describe("the reply after confirm reflects the authoritative row", () => {
       lineTimestampMs: TS,
     });
 
-    expect(outcome.screen).toBe("session_finalize_failed");
+    // Terminal, zero produce writes: its own screen with self-service recovery.
+    expect(outcome.screen).toBe("produce_failed_terminal");
     const body = bodyOf(outcome);
-    expect(body).toContain("ไม่ได้บันทึกรายการนี้");
-    expect(body).toContain("แจ้งผู้ดูแล");
+    expect(body).toContain(GUIDED_MENU_COPY.produceFailedZeroWrites);
     expect(body).not.toContain(GUIDED_MENU_COPY.nextStepWhiteSheet);
     expect(outcome.result).toMatchObject({ produce_finalization: "failed", saved: false });
+    expect(controlLabels(outcome.messages)).toEqual([GUIDED_MENU_COPY.startNewLabel]);
   });
 
   it("does not treat an unknown terminal status as success either", async () => {
@@ -380,8 +381,9 @@ describe("the reply after confirm reflects the authoritative row", () => {
       lineTimestampMs: TS,
     });
 
-    expect(outcome.screen).toBe("session_finalize_failed");
+    expect(outcome.screen).toBe("produce_failed_terminal");
     expect(bodyOf(outcome)).not.toContain(GUIDED_MENU_COPY.nextStepWhiteSheet);
+    expect(bodyOf(outcome)).toContain(GUIDED_MENU_COPY.produceFailedZeroWrites);
   });
 
   it("stays idempotent when a successful confirmation is repeated", async () => {
@@ -462,9 +464,25 @@ describe("ดูสถานะ re-reads the produce outcome", () => {
       identity: IDENTITY,
       lineTimestampMs: TS + 2000,
     });
-    expect(after.screen).toBe("session_finalize_failed");
-    // No action offers the white sheet; only "ดูสถานะ" and the exit remain.
-    expect(controlLabels(after.messages)).toEqual(["ดูสถานะ", "ออกจากเมนู"]);
+    // Terminal, zero produce writes: never poll again — offer a fresh round.
+    expect(after.screen).toBe("produce_failed_terminal");
+    expect(controlLabels(after.messages)).toEqual([GUIDED_MENU_COPY.startNewLabel]);
+
+    // Pressing "เริ่มรายการใหม่" opens Stage 1 directly — it must NOT loop back
+    // through journey resolution, or a terminal row would strand the operator
+    // on this same screen forever (the root-menu-blocking bug this fixes).
+    const lastMessage = after.messages[after.messages.length - 1] as {
+      quickReply?: { items: Array<{ action: { type: string; data?: string } }> };
+    };
+    const startNewToken = lastMessage.quickReply?.items[0]?.action.data;
+    expect(startNewToken).toBeTruthy();
+    const started = await handler.handlePostback({
+      wireToken: startNewToken!,
+      lineEventId: "evt-start-new",
+      identity: IDENTITY,
+      lineTimestampMs: TS + 3000,
+    });
+    expect(started.screen).toBe("transaction_type");
   });
 
   it("keeps a failed round out of every later stage", async () => {

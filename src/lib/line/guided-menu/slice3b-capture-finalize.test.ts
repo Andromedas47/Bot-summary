@@ -177,7 +177,7 @@ describe("Slice 3B — the open round carries its own next actions", () => {
     expect(opened.screen).toBe("session_opened");
     expect(controlLabels(opened.messages)).toEqual([
       "ดูรายการ",
-      "จบรายการ",
+      GUIDED_MENU_COPY.closeItemsLabel,
       "ออกจากเมนู",
     ]);
     const text = (opened.messages[0] as { text: string }).text;
@@ -555,9 +555,11 @@ describe("Slice 3B — ยกเลิก does not void an open round", () => {
 
     expect(outcome.screen).toBe("session_menu_dismissed");
     const text = (outcome.messages[0] as { text: string }).text;
-    expect(text).toContain("รายการที่เปิดไว้ยังอยู่");
+    expect(text).toBe(GUIDED_MENU_COPY.menuDismissedSessionOpen);
+    expect(text).toContain("ยังเปิดอยู่");
     // Crucially the copy must not read as a cancelled round.
     expect(text).not.toBe(GUIDED_MENU_COPY.cancelled);
+    expect(text).not.toContain("ยกเลิก");
     // And the round really is untouched.
     expect(db.tables.pending_sessions[0]!.terminalized).toBe(false);
     expect(db.tables.pending_sessions[0]!.accumulated_text).toBe(CAPTURED_TEXT);

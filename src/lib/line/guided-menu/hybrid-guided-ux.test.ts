@@ -249,7 +249,7 @@ describe("Hybrid Guided UX — capture and pre-open (B, C)", () => {
     expect(quickReplyOf(opened.messages[0])).toBeTruthy();
     expect(controlLabels(opened.messages)).toEqual([
       "ดูรายการ",
-      "จบรายการ",
+      GUIDED_MENU_COPY.closeItemsLabel,
       "ออกจากเมนู",
     ]);
   });
@@ -267,7 +267,7 @@ describe("Hybrid Guided UX — capture and pre-open (B, C)", () => {
     expect((ack!.messages[0] as { text: string }).text).toContain("1 รายการ");
     expect(controlLabels(ack!.messages)).toEqual([
       "ดูรายการ",
-      "จบรายการ",
+      GUIDED_MENU_COPY.closeItemsLabel,
       "ออกจากเมนู",
     ]);
   });
@@ -287,7 +287,7 @@ describe("Hybrid Guided UX — capture and pre-open (B, C)", () => {
     expect(firstQr).toBeTruthy();
     expect(controlLabels(ack!.messages)).toEqual([
       "ดูรายการ",
-      "จบรายการ",
+      GUIDED_MENU_COPY.closeItemsLabel,
       "ออกจากเมนู",
     ]);
   });
@@ -307,7 +307,7 @@ describe("Hybrid Guided UX — capture and pre-open (B, C)", () => {
     expect(text).toContain(GUIDED_MENU_COPY.correctionHint);
     expect(controlLabels(ack!.messages)).toEqual([
       "ดูรายการ",
-      "จบรายการ",
+      GUIDED_MENU_COPY.closeItemsLabel,
       "ออกจากเมนู",
     ]);
   });
@@ -323,7 +323,7 @@ describe("Hybrid Guided UX — capture and pre-open (B, C)", () => {
     expect(hasFlex(menu.messages)).toBe(false);
     expect(controlLabels(menu.messages)).toEqual([
       "ดูรายการ",
-      "จบรายการ",
+      GUIDED_MENU_COPY.closeItemsLabel,
       "ออกจากเมนู",
     ]);
   });
@@ -504,7 +504,7 @@ describe("Hybrid Guided UX — later routine stages prefer Quick Replies (G, H, 
     expect(status.screen).toBe("slip_instructions");
     expect(hasFlex(status.messages)).toBe(false);
     expect(controlLabels(status.messages)).toEqual([
-      "ตรวจยอด",
+      GUIDED_MENU_COPY.closeSlipsLabel,
       "ดูสถานะ",
       "ออกจากเมนู",
     ]);

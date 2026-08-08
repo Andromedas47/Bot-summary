@@ -91,6 +91,41 @@ export const GUIDED_ROUND_BLOCKER_LABEL: Record<GuidedRoundBlocker, string> = {
   difference_non_zero: "ยอดสลิปกับยอดส่งเงินยังไม่ตรงกัน",
 };
 
+/**
+ * V2 UX — the ONE next action that resolves each blocker, for the
+ * "ตรวจและปิดรอบ" combined check-and-close screen. `processGuidedRoundClose`
+ * (journey-bridge.ts) attaches the FIRST blocker's label here as a REAL
+ * Quick Reply button bound to a fresh "ดูสถานะ" (view_status) token — not
+ * inert text — which re-resolves the journey server-side at press time and
+ * lands on whatever screen that blocker actually needs next.
+ */
+export const GUIDED_ROUND_BLOCKER_ACTION_LABEL: Record<GuidedRoundBlocker, string> = {
+  white_sheet_not_submitted: "กรอกใบขาว",
+  slip_batch_open: "จบการส่งสลิป",
+  ocr_pending: "ดูสถานะ",
+  manual_slip_open: "ดูสถานะ",
+  attribution_ambiguous: "ดูสถานะ",
+  settlement_missing: "กรอกยอดส่ง",
+  settlement_ambiguous: "ดูสถานะ",
+  difference_non_zero: "แก้ไขยอดส่ง",
+};
+
+/**
+ * V2 UX — which of the three "ตรวจและปิดรอบ" screens a blocker set maps to.
+ * `difference_non_zero` alone means every OTHER precondition already passed —
+ * data exists, it just does not match — so that specific single-blocker case
+ * gets its own totals-and-difference screen instead of a generic checklist.
+ */
+export function classifyGuidedRoundBlockers(
+  blockers: readonly GuidedRoundBlocker[],
+): "ready" | "mismatch_only" | "missing" {
+  if (blockers.length === 0) return "ready";
+  if (blockers.length === 1 && blockers[0] === "difference_non_zero") {
+    return "mismatch_only";
+  }
+  return "missing";
+}
+
 export type GuidedRoundReport = {
   totals: GuidedRoundTotals;
   slips: GuidedSlipRow[];

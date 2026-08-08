@@ -22,6 +22,7 @@ import {
   type GuidedMenuLineMessage,
   type LineFlexBubble,
   type LineFlexMessage,
+  type LineMessageAction,
   type LinePostbackAction,
   type LineQuickReply,
   type LineTemplateButtonsMessage,
@@ -76,6 +77,55 @@ function quickReplyFromTokens(
         displayText: b.displayText,
       }),
     })),
+  };
+}
+
+/**
+ * A Quick Reply item that resubmits fixed text — only ever used to relabel an
+ * ALREADY-recognized exact-text command (e.g. legacy "ปิดรอบ" / "เมนู" /
+ * "ออกจากเมนู"). No token, no new action type, no new parser: the plain-text
+ * router this resubmits into must already accept `text` verbatim.
+ */
+/** LINE quick-reply message-action `text` limit (code points). */
+const MESSAGE_ACTION_TEXT_MAX = 300;
+
+export function messageAction(label: string, text: string): LineMessageAction {
+  assertLabelLength(label, TEMPLATE_ACTION_LABEL_MAX, "message action");
+  const len = [...text].length;
+  if (len > MESSAGE_ACTION_TEXT_MAX) {
+    throw new Error(
+      `message action text exceeds ${MESSAGE_ACTION_TEXT_MAX} characters (${len})`,
+    );
+  }
+  return { type: "message", label, text };
+}
+
+export type QuickReplyButtonSpec =
+  | { kind: "token"; label: string; wireToken: string; displayText?: string }
+  | { kind: "message"; label: string; text: string };
+
+/** Quick Reply mixing token-bound postback buttons and fixed-text buttons. */
+export function bindMixedQuickReply(
+  buttons: QuickReplyButtonSpec[],
+): LineQuickReply {
+  if (buttons.length > 13) {
+    throw new Error(`Quick Reply allows at most 13 items, got ${buttons.length}`);
+  }
+  return {
+    items: buttons.map((b) =>
+      b.kind === "token"
+        ? {
+            type: "action" as const,
+            action: postbackAction(b.label, b.wireToken, {
+              maxLabelChars: TEMPLATE_ACTION_LABEL_MAX,
+              displayText: b.displayText,
+            }),
+          }
+        : {
+            type: "action" as const,
+            action: messageAction(b.label, b.text),
+          },
+    ),
   };
 }
 
@@ -755,8 +805,13 @@ export function assertGuidedMenuMessageLimits(
         throw new Error("text message exceeds 5000 code points");
       }
       if (msg.quickReply) {
+        if (msg.quickReply.items.length > 13) {
+          throw new Error(
+            `Quick Reply allows at most 13 items, got ${msg.quickReply.items.length}`,
+          );
+        }
         for (const item of msg.quickReply.items) {
-          if (item.action.data.length > 300) {
+          if (item.action.type === "postback" && item.action.data.length > 300) {
             throw new Error("quickReply postback data exceeds 300 chars");
           }
           assertLabelLength(

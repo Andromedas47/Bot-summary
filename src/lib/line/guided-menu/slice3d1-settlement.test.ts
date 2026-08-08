@@ -54,6 +54,18 @@ const IDENTITY: GuidedMenuIdentity = {
   sessionKey: CONTEXT.sessionKey,
 };
 
+/** processGuidedRoundClose only mints a start-new token on "closed"/"finalize_failed". */
+const NOOP_STATE_SERVICE = {
+  createState: async () => ({ status: "invalid_or_expired" as const }),
+} as never;
+
+function textOf(message: { type: string; text?: string }): string {
+  if (message.type !== "text" || typeof message.text !== "string") {
+    throw new Error(`expected a text message, got ${message.type}`);
+  }
+  return message.text;
+}
+
 const SUBMITTED_SHEET: WhiteSheetCashEntryState = {
   status: "submitted",
   expenses: { labor: 0, locationFee: 0, bag: 0, snack: 0, other: 0 },
@@ -603,29 +615,34 @@ describe("guided settlement then reconciliation", () => {
       journey: fakeJourney(state()),
       rounds,
       identity: IDENTITY,
+      stateService: NOOP_STATE_SERVICE,
     });
     expect(first.closed).toBe(true);
-    expect(first.messages[0]).toContain("ปิดรอบเรียบร้อย ✅");
+    expect(textOf(first.messages[0]!)).toBe(GUIDED_MENU_COPY.roundClosed);
 
     const second = await processGuidedRoundClose({
       journey: fakeJourney(state()),
       rounds,
       identity: IDENTITY,
+      stateService: NOOP_STATE_SERVICE,
     });
     expect(second.closed).toBe(true);
     expect(db.tables.settlement_finalizations).toHaveLength(1);
   });
 
-  it("refuses ปิดรอบ while no settlement has been submitted", async () => {
+  it("refuses ตรวจและปิดรอบ while no settlement has been submitted", async () => {
     const db = baseDb();
     seedVerifiedSlip(db, "c-1", 12000);
     const outcome = await processGuidedRoundClose({
       journey: fakeJourney(state()),
       rounds: new GuidedRoundService(db.asClient()),
       identity: IDENTITY,
+      stateService: NOOP_STATE_SERVICE,
     });
     expect(outcome.closed).toBe(false);
-    expect(outcome.messages[0]).toContain("ยังไม่มียอดส่งเงินของรอบนี้ในระบบ");
+    const text = textOf(outcome.messages[0]!);
+    expect(text).toContain(GUIDED_MENU_COPY.roundNotReadyHeading);
+    expect(text).toContain("กรอกยอดส่ง");
   });
 });
 

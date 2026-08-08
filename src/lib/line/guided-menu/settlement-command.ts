@@ -27,7 +27,11 @@ import {
 } from "@/lib/settlement/submit-entry";
 import { thaiDateFromIso, type GuidedJourneyContext } from "./journey";
 import type { GuidedJourneyService } from "./journey";
-import { resolveGuidedOwnership } from "./ownership-guard";
+import {
+  resolveGuidedOwnership,
+  type GuidedOwnershipDebugReason,
+} from "./ownership-guard";
+import type { GuidedMarkerPurpose } from "./provenance";
 import { withGuidedMarker } from "./provenance";
 import type { GuidedRoundService } from "./round-close";
 import { GUIDED_ROUND_BLOCKER_LABEL, summarizeSlipStatuses } from "./round-close";
@@ -246,6 +250,12 @@ export const GUIDED_SETTLEMENT_TIME = "";
 export type GuidedSettlementReply = {
   messages: string[];
   saved: boolean;
+  /** The refusal was a stale/expired form marker — offer recovery. */
+  staleForm?: boolean;
+  /** Present only when a regenerated settlement template is still valid. */
+  regenerate?: { purpose: GuidedMarkerPurpose; context: GuidedJourneyContext };
+  /** Internal diagnostic for logs only — never shown to the operator. */
+  debugReason?: GuidedOwnershipDebugReason;
 };
 
 type SubmitFn = typeof submitSettlementEntryForSource;
@@ -327,7 +337,13 @@ export async function processGuidedSettlementSubmission(input: {
     marker: input.marker,
   });
   if (ownership.verdict === "refused") {
-    return { messages: [ownership.message], saved: false };
+    return {
+      messages: [ownership.message],
+      saved: false,
+      staleForm: ownership.reason === "stale_form",
+      regenerate: ownership.regenerate,
+      debugReason: ownership.debugReason,
+    };
   }
   if (ownership.verdict !== "allowed") {
     // The caller's own journey resolved to this round but the source-wide query

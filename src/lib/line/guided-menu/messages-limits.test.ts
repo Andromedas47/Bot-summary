@@ -1,9 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import {
   assertGuidedMenuMessageLimits,
+  bindMixedQuickReply,
   buildMarketSelectMessage,
+  buildPlainTextMessage,
   buildSellerSelectMessages,
+  guidedControlLabels,
   measureFlexBubbleUtf8Bytes,
+  messageAction,
   postbackAction,
 } from "./messages";
 import {
@@ -166,5 +170,88 @@ describe("0051 Slice 2 — LINE label and Flex byte limits", () => {
         ],
       }),
     ).toThrow(/reply capacity/);
+  });
+});
+
+describe("LineMessageAction — label vs resubmitted text", () => {
+  it("has a distinct user-facing label and a separately-resubmitted text", () => {
+    const action = messageAction("สร้างแบบฟอร์มใหม่", "เมนู");
+    expect(action).toEqual({ type: "message", label: "สร้างแบบฟอร์มใหม่", text: "เมนู" });
+    // The button LABEL and the TEXT it resubmits are independent fields —
+    // this is exactly what lets a friendly label relabel a plain-text command.
+    expect(action.label).not.toBe(action.text);
+  });
+
+  it("accepts message text up to the 300-code-point LINE limit", () => {
+    const text = "ก".repeat(300);
+    expect(() => messageAction("label", text)).not.toThrow();
+  });
+
+  it("rejects message text over the 300-code-point LINE limit", () => {
+    const text = "ก".repeat(301);
+    expect(() => messageAction("label", text)).toThrow(/300/);
+  });
+
+  it("still enforces the 20-char label limit for a message action", () => {
+    const long = "ก".repeat(TEMPLATE_ACTION_LABEL_MAX + 1);
+    expect(() => messageAction(long, "เมนู")).toThrow(/exceeds 20/);
+  });
+
+  it("throws instead of silently truncating a Quick Reply over 13 items", () => {
+    const buttons = Array.from({ length: 14 }, (_, i) => ({
+      kind: "message" as const,
+      label: `L${i}`,
+      text: `T${i}`,
+    }));
+    expect(() => bindMixedQuickReply(buttons)).toThrow(/at most 13/);
+  });
+
+  it("assertGuidedMenuMessageLimits also rejects a Quick Reply over 13 items", () => {
+    const items = Array.from({ length: 14 }, (_, i) => ({
+      type: "action" as const,
+      action: messageAction(`L${i}`, `T${i}`),
+    }));
+    expect(() =>
+      assertGuidedMenuMessageLimits([
+        { ...buildPlainTextMessage("status"), quickReply: { items } },
+      ]),
+    ).toThrow(/at most 13/);
+  });
+
+  it("mixes token (postback) and message actions in one Quick Reply", () => {
+    const qr = bindMixedQuickReply([
+      { kind: "token", label: "ดูสถานะ", wireToken: fixedEvidenceToken(50) },
+      { kind: "message", label: "ออกจากเมนู", text: "ออกจากเมนู" },
+    ]);
+    expect(qr.items[0]!.action.type).toBe("postback");
+    expect(qr.items[1]!.action.type).toBe("message");
+    // assertGuidedMenuMessageLimits only checks `.data` on postback actions —
+    // a message action never carries `data`, so this must not throw.
+    expect(() =>
+      assertGuidedMenuMessageLimits([
+        { ...buildPlainTextMessage("status"), quickReply: qr },
+      ]),
+    ).not.toThrow();
+  });
+
+  it("label extraction (guidedControlLabels) includes message-action labels", () => {
+    const qr = bindMixedQuickReply([
+      { kind: "message", label: "สร้างแบบฟอร์มใหม่", text: "แบบฟอร์มยาว..." },
+      { kind: "message", label: "ออกจากเมนู", text: "ออกจากเมนู" },
+    ]);
+    const message = { ...buildPlainTextMessage("status"), quickReply: qr };
+    expect(guidedControlLabels(message)).toEqual(["สร้างแบบฟอร์มใหม่", "ออกจากเมนู"]);
+  });
+
+  it("walkPostbackActions traversal (via assertGuidedMenuMessageLimits) skips message actions safely", () => {
+    // A flex postback-data check must never trip over a message action mixed
+    // into the SAME quickReply on a sibling text message — no `.data` field
+    // to misread as missing/short.
+    const qr = bindMixedQuickReply([
+      { kind: "token", label: "กรอกใบขาว", wireToken: fixedEvidenceToken(51) },
+      { kind: "message", label: "ดูสถานะ", text: "เมนู" },
+    ]);
+    const messages = [{ ...buildPlainTextMessage("status"), quickReply: qr }];
+    expect(() => assertGuidedMenuMessageLimits(messages)).not.toThrow();
   });
 });

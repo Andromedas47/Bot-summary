@@ -180,6 +180,7 @@ describe("loadDigitalWhiteSheetPageModel", () => {
       updated_at: "2026-07-24T00:00:00Z",
       finalized_at: null,
       finalized_by: null,
+      accountability_round_id: null,
     });
 
     const pageModel = await loadDigitalWhiteSheetPageModel(database, SCOPE);
@@ -249,6 +250,7 @@ describe("requireSubmittedWhiteSheetSummary", () => {
       updated_at: "2026-07-24T00:00:00Z",
       finalized_at: null,
       finalized_by: null,
+      accountability_round_id: null,
     });
     const pageModel = await loadDigitalWhiteSheetPageModel(database, SCOPE);
     expect(requireSubmittedWhiteSheetSummary(pageModel)).toBe(pageModel.summary);
@@ -269,6 +271,7 @@ const SUBMITTED_ENTRY: CashEntryRow = {
   actual_cash_submitted: 500,
   finalized_at: null,
   finalized_by: null,
+  accountability_round_id: null,
   created_at: "2026-07-24T00:00:00Z",
   updated_at: "2026-07-24T00:00:00Z",
 };

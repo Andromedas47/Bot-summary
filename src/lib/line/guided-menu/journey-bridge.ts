@@ -120,6 +120,7 @@ export async function processGuidedRoundClose(input: {
   rounds: GuidedRoundService;
   identity: GuidedMenuIdentity;
   push?: (to: string, text: string, retryKey?: string) => Promise<unknown>;
+  closeLineEventId?: string;
 }): Promise<GuidedRoundCloseReply> {
   const state = await input.journey.resolve(input.identity);
   if (state.stage === "idle") {
@@ -153,6 +154,7 @@ export async function processGuidedRoundClose(input: {
     state.context,
     whiteSheetSubmitted,
     input.push,
+    input.closeLineEventId,
   );
 
   const dateThaiShort =

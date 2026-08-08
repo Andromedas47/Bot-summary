@@ -68,6 +68,7 @@ export async function submitSettlementEntryForSource(
      * calls the SAME finalizer. Finalizing on submit there would skip them.
      */
     finalize?: boolean;
+    accountabilityRoundId?: string | null;
   } = {},
 ): Promise<SubmitSettlementEntryResult> {
   const reconcileResult = await reconcile(
@@ -75,6 +76,7 @@ export async function submitSettlementEntryForSource(
     sourceId,
     values.settlement_date,
     values.money_transfer,
+    options.accountabilityRoundId,
   );
   if (reconcileResult.blocked) {
     return { status: "blocked", reason: reconcileResult.reason };
@@ -83,8 +85,16 @@ export async function submitSettlementEntryForSource(
   const { data, error } = await supabase
     .from("settlement_entries")
     .upsert(
-      { ...values, source_id: sourceId, updated_at: new Date().toISOString() },
-      { onConflict: "settlement_date,settlement_time,staff_name,market_name" },
+      {
+        ...values,
+        source_id: sourceId,
+        accountability_round_id: options.accountabilityRoundId ?? null,
+        updated_at: new Date().toISOString(),
+      },
+      {
+        onConflict:
+          "settlement_date,settlement_time,staff_name,market_name,accountability_round_id",
+      },
     )
     .select()
     .single();
@@ -100,8 +110,15 @@ export async function submitSettlementEntryForSource(
             sourceId,
             values.settlement_date,
             options.push,
+            options.accountabilityRoundId,
           )
-        : await tryFinalizeSettlement(supabase, sourceId, values.settlement_date);
+        : await tryFinalizeSettlement(
+            supabase,
+            sourceId,
+            values.settlement_date,
+            undefined,
+            options.accountabilityRoundId,
+          );
 
   return {
     status: "saved",

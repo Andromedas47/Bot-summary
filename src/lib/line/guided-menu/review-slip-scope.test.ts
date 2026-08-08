@@ -12,6 +12,7 @@ import { buildGuidedRoundReport, loadGuidedSlipRows } from "./round-close";
 import { buildRoundStatusMessage } from "./messages";
 import { businessDateToUtcRange } from "@/lib/reconciliation";
 import { listKnownProduceMarketLabels } from "@/lib/white-sheet";
+import { submitSettlementEntryForSource } from "@/lib/settlement/submit-entry";
 import type { GuidedJourneyContext } from "./journey";
 
 const SOURCE = "G-1";
@@ -52,6 +53,7 @@ function seedSlip(
     receivedAt?: string;
     transactionTime?: string | null;
     status?: string;
+    accountabilityRoundId?: string | null;
   },
 ): void {
   const market = input.market === undefined ? MARKET : input.market;
@@ -63,6 +65,7 @@ function seedSlip(
       market_label_normalized:
         input.normalizedMarket === undefined ? market : input.normalizedMarket,
       received_at: input.receivedAt ?? MID_WINDOW,
+      accountability_round_id: input.accountabilityRoundId,
     },
   ]);
   db.seed("slip_checks", [
@@ -223,5 +226,50 @@ describe("every verified row is inside the authoritative total", () => {
     // The money loaders scope by received_at only: the status is a warning about
     // the bank timestamp, never a claim that the amount was excluded.
     expect(report.totals.aiVerifiedTotal).toBe(1500);
+  });
+
+  it("keeps same-description round A and B slip/settlement totals isolated", async () => {
+    const db = baseDb();
+    const roundA = "10000000-0000-4000-8000-000000000001";
+    const roundB = "10000000-0000-4000-8000-000000000002";
+    seedSlip(db, { id: "round-a", amount: 1000, accountabilityRoundId: roundA });
+    seedSlip(db, { id: "round-b", amount: 2000, accountabilityRoundId: roundB });
+    const values = {
+      settlement_date: DATE,
+      settlement_time: "",
+      staff_name: CONTEXT.sellerLabel,
+      market_name: CONTEXT.marketLabel,
+      money_cash: 0,
+      expenses: 0,
+      labor: 0,
+      notes: "",
+    };
+    const savedA = await submitSettlementEntryForSource(
+      db.asClient(), SOURCE, { ...values, money_transfer: 1000 },
+      { finalize: false, accountabilityRoundId: roundA },
+    );
+    const savedB = await submitSettlementEntryForSource(
+      db.asClient(), SOURCE, { ...values, money_transfer: 2000 },
+      { finalize: false, accountabilityRoundId: roundB },
+    );
+    expect([savedA.status, savedB.status]).toEqual(["saved", "saved"]);
+    expect(db.tables.settlement_entries).toHaveLength(2);
+    expect(db.tables.transfer_reconciliations).toHaveLength(2);
+
+    const reportA = await buildGuidedRoundReport(
+      db.asClient(),
+      { ...CONTEXT, accountabilityRoundId: roundA },
+      true,
+    );
+    const reportB = await buildGuidedRoundReport(
+      db.asClient(),
+      { ...CONTEXT, accountabilityRoundId: roundB },
+      true,
+    );
+
+    expect(reportA.slips.map((row) => row.checkId)).toEqual(["round-a"]);
+    expect(reportA.totals).toMatchObject({ checkedSlipTotal: 1000, submittedTransferTotal: 1000 });
+    expect(reportB.slips.map((row) => row.checkId)).toEqual(["round-b"]);
+    expect(reportB.totals).toMatchObject({ checkedSlipTotal: 2000, submittedTransferTotal: 2000 });
   });
 });

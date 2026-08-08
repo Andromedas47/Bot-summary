@@ -28,6 +28,8 @@ export interface WhiteSheetCashEntryIdentity {
   sourceId: string;
   marketLabelNormalized: string;
   businessDate: string;
+  /** Exact economic cycle. Undefined preserves pre-P2E callers; null is legacy-unbound only. */
+  accountabilityRoundId?: string | null;
 }
 
 /**
@@ -165,15 +167,20 @@ export async function loadWhiteSheetCashEntry(
   );
   const businessDate = requireBusinessDate(rawIdentity.businessDate);
 
-  const { data, error } = await supabase
+  let query = supabase
     .from(TABLE)
     .select(
       "labor, location_fee, bag, snack, other, other_note, actual_cash_submitted, updated_at, finalized_at, finalized_by",
     )
     .eq("source_id", sourceId)
     .eq("market_label_normalized", marketLabelNormalized)
-    .eq("business_date", businessDate)
-    .maybeSingle();
+    .eq("business_date", businessDate);
+  if (rawIdentity.accountabilityRoundId !== undefined) {
+    query = rawIdentity.accountabilityRoundId === null
+      ? query.is("accountability_round_id", null)
+      : query.eq("accountability_round_id", rawIdentity.accountabilityRoundId);
+  }
+  const { data, error } = await query.maybeSingle();
 
   if (error) {
     throw new WhiteSheetPersistenceError(`white sheet cash entry query failed: ${error.message}`);
@@ -210,13 +217,18 @@ export async function saveWhiteSheetCashEntry(
   const actualCashSubmitted = requireMoney(rawInput.actualCashSubmitted, "actualCashSubmitted");
   const otherNote = requireOtherNote(rawInput.otherNote);
 
-  const { data: existing, error: existingError } = await supabase
+  let existingQuery = supabase
     .from(TABLE)
     .select("id, finalized_at")
     .eq("source_id", sourceId)
     .eq("market_label_normalized", marketLabelNormalized)
-    .eq("business_date", businessDate)
-    .maybeSingle();
+    .eq("business_date", businessDate);
+  if (rawInput.accountabilityRoundId !== undefined) {
+    existingQuery = rawInput.accountabilityRoundId === null
+      ? existingQuery.is("accountability_round_id", null)
+      : existingQuery.eq("accountability_round_id", rawInput.accountabilityRoundId);
+  }
+  const { data: existing, error: existingError } = await existingQuery.maybeSingle();
 
   if (existingError) {
     throw new WhiteSheetPersistenceError(`white sheet cash entry query failed: ${existingError.message}`);
@@ -264,6 +276,7 @@ export async function saveWhiteSheetCashEntry(
       source_id: sourceId,
       market_label_normalized: marketLabelNormalized,
       business_date: businessDate,
+      accountability_round_id: rawInput.accountabilityRoundId ?? null,
       ...writeValues,
     })
     .select(SELECT_COLUMNS)

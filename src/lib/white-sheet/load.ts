@@ -30,13 +30,15 @@ const PAGE_SIZE = 1000;
 const SOURCE_LOOKUP_CHUNK_SIZE = 500;
 const EFFECTIVE_TRANSACTION_TYPES = ["เบิก", "คืน", "คืนเสีย"] as const;
 const PRODUCE_TRANSACTION_SELECT =
-  "id, product_name, quantity, unit, price_per_unit, transaction_type, base_transaction_type, item_created_at, session_id, transaction_date, market_name, raw_message_id, basis_quantity, basis_price, session_kind" as const;
+  "id, product_name, quantity, unit, price_per_unit, transaction_type, base_transaction_type, item_created_at, session_id, transaction_date, market_name, raw_message_id, basis_quantity, basis_price, session_kind, accountability_round_id" as const;
 
 export interface DigitalWhiteSheetScope {
   sourceId: string;
   marketKey: string;
   marketLabel: string;
   businessDate: string;
+  /** Undefined preserves legacy reports; null means genuinely unbound rows only. */
+  accountabilityRoundId?: string | null;
 }
 
 /**
@@ -72,6 +74,7 @@ function chunks<T>(values: readonly T[], size: number): T[][] {
 export async function fetchProduceRows(
   supabase: Supabase,
   businessDate: string,
+  accountabilityRoundId?: string | null,
 ): Promise<ProduceTransactionRow[]> {
   const rows: ProduceTransactionRow[] = [];
   const seenRowIds = new Set<string>();
@@ -79,14 +82,19 @@ export async function fetchProduceRows(
   let expectedCount: number | null = null;
 
   while (true) {
-    const { data, error, count } = await supabase
+    let query = supabase
       .from("produce_transactions")
       .select(PRODUCE_TRANSACTION_SELECT, { count: "exact" })
       .eq("transaction_date", businessDate)
       .in("base_transaction_type", [...EFFECTIVE_TRANSACTION_TYPES])
       .order("item_created_at", { ascending: true })
-      .order("id", { ascending: true })
-      .range(offset, offset + PAGE_SIZE - 1);
+      .order("id", { ascending: true });
+    if (accountabilityRoundId !== undefined) {
+      query = accountabilityRoundId === null
+        ? query.is("accountability_round_id", null)
+        : query.eq("accountability_round_id", accountabilityRoundId);
+    }
+    const { data, error, count } = await query.range(offset, offset + PAGE_SIZE - 1);
 
     if (error) {
       throw new WhiteSheetDataError(`produce transaction query failed: ${error.message}`);
@@ -369,6 +377,7 @@ export async function loadDigitalWhiteSheetCalculation(
     marketKey: requireScopeValue(rawScope.marketKey, "marketKey"),
     marketLabel: requireScopeValue(rawScope.marketLabel, "marketLabel"),
     businessDate: requireScopeValue(rawScope.businessDate, "businessDate"),
+    accountabilityRoundId: rawScope.accountabilityRoundId,
   };
 
   const targetMarket = normalizedMarketLabel(scope.marketLabel);
@@ -376,7 +385,11 @@ export async function loadDigitalWhiteSheetCalculation(
     throw new WhiteSheetDataError("marketLabel does not identify a market");
   }
 
-  const dateRows = await fetchProduceRows(supabase, scope.businessDate);
+  const dateRows = await fetchProduceRows(
+    supabase,
+    scope.businessDate,
+    scope.accountabilityRoundId,
+  );
   const sourceRows = await filterRowsBySource(supabase, dateRows, scope.sourceId);
   const knownMarkets = new Set(
     sourceRows
@@ -398,6 +411,7 @@ export async function loadDigitalWhiteSheetCalculation(
     scope.businessDate,
     targetMarket,
     knownMarkets,
+    scope.accountabilityRoundId,
   );
   // checked_slip_total = ai_verified_total + manual_slip_total
   // White Sheet verifiedTransfers must include closed market-scoped manual slips.
@@ -406,6 +420,7 @@ export async function loadDigitalWhiteSheetCalculation(
     scope.sourceId,
     scope.businessDate,
     targetMarket,
+    scope.accountabilityRoundId,
   );
   const verifiedTransfers =
     Math.round((verifiedTransferResult.attributedTotal + manualSlipTotal) * 100) / 100;

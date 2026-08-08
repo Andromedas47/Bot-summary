@@ -201,14 +201,15 @@ export class RoundFakeDatabase {
 
   /** Unique keys the production code relies on for insert-conflict behaviour. */
   uniqueKeys: Record<string, string[]> = {
-    settlement_finalizations: ["source_id", "business_date"],
-    transfer_reconciliations: ["source_id", "business_date"],
+    settlement_finalizations: ["source_id", "business_date", "accountability_round_id"],
+    transfer_reconciliations: ["source_id", "business_date", "accountability_round_id"],
     // The real onConflict target of POST /api/settlement's upsert.
     settlement_entries: [
       "settlement_date",
       "settlement_time",
       "staff_name",
       "market_name",
+      "accountability_round_id",
     ],
   };
 

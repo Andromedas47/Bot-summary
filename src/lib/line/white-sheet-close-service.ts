@@ -56,11 +56,13 @@ export function mergeWhiteSheetCloseInput(
   sourceId: string,
   command: WhiteSheetCloseCommand,
   existing: WhiteSheetCashEntryState,
+  accountabilityRoundId?: string | null,
 ): WhiteSheetCashEntryInput {
   const identity = {
     sourceId,
     marketLabelNormalized: command.marketLabelNormalized,
     businessDate: command.businessDate,
+    accountabilityRoundId,
   };
 
   if (existing.status === "not_submitted") {
@@ -115,9 +117,10 @@ export async function processWhiteSheetCloseCommand(
   input: {
     sourceId: string;
     command: WhiteSheetCloseCommand;
+    accountabilityRoundId?: string | null;
   },
 ): Promise<WhiteSheetCloseOutcome> {
-  const { sourceId, command } = input;
+  const { sourceId, command, accountabilityRoundId } = input;
   const log = logger.child({
     sourceId,
     market: command.marketLabelNormalized,
@@ -154,6 +157,7 @@ export async function processWhiteSheetCloseCommand(
       sourceId,
       marketLabelNormalized: command.marketLabelNormalized,
       businessDate: command.businessDate,
+      accountabilityRoundId,
     });
   } catch (error) {
     log.error("white sheet close existing-entry load failed", {
@@ -177,7 +181,12 @@ export async function processWhiteSheetCloseCommand(
     };
   }
 
-  const merged = mergeWhiteSheetCloseInput(sourceId, command, existing);
+  const merged = mergeWhiteSheetCloseInput(
+    sourceId,
+    command,
+    existing,
+    accountabilityRoundId,
+  );
 
   try {
     await saveWhiteSheetCashEntry(supabase, merged);
@@ -208,6 +217,7 @@ export async function processWhiteSheetCloseCommand(
       marketKey: command.marketLabelNormalized,
       marketLabel: command.marketLabelNormalized,
       businessDate: command.businessDate,
+      accountabilityRoundId,
     });
   } catch (error) {
     log.error("white sheet close canonical reload failed", {

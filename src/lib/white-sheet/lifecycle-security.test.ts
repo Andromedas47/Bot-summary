@@ -231,6 +231,7 @@ describe("lifecycle security hardening (0045)", () => {
       updated_at: "2026-07-24T00:00:00Z",
       finalized_at: "2026-07-24T02:00:00Z",
       finalized_by: "admin-1",
+      accountability_round_id: null,
     });
     await expect(
       reopenWhiteSheetCashEntry(reopenFail.database, IDENTITY, "admin-2", "reason"),

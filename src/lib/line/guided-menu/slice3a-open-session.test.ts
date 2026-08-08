@@ -39,7 +39,10 @@ function collectPostbackData(value: unknown, out: string[] = []): string[] {
   return out;
 }
 
-function seed(db: GuidedMenuFakeDatabase): GuidedMenuUxHandler {
+function seed(
+  db: GuidedMenuFakeDatabase,
+  options: ConstructorParameters<typeof GuidedMenuUxHandler>[1] = {},
+): GuidedMenuUxHandler {
   db.seedOperator({
     line_user_id: IDENTITY.lineUserId,
     staff_label: "ผู้บันทึก",
@@ -57,7 +60,7 @@ function seed(db: GuidedMenuFakeDatabase): GuidedMenuUxHandler {
     active: true,
     sort_order: 1,
   });
-  return new GuidedMenuUxHandler(db.asClient());
+  return new GuidedMenuUxHandler(db.asClient(), options);
 }
 
 /** Walk tx → seller → market → date and return the live confirm_open token. */
@@ -144,8 +147,6 @@ describe("Slice 3A — helpers", () => {
 describe("Slice 3A — confirmation opens a real session", () => {
   const cases: Array<[MenuTransactionTypeCode, string, string]> = [
     ["withdraw", "เบิก", "เปิดรายการเบิกแล้ว ✅"],
-    ["return", "คืน", "เปิดรายการชั่งคืนแล้ว ✅"],
-    ["damaged_return", "คืนเสีย", "เปิดรายการคืนเสียแล้ว ✅"],
   ];
 
   for (const [code, baseType, heading] of cases) {
@@ -188,6 +189,80 @@ describe("Slice 3A — confirmation opens a real session", () => {
       // A freshly opened session is immediately appendable by the parser.
       expect(row.terminalized).toBe(false);
       expect(row.accumulated_text).toBe("");
+    });
+  }
+
+  for (const code of ["return", "damaged_return"] as const) {
+    it(`${code} refuses until the operator explicitly selects a round`, async () => {
+      const db = new GuidedMenuFakeDatabase();
+      const handler = seed(db);
+      const opened = await handler.handlePostback({
+        wireToken: await walkToConfirmToken(db, handler, code),
+        lineEventId: `evt-confirm-${code}`,
+        identity: IDENTITY,
+        lineTimestampMs: TS,
+      });
+      expect(opened.screen).toBe("session_open_conflict");
+      expect(db.tables.pending_sessions ?? []).toHaveLength(0);
+    });
+  }
+
+  for (const code of ["return", "damaged_return"] as const) {
+    it(`${code} reuses the durable selected round through the actual confirm UX`, async () => {
+      const db = new GuidedMenuFakeDatabase();
+      const roundA = "10000000-0000-4000-8000-000000000001";
+      let journeyReads = 0;
+      const handler = seed(db, {
+        journeyService: {
+          resolve: async () => {
+            journeyReads += 1;
+            if (journeyReads === 1) return { stage: "idle", reason: "no_session" };
+            return {
+              stage: "white_sheet",
+              context: {
+                accountabilityRoundId: roundA,
+                sessionKey: SESSION_KEY,
+                sourceId: IDENTITY.sourceId,
+                lineUserId: IDENTITY.lineUserId,
+                sellerLabel: "à¸à¸µà¹‰",
+                marketLabel: "à¸§à¸±à¸”à¸—à¸¸à¹ˆà¸‡à¸¥à¸²à¸™à¸™à¸²",
+                marketLabelNormalized: "à¸§à¸±à¸”à¸—à¸¸à¹ˆà¸‡à¸¥à¸²à¸™à¸™à¸²",
+                businessDate: "2026-07-29",
+                transactionType: "à¹€à¸šà¸´à¸",
+                sessionGeneration: "gen-a",
+              },
+              session: {},
+              whiteSheet: { status: "not_submitted" },
+            };
+          },
+        } as never,
+      });
+      db.seedPendingSession({
+        session_key: SESSION_KEY,
+        source_id: IDENTITY.sourceId,
+        line_user_id: IDENTITY.lineUserId,
+        opened_line_event_id: "evt-a",
+        session_generation: "gen-a",
+        terminalized: true,
+        entry_origin: "structured_menu",
+        business_date: "2026-07-29",
+        staff_label: "à¸à¸µà¹‰",
+        market_label: "à¸§à¸±à¸”à¸—à¸¸à¹ˆà¸‡à¸¥à¸²à¸™à¸™à¸²",
+        accountability_round_id: roundA,
+      });
+
+      const opened = await handler.handlePostback({
+        wireToken: await walkToConfirmToken(db, handler, code),
+        lineEventId: `evt-selected-${code}`,
+        identity: IDENTITY,
+        lineTimestampMs: TS,
+      });
+
+      expect(opened.screen).toBe("session_opened");
+      expect(db.tables.pending_sessions[0]).toMatchObject({
+        accountability_round_id: roundA,
+        initial_transaction_type: TX_CODE_TO_BASE_TRANSACTION_TYPE[code],
+      });
     });
   }
 
@@ -583,7 +658,7 @@ describe("Slice 3A — existing open session guard", () => {
     // have observed gen-stale: the optimistic generation no longer matches.
     const originalRpc = db.rpc.bind(db);
     db.rpc = (async (name: string, args: Record<string, unknown>) => {
-      if (name === "open_or_rotate_guided_produce_structured_session") {
+      if (name === "open_accountability_round_produce_session") {
         db.seedPendingSession({
           session_key: SESSION_KEY,
           source_id: "G-1",

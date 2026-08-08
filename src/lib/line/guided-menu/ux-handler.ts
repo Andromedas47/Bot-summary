@@ -571,6 +571,19 @@ export class GuidedMenuUxHandler {
       return resultEnvelope("invalid", [buildInvalidMenuMessage()]);
     }
 
+    let accountabilityRoundId: string | null = null;
+    if (tx !== "withdraw") {
+      const journey = await this.resolveJourney(input.identity);
+      if (journey.stage === "idle" || !journey.context.accountabilityRoundId) {
+        return resultEnvelope(
+          "session_open_conflict",
+          [buildSessionOpenConflictMessage()],
+          { opened: false, recorded: false, reason: "missing_accountability_round" },
+        );
+      }
+      accountabilityRoundId = journey.context.accountabilityRoundId;
+    }
+
     const opened = await this.opener.open({
       identity: input.identity,
       transactionType: tx,
@@ -579,6 +592,7 @@ export class GuidedMenuUxHandler {
       businessDateIso: resolved.iso,
       lineEventId: input.lineEventId,
       lineTimestampMs: input.lineTimestampMs,
+      accountabilityRoundId,
     });
 
     if (opened.status === "already_open") {

@@ -130,6 +130,7 @@ async function loadVerifiedTransferChecksForSourceDate(
   supabase:     Supabase,
   sourceId:     string,
   businessDate: string,
+  accountabilityRoundId?: string | null,
 ): Promise<{
   checks: VerifiedTransferCheckRow[];
   evidenceMarketById: Map<string, string | null>;
@@ -138,12 +139,18 @@ async function loadVerifiedTransferChecksForSourceDate(
 
   // Trusted financial identity uses raw market_label + canonical TS helper.
   // market_label_normalized (SQL trim/NFC) is storage/index only — not trusted alone.
-  const { data: evidences, error: evidenceError } = await supabase
+  let evidenceQuery = supabase
     .from("slip_evidences")
     .select("id, market_label")
     .eq("source_id", sourceId)
     .gte("received_at", startUtc)
     .lt("received_at", endUtc);
+  if (accountabilityRoundId !== undefined) {
+    evidenceQuery = accountabilityRoundId === null
+      ? evidenceQuery.is("accountability_round_id", null)
+      : evidenceQuery.eq("accountability_round_id", accountabilityRoundId);
+  }
+  const { data: evidences, error: evidenceError } = await evidenceQuery;
   if (evidenceError) {
     throw new Error(`slip evidence query failed: ${evidenceError.message}`);
   }
@@ -204,11 +211,13 @@ export async function loadAiVerifiedTransferTotal(
   supabase:     Supabase,
   sourceId:     string,
   businessDate: string,
+  accountabilityRoundId?: string | null,
 ): Promise<number> {
   const { checks, evidenceMarketById } = await loadVerifiedTransferChecksForSourceDate(
     supabase,
     sourceId,
     businessDate,
+    accountabilityRoundId,
   );
   if (checks.length === 0) return 0;
 
@@ -231,6 +240,7 @@ export async function loadMarketScopedAiVerifiedTransfers(
   businessDate:            string,
   marketLabelNormalized:   string,
   knownMarkets:            ReadonlySet<string>,
+  accountabilityRoundId?:  string | null,
 ): Promise<MarketScopedVerifiedTransferResult> {
   const targetMarket = marketLabelNormalized.normalize("NFC").trim();
   if (!targetMarket) {
@@ -241,6 +251,7 @@ export async function loadMarketScopedAiVerifiedTransfers(
     supabase,
     sourceId,
     businessDate,
+    accountabilityRoundId,
   );
   if (checks.length === 0) {
     return {
@@ -265,13 +276,20 @@ async function computeManualSlipTotal(
   supabase:     Supabase,
   sourceId:     string,
   businessDate: string,
+  accountabilityRoundId?: string | null,
 ): Promise<number> {
-  const { data: sessions } = await supabase
+  let sessionQuery = supabase
     .from("manual_slip_sessions")
     .select("id")
     .eq("source_id", sourceId)
     .eq("business_date", businessDate)
     .eq("status", "closed");
+  if (accountabilityRoundId !== undefined) {
+    sessionQuery = accountabilityRoundId === null
+      ? sessionQuery.is("accountability_round_id", null)
+      : sessionQuery.eq("accountability_round_id", accountabilityRoundId);
+  }
+  const { data: sessions } = await sessionQuery;
 
   const sessionIds = (sessions ?? []).map(s => s.id);
   if (sessionIds.length === 0) return 0;
@@ -303,18 +321,25 @@ export async function loadMarketScopedManualSlipTotal(
   sourceId:              string,
   businessDate:          string,
   marketLabelNormalized: string,
+  accountabilityRoundId?: string | null,
 ): Promise<number> {
   const targetMarket = marketLabelNormalized.normalize("NFC").trim();
   if (!targetMarket) {
     throw new Error("marketLabelNormalized must not be empty");
   }
 
-  const { data: sessions, error: sessionError } = await supabase
+  let sessionQuery = supabase
     .from("manual_slip_sessions")
     .select("id, market_label")
     .eq("source_id", sourceId)
     .eq("business_date", businessDate)
     .eq("status", "closed");
+  if (accountabilityRoundId !== undefined) {
+    sessionQuery = accountabilityRoundId === null
+      ? sessionQuery.is("accountability_round_id", null)
+      : sessionQuery.eq("accountability_round_id", accountabilityRoundId);
+  }
+  const { data: sessions, error: sessionError } = await sessionQuery;
   if (sessionError) {
     throw new Error(`manual_slip_sessions query failed: ${sessionError.message}`);
   }
@@ -341,15 +366,21 @@ export async function reconcile(
   sourceId:             string,
   businessDate:         string,
   submittedTransfer:    number,
+  accountabilityRoundId?: string | null,
 ): Promise<{ blocked: true; reason: string } | { blocked: false; result: ReconciliationResult; row: TransferReconciliationRow }> {
   // Block if any open manual session exists.
-  const { data: openSession } = await supabase
+  let openSessionQuery = supabase
     .from("manual_slip_sessions")
     .select("id")
     .eq("source_id", sourceId)
     .eq("business_date", businessDate)
-    .eq("status", "open")
-    .maybeSingle();
+    .eq("status", "open");
+  if (accountabilityRoundId !== undefined) {
+    openSessionQuery = accountabilityRoundId === null
+      ? openSessionQuery.is("accountability_round_id", null)
+      : openSessionQuery.eq("accountability_round_id", accountabilityRoundId);
+  }
+  const { data: openSession } = await openSessionQuery.maybeSingle();
 
   if (openSession) {
     return {
@@ -370,13 +401,19 @@ export async function reconcile(
   // it's derived from the same close-event timestamp the finalizer itself uses
   // to decide "not_closing" vs "closing" — no schema change needed.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data: failedClosedSessions } = await (supabase as any)
+  let failedQuery = (supabase as any)
     .from("pending_sessions")
     .select("close_event_timestamp_ms")
     .eq("source_id", sourceId)
     .eq("terminalized", true)
     .eq("finalization_status", "failed_closed")
     .not("close_event_timestamp_ms", "is", null);
+  if (accountabilityRoundId !== undefined) {
+    failedQuery = accountabilityRoundId === null
+      ? failedQuery.is("accountability_round_id", null)
+      : failedQuery.eq("accountability_round_id", accountabilityRoundId);
+  }
+  const { data: failedClosedSessions } = await failedQuery;
 
   const hasFailedClosedForDate = ((failedClosedSessions ?? []) as Array<{ close_event_timestamp_ms: number }>)
     .some((row) => bangkokBusinessDateFromTimestamp(row.close_event_timestamp_ms) === businessDate);
@@ -397,11 +434,17 @@ export async function reconcile(
   // before those guarantees existed (or by a future code path that reintroduces
   // the column without the same discipline) — it is not expected to ever fire
   // against current writes, and must not be relied on as the primary gate.
-  const { data: incompleteSessions } = await supabase
+  let incompleteQuery = supabase
     .from("produce_sessions")
     .select("id, raw_message_id")
     .eq("session_date", businessDate)
     .not("parser_errors", "is", null);
+  if (accountabilityRoundId !== undefined) {
+    incompleteQuery = accountabilityRoundId === null
+      ? incompleteQuery.is("accountability_round_id", null)
+      : incompleteQuery.eq("accountability_round_id", accountabilityRoundId);
+  }
+  const { data: incompleteSessions } = await incompleteQuery;
 
   if (incompleteSessions && incompleteSessions.length > 0) {
     const rawMessageIds = incompleteSessions.map((s) => s.raw_message_id);
@@ -423,8 +466,8 @@ export async function reconcile(
   // round to satang before comparing so 0.1 + 0.2 style drift never turns a
   // genuinely matched settlement into a false mismatch.
   const round2 = (n: number) => Math.round(n * 100) / 100;
-  const aiTotal     = round2(await loadAiVerifiedTransferTotal(supabase, sourceId, businessDate));
-  const manualTotal = round2(await computeManualSlipTotal(supabase, sourceId, businessDate));
+  const aiTotal     = round2(await loadAiVerifiedTransferTotal(supabase, sourceId, businessDate, accountabilityRoundId));
+  const manualTotal = round2(await computeManualSlipTotal(supabase, sourceId, businessDate, accountabilityRoundId));
   const checkedTotal = round2(aiTotal + manualTotal);
   const difference   = round2(submittedTransfer - checkedTotal);
   const matched      = difference === 0;
@@ -444,10 +487,11 @@ export async function reconcile(
       {
         source_id:                sourceId,
         business_date:            businessDate,
+        accountability_round_id:  accountabilityRoundId ?? null,
         ...result,
         updated_at:               new Date().toISOString(),
       },
-      { onConflict: "source_id,business_date" },
+      { onConflict: "source_id,business_date,accountability_round_id" },
     )
     .select()
     .single();

@@ -373,6 +373,7 @@ export async function finalizePendingGeneration(
     declared_transaction_type: parsed.declared_transaction_type,
     ingest_idempotency_key: correlationId,
     ingest_source: "line_webhook",
+    accountability_round_id: snapshot.accountability_round_id ?? null,
   };
   const itemPayload = parsed.items.map((item) => ({
     ...item,

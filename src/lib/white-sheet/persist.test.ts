@@ -53,6 +53,7 @@ function makeFakeSupabase(
         updated_at: "2026-07-24T00:00:00Z",
         finalized_at: null,
         finalized_by: null,
+        accountability_round_id: null,
         ...row,
       };
       return [full.id, full];
@@ -292,6 +293,41 @@ describe("loadWhiteSheetCashEntry", () => {
       actualCashSubmitted: 1000,
       updatedAt: "2026-07-24T01:00:00Z",
     });
+  });
+
+  it("keeps same-description round cash exact and legacy-null isolated", async () => {
+    const roundA = "10000000-0000-4000-8000-000000000001";
+    const roundB = "10000000-0000-4000-8000-000000000002";
+    const { database } = makeFakeSupabase([
+      {
+        source_id: IDENTITY.sourceId,
+        market_label_normalized: IDENTITY.marketLabelNormalized,
+        business_date: IDENTITY.businessDate,
+        accountability_round_id: roundA,
+        actual_cash_submitted: 111,
+      },
+      {
+        id: "legacy-row",
+        source_id: IDENTITY.sourceId,
+        market_label_normalized: IDENTITY.marketLabelNormalized,
+        business_date: IDENTITY.businessDate,
+        accountability_round_id: null,
+        actual_cash_submitted: 333,
+      },
+    ]);
+
+    expect(await loadWhiteSheetCashEntry(database, {
+      ...IDENTITY,
+      accountabilityRoundId: roundA,
+    })).toMatchObject({ status: "submitted", actualCashSubmitted: 111 });
+    expect(await loadWhiteSheetCashEntry(database, {
+      ...IDENTITY,
+      accountabilityRoundId: roundB,
+    })).toEqual({ status: "not_submitted" });
+    expect(await loadWhiteSheetCashEntry(database, {
+      ...IDENTITY,
+      accountabilityRoundId: null,
+    })).toMatchObject({ status: "submitted", actualCashSubmitted: 333 });
   });
 
   it("does not confuse a different business date for the same source/market", async () => {

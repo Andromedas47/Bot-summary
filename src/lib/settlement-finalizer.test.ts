@@ -10,6 +10,7 @@ interface StubFin {
   claimRow?:       object | null;   // UPDATE WHERE status IN (pending,failed) result
   staleClaimRow?:  object | null;   // UPDATE stale sending reclaim result
   updateError?:    string | null;   // error for status UPDATE (sent/failed)
+  upsertOptions?:  Array<{ onConflict?: string }>;
 }
 
 // Builds a chainable stub for settlement_finalizations.
@@ -60,7 +61,10 @@ function makeFinStub(fin: StubFin) {
         return { data: null, error: fin.updateError ? { message: fin.updateError } : null };
       });
     },
-    upsert: () => Promise.resolve({ data: null, error: null }),
+    upsert: (_row: unknown, options: { onConflict?: string }) => {
+      fin.upsertOptions?.push(options);
+      return Promise.resolve({ data: null, error: null });
+    },
   };
 }
 
@@ -470,9 +474,11 @@ describe("tryFinalizeSettlement — ambiguous protection", () => {
   });
 
   it("no prior row + multiple entries => ambiguous, no LINE", async () => {
-    const db = makeDb({ fin: { existing: null }, entries: [readyEntry, readyEntry] });
+    const upsertOptions: Array<{ onConflict?: string }> = [];
+    const db = makeDb({ fin: { existing: null, upsertOptions }, entries: [readyEntry, readyEntry] });
     const pushed: string[] = [];
     expect(await tryFinalizeSettlement(db as never, "grp1", "2026-06-17", async () => { pushed.push("X"); })).toBe("ambiguous");
+    expect(upsertOptions).toEqual([{ onConflict: "source_id,business_date,accountability_round_id" }]);
     expect(pushed).toHaveLength(0);
   });
 });

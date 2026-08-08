@@ -135,7 +135,7 @@ export async function tryFinalizeSettlement(
       .from("settlement_finalizations")
       .upsert(
         { source_id: sourceId, business_date: businessDate, accountability_round_id: accountabilityRoundId ?? null, status: "ambiguous", updated_at: now },
-        { onConflict: "source_id,business_date" },
+        { onConflict: "source_id,business_date,accountability_round_id" },
       );
     return "ambiguous";
   }

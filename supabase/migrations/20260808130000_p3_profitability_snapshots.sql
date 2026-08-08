@@ -318,9 +318,14 @@ BEGIN
     hashtext('profitability:' || p_accountability_round_id::text)
   );
 
+  -- The parameters are checked, not the numeric(24,0) locals they were assigned
+  -- to: plpgsql would already have rounded a fractional input at DECLARE time,
+  -- and a silently rounded money input is exactly what must not pass here. A
+  -- negative verified transfer would inflate the shortage, so it is refused too.
   IF p_verified_transfers_satang IS NOT NULL
-     AND p_verified_transfers_satang <> trunc(p_verified_transfers_satang) THEN
-    RAISE EXCEPTION 'P3: invalid_satang_input (verified transfers must be exact satang)';
+     AND (p_verified_transfers_satang <> trunc(p_verified_transfers_satang)
+          OR p_verified_transfers_satang < 0) THEN
+    RAISE EXCEPTION 'P3: invalid_satang_input (verified transfers must be exact non-negative satang)';
   END IF;
   IF p_purchasing_expenses_satang IS NOT NULL
      AND (p_purchasing_expenses_satang <> trunc(p_purchasing_expenses_satang)

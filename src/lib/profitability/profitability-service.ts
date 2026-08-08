@@ -214,7 +214,7 @@ export interface RecordProfitabilitySnapshotInput {
   /** Every produce item of the round the caller can bind to a 0054 balance key. */
   quantityAttributions: readonly ProfitabilityQuantityAttribution[];
   /**
-   * Exact whole satang as a decimal STRING, or null/omitted when the total
+   * Exact non-negative whole satang as a decimal STRING, or null/omitted when the total
    * cannot be proven — which yields `missing_verified_transfers` rather than a
    * zero. Typed `string` so a `number` is a compile error, and re-checked at
    * runtime so a JS caller cannot slip one through either.
@@ -222,7 +222,7 @@ export interface RecordProfitabilitySnapshotInput {
   verifiedTransfersSatang?: string | null;
   /** Slip evidence / slip batch / manual slip session / reconciliation ids of THIS round. */
   verifiedTransferSourceIds?: readonly string[];
-  /** Exact whole satang as a decimal STRING, or null/omitted when unprovable. */
+  /** Exact non-negative whole satang as a decimal STRING, or null/omitted when unprovable. */
   purchasingExpensesSatang?: string | null;
   /** Confirmed purchase receipt ids backing the purchasing expense figure. */
   purchasingExpenseReceiptIds?: readonly string[];
@@ -259,9 +259,9 @@ function attributionPayload(
  *
  * Absent (undefined or null) is legal and meaningful — it becomes SQL NULL and
  * the snapshot records the matching "unprovable" reason. Present means an exact
- * whole-satang decimal string and nothing else: a `number` is refused because
- * it has already been through a double, and `"1.5"` / `"1e3"` are refused
- * because satang are whole and a plain decimal has no exponent.
+ * non-negative whole-satang decimal string and nothing else: a `number` is
+ * refused because it has already been through a double, and negative,
+ * fractional or exponent values are refused to match the PostgreSQL RPC.
  */
 function optionalSatang(value: string | null | undefined, path: string): string | null {
   if (value === undefined || value === null) return null;
@@ -270,6 +270,9 @@ function optionalSatang(value: string | null | undefined, path: string): string 
   }
   if (!isExactSatangString(value)) {
     failInput(path, `expected an exact whole-satang decimal string, got ${JSON.stringify(value)}`);
+  }
+  if (value.startsWith("-")) {
+    failInput(path, `expected non-negative satang, got ${JSON.stringify(value)}`);
   }
   return value;
 }

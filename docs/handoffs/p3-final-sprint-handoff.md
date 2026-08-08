@@ -139,7 +139,32 @@ it to an unreleased layer whose two dependencies are still unmerged would be the
 wrong trade. The wiring point is `loadDigitalWhiteSheetPageModel`, which already
 has the `accountability_round_id` in scope.
 
-## Exact next action
+## Final sprint result — 2026-08-08
 
-Await the two in-flight tracks, then Lead review, then focused tests →
-typecheck → lint → `git diff --check` → full suite once.
+Status: **P3 TEST/CI READY — AWAITING CLAUDE FINAL LEAD REVIEW**
+
+- PostgreSQL worker output was coherent uncommitted work and was preserved.
+- P3 PostgreSQL matrix: 40 required scenarios grouped into 12 test blocks;
+  **12 pass / 0 fail / 325 assertions**.
+- P2D PostgreSQL compatibility: **32 pass / 0 fail / 250 assertions**.
+- P2E PostgreSQL compatibility: **1 pass / 0 fail / 46 assertions**.
+- Focused settlement/reconciliation compatibility:
+  **102 pass / 0 fail / 294 assertions**.
+- P3 TypeScript bundle after the targeted contract fix:
+  **111 pass / 0 fail / 313 assertions**.
+- Defect found and fixed: the TypeScript caller accepted negative verified
+  transfers/purchasing expenses even though the PostgreSQL RPC rejects them.
+  Both client inputs now fail before an RPC call, matching the money contract.
+- Typecheck: clean.
+- Build: clean with documented non-production placeholder Supabase variables.
+  The first attempt compiled but could not prerender `/overview` because this
+  worktree has no Supabase environment; no live service was contacted.
+- Lint: exit 0, no errors; 65 pre-existing warnings outside changed P3 files.
+- `git diff --check`: clean (Windows line-ending notices only).
+- CI: dedicated `p3-profitability` PostgreSQL 17 job added. It runs P3, P2D,
+  P2E, typecheck, and diff-check with required-PostgreSQL flags. A forced
+  unreachable-port probe exits 1, proving PostgreSQL absence cannot green-skip.
+- Integration-base application regression remains **270 pass / 0 fail**.
+- Exact remaining work: Claude final lead review; dependency PRs #36 and #38
+  must still land before opening a truthful P3 PR against `main`.
+- Production mutations: none. No deploy, Production migration, or LINE send.

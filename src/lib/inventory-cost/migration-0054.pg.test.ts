@@ -89,6 +89,12 @@ const APPLY_CHAIN = [
   MIGRATION_0054,
 ];
 
+// Stable test UUIDs model P2E's canonical inventory movement provenance. The
+// harness adds the nullable column after applying 0054, exercising the real
+// mixed-version order where P2D is installed first and P2E arrives later.
+const ROUND_A = "10000000-0000-4000-8000-000000000001";
+const ROUND_B = "10000000-0000-4000-8000-000000000002";
+
 type PsqlResult = { code: number; stdout: string; stderr: string };
 
 function resolvePsql(): string | null {
@@ -199,6 +205,17 @@ describe.skipIf(!pgAvailable)("P2D migration 0054 PostgreSQL", () => {
       const r = await runPsql(psqlPath, ["-v", "ON_ERROR_STOP=1", "-d", name, "-f", file], { database: name });
       if (r.code !== 0) throw new Error(`${file} failed against ${name}:\n${r.stderr}\n${r.stdout}`);
     }
+    const p2eColumn = await runPsql(
+      psqlPath,
+      [
+        "-v", "ON_ERROR_STOP=1", "-d", name, "-c",
+        "ALTER TABLE public.inventory_movements ADD COLUMN accountability_round_id uuid",
+      ],
+      { database: name },
+    );
+    if (p2eColumn.code !== 0) {
+      throw new Error(`P2E inventory round contract failed against ${name}:\n${p2eColumn.stderr}\n${p2eColumn.stdout}`);
+    }
   }
 
   async function dropDb(name: string): Promise<void> {
@@ -287,9 +304,13 @@ describe.skipIf(!pgAvailable)("P2D migration 0054 PostgreSQL", () => {
     type: "ISSUE" | "GOOD_RETURN" | "DAMAGED_WRITE_OFF" | "ADJUSTMENT";
     lines: Array<{ productKey: string; qty: string; unitKey?: string; locationCode?: string }>;
     dedupeKey?: string;
+    accountabilityRoundId?: string | null;
   }): Promise<string> {
     const dedupe = opts.dedupeKey ?? `test-${opts.type.toLowerCase()}-${randomBytes(8).toString("hex")}`;
     const mid = await sql(`SELECT gen_random_uuid()`);
+    const roundId = opts.accountabilityRoundId === undefined
+      ? (opts.type === "ADJUSTMENT" ? null : ROUND_A)
+      : opts.accountabilityRoundId;
     const values = opts.lines
       .map(
         (l, i) =>
@@ -305,10 +326,11 @@ describe.skipIf(!pgAvailable)("P2D migration 0054 PostgreSQL", () => {
     await sql(
       `INSERT INTO public.inventory_movements
          (id, movement_type, business_date, source_system, source_document_type,
-          source_document_id, dedupe_key, line_count)
+          source_document_id, dedupe_key, line_count, accountability_round_id)
        VALUES ('${mid}', '${opts.type}', '2026-07-29', 'test-harness',
                ${sqlLiteral(`manual-${opts.type.toLowerCase()}`)}, gen_random_uuid(),
-               ${sqlLiteral(dedupe)}, ${opts.lines.length});
+               ${sqlLiteral(dedupe)}, ${opts.lines.length},
+               ${roundId === null ? "NULL" : sqlLiteral(roundId)}::uuid);
        INSERT INTO public.inventory_movement_lines
          (movement_id, line_ordinal, product_key, unit_key, location_code, signed_quantity)
        VALUES ${values}`,
@@ -1309,6 +1331,307 @@ describe.skipIf(!pgAvailable)("P2D migration 0054 PostgreSQL", () => {
       expect(err).toMatch(/unprovable_return_cost/iu);
       expect(err).toMatch(/different key/iu);
     }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // 15b. P2E accountability-round provenance
+  // ═══════════════════════════════════════════════════════════════════════
+
+  test("a same-round ISSUE to GOOD_RETURN restores the source issue cost", async () => {
+    expect(ready).toBe(true);
+    const product = uniqueProduct("round-same");
+    await makeValuedReceipt(`doc-round-same-${product}`, [itemJson(product, "3", "1")]);
+
+    const issueId = await insertRawMovement({
+      type: "ISSUE",
+      accountabilityRoundId: ROUND_A,
+      lines: [{ productKey: product, qty: "-1" }],
+    });
+    const issueVal = await valueConsumption(issueId);
+    const issueLine = (issueVal.lines as CostLine[])[0]!;
+    const sourceCostLineId = await sql(
+      `SELECT id::text FROM public.inventory_cost_movement_lines WHERE movement_line_id='${issueLine.movement_line_id}'`,
+    );
+
+    const returnId = await insertRawMovement({
+      type: "GOOD_RETURN",
+      accountabilityRoundId: ROUND_A,
+      lines: [{ productKey: product, qty: "1" }],
+    });
+    const returnVal = await valueGoodReturn(returnId, [sourceCostLineId]);
+    expect((returnVal.lines as CostLine[])[0]?.signed_value_satang).toBe("100");
+    expect(await costBalance(product)).toEqual({
+      qty: "3.000000",
+      value: "300",
+      avg: "100.0000000000000000",
+    });
+  });
+
+  test("a cross-round GOOD_RETURN refuses the source ISSUE cost", async () => {
+    expect(ready).toBe(true);
+    const product = uniqueProduct("round-cross");
+    await makeValuedReceipt(`doc-round-cross-${product}`, [itemJson(product, "3", "1")]);
+
+    const issueId = await insertRawMovement({
+      type: "ISSUE",
+      accountabilityRoundId: ROUND_A,
+      lines: [{ productKey: product, qty: "-1" }],
+    });
+    const issueVal = await valueConsumption(issueId);
+    const issueLine = (issueVal.lines as CostLine[])[0]!;
+    const sourceCostLineId = await sql(
+      `SELECT id::text FROM public.inventory_cost_movement_lines WHERE movement_line_id='${issueLine.movement_line_id}'`,
+    );
+
+    const returnId = await insertRawMovement({
+      type: "GOOD_RETURN",
+      accountabilityRoundId: ROUND_B,
+      lines: [{ productKey: product, qty: "1" }],
+    });
+    const err = await valueGoodReturnFails(returnId, [sourceCostLineId]);
+    expect(err).toMatch(/unprovable_return_cost/iu);
+    expect(err).toMatch(/across accountability rounds/iu);
+    expect(await costMovementCount(returnId)).toBe("0");
+  });
+
+  test("a GOOD_RETURN refuses missing source or return round provenance", async () => {
+    expect(ready).toBe(true);
+    const sourceNullProduct = uniqueProduct("round-source-null");
+    await makeValuedReceipt(`doc-round-source-null-${sourceNullProduct}`, [itemJson(sourceNullProduct, "2", "1")]);
+    const sourceNullIssueId = await insertRawMovement({
+      type: "ISSUE",
+      accountabilityRoundId: null,
+      lines: [{ productKey: sourceNullProduct, qty: "-1" }],
+    });
+    const sourceNullIssueVal = await valueConsumption(sourceNullIssueId);
+    const sourceNullIssueLine = (sourceNullIssueVal.lines as CostLine[])[0]!;
+    const sourceNullCostLineId = await sql(
+      `SELECT id::text FROM public.inventory_cost_movement_lines WHERE movement_line_id='${sourceNullIssueLine.movement_line_id}'`,
+    );
+    const boundReturnId = await insertRawMovement({
+      type: "GOOD_RETURN",
+      accountabilityRoundId: ROUND_A,
+      lines: [{ productKey: sourceNullProduct, qty: "1" }],
+    });
+    expect(await valueGoodReturnFails(boundReturnId, [sourceNullCostLineId])).toMatch(
+      /ISSUE movement .* has no accountability_round_id/iu,
+    );
+    expect(await costMovementCount(boundReturnId)).toBe("0");
+
+    const returnNullProduct = uniqueProduct("round-return-null");
+    await makeValuedReceipt(`doc-round-return-null-${returnNullProduct}`, [itemJson(returnNullProduct, "2", "1")]);
+    const boundIssueId = await insertRawMovement({
+      type: "ISSUE",
+      accountabilityRoundId: ROUND_A,
+      lines: [{ productKey: returnNullProduct, qty: "-1" }],
+    });
+    const boundIssueVal = await valueConsumption(boundIssueId);
+    const boundIssueLine = (boundIssueVal.lines as CostLine[])[0]!;
+    const boundSourceCostLineId = await sql(
+      `SELECT id::text FROM public.inventory_cost_movement_lines WHERE movement_line_id='${boundIssueLine.movement_line_id}'`,
+    );
+    const nullReturnId = await insertRawMovement({
+      type: "GOOD_RETURN",
+      accountabilityRoundId: null,
+      lines: [{ productKey: returnNullProduct, qty: "1" }],
+    });
+    expect(await valueGoodReturnFails(nullReturnId, [boundSourceCostLineId])).toMatch(
+      /GOOD_RETURN movement .* has no accountability_round_id/iu,
+    );
+    expect(await costMovementCount(nullReturnId)).toBe("0");
+  });
+
+  test("a GOOD_RETURN refuses a source cost event that is not an active ISSUE", async () => {
+    expect(ready).toBe(true);
+    const wrongTypeProduct = uniqueProduct("source-type");
+    const receipt = await makeValuedReceipt(
+      `doc-source-type-${wrongTypeProduct}`,
+      [itemJson(wrongTypeProduct, "2", "1")],
+    );
+    const receiptCostLineId = await sql(
+      `SELECT id::text FROM public.inventory_cost_movement_lines WHERE movement_line_id='${receipt.lines[0]!.movement_line_id}'`,
+    );
+    const wrongTypeReturnId = await insertRawMovement({
+      type: "GOOD_RETURN",
+      accountabilityRoundId: ROUND_A,
+      lines: [{ productKey: wrongTypeProduct, qty: "1" }],
+    });
+    expect(await valueGoodReturnFails(wrongTypeReturnId, [receiptCostLineId])).toMatch(
+      /does not belong to an ISSUE movement/iu,
+    );
+    expect(await costMovementCount(wrongTypeReturnId)).toBe("0");
+
+    const reversedProduct = uniqueProduct("source-reversed");
+    await makeValuedReceipt(`doc-source-reversed-${reversedProduct}`, [itemJson(reversedProduct, "2", "1")]);
+    const issueId = await insertRawMovement({
+      type: "ISSUE",
+      accountabilityRoundId: ROUND_A,
+      lines: [{ productKey: reversedProduct, qty: "-1" }],
+    });
+    const issueVal = await valueConsumption(issueId);
+    const issueLine = (issueVal.lines as CostLine[])[0]!;
+    const sourceCostLineId = await sql(
+      `SELECT id::text FROM public.inventory_cost_movement_lines WHERE movement_line_id='${issueLine.movement_line_id}'`,
+    );
+    const sourceCostMovementId = await sql(
+      `SELECT cost_movement_id::text FROM public.inventory_cost_movement_lines WHERE id='${sourceCostLineId}'`,
+    );
+    const quantityReversal = await reverseQuantityMovement(
+      issueId,
+      `round-source-reversed-${reversedProduct}`,
+      "test",
+      "tester",
+    );
+    await reverseCostMovement(sourceCostMovementId, quantityReversal.reversalId, "test");
+
+    const reversedSourceReturnId = await insertRawMovement({
+      type: "GOOD_RETURN",
+      accountabilityRoundId: ROUND_A,
+      lines: [{ productKey: reversedProduct, qty: "1" }],
+    });
+    expect(await valueGoodReturnFails(reversedSourceReturnId, [sourceCostLineId])).toMatch(
+      /ISSUE cost movement .* has been reversed/iu,
+    );
+    expect(await costMovementCount(reversedSourceReturnId)).toBe("0");
+  });
+
+  test("an ISSUE cost movement cannot be reversed before its active GOOD_RETURN", async () => {
+    expect(ready).toBe(true);
+    const product = uniqueProduct("source-active-return");
+    await makeValuedReceipt(`doc-source-active-return-${product}`, [itemJson(product, "2", "1")]);
+    const issueId = await insertRawMovement({
+      type: "ISSUE",
+      accountabilityRoundId: ROUND_A,
+      lines: [{ productKey: product, qty: "-1" }],
+    });
+    const issueVal = await valueConsumption(issueId);
+    const issueLine = (issueVal.lines as CostLine[])[0]!;
+    const issueCostLineId = await sql(
+      `SELECT id::text FROM public.inventory_cost_movement_lines WHERE movement_line_id='${issueLine.movement_line_id}'`,
+    );
+
+    const returnId = await insertRawMovement({
+      type: "GOOD_RETURN",
+      accountabilityRoundId: ROUND_A,
+      lines: [{ productKey: product, qty: "1" }],
+    });
+    const returnVal = await valueGoodReturn(returnId, [issueCostLineId]);
+    const issueQuantityReversal = await reverseQuantityMovement(
+      issueId,
+      `source-active-issue-${product}`,
+      "test",
+      "tester",
+    );
+    expect(
+      await sqlFails(
+        `SELECT public.reverse_inventory_cost_movement(
+          '${issueVal.cost_movement_id}', '${issueQuantityReversal.reversalId}', 'test')`,
+      ),
+    ).toMatch(/source_issue_has_active_returns/iu);
+    expect(await costMovementCount(issueQuantityReversal.reversalId)).toBe("0");
+
+    const returnQuantityReversal = await reverseQuantityMovement(
+      returnId,
+      `source-active-return-${product}`,
+      "test",
+      "tester",
+    );
+    await reverseCostMovement(
+      returnVal.cost_movement_id as string,
+      returnQuantityReversal.reversalId,
+      "test",
+    );
+    const issueCostReversal = await reverseCostMovement(
+      issueVal.cost_movement_id as string,
+      issueQuantityReversal.reversalId,
+      "test",
+    );
+    expect(issueCostReversal.cost_event_type).toBe("REVERSAL");
+  });
+
+  test("reversing a GOOD_RETURN releases its cumulative return capacity", async () => {
+    expect(ready).toBe(true);
+    const product = uniqueProduct("return-reversal-cap");
+    await makeValuedReceipt(`doc-return-reversal-cap-${product}`, [itemJson(product, "1", "1")]);
+    const issueId = await insertRawMovement({
+      type: "ISSUE",
+      accountabilityRoundId: ROUND_A,
+      lines: [{ productKey: product, qty: "-1" }],
+    });
+    const issueVal = await valueConsumption(issueId);
+    const issueLine = (issueVal.lines as CostLine[])[0]!;
+    const sourceCostLineId = await sql(
+      `SELECT id::text FROM public.inventory_cost_movement_lines WHERE movement_line_id='${issueLine.movement_line_id}'`,
+    );
+
+    const firstReturnId = await insertRawMovement({
+      type: "GOOD_RETURN",
+      accountabilityRoundId: ROUND_A,
+      lines: [{ productKey: product, qty: "1" }],
+    });
+    const firstReturn = await valueGoodReturn(firstReturnId, [sourceCostLineId]);
+    const returnQuantityReversal = await reverseQuantityMovement(
+      firstReturnId,
+      `round-return-reversal-${product}`,
+      "test",
+      "tester",
+    );
+    await reverseCostMovement(
+      firstReturn.cost_movement_id as string,
+      returnQuantityReversal.reversalId,
+      "test",
+    );
+
+    const replacementReturnId = await insertRawMovement({
+      type: "GOOD_RETURN",
+      accountabilityRoundId: ROUND_A,
+      lines: [{ productKey: product, qty: "1" }],
+    });
+    const replacementReturn = await valueGoodReturn(replacementReturnId, [sourceCostLineId]);
+    expect((replacementReturn.lines as CostLine[])[0]?.signed_value_satang).toBe("100");
+    expect(await costBalance(product)).toEqual({
+      qty: "1.000000",
+      value: "100",
+      avg: "100.0000000000000000",
+    });
+  });
+
+  test("accountability rounds do not partition the weighted-average balance key", async () => {
+    expect(ready).toBe(true);
+    const product = uniqueProduct("round-shared-pool");
+    await makeValuedReceipt(`doc-round-pool-a-${product}`, [itemJson(product, "2", "1")]);
+    await makeValuedReceipt(`doc-round-pool-b-${product}`, [itemJson(product, "2", "3")]);
+    expect(await costBalance(product)).toEqual({
+      qty: "4.000000",
+      value: "800",
+      avg: "200.0000000000000000",
+    });
+
+    const issueA = await insertRawMovement({
+      type: "ISSUE",
+      accountabilityRoundId: ROUND_A,
+      lines: [{ productKey: product, qty: "-1" }],
+    });
+    const issueB = await insertRawMovement({
+      type: "ISSUE",
+      accountabilityRoundId: ROUND_B,
+      lines: [{ productKey: product, qty: "-1" }],
+    });
+    const valueA = await valueConsumption(issueA);
+    const valueB = await valueConsumption(issueB);
+    expect((valueA.lines as CostLine[])[0]?.signed_value_satang).toBe("-200");
+    expect((valueB.lines as CostLine[])[0]?.signed_value_satang).toBe("-200");
+    expect(await costBalance(product)).toEqual({
+      qty: "2.000000",
+      value: "400",
+      avg: "200.0000000000000000",
+    });
+    expect(
+      await sql(
+        `SELECT count(*)::text FROM public.inventory_cost_balances
+          WHERE location_code='MAIN' AND product_key=${sqlLiteral(product)} AND unit_key='kg'`,
+      ),
+    ).toBe("1");
   });
 
   // ═══════════════════════════════════════════════════════════════════════

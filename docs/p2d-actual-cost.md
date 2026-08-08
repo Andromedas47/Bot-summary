@@ -21,7 +21,7 @@ Migration number `0054` is claimed here. It has been reserved for P2D since
 | 4 | History is immutable. Corrections are compensating records, never edits. |
 | 5 | A purchase receipt adds `line_amount_satang` per confirmed item — `round(quantity × unit_cost × 100)`, already computed and frozen by 0052. |
 | 6 | A consumption (issue, damaged write-off) consumes at the moving average **effective at posting time**. |
-| 7 | A good return restores the **original issue cost**, read from the linked source cost line. If no source can be proven, it fails closed. |
+| 7 | A good return restores the **original active issue cost**, read from the linked source cost line. When P2E round identity exists, the source `ISSUE` and `GOOD_RETURN` must have the same non-null `accountability_round_id`. If source type, active state, or round provenance cannot be proven, it fails closed. |
 | 8 | Negative resulting quantity fails closed for valuation. |
 | 9 | Receipt-level expenses (freight, handling, discount, VAT) are **not** allocated into product cost in V1. |
 | 10 | Every valuation posting and reversal carries a deterministic unique key. |
@@ -90,6 +90,11 @@ without re-deriving it. It is never read back by any calculation.
 
 `source_cost_line_id` is the good-return provenance link. It is what makes rule
 7 provable rather than guessed.
+
+`accountability_round_id` remains on `inventory_movements`, where P2E owns it.
+Cost rows inherit that provenance through their existing movement FKs. It is
+never copied into cost rows and never added to the weighted-average balance
+key, which remains exactly `(location_code, product_key, unit_key)`.
 
 ### Sign agreement
 
@@ -169,7 +174,7 @@ then reports as an infinite unit cost.
 |---|---|
 | `insufficient_inventory` | consumption would drive the quantity balance below zero |
 | `missing_unit_cost` | a receipt item has `unit_cost IS NULL`, so `line_amount_satang` is NULL |
-| `unprovable_return_cost` | a good return cannot be linked to a source issue cost line |
+| `unprovable_return_cost` | a good return cannot be linked to an active ISSUE cost line with matching non-null P2E round provenance |
 | `movement_already_valued` | the movement already has a cost movement with a different dedupe key |
 | `cost_ledger_is_append_only` | any UPDATE/DELETE against either cost table |
 | `invalid_cost_binding` | cost line points at a ledger line belonging to a different movement |
@@ -201,7 +206,7 @@ thing rule 4 forbids.
 | `PURCHASE_RECEIPT` | `SOURCE_UNIT_COST` | `+line_amount_satang` per item, taken from the frozen 0052 confirmation payload. `NULL` refuses. |
 | `ISSUE` | `MOVING_AVERAGE` | `-round(value_balance × qty / quantity_balance)`, or `-value_balance` exactly when `qty = quantity_balance`. |
 | `DAMAGED_WRITE_OFF` | `MOVING_AVERAGE` | same as `ISSUE`. Distinguished only by type, so reporting can separate loss from cost of goods issued. It never restores sellable stock — it is a negative movement, so it structurally cannot. |
-| `GOOD_RETURN` | `SOURCE_ISSUE_SNAPSHOT` | `+round(source_unit_cost × returned_qty)` where `source_unit_cost = |source_cost_line.signed_value_satang| / |source_ledger_line.signed_quantity|`. Returning the full issued quantity restores the full issued value exactly. |
+| `GOOD_RETURN` | `SOURCE_ISSUE_SNAPSHOT` | `+round(source_unit_cost × returned_qty)` where `source_unit_cost = |source_cost_line.signed_value_satang| / |source_ledger_line.signed_quantity|`. The source must be an active `ISSUE`; when P2E is present, both movement headers must carry the same non-null `accountability_round_id`. Returning the full active quantity restores the full issued value exactly. Reversing a return releases its cumulative return capacity. |
 | `ADJUSTMENT` | `MOVING_AVERAGE` | positive adjustments require an explicit unit cost; negative adjustments consume at the average. |
 | `REVERSAL` | `EXACT_NEGATION` | exact negative of the reversed cost movement. |
 

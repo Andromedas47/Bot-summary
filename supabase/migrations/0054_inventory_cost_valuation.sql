@@ -1095,7 +1095,12 @@ DECLARE
   v_line               public.inventory_movement_lines;
   v_source_id          uuid;
   v_source_cost_line   public.inventory_cost_movement_lines;
+  v_source_cost_event  public.inventory_cost_movements;
   v_source_ledger_line public.inventory_movement_lines;
+  v_source_movement    public.inventory_movements;
+  v_round_aware        boolean;
+  v_return_round_id    uuid;
+  v_source_round_id    uuid;
   v_source_issue_qty   numeric;
   v_source_unit_cost   numeric(40,10);
   v_already_returned_qty   numeric;
@@ -1119,6 +1124,38 @@ BEGIN
       'value_good_return_movement only values GOOD_RETURN',
       p_movement_id, v_movement.movement_type
       USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  -- P2E owns accountability_round_id and may be applied before or after 0054.
+  -- Resolve the column dynamically so this function remains installable before
+  -- P2E, but immediately enforces round provenance once that canonical column
+  -- exists. Round identity is lineage only; no balance query or lock key below
+  -- includes it.
+  SELECT EXISTS (
+    SELECT 1
+      FROM pg_attribute
+     WHERE attrelid = 'public.inventory_movements'::regclass
+       AND attname = 'accountability_round_id'
+       AND attnum > 0
+       AND NOT attisdropped
+  ) INTO v_round_aware;
+
+  IF v_round_aware THEN
+    EXECUTE
+      'SELECT accountability_round_id
+         FROM public.inventory_movements
+        WHERE id = $1'
+      INTO v_return_round_id
+      USING p_movement_id;
+
+    IF v_return_round_id IS NULL THEN
+      RAISE EXCEPTION
+        'unprovable_return_cost: GOOD_RETURN movement % has no '
+        'accountability_round_id — round-aware source-cost restoration fails '
+        'closed when return provenance is missing',
+        p_movement_id
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
   END IF;
 
   v_dedupe_key := 'inventory-cost:' || lower('GOOD_RETURN') || ':v1:' || p_movement_id::text;
@@ -1214,9 +1251,66 @@ BEGIN
         USING ERRCODE = 'invalid_parameter_value';
     END IF;
 
+    SELECT * INTO v_source_cost_event
+      FROM public.inventory_cost_movements
+     WHERE id = v_source_cost_line.cost_movement_id
+       FOR UPDATE;
+
     SELECT * INTO v_source_ledger_line
       FROM public.inventory_movement_lines
      WHERE id = v_source_cost_line.movement_line_id;
+
+    SELECT * INTO v_source_movement
+      FROM public.inventory_movements
+     WHERE id = v_source_ledger_line.movement_id;
+
+    IF v_source_cost_event.cost_event_type IS DISTINCT FROM 'ISSUE'
+       OR v_source_movement.movement_type IS DISTINCT FROM 'ISSUE' THEN
+      RAISE EXCEPTION
+        'unprovable_return_cost: movement % line % names source cost line % '
+        'which does not belong to an ISSUE movement (cost event %, quantity '
+        'movement %) — a GOOD_RETURN may only restore an ISSUE',
+        p_movement_id, v_line.line_ordinal, v_source_id,
+        v_source_cost_event.cost_event_type, v_source_movement.movement_type
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    IF v_source_cost_event.reversed_by_cost_movement_id IS NOT NULL THEN
+      RAISE EXCEPTION
+        'unprovable_return_cost: movement % line % names source cost line % '
+        'from ISSUE cost movement % which has been reversed — a GOOD_RETURN '
+        'cannot restore a cancelled issue',
+        p_movement_id, v_line.line_ordinal, v_source_id, v_source_cost_event.id
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    IF v_round_aware THEN
+      EXECUTE
+        'SELECT accountability_round_id
+           FROM public.inventory_movements
+          WHERE id = $1'
+        INTO v_source_round_id
+        USING v_source_movement.id;
+
+      IF v_source_round_id IS NULL THEN
+        RAISE EXCEPTION
+          'unprovable_return_cost: movement % line % names source cost line % '
+          'whose ISSUE movement % has no accountability_round_id — '
+          'round-aware source-cost restoration fails closed',
+          p_movement_id, v_line.line_ordinal, v_source_id, v_source_movement.id
+          USING ERRCODE = 'invalid_parameter_value';
+      END IF;
+
+      IF v_source_round_id IS DISTINCT FROM v_return_round_id THEN
+        RAISE EXCEPTION
+          'unprovable_return_cost: movement % line % belongs to accountability '
+          'round % but source ISSUE cost line % belongs to round % — a '
+          'GOOD_RETURN cannot restore cost across accountability rounds',
+          p_movement_id, v_line.line_ordinal, v_return_round_id,
+          v_source_id, v_source_round_id
+          USING ERRCODE = 'invalid_parameter_value';
+      END IF;
+    END IF;
 
     IF v_source_ledger_line.location_code <> v_line.location_code
        OR v_source_ledger_line.product_key <> v_line.product_key
@@ -1245,9 +1339,13 @@ BEGIN
            coalesce(sum(prior_line.signed_quantity), 0)
       INTO v_already_returned_value, v_already_returned_qty
       FROM public.inventory_cost_movement_lines AS prior
+      JOIN public.inventory_cost_movements AS prior_cost
+        ON prior_cost.id = prior.cost_movement_id
       JOIN public.inventory_movement_lines AS prior_line
         ON prior_line.id = prior.movement_line_id
-     WHERE prior.source_cost_line_id = v_source_id;
+     WHERE prior.source_cost_line_id = v_source_id
+       AND prior_cost.cost_event_type = 'GOOD_RETURN'
+       AND prior_cost.reversed_by_cost_movement_id IS NULL;
 
     IF v_already_returned_qty + v_line.signed_quantity > v_source_issue_qty THEN
       RAISE EXCEPTION
@@ -1298,11 +1396,13 @@ $$;
 
 COMMENT ON FUNCTION public.value_good_return_movement(uuid, uuid[], text) IS
   'Values a GOOD_RETURN at the ORIGINAL issue cost, read from a caller-proven, '
-  'positionally-bound source cost line per return line. Never falls back to '
-  'the moving average — an unprovable return fails closed. Tracks cumulative '
-  'quantity and value already restored against each source cost line, across '
-  'every GOOD_RETURN ever posted against it, so a sequence of returns can '
-  'never over-restore beyond what that line issued.';
+  'positionally-bound active ISSUE cost line per return line. When P2E''s '
+  'accountability_round_id column exists, both movements must have the same '
+  'non-null round. Round identity is provenance, never a weighted-average '
+  'balance key. Never falls back to the moving average — an unprovable return '
+  'fails closed. Tracks cumulative quantity and value restored by active '
+  'GOOD_RETURN movements against each source cost line, so reversals release '
+  'their return capacity and active returns can never over-restore.';
 
 -- ── I.4 RPC: reverse a cost movement ─────────────────────────────────────────
 --
@@ -1373,6 +1473,30 @@ BEGIN
       'REVERSAL that undoes that exact movement',
       p_reversal_movement_id, v_original.movement_id, p_cost_movement_id, v_original.movement_id
       USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  -- An ISSUE remains the provenance root of every active GOOD_RETURN that
+  -- references one of its cost lines. Reversing that ISSUE first would leave
+  -- those returns restoring a cancelled source. Require callers to reverse the
+  -- dependent returns before reversing their source ISSUE.
+  IF v_original.cost_event_type = 'ISSUE'
+     AND EXISTS (
+       SELECT 1
+         FROM public.inventory_cost_movement_lines AS source_line
+         JOIN public.inventory_cost_movement_lines AS return_line
+           ON return_line.source_cost_line_id = source_line.id
+         JOIN public.inventory_cost_movements AS return_cost
+           ON return_cost.id = return_line.cost_movement_id
+        WHERE source_line.cost_movement_id = v_original.id
+          AND return_cost.cost_event_type = 'GOOD_RETURN'
+          AND return_cost.reversed_by_cost_movement_id IS NULL
+     ) THEN
+    RAISE EXCEPTION
+      'source_issue_has_active_returns: ISSUE cost movement % cannot be '
+      'reversed while an active GOOD_RETURN still restores one of its source '
+      'cost lines — reverse the dependent return first',
+      v_original.id
+      USING ERRCODE = 'restrict_violation';
   END IF;
 
   v_dedupe_key := 'inventory-cost:' || lower('REVERSAL') || ':v1:' || p_reversal_movement_id::text;

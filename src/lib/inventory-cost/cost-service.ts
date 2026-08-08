@@ -74,8 +74,8 @@ export class InventoryCostMissingUnitCostError extends Error {
 
 /**
  * A good return could not be bound to a source issue cost line — missing,
- * nonexistent, mismatched key, or already fully restored. Never falls back to
- * the moving average.
+ * nonexistent, wrong/reversed source type, mismatched key or round, or already
+ * fully restored. Never falls back to the moving average.
  */
 export class InventoryCostUnprovableReturnError extends Error {
   constructor(message = "unprovable_return_cost") {
@@ -166,9 +166,9 @@ export function mapInventoryCostRpcError(message: string): Error {
     return new InventoryCostMissingUnitCostError(text);
   }
 
-  // "unprovable_return_cost: ..." — four variants in value_good_return_movement:
-  // no source ids supplied, no id at a line's position, id does not exist, id
-  // names a different key, or id is already fully restored.
+  // "unprovable_return_cost: ..." — source id missing/nonexistent, source is
+  // not an active ISSUE, key or P2E round provenance differs, or the source is
+  // already fully restored.
   if (/unprovable_return_cost/iu.test(text)) {
     return new InventoryCostUnprovableReturnError(text);
   }
@@ -201,8 +201,9 @@ export function mapInventoryCostRpcError(message: string): Error {
   // % but cost movement % is bound to movement % ..." / "invalid_cost_binding:
   // movement % is not a REVERSAL of movement % — cost movement % values
   // movement % and can only be reversed by the 0053 REVERSAL that undoes that
-  // exact movement"
-  if (/invalid_cost_binding/iu.test(text)) {
+  // exact movement" / "source_issue_has_active_returns: ISSUE cost movement %
+  // cannot be reversed while an active GOOD_RETURN still restores ..."
+  if (/invalid_cost_binding|source_issue_has_active_returns/iu.test(text)) {
     return new InventoryCostInvalidBindingError(text);
   }
 

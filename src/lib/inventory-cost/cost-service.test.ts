@@ -487,6 +487,11 @@ describe("mapInventoryCostRpcError", () => {
       InventoryCostInvalidBindingError,
     ],
     [
+      "source_issue_has_active_returns: ISSUE cost movement a cannot be reversed " +
+        "while an active GOOD_RETURN still restores one of its source cost lines",
+      InventoryCostInvalidBindingError,
+    ],
+    [
       "value_sign_conflict: cost line c carries signed_value_satang=5 but its " +
         "ledger line l carries signed_quantity=-1",
       InventoryCostSignConflictError,

@@ -24,6 +24,7 @@ import {
   resolvePriceUnitIdentity,
   resolveProductIdentity,
   resolveQuantityUnitIdentity,
+  resolveSupplierIdentity,
   type IntakeProductRegistryRow,
   type IntakeUnitAliasRegistryRow,
 } from "./identity";
@@ -187,7 +188,8 @@ export function buildPurchaseReceiptDraftInput(params: {
     contractVersion: PURCHASE_CONTRACT_VERSION,
     businessDate: header.purchaseDate,
     purchaseTime: header.purchaseTime,
-    supplierRaw: header.supplierText.raw,
+    // Key and raw are set as a PAIR — purchase_receipts_supplier_pairing.
+    ...resolveSupplierIdentity(header.supplierText.raw),
     referenceText: header.referenceText?.raw ?? null,
     freightSatang: costs.freight.satang.toString(),
     handlingSatang: costs.handling.satang.toString(),

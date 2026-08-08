@@ -2,9 +2,11 @@
 
 ## Status
 
-- Verdict: blockers remediated locally; commit/push/required CI still pending.
+- Verdict: blockers remediated and pushed; one CI-only test-double compatibility
+  fix is validated locally and awaiting its follow-up push/checks.
 - PR: #38, branch `feat/p2e-accountability-round-identity`.
 - Starting head: `310bd25d7680cc66b0e93b2c3415c9eebc5a28ee`.
+- Remediation commit: `5ba7baabfd414f4345b9ae7a76df8f2d8c303f0a`.
 - Production Supabase, deployment, merge, and LINE delivery remain untouched.
 
 ## Blockers and root causes
@@ -50,16 +52,22 @@
   same-description rounds, A/B continuations, cash/slip/settlement/finalization/
   reconciliation isolation, real conflict targets, anon denial, and service-role access.
 - Passed: typecheck, lint (0 errors; 65 pre-existing warnings), `git diff --check`.
+- First pushed head: Vercel passed; the P2E PostgreSQL job passed. The shared
+  cross-feature guard exposed a missing Supabase `.is(..., null)` method in the
+  Guided Menu in-memory database. The shared fake now mirrors null filtering.
+- Follow-up local validation: exact failed file 30/30; exact CI guard 991 passed,
+  40 intentional PostgreSQL-environment skips, 0 failed; typecheck and diff check passed.
 - Build: Next compile and TypeScript passed; local prerender stops at `/overview`
   because this worktree intentionally has no Supabase URL. Required Vercel CI remains
   the environment-backed build authority.
-- Remaining: commit, push PR #38, wait for all required CI, fix P2E-only failures.
+- Remaining: push the follow-up checkpoint and wait for all required CI.
 
 ## Git state
 
-- Starting head `310bd25d`; remediation changes are unstaged and uncommitted.
+- Remediation commit `5ba7baa` is on the PR branch. The follow-up contains only
+  the shared fake's null-filter support and this checkpoint update.
 
 ## Exact next step
 
-Review final staged diff, commit the remediation, push the existing PR branch, and
-wait for required PostgreSQL and Vercel checks. Do not merge or deploy.
+Confirm required PostgreSQL and Vercel checks on the latest PR head. If green,
+report READY. Do not merge or deploy.

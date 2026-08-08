@@ -311,6 +311,14 @@ export class GuidedMenuFakeDatabase {
             },
             eq: (column: string, value: unknown) =>
               chain([...filters, (row) => row[column] === value]),
+            is: (column: string, value: unknown) =>
+              chain([
+                ...filters,
+                (row) =>
+                  value === null
+                    ? row[column] === null || row[column] === undefined
+                    : row[column] === value,
+              ]),
             /** Only `.not(col, "is", null)` is used by the guided lookups. */
             not: (column: string, _operator: string, _value: unknown) => {
               void _operator;
@@ -325,6 +333,13 @@ export class GuidedMenuFakeDatabase {
         return {
           eq: (column: string, value: unknown) =>
             chain([(row) => row[column] === value]),
+          is: (column: string, value: unknown) =>
+            chain([
+              (row) =>
+                value === null
+                  ? row[column] === null || row[column] === undefined
+                  : row[column] === value,
+            ]),
         };
       },
       update: (patch: Row) => ({

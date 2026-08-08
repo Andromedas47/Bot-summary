@@ -71,6 +71,12 @@ export type ProfitabilityCertificationState =
  *     produce_item_unattributed           a produce item of this round was not attributed
  *     pending_produce_sessions            damage/returns are still being decided
  *     accountability_round_open           the round is not closed yet
+ *     accountability_round_cancelled      the round was cancelled, so its money
+ *                                         is an abandoned cycle rather than a
+ *                                         result — cancelling voids none of the
+ *                                         underlying artifacts, so every figure
+ *                                         stays provable and would otherwise
+ *                                         certify
  *     unsupported_round_movement          a live movement bound to the round is
  *                                         neither ISSUE, GOOD_RETURN nor REVERSAL
  *                                         (above all DAMAGED_WRITE_OFF, which
@@ -87,6 +93,7 @@ export type ProfitabilityCertificationState =
  * carries it — so it fails closed rather than displaying a blank bullet.
  */
 export const PROFITABILITY_INCOMPLETE_REASONS = [
+  "accountability_round_cancelled",
   "accountability_round_open",
   "good_return_cost_unvalued",
   "good_return_quantity_mismatch",

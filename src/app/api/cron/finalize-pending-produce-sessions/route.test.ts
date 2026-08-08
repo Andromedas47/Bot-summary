@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { NextRequest } from "next/server";
-import { POST } from "./route";
+import { GET, POST } from "./route";
 
 const originalCronSecret = process.env.CRON_SECRET;
 
@@ -62,5 +62,17 @@ describe("produce notification operator resend authentication", () => {
     expect(await response.json()).toEqual({
       error: "produceSessionId must be a UUID",
     });
+  });
+});
+
+describe("pending produce sweep authentication", () => {
+  it("rejects an unauthenticated sweep before database work", async () => {
+    process.env.CRON_SECRET = "operator-secret";
+
+    const response = await GET(new NextRequest(
+      "http://localhost/api/cron/finalize-pending-produce-sessions",
+    ));
+
+    expect(response.status).toBe(401);
   });
 });

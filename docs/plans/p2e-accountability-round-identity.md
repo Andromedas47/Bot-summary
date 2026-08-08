@@ -47,7 +47,7 @@ P2E creates no ISSUE adapter: produce rows do not yet freeze canonical ledger pr
 - Expenses/wages/cash use the existing white-sheet columns. Settlement aggregates remain their separate existing contract; P2E adds identity, not duplicate money.
 - Settlement entries, settlement finalizations, and transfer reconciliations carry the UUID when the caller has authoritative round context.
 
-Existing descriptive unique constraints remain during the mixed-version gate. They may safely refuse a same-description second bound financial row; they must never overwrite or merge it. Removing those constraints requires a later cutover after every writer uses round-aware RPCs, because old PostgREST `onConflict` calls otherwise break (the failure previously repaired by migration 0058).
+Existing descriptive unique constraints remain through EXPAND. A temporary database trigger rejects every non-NULL round binding on White Sheet cash, settlement entries/finalizations, and reconciliations, because accepting even the first bound row would let a tuple-only old upsert merge into it. Old writers continue with NULL; modern financial writes fail closed during the short deploy-to-CONTRACT window. CONTRACT atomically removes the guards, tuple-only conflict targets, and tuple-only White Sheet lifecycle RPCs.
 
 ## 14. Corrections and reversals
 
@@ -73,15 +73,15 @@ The round stores creator event, source, owner, seller, market, date, status, and
 
 `accountability_rounds` has RLS enabled and no public policies. PUBLIC, anon, and authenticated receive no table access or privileged function execution. Narrow RPCs use `SECURITY DEFINER`, fixed `search_path = public, extensions, pg_temp`, validate all identities, and are executable only by `service_role`.
 
-Production currently reports RLS disabled on `settlement_entries`, `produce_session_notifications`, and `produce_notification_attempts`. P2E does not silently change those unrelated live access contracts; remediation needs a separate policy decision.
+Production currently reports RLS disabled on `settlement_entries`, `produce_session_notifications`, and `produce_notification_attempts`. P2E enables RLS and narrows grants on `settlement_entries`, which is in scope and accessed only through service-role server paths. The two notification tables remain unchanged.
 
 ## 22. Mixed-version rollout
 
-Migration M1 is forward-only and additive: new table plus nullable FKs, indexes, triggers, and new RPC signatures. Old writers continue with NULL. New writers use generated/explicit UUIDs. No NOT NULL is added to legacy artifacts. Plain legacy unique constraints stay until all writers are round-aware; conflicts fail closed rather than merge money.
+EXPAND (`20260808105001`) is forward-only: new table, nullable FKs, indexes, guards, and round-aware RPC overloads. Old writers continue with NULL. The compatible app may deploy, but its bound financial writes fail closed until CONTRACT (`20260808212137`) atomically removes guards and tuple-only targets. No NOT NULL is added to legacy artifacts. The deploy-to-CONTRACT interval is deliberately short.
 
 ## 23. Rollback
 
-Application rollback is safe because columns stay nullable and old RPCs remain. Schema rollback is not destructive: leave M1 objects in place and stop new writers. Do not drop UUIDs or rewrite history.
+Before CONTRACT, application rollback is safe: leave EXPAND installed and redeploy the old app. A failed CONTRACT rolls back transactionally to EXPAND. After CONTRACT, do not deploy a pre-P2E app: its old conflict targets and lifecycle RPC signatures intentionally fail closed. Roll forward with the compatible P2E app. Never drop UUIDs or rewrite history.
 
 ## 24. P3 handoff
 
@@ -109,4 +109,5 @@ Any required NULL, missing, or mismatched binding makes the snapshot INCOMPLETE.
 7. Rebinding and reversal lineage violations fail.
 8. Legacy rows stay NULL; ambiguous tuple backfill is absent.
 9. Real PostgreSQL concurrency and constraint tests hard-fail in CI when PostgreSQL is unavailable.
-10. P2D/P3 worktrees, Production data/schema, LINE, and PR #36 remain untouched.
+10. EXPAND preserves old writer targets and rejects bound financial writes; CONTRACT failure restores EXPAND atomically; post-CONTRACT old writers fail closed.
+11. P2D/P3 worktrees, Production data/schema, LINE, and PR #36 remain untouched before authorization.

@@ -2,6 +2,7 @@ export type WhiteSheetLifecycleScope = {
   sourceId: string;
   market: string;
   date: string;
+  accountabilityRoundId?: string | null;
 };
 
 export type WhiteSheetLifecycleResult =
@@ -31,12 +32,15 @@ export async function postWhiteSheetLifecycle(
   const path =
     action === "finalize" ? "/api/white-sheet/finalize" : "/api/white-sheet/reopen";
 
-  let body: Record<string, string>;
+  let body: Record<string, string | null>;
   if (action === "finalize") {
     body = {
       sourceId: scope.sourceId,
       market: scope.market,
       date: scope.date,
+      ...(scope.accountabilityRoundId !== undefined
+        ? { accountabilityRoundId: scope.accountabilityRoundId }
+        : {}),
     };
   } else {
     const reason = requireReopenReason(options.reason ?? "");
@@ -48,6 +52,9 @@ export async function postWhiteSheetLifecycle(
       market: scope.market,
       date: scope.date,
       reason,
+      ...(scope.accountabilityRoundId !== undefined
+        ? { accountabilityRoundId: scope.accountabilityRoundId }
+        : {}),
     };
   }
 

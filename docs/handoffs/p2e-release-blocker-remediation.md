@@ -1,5 +1,7 @@
 # P2E release-blocker remediation
 
+Superseded for cutover by `docs/handoffs/release-train-p2e-p2d-p3.md`; retained as the first remediation checkpoint.
+
 ## Status
 
 - Verdict: blockers remediated and pushed; one CI-only test-double compatibility

@@ -190,6 +190,8 @@ CREATE TABLE public.digital_white_sheet_cash_entries (
   snack numeric NOT NULL DEFAULT 0,
   other numeric NOT NULL DEFAULT 0,
   actual_cash_submitted numeric NOT NULL DEFAULT 0,
+  finalized_at timestamptz,
+  finalized_by text,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT digital_white_sheet_cash_entries_identity_key
@@ -203,8 +205,52 @@ CREATE TABLE public.white_sheet_lifecycle_events (
   business_date date NOT NULL,
   event text NOT NULL,
   actor text NOT NULL,
+  reason text,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE FUNCTION public.finalize_white_sheet_cash_entry(
+  p_source_id text, p_market_label_normalized text, p_business_date date, p_actor text
+) RETURNS public.digital_white_sheet_cash_entries
+LANGUAGE plpgsql AS $$
+DECLARE v_row public.digital_white_sheet_cash_entries;
+BEGIN
+  UPDATE public.digital_white_sheet_cash_entries
+  SET finalized_at = now(), finalized_by = btrim(p_actor)
+  WHERE source_id = p_source_id
+    AND market_label_normalized = p_market_label_normalized
+    AND business_date = p_business_date
+    AND finalized_at IS NULL
+  RETURNING * INTO v_row;
+  IF NOT FOUND THEN RAISE EXCEPTION 'no SUBMITTED White Sheet entry found'; END IF;
+  INSERT INTO public.white_sheet_lifecycle_events (
+    source_id, market_label_normalized, business_date, event, actor
+  ) VALUES (v_row.source_id, v_row.market_label_normalized, v_row.business_date, 'finalized', btrim(p_actor));
+  RETURN v_row;
+END;
+$$;
+
+CREATE FUNCTION public.reopen_white_sheet_cash_entry(
+  p_source_id text, p_market_label_normalized text, p_business_date date,
+  p_actor text, p_reason text
+) RETURNS public.digital_white_sheet_cash_entries
+LANGUAGE plpgsql AS $$
+DECLARE v_row public.digital_white_sheet_cash_entries;
+BEGIN
+  UPDATE public.digital_white_sheet_cash_entries
+  SET finalized_at = NULL, finalized_by = NULL
+  WHERE source_id = p_source_id
+    AND market_label_normalized = p_market_label_normalized
+    AND business_date = p_business_date
+    AND finalized_at IS NOT NULL
+  RETURNING * INTO v_row;
+  IF NOT FOUND THEN RAISE EXCEPTION 'no FINALIZED White Sheet entry found'; END IF;
+  INSERT INTO public.white_sheet_lifecycle_events (
+    source_id, market_label_normalized, business_date, event, actor, reason
+  ) VALUES (v_row.source_id, v_row.market_label_normalized, v_row.business_date, 'reopened', btrim(p_actor), btrim(p_reason));
+  RETURN v_row;
+END;
+$$;
 
 CREATE TABLE public.settlement_entries (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

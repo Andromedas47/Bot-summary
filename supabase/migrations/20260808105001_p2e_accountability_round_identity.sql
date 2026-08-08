@@ -1,5 +1,7 @@
--- P2E: generated accountability-round identity. Additive mixed-version gate:
--- old writers keep NULL; new writers bind explicit UUIDs. No legacy inference.
+-- P2E EXPAND: generated accountability-round identity.
+-- Old writers keep their legacy unique targets; new writers bind explicit UUIDs.
+-- CONTRACT removes legacy targets only after the compatible app is deployed.
+BEGIN;
 
 DO $$
 DECLARE
@@ -92,8 +94,6 @@ ALTER TABLE public.settlement_entries
   ADD COLUMN accountability_round_id uuid
     REFERENCES public.accountability_rounds(id);
 ALTER TABLE public.settlement_entries
-  DROP CONSTRAINT settlement_entries_settlement_date_settlement_time_staff_na_key;
-ALTER TABLE public.settlement_entries
   ADD CONSTRAINT settlement_entries_round_identity_key
   UNIQUE NULLS NOT DISTINCT (
     settlement_date, settlement_time, staff_name, market_name,
@@ -107,16 +107,11 @@ ALTER TABLE public.settlement_finalizations
   ADD COLUMN accountability_round_id uuid
     REFERENCES public.accountability_rounds(id);
 ALTER TABLE public.settlement_finalizations
-  DROP CONSTRAINT IF EXISTS settlement_finalizations_source_id_business_date_key;
-DROP INDEX IF EXISTS public.settlement_finalizations_legacy_source_date_key;
-ALTER TABLE public.settlement_finalizations
   ADD CONSTRAINT settlement_finalizations_round_identity_key
   UNIQUE NULLS NOT DISTINCT (source_id, business_date, accountability_round_id);
 ALTER TABLE public.transfer_reconciliations
   ADD COLUMN accountability_round_id uuid
     REFERENCES public.accountability_rounds(id);
-ALTER TABLE public.transfer_reconciliations
-  DROP CONSTRAINT transfer_reconciliations_source_date_key;
 ALTER TABLE public.transfer_reconciliations
   ADD CONSTRAINT transfer_reconciliations_round_identity_key
   UNIQUE NULLS NOT DISTINCT (source_id, business_date, accountability_round_id);
@@ -139,8 +134,6 @@ CREATE INDEX slip_evidences_accountability_round_idx
 CREATE INDEX manual_slip_sessions_accountability_round_idx
   ON public.manual_slip_sessions (accountability_round_id)
   WHERE accountability_round_id IS NOT NULL;
-ALTER TABLE public.digital_white_sheet_cash_entries
-  DROP CONSTRAINT digital_white_sheet_cash_entries_identity_key;
 CREATE UNIQUE INDEX digital_white_sheet_cash_entries_legacy_identity_uidx
   ON public.digital_white_sheet_cash_entries (
     source_id, market_label_normalized, business_date
@@ -160,6 +153,35 @@ CREATE UNIQUE INDEX settlement_finalizations_accountability_round_uidx
 CREATE UNIQUE INDEX transfer_reconciliations_accountability_round_uidx
   ON public.transfer_reconciliations (accountability_round_id)
   WHERE accountability_round_id IS NOT NULL;
+
+-- A bound row plus a legacy tuple-only upsert can silently merge identities.
+-- Keep financial writes unbound until CONTRACT removes both this guard and the
+-- old conflict targets. Modern writes fail closed during the short cutover.
+CREATE FUNCTION public.guard_p2e_bound_financial_write_during_expand()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF NEW.accountability_round_id IS NOT NULL THEN
+    RAISE EXCEPTION 'P2E EXPAND: bound financial writes require CONTRACT';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER p2e_expand_guard_settlement_entries
+  BEFORE INSERT OR UPDATE ON public.settlement_entries
+  FOR EACH ROW EXECUTE FUNCTION public.guard_p2e_bound_financial_write_during_expand();
+CREATE TRIGGER p2e_expand_guard_settlement_finalizations
+  BEFORE INSERT OR UPDATE ON public.settlement_finalizations
+  FOR EACH ROW EXECUTE FUNCTION public.guard_p2e_bound_financial_write_during_expand();
+CREATE TRIGGER p2e_expand_guard_transfer_reconciliations
+  BEFORE INSERT OR UPDATE ON public.transfer_reconciliations
+  FOR EACH ROW EXECUTE FUNCTION public.guard_p2e_bound_financial_write_during_expand();
+CREATE TRIGGER p2e_expand_guard_white_sheet_cash_entries
+  BEFORE INSERT OR UPDATE ON public.digital_white_sheet_cash_entries
+  FOR EACH ROW EXECUTE FUNCTION public.guard_p2e_bound_financial_write_during_expand();
 
 -- Native same-parent check for slip evidence. MATCH SIMPLE preserves legacy NULL.
 ALTER TABLE public.slip_batches
@@ -447,17 +469,124 @@ BEGIN
   WHERE source_id = NEW.source_id
     AND market_label_normalized = NEW.market_label_normalized
     AND business_date = NEW.business_date
+    AND accountability_round_id IS NOT DISTINCT FROM NEW.accountability_round_id
   FOR KEY SHARE;
-  IF v_round IS NOT NULL THEN
-    IF NEW.accountability_round_id IS NOT NULL
-       AND NEW.accountability_round_id IS DISTINCT FROM v_round THEN
-      RAISE EXCEPTION 'P2E: white-sheet lifecycle event round differs from cash row';
-    END IF;
-    NEW.accountability_round_id := v_round;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'P2E: white-sheet lifecycle event has no exact cash-row identity';
   END IF;
+  NEW.accountability_round_id := v_round;
   RETURN NEW;
 END;
 $$;
+
+-- New app overloads. Legacy signatures remain callable through EXPAND and are
+-- removed by CONTRACT after the compatible deployment is verified.
+CREATE OR REPLACE FUNCTION public.finalize_white_sheet_cash_entry(
+  p_source_id               text,
+  p_market_label_normalized text,
+  p_business_date           date,
+  p_accountability_round_id uuid,
+  p_actor                   text
+) RETURNS public.digital_white_sheet_cash_entries
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_row public.digital_white_sheet_cash_entries;
+  v_actor text;
+BEGIN
+  IF p_source_id IS NULL OR btrim(p_source_id) = ''
+     OR p_market_label_normalized IS NULL OR btrim(p_market_label_normalized) = ''
+     OR p_business_date IS NULL
+     OR p_actor IS NULL OR btrim(p_actor) = '' THEN
+    RAISE EXCEPTION 'P2E: invalid White Sheet finalize identity';
+  END IF;
+  v_actor := btrim(p_actor);
+
+  UPDATE public.digital_white_sheet_cash_entries
+  SET finalized_at = now(), finalized_by = v_actor
+  WHERE source_id = p_source_id
+    AND market_label_normalized = p_market_label_normalized
+    AND business_date = p_business_date
+    AND accountability_round_id IS NOT DISTINCT FROM p_accountability_round_id
+    AND finalized_at IS NULL
+  RETURNING * INTO v_row;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'no SUBMITTED White Sheet entry found for this exact round, or it is already finalized';
+  END IF;
+
+  INSERT INTO public.white_sheet_lifecycle_events (
+    source_id, market_label_normalized, business_date,
+    event, actor, accountability_round_id
+  ) VALUES (
+    v_row.source_id, v_row.market_label_normalized, v_row.business_date,
+    'finalized', v_actor, v_row.accountability_round_id
+  );
+  RETURN v_row;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.reopen_white_sheet_cash_entry(
+  p_source_id               text,
+  p_market_label_normalized text,
+  p_business_date           date,
+  p_accountability_round_id uuid,
+  p_actor                   text,
+  p_reason                  text
+) RETURNS public.digital_white_sheet_cash_entries
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_row public.digital_white_sheet_cash_entries;
+  v_actor text;
+  v_reason text;
+BEGIN
+  IF p_source_id IS NULL OR btrim(p_source_id) = ''
+     OR p_market_label_normalized IS NULL OR btrim(p_market_label_normalized) = ''
+     OR p_business_date IS NULL
+     OR p_actor IS NULL OR btrim(p_actor) = ''
+     OR p_reason IS NULL OR btrim(p_reason) = '' THEN
+    RAISE EXCEPTION 'P2E: invalid White Sheet reopen identity';
+  END IF;
+  v_actor := btrim(p_actor);
+  v_reason := btrim(p_reason);
+
+  UPDATE public.digital_white_sheet_cash_entries
+  SET finalized_at = NULL, finalized_by = NULL
+  WHERE source_id = p_source_id
+    AND market_label_normalized = p_market_label_normalized
+    AND business_date = p_business_date
+    AND accountability_round_id IS NOT DISTINCT FROM p_accountability_round_id
+    AND finalized_at IS NOT NULL
+  RETURNING * INTO v_row;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'no FINALIZED White Sheet entry found for this exact round';
+  END IF;
+
+  INSERT INTO public.white_sheet_lifecycle_events (
+    source_id, market_label_normalized, business_date,
+    event, actor, reason, accountability_round_id
+  ) VALUES (
+    v_row.source_id, v_row.market_label_normalized, v_row.business_date,
+    'reopened', v_actor, v_reason, v_row.accountability_round_id
+  );
+  RETURN v_row;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.finalize_white_sheet_cash_entry(
+  text, text, date, uuid, text
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.finalize_white_sheet_cash_entry(
+  text, text, date, uuid, text
+) TO service_role;
+REVOKE ALL ON FUNCTION public.reopen_white_sheet_cash_entry(
+  text, text, date, uuid, text, text
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.reopen_white_sheet_cash_entry(
+  text, text, date, uuid, text, text
+) TO service_role;
 
 CREATE TRIGGER produce_sessions_propagate_accountability_round
   BEFORE INSERT ON public.produce_sessions
@@ -736,3 +865,5 @@ COMMENT ON COLUMN public.produce_sessions.accountability_round_id IS
   'Immutable generated accountability cycle. NULL is legacy/unbound; never infer from descriptive fields.';
 COMMENT ON COLUMN public.inventory_movements.accountability_round_id IS
   'Accountability provenance only; never part of physical stock or weighted-average pool keys.';
+
+COMMIT;

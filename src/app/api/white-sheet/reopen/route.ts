@@ -16,6 +16,7 @@ interface ReopenRequestBody {
   market?: string;
   date?: string;
   reason?: string;
+  accountabilityRoundId?: string | null;
 }
 
 export async function POST(req: NextRequest) {
@@ -40,7 +41,12 @@ export async function POST(req: NextRequest) {
 
   try {
     const state = await reopenServerWhiteSheetCashEntry(
-      { sourceId, marketLabelNormalized: normalizedMarketLabel(market), businessDate: date },
+      {
+        sourceId,
+        marketLabelNormalized: normalizedMarketLabel(market),
+        businessDate: date,
+        accountabilityRoundId: body.accountabilityRoundId ?? null,
+      },
       actor.id,
       reason,
     );

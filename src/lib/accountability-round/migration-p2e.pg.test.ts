@@ -6,6 +6,7 @@ import { join } from "path";
 const root = join(import.meta.dir, "..", "..", "..");
 const bootstrap = join(root, "supabase", "tests", "p2e_accountability_round_bootstrap.sql");
 const migration = join(root, "supabase", "migrations", "20260808105001_p2e_accountability_round_identity.sql");
+const contract = join(root, "supabase", "migrations", "20260808212137_p2e_accountability_round_identity_contract.sql");
 const psql = existsSync("C:\\Program Files\\PostgreSQL\\17\\bin\\psql.exe") ? "C:\\Program Files\\PostgreSQL\\17\\bin\\psql.exe" : "psql";
 const env = { ...process.env, PGHOST: process.env.PGHOST ?? "localhost", PGUSER: process.env.PGUSER ?? "postgres", PGPASSWORD: process.env.PGPASSWORD ?? "postgres", PGPORT: process.env.PGPORT ?? "5432", PGCLIENTENCODING: "UTF8" };
 
@@ -61,6 +62,31 @@ describe.skipIf(!available)("P2E accountability-round migration", () => {
     const applied = await run(["-v", "ON_ERROR_STOP=1", "-f", migration], db);
     expect(applied.code, applied.stderr).toBe(0);
 
+    // EXPAND: deployed tuple-only writers still work; bound financial writes
+    // fail closed so an old upsert cannot merge into a new round.
+    await sql(`INSERT INTO settlement_entries(settlement_date,settlement_time,staff_name,market_name,money_cash)
+      VALUES ('2026-08-07','10:00','Legacy','Legacy',1)
+      ON CONFLICT (settlement_date,settlement_time,staff_name,market_name)
+      DO UPDATE SET money_cash=7`);
+    await sql(`INSERT INTO settlement_entries(settlement_date,settlement_time,staff_name,market_name,money_cash)
+      VALUES ('2026-08-07','10:00','Legacy','Legacy',7)
+      ON CONFLICT (settlement_date,settlement_time,staff_name,market_name)
+      DO UPDATE SET money_cash=EXCLUDED.money_cash`);
+    expect(await sql(`SELECT money_cash FROM settlement_entries WHERE staff_name='Legacy'`)).toBe("7");
+    await sql(`INSERT INTO transfer_reconciliations(source_id,business_date,ai_verified_total)
+      VALUES ('LEGACY','2026-08-07',1)
+      ON CONFLICT (source_id,business_date) DO UPDATE SET ai_verified_total=7`);
+    await sql(`INSERT INTO transfer_reconciliations(source_id,business_date,ai_verified_total)
+      VALUES ('LEGACY','2026-08-07',7)
+      ON CONFLICT (source_id,business_date) DO UPDATE SET ai_verified_total=EXCLUDED.ai_verified_total`);
+    expect(await sql(`SELECT ai_verified_total FROM transfer_reconciliations WHERE source_id='LEGACY'`)).toBe("7");
+    await sql(`INSERT INTO digital_white_sheet_cash_entries(source_id,market_label_normalized,business_date)
+      VALUES ('LEGACY','Legacy','2026-08-07')`);
+    expect(await sql(`SELECT (public.finalize_white_sheet_cash_entry('LEGACY','Legacy','2026-08-07','old-app')).finalized_by`)).toBe("old-app");
+    await sql(`SELECT public.reopen_white_sheet_cash_entry('LEGACY','Legacy','2026-08-07','old-app','test')`);
+    await sql(`INSERT INTO settlement_finalizations(source_id,business_date) VALUES ('LEGACY','2026-08-07')`);
+    await fails(`INSERT INTO settlement_finalizations(source_id,business_date) VALUES ('LEGACY','2026-08-07')`, /duplicate key/i);
+
     const a = await open({ key: "main-a", event: "event-a" });
     const retry = await open({ key: "main-a", event: "event-a" });
     const b = await open({ key: "main-b", event: "event-b" });
@@ -113,14 +139,48 @@ describe.skipIf(!available)("P2E accountability-round migration", () => {
 
     await sql(`INSERT INTO manual_slip_sessions(source_id,business_date,market_label,market_key,opened_by_line_user_id,accountability_round_id)
       VALUES ('G1','2026-08-08','Market','Market','U1','${a.accountability_round_id}')`);
+    await fails(`INSERT INTO digital_white_sheet_cash_entries(source_id,market_label_normalized,business_date,accountability_round_id)
+      VALUES ('G1','Market','2026-08-08','${a.accountability_round_id}')`, /P2E EXPAND/);
+    await fails(`INSERT INTO settlement_entries(settlement_date,settlement_time,staff_name,market_name,source_id,accountability_round_id)
+      VALUES ('2026-08-08','10:00','Seller','Market','G1','${a.accountability_round_id}')`, /P2E EXPAND/);
+    await fails(`INSERT INTO settlement_finalizations(source_id,business_date,accountability_round_id)
+      VALUES ('G1','2026-08-08','${a.accountability_round_id}')`, /P2E EXPAND/);
+    await fails(`INSERT INTO transfer_reconciliations(source_id,business_date,accountability_round_id)
+      VALUES ('G1','2026-08-08','${a.accountability_round_id}')`, /P2E EXPAND/);
+    expect(await sql(`SELECT count(*) FROM settlement_entries WHERE accountability_round_id IS NOT NULL`)).toBe("0");
+
+    // A late CONTRACT error rolls the whole transaction back to EXPAND.
+    await sql(`ALTER FUNCTION public.reopen_white_sheet_cash_entry(text,text,date,text,text)
+      RENAME TO reopen_white_sheet_cash_entry_contract_failure`);
+    const failedContract = await run(["-v", "ON_ERROR_STOP=1", "-f", contract], db);
+    expect(failedContract.code).not.toBe(0);
+    expect(await sql(`SELECT to_regprocedure('public.guard_p2e_bound_financial_write_during_expand()') IS NOT NULL`)).toBe("t");
+    expect(await sql(`SELECT to_regprocedure('public.finalize_white_sheet_cash_entry(text,text,date,text)') IS NOT NULL`)).toBe("t");
+    expect(await sql(`SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='settlement_entries_settlement_date_settlement_time_staff_na_key')`)).toBe("t");
+    await sql(`ALTER FUNCTION public.reopen_white_sheet_cash_entry_contract_failure(text,text,date,text,text)
+      RENAME TO reopen_white_sheet_cash_entry`);
+
+    const contracted = await run(["-v", "ON_ERROR_STOP=1", "-f", contract], db);
+    expect(contracted.code, contracted.stderr).toBe(0);
+    expect(await sql(`SELECT to_regprocedure('public.guard_p2e_bound_financial_write_during_expand()') IS NULL`)).toBe("t");
+    expect(await sql(`SELECT to_regprocedure('public.finalize_white_sheet_cash_entry(text,text,date,text)') IS NULL`)).toBe("t");
+    await fails(`INSERT INTO settlement_entries(settlement_date,settlement_time,staff_name,market_name)
+      VALUES ('2026-08-07','10:00','Legacy','Legacy')
+      ON CONFLICT (settlement_date,settlement_time,staff_name,market_name) DO NOTHING`, /no unique or exclusion constraint/i);
+    await fails(`INSERT INTO transfer_reconciliations(source_id,business_date)
+      VALUES ('LEGACY','2026-08-07') ON CONFLICT (source_id,business_date) DO NOTHING`, /no unique or exclusion constraint/i);
+
     await sql(`INSERT INTO digital_white_sheet_cash_entries(source_id,market_label_normalized,business_date) VALUES ('G1','Market','2026-08-08')`);
     await sql(`INSERT INTO manual_white_sheet_note_sessions(source_id,market_label,market_label_normalized,business_date,opened_by_line_user_id,opened_line_event_id,accountability_round_id)
       VALUES ('G1','Market','Market','2026-08-08','U1','white-a','${a.accountability_round_id}')`);
     await sql(`UPDATE manual_white_sheet_note_sessions SET status='closed' WHERE opened_line_event_id='white-a'`);
-    expect(await sql(`SELECT accountability_round_id FROM digital_white_sheet_cash_entries`)).toBe(a.accountability_round_id);
+    expect(await sql(`SELECT accountability_round_id FROM digital_white_sheet_cash_entries WHERE source_id='G1'`)).toBe(a.accountability_round_id);
     await sql(`INSERT INTO digital_white_sheet_cash_entries(source_id,market_label_normalized,business_date,actual_cash_submitted,accountability_round_id)
       VALUES ('G1','Market','2026-08-08',222,'${b.accountability_round_id}')`);
-    expect(await sql(`SELECT count(DISTINCT accountability_round_id) FROM digital_white_sheet_cash_entries`)).toBe("2");
+    expect(await sql(`SELECT count(DISTINCT accountability_round_id) FROM digital_white_sheet_cash_entries WHERE source_id='G1'`)).toBe("2");
+    expect(await sql(`SELECT (public.finalize_white_sheet_cash_entry('G1','Market','2026-08-08','${a.accountability_round_id}','new-app')).accountability_round_id`)).toBe(a.accountability_round_id);
+    await sql(`SELECT public.reopen_white_sheet_cash_entry('G1','Market','2026-08-08','${a.accountability_round_id}','new-app','test')`);
+    expect(await sql(`SELECT accountability_round_id FROM white_sheet_lifecycle_events WHERE source_id='G1' ORDER BY created_at DESC LIMIT 1`)).toBe(a.accountability_round_id);
 
     await sql(`INSERT INTO settlement_entries(settlement_date,settlement_time,staff_name,market_name,source_id,accountability_round_id) VALUES
       ('2026-08-08','10:00','Seller','Market','G1','${a.accountability_round_id}'),
@@ -145,7 +205,7 @@ describe.skipIf(!available)("P2E accountability-round migration", () => {
       DO UPDATE SET ai_verified_total=EXCLUDED.ai_verified_total`);
     expect(await sql(`SELECT ai_verified_total FROM transfer_reconciliations WHERE accountability_round_id='${a.accountability_round_id}'`)).toBe("11");
     await sql(`UPDATE settlement_entries SET money_cash=10 WHERE accountability_round_id='${a.accountability_round_id}'`);
-    await fails(`UPDATE settlement_entries SET accountability_round_id='${b.accountability_round_id}' WHERE settlement_time='10:00'`, /write-once/i);
+    await fails(`UPDATE settlement_entries SET accountability_round_id='${b.accountability_round_id}' WHERE accountability_round_id='${a.accountability_round_id}'`, /write-once/i);
 
     const [c1, c2] = await Promise.all([open({ key: "concurrent", event: "concurrent" }), open({ key: "concurrent", event: "concurrent" })]);
     expect(c1.accountability_round_id).toBe(c2.accountability_round_id);
@@ -159,7 +219,7 @@ describe.skipIf(!available)("P2E accountability-round migration", () => {
     expect(await sql(`SELECT has_table_privilege('authenticated','settlement_entries','SELECT')::text || has_table_privilege('authenticated','settlement_entries','INSERT')::text || has_table_privilege('authenticated','settlement_entries','UPDATE')::text || has_table_privilege('authenticated','settlement_entries','DELETE')::text`)).toBe("falsefalsefalsefalse");
     expect(await sql(`SELECT has_table_privilege('service_role','settlement_entries','SELECT')::text || has_table_privilege('service_role','settlement_entries','INSERT')::text || has_table_privilege('service_role','settlement_entries','UPDATE')::text || has_table_privilege('service_role','settlement_entries','DELETE')::text`)).toBe("truetruetruefalse");
     await fails(`SET ROLE anon; SELECT count(*) FROM settlement_entries`, /permission denied|row-level security/i);
-    expect(await sql(`SET ROLE service_role; UPDATE settlement_entries SET money_cash=money_cash WHERE accountability_round_id='${a.accountability_round_id}'; SELECT count(*) FROM settlement_entries; RESET ROLE`)).toContain("2");
+    expect(await sql(`SET ROLE service_role; UPDATE settlement_entries SET money_cash=money_cash WHERE accountability_round_id='${a.accountability_round_id}'; SELECT count(*) FROM settlement_entries; RESET ROLE`)).toContain("3");
     expect(await sql(`SELECT has_function_privilege('anon','public.open_accountability_round_produce_session(text,text,text,text,text,bigint,integer,date,text,text,text,text,text,text,text,text,text,uuid,uuid,text)','EXECUTE')`)).toBe("f");
   }, 60_000);
 

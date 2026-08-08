@@ -22,6 +22,8 @@ export async function GET(req: NextRequest) {
   const sourceId = req.nextUrl.searchParams.get("sourceId");
   const market = req.nextUrl.searchParams.get("market");
   const date = req.nextUrl.searchParams.get("date");
+  const accountabilityRoundId =
+    req.nextUrl.searchParams.get("accountabilityRoundId") || null;
 
   if (!sourceId || !market || !date) {
     return NextResponse.json(
@@ -36,10 +38,11 @@ export async function GET(req: NextRequest) {
       marketKey: market,
       marketLabel: market,
       businessDate: date,
+      accountabilityRoundId,
     });
     return NextResponse.json(pageModel);
   } catch (err) {
-    if (err instanceof WhiteSheetDataError) {
+    if (err instanceof WhiteSheetDataError || err instanceof WhiteSheetPersistenceError) {
       return NextResponse.json({ error: err.message }, { status: 400 });
     }
     return NextResponse.json(
@@ -60,6 +63,7 @@ interface WhiteSheetCashEntryRequestBody {
   other?: number;
   otherNote?: string | null;
   actualCashSubmitted?: number;
+  accountabilityRoundId?: string | null;
 }
 
 export async function POST(req: NextRequest) {
@@ -78,6 +82,7 @@ export async function POST(req: NextRequest) {
       sourceId,
       marketLabelNormalized: normalizedMarketLabel(market),
       businessDate: date,
+      accountabilityRoundId: body.accountabilityRoundId ?? null,
       labor: body.labor ?? 0,
       locationFee: body.locationFee ?? 0,
       bag: body.bag ?? 0,
@@ -95,6 +100,7 @@ export async function POST(req: NextRequest) {
       marketKey: market,
       marketLabel: market,
       businessDate: date,
+      accountabilityRoundId: body.accountabilityRoundId ?? null,
     });
     return NextResponse.json(pageModel);
   } catch (err) {

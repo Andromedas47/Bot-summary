@@ -2062,6 +2062,7 @@ export interface Database {
           p_source_id:               string;
           p_market_label_normalized: string;
           p_business_date:           string;
+          p_accountability_round_id: string | null;
           p_actor:                   string;
         };
         Returns: {
@@ -2080,6 +2081,7 @@ export interface Database {
           updated_at:              string;
           finalized_at:            string | null;
           finalized_by:            string | null;
+          accountability_round_id: string | null;
         };
       };
       reopen_white_sheet_cash_entry: {
@@ -2087,6 +2089,7 @@ export interface Database {
           p_source_id:               string;
           p_market_label_normalized: string;
           p_business_date:           string;
+          p_accountability_round_id: string | null;
           p_actor:                   string;
           p_reason:                  string;
         };
@@ -2106,6 +2109,7 @@ export interface Database {
           updated_at:              string;
           finalized_at:            string | null;
           finalized_by:            string | null;
+          accountability_round_id: string | null;
         };
       };
       open_physical_inventory_session: {

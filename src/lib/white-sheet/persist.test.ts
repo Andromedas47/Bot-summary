@@ -383,6 +383,14 @@ describe("loadWhiteSheetCashEntry", () => {
     ).rejects.toThrow(WhiteSheetPersistenceError);
   });
 
+  it("rejects a malformed accountability round UUID", async () => {
+    const { database } = makeFakeSupabase();
+    await expect(loadWhiteSheetCashEntry(database, {
+      ...IDENTITY,
+      accountabilityRoundId: "not-a-uuid",
+    })).rejects.toThrow(/accountabilityRoundId must be a UUID/);
+  });
+
   it("rejects a malformed businessDate", async () => {
     const { database } = makeFakeSupabase();
     await expect(
@@ -664,6 +672,7 @@ describe("White Sheet lifecycle (finalize/reopen)", () => {
       p_source_id: IDENTITY.sourceId,
       p_market_label_normalized: IDENTITY.marketLabelNormalized,
       p_business_date: IDENTITY.businessDate,
+      p_accountability_round_id: null,
       p_actor: "admin-1",
     });
   });
@@ -681,6 +690,7 @@ describe("White Sheet lifecycle (finalize/reopen)", () => {
       p_source_id: IDENTITY.sourceId,
       p_market_label_normalized: IDENTITY.marketLabelNormalized,
       p_business_date: IDENTITY.businessDate,
+      p_accountability_round_id: null,
       p_actor: "admin-2",
       p_reason: "operator reported a typo",
     });

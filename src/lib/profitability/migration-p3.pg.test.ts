@@ -1786,4 +1786,488 @@ describe.skipIf(!available)("P3 profitability snapshots (real PostgreSQL)", () =
     },
     180_000,
   );
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // 14. Settlement cross-round isolation
+  //
+  // Three rounds that are descriptively INDISTINGUISHABLE. A and B each own a
+  // settlement family whose descriptive columns are byte-identical; C owns
+  // none. Every claim below is about the SETTLEMENT side specifically, because
+  // settlement is the surface a pre-P2E implementation keyed on
+  // (settlement_date, settlement_time, staff_name, market_name, source_id) —
+  // exactly the tuple that can no longer identify a round.
+  // ═════════════════════════════════════════════════════════════════════════
+
+  test(
+    "a settlement family bound to one round never leaks into, satisfies or attaches to its identically-described siblings",
+    async () => {
+      const product = uniqueKey("p3-settle-iso");
+      await makeValuedReceipt(`doc-${product}`, [itemJson(product, "30", "1")]); // avg 100
+      await seedPrice(product, 300);
+
+      const roundA = await openRound("p3-settle-iso-a", "p3-settle-iso-a-open");
+      const roundB = await openRound("p3-settle-iso-b", "p3-settle-iso-b-open");
+      const roundC = await openRound("p3-settle-iso-c", "p3-settle-iso-c-open");
+      expect(new Set([roundA, roundB, roundC]).size).toBe(3);
+
+      // The premise, asserted rather than assumed: every descriptive field the
+      // old identity was built from is the same on all three rounds, so the
+      // round id is the ONLY thing that can separate them.
+      expect(
+        await sql(
+          `SELECT count(DISTINCT (source_id, owner_line_user_id, business_date,
+                                  seller_label, market_label_normalized))
+             FROM public.accountability_rounds
+            WHERE id IN ('${roundA}', '${roundB}', '${roundC}')`,
+        ),
+      ).toBe("1");
+
+      async function build(round: string): Promise<string> {
+        const session = await newSession(round);
+        const [item] = await addItems(session, [{ type: "issue", product, qty: "5" }]);
+        const issue = await postMovement({
+          type: "ISSUE", sessionId: session, round, lines: [{ product, qty: "-5" }],
+        });
+        await valueIssue(issue);
+        await whiteSheet(round, { actualCash: "15.00" });
+        await finalizePendingSessions(round);
+        return item!;
+      }
+
+      const itemA = await build(roundA);
+      const itemB = await build(roundB);
+      const itemC = await build(roundC);
+
+      /**
+       * The settlement family, with BYTE-IDENTICAL descriptive columns on both
+       * rounds — same settlement_time included, which P2E's
+       * `UNIQUE NULLS NOT DISTINCT (date, time, staff, market, round)` permits
+       * on purpose. Money differs so a leak would also be visible as a number.
+       */
+      const SETTLE_TIME = "10:00";
+      async function settle(round: string, transfer: string) {
+        const entry = await insertReturningId(
+          `INSERT INTO public.settlement_entries
+             (settlement_date, settlement_time, staff_name, market_name, source_id,
+              money_transfer, accountability_round_id)
+           VALUES (${lit(DATE)}, ${lit(SETTLE_TIME)}, ${lit(SELLER)}, ${lit(MARKET)},
+                   ${lit(SOURCE)}, ${transfer}, '${round}')`,
+        );
+        const finalization = await insertReturningId(
+          `INSERT INTO public.settlement_finalizations
+             (source_id, business_date, status, accountability_round_id)
+           VALUES (${lit(SOURCE)}, ${lit(DATE)}, 'finalized', '${round}')`,
+        );
+        const reconciliation = await insertReturningId(
+          `INSERT INTO public.transfer_reconciliations
+             (source_id, business_date, submitted_transfer_total, matched, accountability_round_id)
+           VALUES (${lit(SOURCE)}, ${lit(DATE)}, ${transfer}, true, '${round}')`,
+        );
+        const batch = await insertReturningId(
+          `INSERT INTO public.slip_batches
+             (source_id, source_type, sender_id, seller_name, market_name, slip_date,
+              accountability_round_id)
+           VALUES (${lit(SOURCE)}, 'group', ${lit(OWNER)}, ${lit(SELLER)}, ${lit(MARKET)},
+                   ${lit(DATE)}, '${round}')`,
+        );
+        return { entry, finalization, reconciliation, batch };
+      }
+
+      const a = await settle(roundA, "111.00");
+      const b = await settle(roundB, "222.00");
+      // Round C deliberately gets NOTHING on the settlement side.
+
+      // The hazard is real, not hypothetical: these two settlement entries agree
+      // on every column of the pre-P2E unique key and disagree only on the round
+      // id, so any descriptive lookup over them is ambiguous by construction.
+      expect(
+        await sql(
+          `SELECT count(DISTINCT (settlement_date, settlement_time, staff_name,
+                                  market_name, source_id))::text || '/' ||
+                  count(DISTINCT accountability_round_id)::text
+             FROM public.settlement_entries
+            WHERE id IN ('${a.entry}', '${b.entry}')`,
+        ),
+      ).toBe("1/2");
+
+      // ...and this is literally the query a descriptive implementation would
+      // run for Round C. It finds BOTH siblings' entries. C owns neither.
+      // Scoped to the two ids this test created, because the suite shares one
+      // database and other rounds have already added their own siblings — which
+      // only makes the descriptive tuple more ambiguous, never less.
+      expect(
+        await sql(
+          `SELECT count(*)
+             FROM public.settlement_entries s
+             JOIN public.accountability_rounds r ON r.id = '${roundC}'
+            WHERE s.id IN ('${a.entry}', '${b.entry}')
+              AND s.settlement_date = r.business_date
+              AND s.staff_name       = r.seller_label
+              AND s.market_name      = r.market_label_normalized
+              AND s.source_id        = r.source_id`,
+        ),
+      ).toBe("2");
+      expect(
+        await sql(
+          `SELECT count(*) FROM public.settlement_entries
+            WHERE accountability_round_id = '${roundC}'`,
+        ),
+      ).toBe("0");
+
+      // P2E guarantees at most ONE settlement entry per round, which is what
+      // makes a round-keyed read deterministic in the first place.
+      expect(
+        await sqlBool(
+          `SELECT EXISTS (SELECT 1 FROM pg_indexes
+             WHERE schemaname = 'public'
+               AND indexname = 'settlement_entries_accountability_round_uidx')`,
+        ),
+      ).toBe(true);
+
+      await closeRound(roundA, "p3-settle-iso-a-close");
+      await closeRound(roundB, "p3-settle-iso-b-close");
+      await closeRound(roundC, "p3-settle-iso-c-close");
+
+      const opts: RecordOpts = { transfers: "0", purchasing: "0" };
+      const postedA = await record(roundA, [{ itemId: itemA, product }], {
+        ...opts, transferSourceIds: [a.batch, a.reconciliation],
+      });
+      const postedB = await record(roundB, [{ itemId: itemB, product }], {
+        ...opts, transferSourceIds: [b.batch, b.reconciliation],
+      });
+      const postedC = await record(roundC, [{ itemId: itemC, product }], opts);
+      expect(postedA.certification_state).toBe("CERTIFIED");
+      expect(postedB.certification_state).toBe("CERTIFIED");
+      expect(postedC.certification_state).toBe("CERTIFIED");
+
+      const lineage = async (round: string) =>
+        (await readSnapshot(round)).sources.map((s) => `${s.artifact_kind}:${s.artifact_id}`);
+      const sourcesA = await lineage(roundA);
+      const sourcesB = await lineage(roundB);
+      const sourcesC = await lineage(roundC);
+
+      // Each round attaches exactly its OWN settlement evidence...
+      expect(sourcesA).toContain(`settlement_entry:${a.entry}`);
+      expect(sourcesA).toContain(`slip_batch:${a.batch}`);
+      expect(sourcesA).toContain(`transfer_reconciliation:${a.reconciliation}`);
+      expect(sourcesB).toContain(`settlement_entry:${b.entry}`);
+      expect(sourcesB).toContain(`slip_batch:${b.batch}`);
+      expect(sourcesB).toContain(`transfer_reconciliation:${b.reconciliation}`);
+
+      // ...and never its twin's, in either direction.
+      for (const id of [b.entry, b.finalization, b.reconciliation, b.batch]) {
+        expect(sourcesA.some((s) => s.endsWith(`:${id}`))).toBe(false);
+      }
+      for (const id of [a.entry, a.finalization, a.reconciliation, a.batch]) {
+        expect(sourcesB.some((s) => s.endsWith(`:${id}`))).toBe(false);
+      }
+
+      // Round C: two identically-described settlement families exist and C
+      // observes NEITHER. Not one of them, and not a merge of both — a round
+      // with no settlement of its own has an empty settlement lineage.
+      for (const id of [
+        a.entry, a.finalization, a.reconciliation, a.batch,
+        b.entry, b.finalization, b.reconciliation, b.batch,
+      ]) {
+        expect(sourcesC.some((s) => s.endsWith(`:${id}`))).toBe(false);
+      }
+      for (const kind of ["settlement_entry", "settlement_finalization",
+                          "transfer_reconciliation", "slip_batch"]) {
+        expect(sourcesC.some((s) => s.startsWith(`${kind}:`))).toBe(false);
+      }
+
+      // The same statement in SQL, over the real lineage table: zero overlap
+      // between what a descriptive lookup would have found for Round C and what
+      // Round C's snapshot actually recorded.
+      expect(
+        await sql(
+          `SELECT count(*)
+             FROM public.profitability_snapshot_sources x
+             JOIN public.settlement_entries s ON s.id = x.artifact_id
+             JOIN public.accountability_rounds r ON r.id = '${roundC}'
+            WHERE x.snapshot_id = '${postedC.snapshot_id}'
+              AND s.settlement_date = r.business_date
+              AND s.staff_name      = r.seller_label
+              AND s.market_name     = r.market_label_normalized
+              AND s.source_id       = r.source_id`,
+        ),
+      ).toBe("0");
+
+      // ── Explicit attribution refuses across rounds ────────────────────────
+      // The RPC does accept caller-supplied transfer evidence, so the refusal
+      // has to be proven at that door too, per id and per artifact class.
+      for (const id of [a.batch, a.reconciliation]) {
+        expect(
+          await recordFails(roundB, [{ itemId: itemB, product }], {
+            ...opts, transferSourceIds: [id],
+          }),
+        ).toMatch(/cross_round_artifact/u);
+      }
+      for (const id of [b.batch, b.reconciliation]) {
+        expect(
+          await recordFails(roundA, [{ itemId: itemA, product }], {
+            ...opts, transferSourceIds: [id],
+          }),
+        ).toMatch(/cross_round_artifact/u);
+      }
+      // One valid own-round id does not launder a cross-round id beside it.
+      expect(
+        await recordFails(roundB, [{ itemId: itemB, product }], {
+          ...opts, transferSourceIds: [b.batch, a.batch],
+        }),
+      ).toMatch(/cross_round_artifact/u);
+
+      /**
+       * A settlement entry and a settlement finalization are NOT transfer
+       * evidence in this contract, so their ids fail closed in BOTH directions
+       * — including from their own round. That matters because the lineage
+       * writer classifies a supplied id by elimination, with
+       * `transfer_reconciliation` as the final ELSE: if an unproven id could
+       * reach it, a settlement entry would be recorded as a reconciliation that
+       * does not exist. This proves that branch is unreachable.
+       */
+      for (const round of [roundA, roundB] as const) {
+        const item = round === roundA ? itemA : itemB;
+        for (const id of [a.entry, a.finalization, b.entry, b.finalization]) {
+          expect(
+            await recordFails(round, [{ itemId: item, product }], {
+              ...opts, transferSourceIds: [id],
+            }),
+          ).toMatch(/cross_round_artifact/u);
+        }
+      }
+      const stranger = await sql(`SELECT gen_random_uuid()`);
+      expect(
+        await recordFails(roundC, [{ itemId: itemC, product }], {
+          ...opts, transferSourceIds: [stranger],
+        }),
+      ).toMatch(/cross_round_artifact/u);
+
+      // Every refusal above was a refusal: no extra revision anywhere.
+      expect(await snapshotCount(roundA)).toBe("1");
+      expect(await snapshotCount(roundB)).toBe("1");
+      expect(await snapshotCount(roundC)).toBe("1");
+      expect(
+        await sql(
+          `SELECT count(*) FROM public.profitability_snapshot_sources
+            WHERE artifact_kind = 'transfer_reconciliation'
+              AND artifact_id IN ('${a.entry}', '${b.entry}',
+                                  '${a.finalization}', '${b.finalization}', '${stranger}')`,
+        ),
+      ).toBe("0");
+    },
+    240_000,
+  );
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // 15. White Sheet cross-round isolation
+  //
+  // The White Sheet is the only source of approved wages, approved expenses
+  // and submitted cash, so a descriptive fallback here would not merely
+  // mis-attribute lineage — it would put another round's money in this round's
+  // profit. Round A and Round B carry DELIBERATELY DIFFERENT amounts so a leak
+  // is visible as a wrong number, and Round C carries none at all.
+  // ═════════════════════════════════════════════════════════════════════════
+
+  test(
+    "a White Sheet bound to one round can never satisfy or fund an identically-described sibling round",
+    async () => {
+      const product = uniqueKey("p3-sheet-iso");
+      await makeValuedReceipt(`doc-${product}`, [itemJson(product, "30", "1")]); // avg 100
+      await seedPrice(product, 300);
+
+      const roundA = await openRound("p3-sheet-iso-a", "p3-sheet-iso-a-open");
+      const roundB = await openRound("p3-sheet-iso-b", "p3-sheet-iso-b-open");
+      const roundC = await openRound("p3-sheet-iso-c", "p3-sheet-iso-c-open");
+      expect(
+        await sql(
+          `SELECT count(DISTINCT (source_id, owner_line_user_id, business_date,
+                                  seller_label, market_label_normalized))
+             FROM public.accountability_rounds
+            WHERE id IN ('${roundA}', '${roundB}', '${roundC}')`,
+        ),
+      ).toBe("1");
+
+      // Identical produce and cost on all three: 5 kg issued at 100 satang, sold
+      // at 300. Every difference in the result below therefore comes from the
+      // White Sheet and from nothing else.
+      async function build(round: string): Promise<string> {
+        const session = await newSession(round);
+        const [item] = await addItems(session, [{ type: "issue", product, qty: "5" }]);
+        const issue = await postMovement({
+          type: "ISSUE", sessionId: session, round, lines: [{ product, qty: "-5" }],
+        });
+        await valueIssue(issue);
+        await finalizePendingSessions(round);
+        return item!;
+      }
+      const itemA = await build(roundA);
+      const itemB = await build(roundB);
+      const itemC = await build(roundC);
+
+      // Round A's sheet: wages 50000 satang, expenses (1+2+3+4)*100 = 1000,
+      // cash 123400.
+      const sheetA = await whiteSheet(roundA, {
+        labor: "500.00", locationFee: "1.00", bag: "2.00", snack: "3.00", other: "4.00",
+        actualCash: "1234.00",
+      });
+
+      const opts: RecordOpts = { transfers: "0", purchasing: "0" };
+
+      // ── Round B, still without a sheet of its own ─────────────────────────
+      const bMissing = await record(roundB, [{ itemId: itemB, product }], opts);
+      expect(bMissing.certification_state).toBe("INCOMPLETE");
+      expect(bMissing.incomplete_reasons).toEqual([
+        "accountability_round_open",
+        "white_sheet_missing",
+      ]);
+
+      const readMissing = await readSnapshot(roundB);
+      // No descriptive fallback: A's 500-baht wage bill is NOT visible here, and
+      // the absence is NULL plus a reason — never a zero that would silently
+      // flatter the profit.
+      expect(readMissing.approved_wages_satang).toBeNull();
+      expect(readMissing.approved_expenses_satang).toBeNull();
+      expect(readMissing.actual_cash_satang).toBeNull();
+      expect(readMissing.expected_operating_pl_satang).toBeNull();
+      expect(readMissing.shortage_overage_satang).toBeNull();
+      expect(readMissing.realized_pl_satang).toBeNull();
+      expect(
+        readMissing.sources.some((s) => s.artifact_kind === "white_sheet_cash_entry"),
+      ).toBe(false);
+      // ...while everything the round CAN prove is still proven. A missing sheet
+      // does not coerce COGS to 0 and does not suppress it either.
+      expect(readMissing.cogs_sold_satang).toBe("500");
+      expect(readMissing.issued_cost_satang).toBe("500");
+      expect(readMissing.expected_money_satang).toBe("1500");
+      expect(readMissing.standard_margin_satang).toBe("1000");
+
+      // ── Round B gets its OWN sheet, with different amounts ────────────────
+      // wages 90000 satang, expenses (10+20+30+40)*100 = 10000, cash 432100.
+      const sheetB = await whiteSheet(roundB, {
+        labor: "900.00", locationFee: "10.00", bag: "20.00", snack: "30.00", other: "40.00",
+        actualCash: "4321.00",
+      });
+      expect(sheetB).not.toBe(sheetA);
+
+      // The hazard is real: the descriptive tuple now matches at least two
+      // sheets, so a descriptive read would be ambiguous by construction.
+      expect(
+        Number(
+          await sql(
+            `SELECT count(*)
+               FROM public.digital_white_sheet_cash_entries w
+               JOIN public.accountability_rounds r ON r.id = '${roundC}'
+              WHERE w.source_id               = r.source_id
+                AND w.market_label_normalized = r.market_label_normalized
+                AND w.business_date           = r.business_date`,
+          ),
+        ),
+      ).toBeGreaterThanOrEqual(2);
+
+      // P2E allows at most one sheet per round, which is what makes the
+      // round-keyed read single-valued rather than "whichever row came back".
+      expect(
+        await sqlFails(
+          `INSERT INTO public.digital_white_sheet_cash_entries
+             (source_id, market_label_normalized, business_date, labor,
+              actual_cash_submitted, finalized_at, accountability_round_id)
+           VALUES (${lit(SOURCE)}, ${lit(MARKET)}, ${lit(DATE)}, 7.00, 7.00, now(), '${roundB}')`,
+        ),
+      ).toMatch(/digital_white_sheet_cash_entries_accountability_round_uidx/u);
+
+      const bOwn = await record(roundB, [{ itemId: itemB, product }], opts);
+      expect(bOwn.revision).toBe(2);
+      // The sheet requirement is satisfied the moment B has its OWN sheet, and
+      // not one moment earlier — the only remaining reason is the open status.
+      expect(bOwn.incomplete_reasons).toEqual(["accountability_round_open"]);
+
+      const readOwn = await readSnapshot(roundB);
+      // B's OWN numbers. Not A's 50000/1000/123400, and not a sibling merge
+      // (140000/11000) either.
+      expect(readOwn.approved_wages_satang).toBe("90000");
+      expect(readOwn.approved_expenses_satang).toBe("10000");
+      expect(readOwn.actual_cash_satang).toBe("432100");
+      expect(readOwn.approved_wages_satang).not.toBe("50000");
+      expect(readOwn.approved_wages_satang).not.toBe("140000");
+      expect(readOwn.sources.map((s) => `${s.artifact_kind}:${s.artifact_id}`))
+        .toContain(`white_sheet_cash_entry:${sheetB}`);
+      expect(readOwn.sources.some((s) => s.artifact_id === sheetA)).toBe(false);
+      // 1500 − 500 − 0 damage − 10000 expenses − 90000 wages − 0 purchasing.
+      expect(readOwn.expected_operating_pl_satang).toBe("-99000");
+      // 432100 − (1500 − 0 transfers − 100000 approved outflow).
+      expect(readOwn.shortage_overage_satang).toBe("530600");
+      expect(readOwn.realized_pl_satang).toBe("431600");
+
+      // ── Certification, and A's own numbers ───────────────────────────────
+      await closeRound(roundA, "p3-sheet-iso-a-close");
+      await closeRound(roundB, "p3-sheet-iso-b-close");
+      await closeRound(roundC, "p3-sheet-iso-c-close");
+
+      const finalB = await record(roundB, [{ itemId: itemB, product }], opts);
+      expect(finalB.revision).toBe(3);
+      expect(finalB.certification_state).toBe("CERTIFIED");
+
+      const postedA = await record(roundA, [{ itemId: itemA, product }], opts);
+      expect(postedA.certification_state).toBe("CERTIFIED");
+      const readA = await readSnapshot(roundA);
+      expect(readA.approved_wages_satang).toBe("50000");
+      expect(readA.approved_expenses_satang).toBe("1000");
+      expect(readA.actual_cash_satang).toBe("123400");
+      expect(readA.expected_operating_pl_satang).toBe("-50000");
+      expect(readA.sources.map((s) => `${s.artifact_kind}:${s.artifact_id}`))
+        .toContain(`white_sheet_cash_entry:${sheetA}`);
+      expect(readA.sources.some((s) => s.artifact_id === sheetB)).toBe(false);
+      // Identical produce, identical cost, identical price — and a different
+      // result, because each round read its own sheet.
+      expect(readA.cogs_sold_satang).toBe(readOwn.cogs_sold_satang);
+      expect(readA.expected_money_satang).toBe(readOwn.expected_money_satang);
+      expect(readA.expected_operating_pl_satang)
+        .not.toBe(readOwn.expected_operating_pl_satang);
+
+      // ── Round C: two funded siblings, still INCOMPLETE ────────────────────
+      const postedC = await record(roundC, [{ itemId: itemC, product }], opts);
+      expect(postedC.certification_state).toBe("INCOMPLETE");
+      expect(postedC.incomplete_reasons).toEqual(["white_sheet_missing"]);
+      const readC = await readSnapshot(roundC);
+      expect(readC.approved_wages_satang).toBeNull();
+      expect(readC.approved_expenses_satang).toBeNull();
+      expect(readC.actual_cash_satang).toBeNull();
+      expect(readC.realized_pl_satang).toBeNull();
+      expect(readC.cogs_sold_satang).toBe("500");
+
+      // No sheet that a descriptive lookup would have handed Round C appears in
+      // Round C's lineage — expressed over the real tables, so it also covers
+      // any legacy unbound sheet sharing the same descriptive tuple.
+      expect(
+        await sql(
+          `SELECT count(*)
+             FROM public.profitability_snapshot_sources x
+             JOIN public.digital_white_sheet_cash_entries w ON w.id = x.artifact_id
+             JOIN public.accountability_rounds r ON r.id = '${roundC}'
+            WHERE x.snapshot_id = '${postedC.snapshot_id}'
+              AND w.source_id               = r.source_id
+              AND w.market_label_normalized = r.market_label_normalized
+              AND w.business_date           = r.business_date`,
+        ),
+      ).toBe("0");
+      expect(
+        await sql(
+          `SELECT count(*) FROM public.digital_white_sheet_cash_entries
+            WHERE accountability_round_id = '${roundC}'`,
+        ),
+      ).toBe("0");
+
+      // Neither sibling's sheet was mutated by anything above: P3 reads money,
+      // it never writes it back.
+      expect(
+        await sql(
+          `SELECT string_agg(labor::text || '/' || actual_cash_submitted::text, ',' ORDER BY labor)
+             FROM public.digital_white_sheet_cash_entries
+            WHERE id IN ('${sheetA}', '${sheetB}')`,
+        ),
+      ).toBe("500.00/1234.00,900.00/4321.00");
+    },
+    240_000,
+  );
 });

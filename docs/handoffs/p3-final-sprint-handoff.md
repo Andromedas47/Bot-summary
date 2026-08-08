@@ -164,6 +164,13 @@ Status: **P3 TEST/CI READY — AWAITING CLAUDE FINAL LEAD REVIEW**
 - CI: dedicated `p3-profitability` PostgreSQL 17 job added. It runs P3, P2D,
   P2E, typecheck, and diff-check with required-PostgreSQL flags. A forced
   unreachable-port probe exits 1, proving PostgreSQL absence cannot green-skip.
+- New commits:
+  - `73b24f9` — real-PostgreSQL matrix and CI protection
+  - `3c8c11d` — TypeScript/PostgreSQL input-contract alignment
+  - `503d891` — final validation handoff
+- Branch pushed as `origin/feat/p3-profit-loss-final`; no PR opened while the
+  dependency PRs remain unmerged.
+- Final git status: clean, tracking `origin/feat/p3-profit-loss-final`.
 - Integration-base application regression remains **270 pass / 0 fail**.
 - Exact remaining work: Claude final lead review; dependency PRs #36 and #38
   must still land before opening a truthful P3 PR against `main`.

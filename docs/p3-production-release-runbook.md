@@ -622,6 +622,33 @@ SELECT s.id AS snapshot_id, x.artifact_kind, x.artifact_id
     OR (e.id IS NOT NULL AND e.accountability_round_id IS DISTINCT FROM s.accountability_round_id);
 ```
 
+### 5.E White Sheet read surface — after application deploy
+
+Required once the P3 **application** is deployed (case D). This is a read-only
+page-model check: loading the White Sheet must never record a snapshot.
+
+Pick a closed round that already has a snapshot from §5.A or §5.B, with a known
+`accountability_round_id`. Load the White Sheet page/API for that round's scope
+(the caller that already threads `accountabilityRoundId` into
+`loadDigitalWhiteSheetPageModel` / `loadServerDigitalWhiteSheetPageModel`).
+
+**Expected:**
+
+| Scope | `pageModel.profitability` |
+|---|---|
+| Valid round UUID + snapshot exists | `state: "available"` — `formatted` matches `formatProfitabilitySnapshot`; CERTIFIED or INCOMPLETE is visibly distinct; NULL money terms show as unprovable, never ฿0 |
+| Valid round UUID + no snapshot | `state: "not_calculated"` — UI shows `ยังไม่มีผลคำนวณกำไร/ขาดทุน` |
+| Legacy scope (`accountabilityRoundId` undefined/null) | `state: "round_unbound"` — no profitability figures invented; no `get_profitability_snapshot` fallback by source/market/date |
+
+Also confirm:
+
+- White Sheet hard-stop warnings still block `requireTrustedWhiteSheetSummary`
+  when present — P3 display does not override that.
+- The §5 fingerprint is unchanged by a page load (no inventory, cost, settlement,
+  white-sheet, or profitability write).
+- Application logs / network show `get_profitability_snapshot` only — never
+  `record_profitability_snapshot` on render.
+
 ---
 
 ## 6. Reversible vs irreversible steps
@@ -668,13 +695,17 @@ migration file, and never fabricate migration history.
 
 In escalating order, all non-destructive:
 
-1. **Stop calling it.** P3 is not wired into the Digital White Sheet page model
-   (`src/lib/white-sheet/compose.ts` is deliberately untouched). Nothing user
-   facing depends on it, so "off" is the default and needs no flag.
+1. **Redeploy the previous application build.** The White Sheet page model reads
+   P3 via `get_profitability_snapshot` only; rolling back the app returns to case
+   C (schema present, no user-facing read). Recording new snapshots is already a
+   separate, explicit caller path — page load never writes.
 2. **Revoke EXECUTE** on `record_profitability_snapshot` from `service_role`. New
-   snapshots become impossible; existing history stays readable.
+   snapshots become impossible; existing history stays readable (including the
+   White Sheet read surface).
 3. **Revoke EXECUTE** on `get_profitability_snapshot` as well. The tables become
-   unreachable through the API while the rows remain intact.
+   unreachable through the API while the rows remain intact. The White Sheet
+   page model will then fail closed on bound-round loads until EXECUTE is
+   restored or the previous app build is redeployed.
 
 ```sql
 -- Kill switch. Reversible with the matching GRANT. Deletes nothing.

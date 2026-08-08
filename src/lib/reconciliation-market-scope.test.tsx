@@ -493,6 +493,7 @@ describe("White Sheet fail-closed for unattributed verified transfers", () => {
       },
       finalizedAt: null,
       finalizedBy: null,
+      profitability: { state: "round_unbound" as const },
     };
 
     expect(() => requireTrustedWhiteSheetSummary(pageModel)).toThrow(WhiteSheetHardStopError);
@@ -559,6 +560,7 @@ describe("White Sheet fail-closed for unattributed verified transfers", () => {
       },
       finalizedAt: null,
       finalizedBy: null,
+      profitability: { state: "round_unbound" as const },
     };
 
     expect(() => requireTrustedWhiteSheetSummary(pageModel)).toThrow(WhiteSheetHardStopError);

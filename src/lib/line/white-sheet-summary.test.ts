@@ -119,6 +119,7 @@ describe("buildWhiteSheetSummaryMessagesFromPageModel", () => {
       summary: matchedWhiteSheetFixture,
       finalizedAt: null,
       finalizedBy: null,
+      profitability: { state: "round_unbound" },
     });
     assertWithinLineLimits(messages);
     expect(messages[0]).toContain("สรุปปิดยอด — วัดทุ่งลานนา");
@@ -131,6 +132,7 @@ describe("buildWhiteSheetSummaryMessagesFromPageModel", () => {
         summary: matchedWhiteSheetFixture,
         finalizedAt: null,
         finalizedBy: null,
+        profitability: { state: "round_unbound" },
       }),
     ).toThrow(WhiteSheetNotSubmittedError);
   });
@@ -150,6 +152,7 @@ describe("buildWhiteSheetSummaryMessagesFromPageModel", () => {
         summary: hardStopSummary,
         finalizedAt: null,
         finalizedBy: null,
+        profitability: { state: "round_unbound" },
       }),
     ).toThrow(WhiteSheetHardStopError);
   });

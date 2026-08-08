@@ -44,6 +44,7 @@ export function stubManualSlipTables(options?: {
       const builder: {
         select: () => typeof builder;
         eq: (column: string, value: unknown) => typeof builder;
+        is: (column: string, value: unknown) => typeof builder;
         then: (
           resolve: (value: unknown) => unknown,
           reject?: (reason: unknown) => unknown,
@@ -51,6 +52,11 @@ export function stubManualSlipTables(options?: {
       } = {
         select: () => builder,
         eq: (column, value) => {
+          filters.push([column, value]);
+          return builder;
+        },
+        // Round-unbound White Sheet scopes filter accountability_round_id IS NULL.
+        is: (column, value) => {
           filters.push([column, value]);
           return builder;
         },

@@ -88,14 +88,58 @@ distinct assertion. If the owner rules that purchasing expenses are *not* a mark
 operating expense, the term becomes a constant 0 and one reason disappears — a one-line
 change, no schema impact.
 
-## Files changed so far
+## Real-PostgreSQL apply chain (verified, ~60s)
 
-- (integration merge only)
+```
+supabase/tests/purchase_capture_slice_b_bootstrap.sql
+supabase/migrations/0052_purchase_receipt_persistence.sql
+supabase/tests/purchase_capture_slice_c_pre_0053.sql
+supabase/migrations/0053_inventory_movement_ledger.sql
+supabase/migrations/0054_inventory_cost_valuation.sql          <- P2D
+supabase/tests/p3_profitability_bootstrap.sql
+supabase/migrations/20260808105001_p2e_accountability_round_identity.sql   <- P2E
+supabase/migrations/20260808130000_p3_profitability_snapshots.sql          <- P3
+```
 
-## Tests run so far
+`purchase_capture_slice_c_hardening.sql`, `purchase_capture_slice_c_post_0053.sql`
+and the `20260805*` purchase-capture migrations are deliberately NOT in the chain:
+they are unrelated to P3, and `slice_c_hardening` executes a `pg_sleep` timeout
+assertion — **that is the root cause of the previously reported ">600s local
+PostgreSQL hang"**, not 0053/0054. Confirmed via `pg_stat_activity`
+(`wait_event = PgSleep`).
 
-- none
+## Files changed
+
+| File | State |
+|---|---|
+| `supabase/migrations/20260808130000_p3_profitability_snapshots.sql` | new, applies clean |
+| `supabase/tests/p3_profitability_bootstrap.sql` | new |
+| `docs/plans/p3-profit-loss-final.md` | new, frozen contract |
+| `docs/handoffs/p3-final-sprint-handoff.md` | this file |
+| `src/lib/profitability/*` | in progress (TypeScript service, validators, formatter, tests) |
+| `src/lib/profitability/migration-p3.pg.test.ts` + `.github/workflows/pg-tests.yml` | in progress (real-PostgreSQL matrix + CI job) |
+
+## Verified so far
+
+Migration applies clean on the chain above. Smoke test proves:
+two same-description rounds get distinct UUIDs; each independently allocates
+revision 1; `sold = issued − good return − damaged` (10 − 2 − 1 = 7);
+`expected_money = 35000` satang at a 5000-satang price; every cost term is NULL
+with `issue_movement_unbound` when no ISSUE is posted (never 0); an identical
+retry returns `replayed: true` with the same `snapshot_id` and no second
+revision; a Round A produce item attributed to Round B raises
+`cross_round_artifact`; lineage contains only Round A artifacts.
+
+## Report integration — deliberate scope decision
+
+P3 exposes `ProfitabilityService.getSnapshot` and `formatProfitabilitySnapshot`.
+The Digital White Sheet page model (`src/lib/white-sheet/compose.ts`) is **not**
+modified: it is a live UAT money surface with a hard-stop error path, and wiring
+it to an unreleased layer whose two dependencies are still unmerged would be the
+wrong trade. The wiring point is `loadDigitalWhiteSheetPageModel`, which already
+has the `accountability_round_id` in scope.
 
 ## Exact next action
 
-Write `supabase/migrations/20260808130000_p3_profitability_snapshots.sql`.
+Await the two in-flight tracks, then Lead review, then focused tests →
+typecheck → lint → `git diff --check` → full suite once.

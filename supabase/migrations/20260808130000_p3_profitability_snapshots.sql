@@ -618,6 +618,20 @@ BEGIN
     v_reasons := v_reasons || 'accountability_round_open'::text;
   END IF;
 
+  -- Only ISSUE and GOOD_RETURN have a defined contribution to this result. A
+  -- round-bound movement of any other class is a contract this repository has
+  -- not reviewed — most of all DAMAGED_WRITE_OFF, which would decrement MAIN a
+  -- second time for stock that already left on the issue. Silently ignoring it
+  -- would understate cost, so it blocks certification instead.
+  IF EXISTS (
+    SELECT 1 FROM public.inventory_movements m
+    WHERE m.accountability_round_id = p_accountability_round_id
+      AND m.movement_type NOT IN ('ISSUE', 'GOOD_RETURN', 'REVERSAL')
+      AND m.reversed_by_movement_id IS NULL
+  ) THEN
+    v_reasons := v_reasons || 'unsupported_round_movement'::text;
+  END IF;
+
   -- White sheet: found only through the round id. A white sheet bound to
   -- another round is therefore invisible here, not merely rejected.
   SELECT * INTO v_sheet FROM public.digital_white_sheet_cash_entries

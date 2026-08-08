@@ -60,7 +60,9 @@ export function unresolvedPlaceholderKey(kind: "product" | "unit", normalizedTex
  * whitespace + trim normalization the DB already applies to document_key
  * (purchase_receipt_normalize_document_key) and this module applies to registry
  * lookups. Deterministic and idempotent, so a redelivered or rechecked document
- * derives the identical key, and two distinct supplier names can never collide.
+ * derives the identical key. Textual variants of one supplier are MEANT to
+ * canonicalize onto the same key; what never collides is two distinct canonical
+ * supplier identities.
  *
  * The pair is returned together because purchase_receipts_supplier_pairing
  * requires `(supplier_key IS NULL) = (supplier_raw IS NULL)`: a raw text that

@@ -98,9 +98,12 @@ describe("purchase intake identity resolution", () => {
     });
   });
 
-  test("supplier key is idempotent and never collides across suppliers", () => {
+  test("supplier key is idempotent and separates distinct canonical identities", () => {
     const once = resolveSupplierIdentity("ร้าน   เจ๊แดง").supplierKey as string;
     expect(resolveSupplierIdentity(once).supplierKey).toBe(once);
+    // Textual variants of one supplier canonicalize onto the same key by design.
+    expect(resolveSupplierIdentity("  ร้าน เจ๊แดง  ").supplierKey).toBe(once);
+    // Distinct canonical identities stay distinct.
     expect(resolveSupplierIdentity("ร้านเจ๊ดำ").supplierKey).not.toBe(once);
   });
 

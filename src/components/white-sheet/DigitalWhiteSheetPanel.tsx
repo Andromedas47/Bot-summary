@@ -1,6 +1,10 @@
-import type { DigitalWhiteSheetSummary as DigitalWhiteSheetSummaryContract } from "@/lib/white-sheet";
+import type {
+  DigitalWhiteSheetProfitability as ProfitabilityReadState,
+  DigitalWhiteSheetSummary as DigitalWhiteSheetSummaryContract,
+} from "@/lib/white-sheet";
 import type { WhiteSheetExpenseInput } from "./types";
 import { DigitalWhiteSheetExpensesForm } from "./DigitalWhiteSheetExpensesForm";
+import { DigitalWhiteSheetProfitability } from "./DigitalWhiteSheetProfitability";
 import { DigitalWhiteSheetSummary } from "./DigitalWhiteSheetSummary";
 import { WhiteSheetLifecycleControls } from "./WhiteSheetLifecycleControls";
 
@@ -9,6 +13,7 @@ export function DigitalWhiteSheetPanel({
   entryStatus = "submitted",
   finalizedAt = null,
   finalizedBy = null,
+  profitability = { state: "round_unbound" },
   onSubmitExpenses,
   isSubmitting,
   lifecyclePending = false,
@@ -20,6 +25,7 @@ export function DigitalWhiteSheetPanel({
   entryStatus?: "submitted" | "finalized" | "not_submitted";
   finalizedAt?: string | null;
   finalizedBy?: string | null;
+  profitability?: ProfitabilityReadState;
   onSubmitExpenses: (input: WhiteSheetExpenseInput) => void | Promise<void>;
   isSubmitting?: boolean;
   lifecyclePending?: boolean;
@@ -30,6 +36,7 @@ export function DigitalWhiteSheetPanel({
   return (
     <div className="space-y-6" data-testid="white-sheet-panel">
       <DigitalWhiteSheetSummary viewModel={viewModel} entryStatus={entryStatus} />
+      <DigitalWhiteSheetProfitability profitability={profitability} />
       <DigitalWhiteSheetExpensesForm
         viewModel={entryStatus !== "not_submitted" ? viewModel : undefined}
         onSubmitExpenses={onSubmitExpenses}

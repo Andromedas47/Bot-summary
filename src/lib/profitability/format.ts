@@ -45,6 +45,12 @@ export const PROFITABILITY_REASON_HEADING = "สาเหตุที่ยั�
 /** Used wherever a money figure would otherwise print a misleading 0.00 or a dash. */
 export const PROFITABILITY_MONEY_UNPROVABLE = "ไม่สามารถพิสูจน์ได้";
 
+/** White Sheet page when a bound round has no snapshot yet — never invent zeros. */
+export const PROFITABILITY_NOT_CALCULATED_MESSAGE = "ยังไม่มีผลคำนวณกำไร/ขาดทุน";
+/** White Sheet page when accountabilityRoundId is missing/null/invalid. */
+export const PROFITABILITY_ROUND_UNBOUND_MESSAGE =
+  "รอบความรับผิดชอบยังไม่ได้ผูก — ไม่แสดงผลกำไร/ขาดทุน";
+
 export const PROFITABILITY_COGS_LABEL = "ต้นทุนสินค้าที่ขาย (COGS)";
 export const PROFITABILITY_DAMAGE_LOSS_LABEL = "มูลค่าของเสีย";
 export const PROFITABILITY_STANDARD_MARGIN_LABEL = "กำไรขั้นต้นตามราคากลาง";

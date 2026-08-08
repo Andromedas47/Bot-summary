@@ -62,7 +62,10 @@ export {
   WhiteSheetHardStopError,
   WhiteSheetNotSubmittedError,
 } from "./compose";
-export type { DigitalWhiteSheetPageModel } from "./compose";
+export type {
+  DigitalWhiteSheetPageModel,
+  DigitalWhiteSheetProfitability,
+} from "./compose";
 export {
   CENTRAL_PRICE_CONFLICT_WARNING_PREFIX,
   centralPriceConflictWarning,

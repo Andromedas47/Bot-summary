@@ -3,7 +3,10 @@
 import { useEffect, useRef, useState, useTransition } from "react";
 import { Button } from "@/components/ui/Button";
 import { formatBusinessDateThai } from "@/lib/white-sheet/business-date-display";
-import type { DigitalWhiteSheetSummary } from "@/lib/white-sheet";
+import type {
+  DigitalWhiteSheetProfitability,
+  DigitalWhiteSheetSummary,
+} from "@/lib/white-sheet";
 import {
   whiteSheetMarketScopeKey,
   type WhiteSheetMarketScopeOption,
@@ -21,6 +24,7 @@ interface DigitalWhiteSheetPageModelResponse {
   summary: DigitalWhiteSheetSummary;
   finalizedAt: string | null;
   finalizedBy: string | null;
+  profitability: DigitalWhiteSheetProfitability;
 }
 
 const INPUT_CLS =
@@ -160,6 +164,7 @@ export function WhiteSheetPageClient({
       summary: json.summary,
       finalizedAt: json.finalizedAt ?? null,
       finalizedBy: json.finalizedBy ?? null,
+      profitability: json.profitability ?? { state: "round_unbound" },
     });
   }
 
@@ -203,6 +208,7 @@ export function WhiteSheetPageClient({
       summary: json.summary,
       finalizedAt: json.finalizedAt ?? null,
       finalizedBy: json.finalizedBy ?? null,
+      profitability: json.profitability ?? { state: "round_unbound" },
     });
   }
 
@@ -364,6 +370,7 @@ export function WhiteSheetPageClient({
           entryStatus={pageModel.entryStatus}
           finalizedAt={pageModel.finalizedAt}
           finalizedBy={pageModel.finalizedBy}
+          profitability={pageModel.profitability}
           onSubmitExpenses={handleSubmitExpenses}
           lifecyclePending={lifecyclePending}
           lifecycleError={lifecycleError}

@@ -161,6 +161,8 @@ describe("loadDigitalWhiteSheetPageModel", () => {
     // not render them as a genuine submission.
     expect(pageModel.summary.actualCashSubmitted).toBe(0);
     expect(pageModel.summary.expenseTotal).toBe(0);
+    // Legacy scope without a round UUID never invents profitability.
+    expect(pageModel.profitability).toEqual({ state: "round_unbound" });
   });
 
   it("reports submitted with the persisted expenses/cash folded into the canonical summary", async () => {

@@ -1,8 +1,9 @@
 # P3 Final Sprint — Handoff
 
-Updated: 2026-08-09. Status: **P3 RELEASE PACKAGE COMPLETE — WAITING ONLY FOR
-DEPENDENCY RELEASE.** See the RELEASE PACKAGE section at the end of this file for
-the current state; the sections above are the sprint history that produced it.
+Updated: 2026-08-09. Status: **P3 END-TO-END RELEASE PACKAGE COMPLETE — WAITING
+ONLY FOR DEPENDENCY RELEASE.** See the RELEASE PACKAGE and END-TO-END SURFACE
+sections at the end of this file for the current state; the sections above are
+the sprint history that produced it.
 
 ## Workspace
 
@@ -132,14 +133,12 @@ retry returns `replayed: true` with the same `snapshot_id` and no second
 revision; a Round A produce item attributed to Round B raises
 `cross_round_artifact`; lineage contains only Round A artifacts.
 
-## Report integration — deliberate scope decision
+## Report integration — completed in the end-to-end surface sprint
 
 P3 exposes `ProfitabilityService.getSnapshot` and `formatProfitabilitySnapshot`.
-The Digital White Sheet page model (`src/lib/white-sheet/compose.ts`) is **not**
-modified: it is a live UAT money surface with a hard-stop error path, and wiring
-it to an unreleased layer whose two dependencies are still unmerged would be the
-wrong trade. The wiring point is `loadDigitalWhiteSheetPageModel`, which already
-has the `accountability_round_id` in scope.
+They are now wired into `loadDigitalWhiteSheetPageModel` as a **read-only**
+attach: page load never calls `recordSnapshot` or any profitability write RPC.
+See **END-TO-END SURFACE — 2026-08-09** below.
 
 ## Final sprint result — 2026-08-08
 
@@ -182,7 +181,9 @@ Status: **P3 TEST/CI READY — AWAITING CLAUDE FINAL LEAD REVIEW**
 
 # RELEASE PACKAGE — 2026-08-09
 
-Status: **P3 RELEASE PACKAGE COMPLETE — WAITING ONLY FOR DEPENDENCY RELEASE.**
+Status: **P3 END-TO-END RELEASE PACKAGE COMPLETE — WAITING ONLY FOR DEPENDENCY
+RELEASE.** (Supersedes the earlier "release package complete" wording once the
+White Sheet read surface landed; see END-TO-END SURFACE below.)
 
 No P3 architecture work, implementation work or known test gap remains. What is
 left is a mechanical release sequence gated on PRs #36 and #38.
@@ -489,10 +490,8 @@ Production smoke · P2D's own P2C Production UAT precondition.
 
 **POST-RELEASE OPTIONAL IMPROVEMENTS** — none of these blocks the release
 
-1. Wire `ProfitabilityService.getSnapshot` / `formatProfitabilitySnapshot` into
-   `loadDigitalWhiteSheetPageModel`, which already has the
-   `accountability_round_id` in scope. Deliberately not done: it is a live UAT
-   money surface with a hard-stop error path.
+1. ~~Wire `ProfitabilityService.getSnapshot` / `formatProfitabilitySnapshot` into
+   `loadDigitalWhiteSheetPageModel`~~ — **COMPLETE** (end-to-end surface sprint).
 2. Resolve the open business decision on `− purchasing expenses`. If the owner
    rules it is not a market-round operating expense, the term becomes a constant
    `0` and one reason disappears — a one-line change, no schema impact.
@@ -503,6 +502,72 @@ Production smoke · P2D's own P2C Production UAT precondition.
 4. `docs/handoffs/p3-final-sprint-handoff.md` has grown into three sprint
    reports; it could be split into a single current-state document plus an
    archive.
+
+---
+
+# END-TO-END SURFACE — 2026-08-09
+
+Status: **P3 END-TO-END RELEASE PACKAGE COMPLETE — WAITING ONLY FOR DEPENDENCY
+RELEASE.**
+
+No missing P3 user-facing read integration remains before dependency release.
+The money engine is unchanged. This sprint only attaches an approved read of the
+latest snapshot to the White Sheet page model and UI.
+
+## Integration
+
+```
+loadServerDigitalWhiteSheetPageModel
+  → loadDigitalWhiteSheetPageModel
+      → existing White Sheet summary (unchanged)
+      → ProfitabilityService.getSnapshot(accountabilityRoundId)  // read only
+      → formatProfitabilitySnapshot(snapshot)                     // presentation only
+  → DigitalWhiteSheetProfitability (read-only block)
+```
+
+No public mutation route was added. Page load never calls
+`record_profitability_snapshot`.
+
+## Page model contract
+
+`DigitalWhiteSheetPageModel.profitability`:
+
+| state | When |
+|---|---|
+| `available` | Valid round UUID + snapshot exists — carries `snapshot` + `formatted` |
+| `not_calculated` | Valid round UUID + `getSnapshot` returns null |
+| `round_unbound` | `accountabilityRoundId` is `undefined`, `null`, or not a UUID |
+
+No descriptive (source/market/date) fallback. Invalid UUID is unbound without an
+RPC call. NULL money terms stay unprovable in the formatted block — never ฿0.
+
+## Hard-stop
+
+`requireTrustedWhiteSheetSummary` / `WhiteSheetHardStopError` are unchanged.
+P3 CERTIFIED/INCOMPLETE is independently visible even when the White Sheet is
+untrusted; an untrustworthy White Sheet is never converted into a trusted result.
+
+## Tests / gates
+
+| Suite | Result |
+|---|---|
+| White Sheet/P3 compose integration (`compose-profitability.test.tsx`) | **12 pass / 0 fail** |
+| `src/lib/profitability` TypeScript (format + service) | **111 pass / 0 fail** |
+| White Sheet compose / load / local-UAT / central-pricing / client | **pass** |
+| Settlement / reconciliation market-scope focused | **pass** |
+| Typecheck | clean |
+| Build | clean (placeholder Supabase env) |
+| Lint | 0 errors, 65 pre-existing warnings |
+| `git diff --check` | clean (Windows LF/CRLF notice only) |
+
+## Dependency state (unchanged)
+
+| PR | State |
+|---|---|
+| #38 P2E | **OPEN** |
+| #36 P2D | **OPEN** |
+
+Production mutations: **none**. No merge, deploy, migration, LINE, or cron change.
 
 ## Prohibitions honoured this sprint
 

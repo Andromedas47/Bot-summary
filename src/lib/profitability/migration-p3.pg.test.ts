@@ -440,6 +440,19 @@ describe.skipIf(!available)("P3 profitability snapshots (real PostgreSQL)", () =
     expect(status).toBe("closed");
   }
 
+  /**
+   * The OTHER terminal status P2E allows. It only flips the status and stamps
+   * closed_at — no produce session, movement, cost line or white sheet is
+   * voided — which is exactly why P3 must refuse to certify afterwards.
+   */
+  async function cancelRound(round: string, event: string): Promise<void> {
+    const status = await sql(
+      `SELECT status FROM public.close_accountability_round(
+         '${round}', ${lit(SOURCE)}, ${lit(OWNER)}, ${lit(event)}, 'cancelled')`,
+    );
+    expect(status).toBe("cancelled");
+  }
+
   // ── P3 RPCs ────────────────────────────────────────────────────────────────
 
   type RecordOpts = {
@@ -1700,6 +1713,76 @@ describe.skipIf(!available)("P3 profitability snapshots (real PostgreSQL)", () =
              AND pid IN (SELECT pid FROM pg_stat_activity WHERE datname = current_database())`,
         ),
       ).toBe("0");
+    },
+    180_000,
+  );
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // 13. A cancelled round is terminal but is NOT a result
+  // ═════════════════════════════════════════════════════════════════════════
+
+  test(
+    "a cancelled round refuses to certify while its identically-built closed twin certifies",
+    async () => {
+      const product = uniqueKey("p3-cancel");
+      await makeValuedReceipt(`doc-${product}`, [itemJson(product, "20", "1")]); // avg 100
+      await seedPrice(product, 300);
+
+      // One builder, two rounds: the ONLY difference between them is which
+      // terminal status P2E stamps at the end.
+      async function build(round: string): Promise<string> {
+        const session = await newSession(round);
+        const [item] = await addItems(session, [{ type: "issue", product, qty: "5" }]);
+        const issue = await postMovement({
+          type: "ISSUE", sessionId: session, round, lines: [{ product, qty: "-5" }],
+        });
+        await valueIssue(issue);
+        await whiteSheet(round, { actualCash: "15.00" });
+        await finalizePendingSessions(round);
+        return item!;
+      }
+
+      const closed = await openRound("p3-cancel-closed", "p3-cancel-closed-open");
+      const cancelled = await openRound("p3-cancel-void", "p3-cancel-void-open");
+      const closedItem = await build(closed);
+      const cancelledItem = await build(cancelled);
+
+      await closeRound(closed, "p3-cancel-closed-close");
+      await cancelRound(cancelled, "p3-cancel-void-cancel");
+
+      const opts: RecordOpts = { transfers: "0", purchasing: "0" };
+
+      // Control: this exact data under the successful terminal status certifies.
+      const postedClosed = await record(closed, [{ itemId: closedItem, product }], opts);
+      expect(postedClosed.certification_state).toBe("CERTIFIED");
+      expect(postedClosed.incomplete_reasons).toEqual([]);
+
+      // Cancelling voided nothing, so the cancelled twin is refused for the one
+      // reason that it was cancelled — not because anything became unprovable.
+      const postedCancelled = await record(cancelled, [{ itemId: cancelledItem, product }], opts);
+      expect(postedCancelled.certification_state).toBe("INCOMPLETE");
+      expect(postedCancelled.incomplete_reasons).toEqual(["accountability_round_cancelled"]);
+
+      // The proof that the guard is load-bearing rather than incidental: every
+      // money term is present and equal to the CERTIFIED twin's, and is still
+      // refused certification.
+      const read = await readSnapshot(cancelled);
+      const control = await readSnapshot(closed);
+      expect(read.issued_cost_satang).toBe(control.issued_cost_satang);
+      expect(read.cogs_sold_satang).toBe(control.cogs_sold_satang);
+      expect(read.expected_money_satang).toBe(control.expected_money_satang);
+      expect(read.expected_operating_pl_satang).toBe(control.expected_operating_pl_satang);
+      expect(read.shortage_overage_satang).toBe(control.shortage_overage_satang);
+      expect(read.realized_pl_satang).toBe(control.realized_pl_satang);
+      expect(read.realized_pl_satang).not.toBeNull();
+
+      // A cancelled round still may not be CERTIFIED at any later revision: the
+      // status is in the digest, so a re-post replays rather than laundering it.
+      const replay = await record(cancelled, [{ itemId: cancelledItem, product }], opts);
+      expect(replay.replayed).toBe(true);
+      expect(replay.snapshot_id).toBe(postedCancelled.snapshot_id);
+      expect(replay.certification_state).toBe("INCOMPLETE");
+      expect(await snapshotCount(cancelled)).toBe("1");
     },
     180_000,
   );

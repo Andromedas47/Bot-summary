@@ -619,8 +619,20 @@ BEGIN
     v_reasons := v_reasons || 'pending_produce_sessions'::text;
   END IF;
 
+  -- Only the successful terminal state may certify money. 'cancelled' is
+  -- terminal too, but it is an ABANDONED accountability cycle: P2E's
+  -- close_accountability_round only flips the status and stamps closed_at, so
+  -- cancelling voids no produce session, no movement, no cost line and no white
+  -- sheet. Every figure above therefore stays fully provable, and without this
+  -- branch a round the owner explicitly threw away would certify a final
+  -- profit. An unrecognised future status refuses outright rather than being
+  -- assumed harmless.
   IF v_round.status = 'open' THEN
     v_reasons := v_reasons || 'accountability_round_open'::text;
+  ELSIF v_round.status = 'cancelled' THEN
+    v_reasons := v_reasons || 'accountability_round_cancelled'::text;
+  ELSIF v_round.status <> 'closed' THEN
+    RAISE EXCEPTION 'P3: unsupported_round_status (%)', v_round.status;
   END IF;
 
   -- Only ISSUE and GOOD_RETURN have a defined contribution to this result. A

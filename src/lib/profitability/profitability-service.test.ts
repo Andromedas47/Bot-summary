@@ -547,7 +547,10 @@ describe("ProfitabilityService.recordSnapshot — response handling", () => {
     expect(result.incompleteReasons).toContain("unsupported_round_movement");
     expect(result.incompleteReasons).toContain("no_round_activity");
     expect(result.incompleteReasons).toContain("purchasing_expenses_unattributable");
-    expect(allReasons).toHaveLength(15);
+    // A cancelled round is terminal but is not a result; it must stay nameable
+    // here, because a reason this client cannot name it cannot honestly render.
+    expect(result.incompleteReasons).toContain("accountability_round_cancelled");
+    expect(allReasons).toHaveLength(16);
   });
 
   test("an unknown reason string is refused rather than displayed as a blank", async () => {

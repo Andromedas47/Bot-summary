@@ -54,6 +54,7 @@ export const PROFITABILITY_REALIZED_PL_LABEL = "กำไร/ขาดทุน�
 
 /** Plain-language names for every reason the migration can emit. */
 const REASON_LABELS: Record<ProfitabilityIncompleteReason, string> = {
+  accountability_round_cancelled: "รอบความรับผิดชอบถูกยกเลิก",
   accountability_round_open: "รอบความรับผิดชอบยังไม่ปิด",
   good_return_cost_unvalued: "รายการคืนยังไม่มีต้นทุนกำกับ",
   good_return_quantity_mismatch: "จำนวนคืนในคลังไม่ตรงกับที่ชั่ง",

@@ -846,14 +846,12 @@ COMMENT ON FUNCTION public.value_purchase_receipt_movement(uuid, text) IS
 -- quantity reaching zero and value reaching zero happen together (see
 -- docs/p2d-actual-cost.md section 3, "Exact-drain rule").
 --
--- Lines are processed in line_ordinal order, and each line's starting balance
--- is the true committed balance (this movement has never been valued before —
--- checked above via the movement_id UNIQUE replay branch — so no cost line of
--- THIS movement can already exist to exclude) ADJUSTED by a running total of
--- what earlier lines IN THIS SAME LOOP already consumed against the same key.
--- That running adjustment (v_running) is what makes "the second line must see
--- the balance already reduced by the first" correct without re-querying the
--- view mid-loop and relying on read-your-own-writes ordering.
+-- Lines are processed in line_ordinal order. Each line starts from the stable
+-- PRE-MOVEMENT valued balance, computed by explicitly excluding this movement,
+-- then applies the running total of earlier lines in THIS SAME LOOP against the
+-- same key. The exclusion is essential: after line 1 is inserted, PostgreSQL
+-- read-your-own-writes makes inventory_cost_balances include it, so combining
+-- that live balance with v_running would subtract line 1 twice.
 
 CREATE OR REPLACE FUNCTION public.value_inventory_consumption_movement(
   p_movement_id uuid,
@@ -961,30 +959,21 @@ BEGIN
   LOOP
     v_key := v_line.location_code || '|' || v_line.product_key || '|' || v_line.unit_key;
 
-    -- True committed balance for this key. This movement has never been
-    -- valued before (proven by the replay check above), so no cost line
-    -- belonging to it can exist yet — the exclusion the contract calls for is
-    -- therefore already structurally true, not something this query has to
-    -- filter for.
-    SELECT b.quantity_balance, b.value_balance_satang
+    -- Stable PRE-MOVEMENT valued balance for this key. Query the underlying
+    -- lines rather than inventory_cost_balances so this movement can be
+    -- excluded explicitly. After the first line is inserted, the view already
+    -- reflects it in this transaction; v_running below is the one and only
+    -- mechanism that applies same-movement lines to this baseline.
+    SELECT coalesce(sum(l.signed_quantity), 0),
+           coalesce(sum(c.signed_value_satang), 0)
       INTO v_base_qty, v_base_value
-      FROM public.inventory_cost_balances AS b
-     WHERE b.location_code = v_line.location_code
-       AND b.product_key   = v_line.product_key
-       AND b.unit_key      = v_line.unit_key;
-
-    -- The coalesce MUST be here, not in the select list above.
-    -- inventory_cost_balances is a GROUP BY view, so a key that has never had
-    -- a cost line written for it produces NO ROW at all — not a row of NULLs.
-    -- SELECT ... INTO then leaves both variables NULL and a coalesce inside the
-    -- select list never runs, because the select list itself never evaluates.
-    -- That NULL is silently poisonous: `v_qty_balance + signed_quantity < 0`
-    -- evaluates to NULL, which IF treats as false, so the insufficiency guard
-    -- is SKIPPED and the function falls through to inserting a NULL value —
-    -- surfacing as a raw NOT NULL violation instead of the documented
-    -- unvalued_source_inventory refusal.
-    v_base_qty   := coalesce(v_base_qty, 0);
-    v_base_value := coalesce(v_base_value, 0);
+      FROM public.inventory_movement_lines AS l
+      JOIN public.inventory_cost_movement_lines AS c
+        ON c.movement_line_id = l.id
+     WHERE l.location_code = v_line.location_code
+       AND l.product_key   = v_line.product_key
+       AND l.unit_key      = v_line.unit_key
+       AND l.movement_id  <> p_movement_id;
 
     -- Adjust by what earlier lines in THIS loop already consumed against the
     -- same key, so a second line against one key sees the first line's effect.

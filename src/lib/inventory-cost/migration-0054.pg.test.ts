@@ -731,6 +731,109 @@ describe.skipIf(!pgAvailable)("P2D migration 0054 PostgreSQL", () => {
     expect(bal.avg).toBe("150.0000000000000000");
   });
 
+  test("same-key lines in one ISSUE consume the pre-movement balance exactly once and drain to zero", async () => {
+    expect(ready).toBe(true);
+    const product = uniqueProduct("samekey-drain");
+    await makeValuedReceipt(`doc-samekey-drain-${product}`, [itemJson(product, "3", "1")]);
+
+    const issueId = await insertRawMovement({
+      type: "ISSUE",
+      lines: [
+        { productKey: product, qty: "-2" },
+        { productKey: product, qty: "-1" },
+      ],
+    });
+    const first = await valueConsumption(issueId);
+    const lines = first.lines as CostLine[];
+
+    expect(lines).toHaveLength(2);
+    expect(lines.map((line) => line.signed_value_satang)).toEqual(["-200", "-100"]);
+    expect(await ledgerQtySum(product)).toBe("0.000000");
+    expect(await costBalanceRow(product)).toEqual({
+      qty: "0.000000",
+      value: "0",
+      avg: null,
+    });
+
+    // Valuation writes no quantity and seals exactly one cost header with one
+    // value line per pre-existing quantity line.
+    expect(
+      await sql(`SELECT count(*)::text FROM public.inventory_movements WHERE id='${issueId}'`),
+    ).toBe("1");
+    expect(
+      await sql(`SELECT count(*)::text FROM public.inventory_movement_lines WHERE movement_id='${issueId}'`),
+    ).toBe("2");
+    expect(await costMovementCount(issueId)).toBe("1");
+    expect(
+      await sql(
+        `SELECT count(*)::text
+           FROM public.inventory_cost_movement_lines c
+           JOIN public.inventory_cost_movements m ON m.id = c.cost_movement_id
+          WHERE m.movement_id='${issueId}'`,
+      ),
+    ).toBe("2");
+
+    const replay = await valueConsumption(issueId);
+    expect(replay.replayed).toBe(true);
+    expect(replay.cost_movement_id).toBe(first.cost_movement_id);
+    expect(await costMovementCount(issueId)).toBe("1");
+  });
+
+  test("same-key lines in one partial ISSUE leave the correct valued remainder", async () => {
+    expect(ready).toBe(true);
+    const product = uniqueProduct("samekey-partial");
+    await makeValuedReceipt(`doc-samekey-partial-${product}`, [itemJson(product, "4", "1")]);
+
+    const issueId = await insertRawMovement({
+      type: "ISSUE",
+      lines: [
+        { productKey: product, qty: "-2" },
+        { productKey: product, qty: "-1" },
+      ],
+    });
+    const val = await valueConsumption(issueId);
+    expect((val.lines as CostLine[]).map((line) => line.signed_value_satang)).toEqual([
+      "-200",
+      "-100",
+    ]);
+    expect(await costBalanceRow(product)).toEqual({
+      qty: "1.000000",
+      value: "100",
+      avg: "100.0000000000000000",
+    });
+  });
+
+  test("different balance keys in one ISSUE remain isolated", async () => {
+    expect(ready).toBe(true);
+    const productA = uniqueProduct("multikey-a");
+    const productB = uniqueProduct("multikey-b");
+    await makeValuedReceipt(`doc-multikey-a-${productA}`, [itemJson(productA, "3", "1")]);
+    await makeValuedReceipt(`doc-multikey-b-${productB}`, [itemJson(productB, "4", "2")]);
+
+    const issueId = await insertRawMovement({
+      type: "ISSUE",
+      lines: [
+        { productKey: productA, qty: "-2" },
+        { productKey: productB, qty: "-1" },
+      ],
+    });
+    const val = await valueConsumption(issueId);
+    expect((val.lines as CostLine[]).map((line) => line.signed_value_satang)).toEqual([
+      "-200",
+      "-200",
+    ]);
+    expect(await costBalanceRow(productA)).toEqual({
+      qty: "1.000000",
+      value: "100",
+      avg: "100.0000000000000000",
+    });
+    expect(await costBalanceRow(productB)).toEqual({
+      qty: "3.000000",
+      value: "600",
+      avg: "200.0000000000000000",
+    });
+  });
+
   // ═══════════════════════════════════════════════════════════════════════
   // 4 + 5. Exact satang rounding, then exact drain after rounded partials
   // ═══════════════════════════════════════════════════════════════════════

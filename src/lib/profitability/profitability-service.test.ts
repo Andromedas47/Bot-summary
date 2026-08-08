@@ -418,6 +418,7 @@ describe("ProfitabilityService.recordSnapshot — satang arguments are exact str
     ["a large JS number", 123456789012345678901234],
     ["a fractional string", "150.5"],
     ["a fractional string ending in .0", "150.0"],
+    ["a negative exact string", "-500"],
     ["exponent notation", "1e3"],
     ["a padded string", " 150 "],
     ["a non-numeric string", "40000บาท"],
@@ -454,18 +455,6 @@ describe("ProfitabilityService.recordSnapshot — satang arguments are exact str
       ).rejects.toBeInstanceOf(ProfitabilityInvalidInputError);
     });
   }
-
-  test("a negative exact satang string is accepted — an overage is real money", async () => {
-    const { service: subject, calls } = service({
-      record_profitability_snapshot: { data: POSTED_OK },
-    });
-    await subject.recordSnapshot({
-      accountabilityRoundId: ROUND_ID,
-      quantityAttributions: [ATTRIBUTION],
-      verifiedTransfersSatang: "-500",
-    });
-    expect(calls[0]!.args.p_verified_transfers_satang).toBe("-500");
-  });
 
   test("zero is accepted — a proven zero is not the same fact as an absent figure", async () => {
     const { service: subject, calls } = service({

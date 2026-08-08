@@ -91,7 +91,10 @@ export async function submitSettlementEntryForSource(
         accountability_round_id: options.accountabilityRoundId ?? null,
         updated_at: new Date().toISOString(),
       },
-      { onConflict: "settlement_date,settlement_time,staff_name,market_name" },
+      {
+        onConflict:
+          "settlement_date,settlement_time,staff_name,market_name,accountability_round_id",
+      },
     )
     .select()
     .single();

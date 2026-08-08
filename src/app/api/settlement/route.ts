@@ -88,8 +88,12 @@ export async function POST(req: NextRequest) {
     .from("settlement_entries")
     .upsert(
       { settlement_date, settlement_time, staff_name, market_name,
-        money_transfer, money_cash, expenses, labor, notes, updated_at: new Date().toISOString() },
-      { onConflict: "settlement_date,settlement_time,staff_name,market_name" },
+        money_transfer, money_cash, expenses, labor, notes,
+        accountability_round_id: null, updated_at: new Date().toISOString() },
+      {
+        onConflict:
+          "settlement_date,settlement_time,staff_name,market_name,accountability_round_id",
+      },
     )
     .select()
     .single();

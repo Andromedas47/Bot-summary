@@ -7,7 +7,7 @@ DO $$ BEGIN
   CREATE ROLE authenticated NOLOGIN;
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN
-  CREATE ROLE service_role NOLOGIN;
+  CREATE ROLE service_role NOLOGIN BYPASSRLS;
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated, service_role;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO anon, authenticated, service_role;
@@ -192,7 +192,8 @@ CREATE TABLE public.digital_white_sheet_cash_entries (
   actual_cash_submitted numeric NOT NULL DEFAULT 0,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (source_id, market_label_normalized, business_date)
+  CONSTRAINT digital_white_sheet_cash_entries_identity_key
+    UNIQUE (source_id, market_label_normalized, business_date)
 );
 
 CREATE TABLE public.white_sheet_lifecycle_events (
@@ -219,7 +220,8 @@ CREATE TABLE public.settlement_entries (
   source_id text,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (settlement_date, settlement_time, staff_name, market_name)
+  CONSTRAINT settlement_entries_settlement_date_settlement_time_staff_na_key
+    UNIQUE (settlement_date, settlement_time, staff_name, market_name)
 );
 
 CREATE TABLE public.settlement_finalizations (
@@ -227,8 +229,13 @@ CREATE TABLE public.settlement_finalizations (
   source_id text NOT NULL,
   business_date date NOT NULL,
   status text NOT NULL DEFAULT 'pending',
-  UNIQUE (source_id, business_date)
+  work_round_id uuid
 );
+CREATE UNIQUE INDEX settlement_finalizations_legacy_source_date_key
+  ON public.settlement_finalizations (source_id, business_date)
+  WHERE work_round_id IS NULL;
+CREATE UNIQUE INDEX settlement_finalizations_work_round_key
+  ON public.settlement_finalizations (work_round_id);
 
 CREATE TABLE public.transfer_reconciliations (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -237,7 +244,8 @@ CREATE TABLE public.transfer_reconciliations (
   ai_verified_total numeric NOT NULL DEFAULT 0,
   manual_slip_total numeric NOT NULL DEFAULT 0,
   submitted_transfer_total numeric NOT NULL DEFAULT 0,
-  UNIQUE (source_id, business_date)
+  CONSTRAINT transfer_reconciliations_source_date_key
+    UNIQUE (source_id, business_date)
 );
 
 CREATE OR REPLACE FUNCTION public.open_or_rotate_guided_produce_structured_session(

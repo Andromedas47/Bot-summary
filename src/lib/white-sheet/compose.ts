@@ -71,6 +71,7 @@ export async function loadDigitalWhiteSheetPageModel(
     sourceId: scope.sourceId,
     marketLabelNormalized,
     businessDate: scope.businessDate,
+    accountabilityRoundId: scope.accountabilityRoundId,
   });
 
   const cashInput = entry.status !== "not_submitted"

@@ -51,7 +51,11 @@ async function computeTransactionTotals(
     .from("produce_transactions")
     .select("transaction_type, total_amount, market_name")
     .eq("transaction_date", date);
-  if (accountabilityRoundId) base = base.eq("accountability_round_id", accountabilityRoundId);
+  if (accountabilityRoundId !== undefined) {
+    base = accountabilityRoundId === null
+      ? base.is("accountability_round_id", null)
+      : base.eq("accountability_round_id", accountabilityRoundId);
+  }
 
   const filtered = staff_name ? base.eq("staff_name", staff_name) : base;
   const { data } = await filtered.in("transaction_type", KNOWN_TX_TYPES as unknown as string[]);
@@ -86,8 +90,17 @@ export async function tryFinalizeSettlement(
 ): Promise<FinalizeSettlementResult> {
   const log = logger.child({ fn: "tryFinalizeSettlement", sourceId, businessDate });
   const now = new Date().toISOString();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const scoped = <T>(query: T): T => accountabilityRoundId ? (query as any).eq("accountability_round_id", accountabilityRoundId) : query;
+  const scoped = <T>(query: T): T => {
+    const roundQuery = query as T & {
+      is(column: string, value: null): T;
+      eq(column: string, value: string): T;
+    };
+    return accountabilityRoundId === undefined
+      ? query
+      : accountabilityRoundId === null
+        ? roundQuery.is("accountability_round_id", null)
+        : roundQuery.eq("accountability_round_id", accountabilityRoundId);
+  };
 
   // ── 1. Detect multiple settlement entries (ambiguous) ──────────────────────
   const { data: entries, error: entryErr } = await scoped(supabase

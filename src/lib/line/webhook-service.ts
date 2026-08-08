@@ -1843,6 +1843,7 @@ export class WebhookService {
       const outcome = await processWhiteSheetCloseCommand(this.supabase, {
         sourceId,
         command: parseResult.command,
+        accountabilityRoundId: guidedContext?.accountabilityRoundId,
       });
       // 3C → 3D handoff, only when the sheet actually persisted.
       const handoff =

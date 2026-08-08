@@ -147,7 +147,11 @@ export async function loadGuidedSlipRows(
     .eq("source_id", context.sourceId)
     .gte("received_at", startUtc)
     .lt("received_at", endUtc);
-  if (context.accountabilityRoundId) evidenceQuery = evidenceQuery.eq("accountability_round_id", context.accountabilityRoundId);
+  if (context.accountabilityRoundId !== undefined) {
+    evidenceQuery = context.accountabilityRoundId === null
+      ? evidenceQuery.is("accountability_round_id", null)
+      : evidenceQuery.eq("accountability_round_id", context.accountabilityRoundId);
+  }
   const { data: evidences, error: evidenceError } = await evidenceQuery;
   if (evidenceError) {
     throw new Error(`slip evidence lookup failed: ${evidenceError.message}`);
@@ -259,9 +263,13 @@ export async function buildGuidedRoundReport(
       .eq("source_id", context.sourceId)
       .eq("business_date", context.businessDate)
       .eq("status", "open");
-  if (context.accountabilityRoundId) {
-    batchQuery = batchQuery.eq("accountability_round_id", context.accountabilityRoundId);
-    manualQuery = manualQuery.eq("accountability_round_id", context.accountabilityRoundId);
+  if (context.accountabilityRoundId !== undefined) {
+    batchQuery = context.accountabilityRoundId === null
+      ? batchQuery.is("accountability_round_id", null)
+      : batchQuery.eq("accountability_round_id", context.accountabilityRoundId);
+    manualQuery = context.accountabilityRoundId === null
+      ? manualQuery.is("accountability_round_id", null)
+      : manualQuery.eq("accountability_round_id", context.accountabilityRoundId);
   }
   const [batchRes, manualRes] = await Promise.all([batchQuery, manualQuery]);
   if (batchRes.error) {
@@ -313,7 +321,11 @@ export async function buildGuidedRoundReport(
     .select("money_transfer")
     .eq("source_id", context.sourceId)
     .eq("settlement_date", context.businessDate);
-  if (context.accountabilityRoundId) entryQuery = entryQuery.eq("accountability_round_id", context.accountabilityRoundId);
+  if (context.accountabilityRoundId !== undefined) {
+    entryQuery = context.accountabilityRoundId === null
+      ? entryQuery.is("accountability_round_id", null)
+      : entryQuery.eq("accountability_round_id", context.accountabilityRoundId);
+  }
   const { data: entries, error: entryError } = await entryQuery;
   if (entryError) {
     throw new Error(`settlement entry lookup failed: ${entryError.message}`);

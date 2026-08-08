@@ -261,10 +261,16 @@ function makeProduceLoaderDatabase(
     from(table: string) {
       if (table === "produce_transactions") {
         let selectedBusinessDate = "";
+        let selectedRoundId: string | null | undefined;
         const builder = {
           select: () => builder,
           eq: (column: string, value: unknown) => {
             if (column === "transaction_date") selectedBusinessDate = String(value);
+            if (column === "accountability_round_id") selectedRoundId = String(value);
+            return builder;
+          },
+          is: (column: string, value: null) => {
+            if (column === "accountability_round_id") selectedRoundId = value;
             return builder;
           },
           in: () => builder,
@@ -275,7 +281,9 @@ function makeProduceLoaderDatabase(
           range: async (start: number, end: number) => {
             requestedRanges.push([start, end]);
             const matchingRows = produceRows
-              .filter((row) => row.transaction_date === selectedBusinessDate)
+              .filter((row) =>
+                row.transaction_date === selectedBusinessDate
+                && (selectedRoundId === undefined || row.accountability_round_id === selectedRoundId))
               .sort((left, right) =>
                 left.item_created_at.localeCompare(right.item_created_at)
                   || left.id.localeCompare(right.id));
@@ -356,6 +364,22 @@ describe("produce transaction pagination", () => {
       [0, 999],
       [600, 1599],
     ]);
+  });
+
+  test("returns only the explicitly selected same-description round", async () => {
+    const { produceRows } = makeIntegrationDatabase();
+    const baseRow = produceRows[0] as ProduceRow;
+    const roundA = "10000000-0000-4000-8000-000000000001";
+    const roundB = "10000000-0000-4000-8000-000000000002";
+    const { database } = makeProduceLoaderDatabase([
+      { ...baseRow, id: "round-a", accountability_round_id: roundA },
+      { ...baseRow, id: "round-b", accountability_round_id: roundB },
+    ], []);
+
+    expect((await fetchProduceRows(database, BUSINESS_DATE, roundA)).map((row) => row.id))
+      .toEqual(["round-a"]);
+    expect((await fetchProduceRows(database, BUSINESS_DATE, roundB)).map((row) => row.id))
+      .toEqual(["round-b"]);
   });
 });
 

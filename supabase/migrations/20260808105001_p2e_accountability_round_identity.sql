@@ -91,12 +91,35 @@ ALTER TABLE public.white_sheet_lifecycle_events
 ALTER TABLE public.settlement_entries
   ADD COLUMN accountability_round_id uuid
     REFERENCES public.accountability_rounds(id);
+ALTER TABLE public.settlement_entries
+  DROP CONSTRAINT settlement_entries_settlement_date_settlement_time_staff_na_key;
+ALTER TABLE public.settlement_entries
+  ADD CONSTRAINT settlement_entries_round_identity_key
+  UNIQUE NULLS NOT DISTINCT (
+    settlement_date, settlement_time, staff_name, market_name,
+    accountability_round_id
+  );
+ALTER TABLE public.settlement_entries ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.settlement_entries FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON TABLE public.settlement_entries FROM service_role;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.settlement_entries TO service_role;
 ALTER TABLE public.settlement_finalizations
   ADD COLUMN accountability_round_id uuid
     REFERENCES public.accountability_rounds(id);
+ALTER TABLE public.settlement_finalizations
+  DROP CONSTRAINT IF EXISTS settlement_finalizations_source_id_business_date_key;
+DROP INDEX IF EXISTS public.settlement_finalizations_legacy_source_date_key;
+ALTER TABLE public.settlement_finalizations
+  ADD CONSTRAINT settlement_finalizations_round_identity_key
+  UNIQUE NULLS NOT DISTINCT (source_id, business_date, accountability_round_id);
 ALTER TABLE public.transfer_reconciliations
   ADD COLUMN accountability_round_id uuid
     REFERENCES public.accountability_rounds(id);
+ALTER TABLE public.transfer_reconciliations
+  DROP CONSTRAINT transfer_reconciliations_source_date_key;
+ALTER TABLE public.transfer_reconciliations
+  ADD CONSTRAINT transfer_reconciliations_round_identity_key
+  UNIQUE NULLS NOT DISTINCT (source_id, business_date, accountability_round_id);
 
 CREATE INDEX pending_sessions_accountability_round_idx
   ON public.pending_sessions (accountability_round_id)
@@ -116,6 +139,13 @@ CREATE INDEX slip_evidences_accountability_round_idx
 CREATE INDEX manual_slip_sessions_accountability_round_idx
   ON public.manual_slip_sessions (accountability_round_id)
   WHERE accountability_round_id IS NOT NULL;
+ALTER TABLE public.digital_white_sheet_cash_entries
+  DROP CONSTRAINT digital_white_sheet_cash_entries_identity_key;
+CREATE UNIQUE INDEX digital_white_sheet_cash_entries_legacy_identity_uidx
+  ON public.digital_white_sheet_cash_entries (
+    source_id, market_label_normalized, business_date
+  )
+  WHERE accountability_round_id IS NULL;
 CREATE UNIQUE INDEX digital_white_sheet_cash_entries_accountability_round_uidx
   ON public.digital_white_sheet_cash_entries (accountability_round_id)
   WHERE accountability_round_id IS NOT NULL;

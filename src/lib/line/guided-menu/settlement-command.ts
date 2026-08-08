@@ -342,7 +342,11 @@ export async function processGuidedSettlementSubmission(input: {
     .select("status, message_sent_at")
     .eq("source_id", context.sourceId)
     .eq("business_date", context.businessDate);
-  if (context.accountabilityRoundId) finalizationQuery = finalizationQuery.eq("accountability_round_id", context.accountabilityRoundId);
+  if (context.accountabilityRoundId !== undefined) {
+    finalizationQuery = context.accountabilityRoundId === null
+      ? finalizationQuery.is("accountability_round_id", null)
+      : finalizationQuery.eq("accountability_round_id", context.accountabilityRoundId);
+  }
   const { data: finalization } = await finalizationQuery.maybeSingle();
   if (finalization?.status === "sent" || finalization?.message_sent_at) {
     return {
@@ -359,7 +363,11 @@ export async function processGuidedSettlementSubmission(input: {
     .select("settlement_time, staff_name, market_name")
     .eq("source_id", context.sourceId)
     .eq("settlement_date", context.businessDate);
-  if (context.accountabilityRoundId) existingQuery = existingQuery.eq("accountability_round_id", context.accountabilityRoundId);
+  if (context.accountabilityRoundId !== undefined) {
+    existingQuery = context.accountabilityRoundId === null
+      ? existingQuery.is("accountability_round_id", null)
+      : existingQuery.eq("accountability_round_id", context.accountabilityRoundId);
+  }
   const { data: existing, error: existingError } = await existingQuery;
   if (existingError) {
     throw new Error(`settlement entry lookup failed: ${existingError.message}`);

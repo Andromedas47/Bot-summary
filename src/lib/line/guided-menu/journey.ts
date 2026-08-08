@@ -196,6 +196,7 @@ export class GuidedJourneyService {
       sourceId: context.sourceId,
       marketLabelNormalized: context.marketLabelNormalized,
       businessDate: context.businessDate,
+      accountabilityRoundId: context.accountabilityRoundId ?? null,
     });
 
     if (whiteSheet.status === "not_submitted") {
@@ -234,19 +235,25 @@ export class GuidedJourneyService {
   private async hasOpenSlipWork(
     context: GuidedJourneyContext,
   ): Promise<boolean> {
-    const [batches, manual] = await Promise.all([
-      this.supabase
+    let batchQuery = this.supabase
         .from("slip_batches")
         .select("id, status")
         .eq("source_id", context.sourceId)
-        .in("status", ["collecting", "closing", "processing"]),
-      this.supabase
+        .in("status", ["collecting", "closing", "processing"]);
+    let manualQuery = this.supabase
         .from("manual_slip_sessions")
         .select("id")
         .eq("source_id", context.sourceId)
         .eq("business_date", context.businessDate)
-        .eq("status", "open"),
-    ]);
+        .eq("status", "open");
+    if (context.accountabilityRoundId == null) {
+      batchQuery = batchQuery.is("accountability_round_id", null);
+      manualQuery = manualQuery.is("accountability_round_id", null);
+    } else {
+      batchQuery = batchQuery.eq("accountability_round_id", context.accountabilityRoundId);
+      manualQuery = manualQuery.eq("accountability_round_id", context.accountabilityRoundId);
+    }
+    const [batches, manual] = await Promise.all([batchQuery, manualQuery]);
     if (batches.error) {
       throw new Error(`slip batch lookup failed: ${batches.error.message}`);
     }

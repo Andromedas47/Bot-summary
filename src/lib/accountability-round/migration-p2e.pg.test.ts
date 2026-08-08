@@ -118,13 +118,32 @@ describe.skipIf(!available)("P2E accountability-round migration", () => {
       VALUES ('G1','Market','Market','2026-08-08','U1','white-a','${a.accountability_round_id}')`);
     await sql(`UPDATE manual_white_sheet_note_sessions SET status='closed' WHERE opened_line_event_id='white-a'`);
     expect(await sql(`SELECT accountability_round_id FROM digital_white_sheet_cash_entries`)).toBe(a.accountability_round_id);
+    await sql(`INSERT INTO digital_white_sheet_cash_entries(source_id,market_label_normalized,business_date,actual_cash_submitted,accountability_round_id)
+      VALUES ('G1','Market','2026-08-08',222,'${b.accountability_round_id}')`);
+    expect(await sql(`SELECT count(DISTINCT accountability_round_id) FROM digital_white_sheet_cash_entries`)).toBe("2");
 
     await sql(`INSERT INTO settlement_entries(settlement_date,settlement_time,staff_name,market_name,source_id,accountability_round_id) VALUES
       ('2026-08-08','10:00','Seller','Market','G1','${a.accountability_round_id}'),
-      ('2026-08-08','11:00','Seller','Market','G1','${b.accountability_round_id}')`);
-    await sql(`INSERT INTO settlement_finalizations(source_id,business_date,accountability_round_id) VALUES ('G1','2026-08-08','${a.accountability_round_id}')`);
-    await sql(`INSERT INTO transfer_reconciliations(source_id,business_date,accountability_round_id) VALUES ('G1','2026-08-08','${a.accountability_round_id}')`);
+      ('2026-08-08','10:00','Seller','Market','G1','${b.accountability_round_id}')`);
+    await sql(`INSERT INTO settlement_finalizations(source_id,business_date,accountability_round_id) VALUES
+      ('G1','2026-08-08','${a.accountability_round_id}'),
+      ('G1','2026-08-08','${b.accountability_round_id}')`);
+    await sql(`INSERT INTO transfer_reconciliations(source_id,business_date,accountability_round_id) VALUES
+      ('G1','2026-08-08','${a.accountability_round_id}'),
+      ('G1','2026-08-08','${b.accountability_round_id}')`);
     expect(await sql(`SELECT count(DISTINCT accountability_round_id) FROM settlement_entries`)).toBe("2");
+    expect(await sql(`SELECT count(DISTINCT accountability_round_id) FROM settlement_finalizations`)).toBe("2");
+    expect(await sql(`SELECT count(DISTINCT accountability_round_id) FROM transfer_reconciliations`)).toBe("2");
+    await sql(`INSERT INTO settlement_entries(settlement_date,settlement_time,staff_name,market_name,source_id,money_cash,accountability_round_id)
+      VALUES ('2026-08-08','10:00','Seller','Market','G1',11,'${a.accountability_round_id}')
+      ON CONFLICT (settlement_date,settlement_time,staff_name,market_name,accountability_round_id)
+      DO UPDATE SET money_cash=EXCLUDED.money_cash`);
+    expect(await sql(`SELECT money_cash FROM settlement_entries WHERE accountability_round_id='${a.accountability_round_id}'`)).toBe("11");
+    await sql(`INSERT INTO transfer_reconciliations(source_id,business_date,ai_verified_total,accountability_round_id)
+      VALUES ('G1','2026-08-08',11,'${a.accountability_round_id}')
+      ON CONFLICT (source_id,business_date,accountability_round_id)
+      DO UPDATE SET ai_verified_total=EXCLUDED.ai_verified_total`);
+    expect(await sql(`SELECT ai_verified_total FROM transfer_reconciliations WHERE accountability_round_id='${a.accountability_round_id}'`)).toBe("11");
     await sql(`UPDATE settlement_entries SET money_cash=10 WHERE accountability_round_id='${a.accountability_round_id}'`);
     await fails(`UPDATE settlement_entries SET accountability_round_id='${b.accountability_round_id}' WHERE settlement_time='10:00'`, /write-once/i);
 
@@ -135,6 +154,12 @@ describe.skipIf(!available)("P2E accountability-round migration", () => {
     expect(await sql(`SELECT status FROM accountability_rounds WHERE id='${a.accountability_round_id}'`)).toBe("closed");
     await fails(`SELECT public.open_accountability_round_produce_session('after-close','group','G1','U1','after-close',1,1,'2026-08-08','08:00','operator','Seller','Market','Market','main',U&'\\0E04\\0E37\\0E19',NULL,NULL,NULL,'${a.accountability_round_id}')`, /identity mismatch/i);
     expect(await sql(`SELECT relrowsecurity FROM pg_class WHERE oid='accountability_rounds'::regclass`)).toBe("t");
+    expect(await sql(`SELECT relrowsecurity FROM pg_class WHERE oid='settlement_entries'::regclass`)).toBe("t");
+    expect(await sql(`SELECT has_table_privilege('anon','settlement_entries','SELECT')::text || has_table_privilege('anon','settlement_entries','INSERT')::text || has_table_privilege('anon','settlement_entries','UPDATE')::text || has_table_privilege('anon','settlement_entries','DELETE')::text`)).toBe("falsefalsefalsefalse");
+    expect(await sql(`SELECT has_table_privilege('authenticated','settlement_entries','SELECT')::text || has_table_privilege('authenticated','settlement_entries','INSERT')::text || has_table_privilege('authenticated','settlement_entries','UPDATE')::text || has_table_privilege('authenticated','settlement_entries','DELETE')::text`)).toBe("falsefalsefalsefalse");
+    expect(await sql(`SELECT has_table_privilege('service_role','settlement_entries','SELECT')::text || has_table_privilege('service_role','settlement_entries','INSERT')::text || has_table_privilege('service_role','settlement_entries','UPDATE')::text || has_table_privilege('service_role','settlement_entries','DELETE')::text`)).toBe("truetruetruefalse");
+    await fails(`SET ROLE anon; SELECT count(*) FROM settlement_entries`, /permission denied|row-level security/i);
+    expect(await sql(`SET ROLE service_role; UPDATE settlement_entries SET money_cash=money_cash WHERE accountability_round_id='${a.accountability_round_id}'; SELECT count(*) FROM settlement_entries; RESET ROLE`)).toContain("2");
     expect(await sql(`SELECT has_function_privilege('anon','public.open_accountability_round_produce_session(text,text,text,text,text,bigint,integer,date,text,text,text,text,text,text,text,text,text,uuid,uuid,text)','EXECUTE')`)).toBe("f");
   }, 60_000);
 

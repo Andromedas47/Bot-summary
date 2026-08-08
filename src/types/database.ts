@@ -758,6 +758,7 @@ export interface Database {
           updated_at:              string;
           finalized_at:            string | null;
           finalized_by:            string | null;
+          accountability_round_id: string | null;
         };
         Insert: {
           id?:                      string;
@@ -775,6 +776,7 @@ export interface Database {
           updated_at?:              string;
           finalized_at?:            string | null;
           finalized_by?:            string | null;
+          accountability_round_id?: string | null;
         };
         Update: {
           id?:                      string;
@@ -792,6 +794,7 @@ export interface Database {
           updated_at?:              string;
           finalized_at?:            string | null;
           finalized_by?:            string | null;
+          accountability_round_id?: string | null;
         };
         Relationships: [];
       };
@@ -806,6 +809,7 @@ export interface Database {
           actor:                   string;
           reason:                  string | null;
           created_at:              string;
+          accountability_round_id: string | null;
         };
         Insert: {
           id?:                      string;
@@ -816,6 +820,7 @@ export interface Database {
           actor:                    string;
           reason?:                  string | null;
           created_at?:              string;
+          accountability_round_id?: string | null;
         };
         Update: {
           id?:                      string;
@@ -826,6 +831,7 @@ export interface Database {
           actor?:                   string;
           reason?:                  string | null;
           created_at?:              string;
+          accountability_round_id?: string | null;
         };
         Relationships: [];
       };

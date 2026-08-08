@@ -145,7 +145,11 @@ async function loadVerifiedTransferChecksForSourceDate(
     .eq("source_id", sourceId)
     .gte("received_at", startUtc)
     .lt("received_at", endUtc);
-  if (accountabilityRoundId) evidenceQuery = evidenceQuery.eq("accountability_round_id", accountabilityRoundId);
+  if (accountabilityRoundId !== undefined) {
+    evidenceQuery = accountabilityRoundId === null
+      ? evidenceQuery.is("accountability_round_id", null)
+      : evidenceQuery.eq("accountability_round_id", accountabilityRoundId);
+  }
   const { data: evidences, error: evidenceError } = await evidenceQuery;
   if (evidenceError) {
     throw new Error(`slip evidence query failed: ${evidenceError.message}`);
@@ -280,7 +284,11 @@ async function computeManualSlipTotal(
     .eq("source_id", sourceId)
     .eq("business_date", businessDate)
     .eq("status", "closed");
-  if (accountabilityRoundId) sessionQuery = sessionQuery.eq("accountability_round_id", accountabilityRoundId);
+  if (accountabilityRoundId !== undefined) {
+    sessionQuery = accountabilityRoundId === null
+      ? sessionQuery.is("accountability_round_id", null)
+      : sessionQuery.eq("accountability_round_id", accountabilityRoundId);
+  }
   const { data: sessions } = await sessionQuery;
 
   const sessionIds = (sessions ?? []).map(s => s.id);
@@ -326,7 +334,11 @@ export async function loadMarketScopedManualSlipTotal(
     .eq("source_id", sourceId)
     .eq("business_date", businessDate)
     .eq("status", "closed");
-  if (accountabilityRoundId) sessionQuery = sessionQuery.eq("accountability_round_id", accountabilityRoundId);
+  if (accountabilityRoundId !== undefined) {
+    sessionQuery = accountabilityRoundId === null
+      ? sessionQuery.is("accountability_round_id", null)
+      : sessionQuery.eq("accountability_round_id", accountabilityRoundId);
+  }
   const { data: sessions, error: sessionError } = await sessionQuery;
   if (sessionError) {
     throw new Error(`manual_slip_sessions query failed: ${sessionError.message}`);
@@ -363,7 +375,11 @@ export async function reconcile(
     .eq("source_id", sourceId)
     .eq("business_date", businessDate)
     .eq("status", "open");
-  if (accountabilityRoundId) openSessionQuery = openSessionQuery.eq("accountability_round_id", accountabilityRoundId);
+  if (accountabilityRoundId !== undefined) {
+    openSessionQuery = accountabilityRoundId === null
+      ? openSessionQuery.is("accountability_round_id", null)
+      : openSessionQuery.eq("accountability_round_id", accountabilityRoundId);
+  }
   const { data: openSession } = await openSessionQuery.maybeSingle();
 
   if (openSession) {
@@ -392,7 +408,11 @@ export async function reconcile(
     .eq("terminalized", true)
     .eq("finalization_status", "failed_closed")
     .not("close_event_timestamp_ms", "is", null);
-  if (accountabilityRoundId) failedQuery = failedQuery.eq("accountability_round_id", accountabilityRoundId);
+  if (accountabilityRoundId !== undefined) {
+    failedQuery = accountabilityRoundId === null
+      ? failedQuery.is("accountability_round_id", null)
+      : failedQuery.eq("accountability_round_id", accountabilityRoundId);
+  }
   const { data: failedClosedSessions } = await failedQuery;
 
   const hasFailedClosedForDate = ((failedClosedSessions ?? []) as Array<{ close_event_timestamp_ms: number }>)
@@ -419,7 +439,11 @@ export async function reconcile(
     .select("id, raw_message_id")
     .eq("session_date", businessDate)
     .not("parser_errors", "is", null);
-  if (accountabilityRoundId) incompleteQuery = incompleteQuery.eq("accountability_round_id", accountabilityRoundId);
+  if (accountabilityRoundId !== undefined) {
+    incompleteQuery = accountabilityRoundId === null
+      ? incompleteQuery.is("accountability_round_id", null)
+      : incompleteQuery.eq("accountability_round_id", accountabilityRoundId);
+  }
   const { data: incompleteSessions } = await incompleteQuery;
 
   if (incompleteSessions && incompleteSessions.length > 0) {
@@ -467,7 +491,7 @@ export async function reconcile(
         ...result,
         updated_at:               new Date().toISOString(),
       },
-      { onConflict: "source_id,business_date" },
+      { onConflict: "source_id,business_date,accountability_round_id" },
     )
     .select()
     .single();

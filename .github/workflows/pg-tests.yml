@@ -287,6 +287,52 @@ jobs:
       - name: git diff --check against the PR base
         run: git diff --check "origin/${{ github.base_ref }}...HEAD"
 
+  p3-profitability:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ALLOW_DISPOSABLE_POSTGRES_TESTS: "1"
+      # P3 turns proven cost into money. It is verified against real PostgreSQL
+      # or not at all — an unreachable database is a HARD FAILURE of this job,
+      # never a green skip. The P2D/P2E regression suites below carry their own
+      # required-flags for the same reason.
+      REQUIRE_P3_POSTGRES: "1"
+      REQUIRE_POSTGRES_TESTS: "1"
+      REQUIRE_P2E_POSTGRES: "1"
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGPORT: "5432"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - name: P3 real-PostgreSQL profitability snapshot suite
+        run: bun run test:pg:p3
+      - name: P2D migration 0054 regression suite (P3 reads its cost lines)
+        run: bunx bun test src/lib/inventory-cost/migration-0054.pg.test.ts
+      - name: P2E accountability-round regression suite (P3's only identity)
+        run: bun run test:pg:p2e
+      - name: Typecheck
+        run: npm run type-check
+      - name: git diff --check against the PR base
+        run: git diff --check "origin/${{ github.base_ref }}...HEAD"
+
   inventory-cost-0054:
     runs-on: ubuntu-latest
     services:

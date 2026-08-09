@@ -490,11 +490,13 @@ SELECT (SELECT count(*) FROM public.inventory_movements)            AS movements
        (SELECT count(*) FROM public.settlement_entries)             AS settlements;
 ```
 
-### 5.A INCOMPLETE round — required, always available
+### 5.A INCOMPLETE round — only when a real round exists
 
 Pick a legitimate closed round that is missing required provenance: no
 round-bound `ISSUE`, or an `ISSUE` with no P2D cost line, or no white sheet of
-its own. §2.4 and §2.6 identify candidates.
+its own. §2.4 and §2.6 identify candidates. If Production has no closed round,
+record no snapshot and do not create or backfill a round for smoke. Verify the
+snapshot count remains zero and defer this case until a real round closes.
 
 Read first — this needs no write at all:
 
@@ -569,7 +571,7 @@ SELECT count(*) FROM public.profitability_snapshots WHERE accountability_round_i
 Re-record with identical inputs. **Expected:** `replayed: true`, the same
 `snapshot_id`, and no second revision.
 
-### 5.C Cancelled round — required
+### 5.C Cancelled round — only if Production has one
 
 A cancelled round is terminal but is **not a result**. Cancelling voids no
 produce session, movement, cost line or white sheet, so every figure stays
@@ -581,7 +583,10 @@ SELECT id, business_date, market_label_normalized FROM public.accountability_rou
  WHERE status = 'cancelled' ORDER BY business_date DESC LIMIT 5;
 ```
 
-Record a snapshot for it and read it back. **Expected:**
+If no cancelled round exists, create none. Run the standing invariant below and
+rely on the disposable-PostgreSQL cancelled/closed twin case until a real
+cancelled round exists. Otherwise record a snapshot for it and read it back.
+**Expected:**
 
 - `certification_state = "INCOMPLETE"`.
 - `incomplete_reasons` contains `accountability_round_cancelled`.
@@ -621,6 +626,10 @@ Pick a closed round that already has a snapshot from §5.A or §5.B, with a know
 `accountability_round_id`. Load the White Sheet page/API for that round's scope
 (the caller that already threads `accountabilityRoundId` into
 `loadDigitalWhiteSheetPageModel` / `loadServerDigitalWhiteSheetPageModel`).
+
+If Production still has no real round/snapshot, test only the legacy
+`round_unbound` page state and prove page load writes nothing. Defer the bound
+states; never create financial history merely to exercise rendering.
 
 **Expected:**
 

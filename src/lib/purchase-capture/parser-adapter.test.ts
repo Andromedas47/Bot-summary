@@ -96,6 +96,15 @@ describe("purchase capture parser adapter", () => {
     expect(draft?.documentKey).toBe("evt-open");
   });
 
+  test("supplier key and raw are emitted as a pair", () => {
+    // purchase_receipts_supplier_pairing rejects a raw supplier with a NULL key.
+    const raw = [HEADER_KNOWN, ITEM_ONE, COSTS_NO_VAT, CLOSE_ONE].join("\n\n");
+    const assembly = parsePurchaseCaptureAssembly([ingest("evt-all", 1000, raw, 1)], context);
+    const draft = buildPurchaseReceiptDraftInput({ assembly, context, ...emptyRegistries });
+    expect(draft?.supplierRaw).toBe("ร้านเจ๊แดง");
+    expect(draft?.supplierKey).toBe("ร้านเจ๊แดง");
+  });
+
   test("multi-message complete document", () => {
     const ingests = [
       ingest("evt-header", 1000, HEADER_KNOWN, 1),

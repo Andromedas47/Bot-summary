@@ -311,6 +311,14 @@ export class GuidedMenuFakeDatabase {
             },
             eq: (column: string, value: unknown) =>
               chain([...filters, (row) => row[column] === value]),
+            is: (column: string, value: unknown) =>
+              chain([
+                ...filters,
+                (row) =>
+                  value === null
+                    ? row[column] === null || row[column] === undefined
+                    : row[column] === value,
+              ]),
             /** Only `.not(col, "is", null)` is used by the guided lookups. */
             not: (column: string, _operator: string, _value: unknown) => {
               void _operator;
@@ -325,6 +333,13 @@ export class GuidedMenuFakeDatabase {
         return {
           eq: (column: string, value: unknown) =>
             chain([(row) => row[column] === value]),
+          is: (column: string, value: unknown) =>
+            chain([
+              (row) =>
+                value === null
+                  ? row[column] === null || row[column] === undefined
+                  : row[column] === value,
+            ]),
         };
       },
       update: (patch: Row) => ({
@@ -376,6 +391,19 @@ export class GuidedMenuFakeDatabase {
     }
     if (name === "open_or_rotate_guided_produce_structured_session") {
       return { data: this.openGuided(args), error: null };
+    }
+    if (name === "open_accountability_round_produce_session") {
+      const result = this.openGuided(args);
+      const outcome = String(result.outcome ?? "");
+      if (!["opened", "rotated", "idempotent"].includes(outcome)) {
+        return { data: result, error: null };
+      }
+      const round = args.p_accountability_round_id ?? `round:${String(args.p_opened_line_event_id)}`;
+      const row = (this.tables.pending_sessions ?? []).find(
+        (candidate) => candidate.session_generation === result.session_generation,
+      );
+      if (row) row.accountability_round_id = round;
+      return { data: { ...result, accountability_round_id: round }, error: null };
     }
     if (name === "close_produce_structured_session") {
       return { data: this.closeStructured(args), error: null };

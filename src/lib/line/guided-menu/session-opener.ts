@@ -52,6 +52,8 @@ export interface GuidedSessionOpenInput {
   businessDateIso: string;
   lineEventId: string;
   lineTimestampMs: number;
+  /** Explicit operator-selected target for return/damage/additional work. */
+  accountabilityRoundId?: string | null;
 }
 
 export type GuidedSessionOpenOutcome =
@@ -61,6 +63,7 @@ export type GuidedSessionOpenOutcome =
       outcome: "opened" | "rotated" | "idempotent";
       sessionKey: string;
       sessionGeneration: string;
+      accountabilityRoundId: string;
     }
   /** A live session already exists for this operator — nothing was written. */
   | { status: "already_open"; sessionKey: string }
@@ -145,6 +148,9 @@ export class GuidedSessionOpener {
     if (input.identity.sessionKey && input.identity.sessionKey !== sessionKey) {
       return { status: "refused", reason: "session_key_mismatch" };
     }
+    if (input.transactionType !== "withdraw" && !input.accountabilityRoundId) {
+      return { status: "refused", reason: "missing_accountability_round" };
+    }
 
     const transactionTime = bangkokTimeHhMm(input.lineTimestampMs);
     if (!transactionTime) {
@@ -190,6 +196,7 @@ export class GuidedSessionOpener {
         // rotated the row after the lookup above, the RPC refuses instead of
         // overwriting a session this call never saw.
         expectedSessionGeneration: existing?.session_generation ?? null,
+        accountabilityRoundId: input.accountabilityRoundId ?? null,
       },
       source,
       normalizedMarketLabel(input.marketLabel),
@@ -211,12 +218,16 @@ export class GuidedSessionOpener {
     if (result.kind !== "open") {
       return { status: "refused", reason: "unexpected_command_result" };
     }
+    if (!result.accountabilityRoundId) {
+      return { status: "refused", reason: "missing_accountability_round" };
+    }
 
     return {
       status: "opened",
       outcome: result.outcome,
       sessionKey: result.sessionKey,
       sessionGeneration: result.sessionGeneration,
+      accountabilityRoundId: result.accountabilityRoundId,
     };
   }
 }

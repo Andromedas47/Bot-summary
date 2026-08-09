@@ -50,6 +50,35 @@ export function unresolvedPlaceholderKey(kind: "product" | "unit", normalizedTex
   return `unresolved:${kind}:${token}`;
 }
 
+/**
+ * Supplier identity for a document whose supplier is raw staff text.
+ *
+ * No supplier master exists (0052: "Supplier identity text. No supplier master
+ * exists at 0052."), so there is nothing to resolve against and no
+ * supplier_identity_status column to report a fallback through. supplier_key is
+ * therefore the CANONICAL TEXT FORM of supplier_raw — the same NFC + collapsed
+ * whitespace + trim normalization the DB already applies to document_key
+ * (purchase_receipt_normalize_document_key) and this module applies to registry
+ * lookups. Deterministic and idempotent, so a redelivered or rechecked document
+ * derives the identical key. Textual variants of one supplier are MEANT to
+ * canonicalize onto the same key; what never collides is two distinct canonical
+ * supplier identities.
+ *
+ * The pair is returned together because purchase_receipts_supplier_pairing
+ * requires `(supplier_key IS NULL) = (supplier_raw IS NULL)`: a raw text that
+ * normalizes to nothing (e.g. only non-ASCII whitespace, which the parser's
+ * ASCII-only trim admits but btrim does not) yields NO supplier at all rather
+ * than a half pair the constraint would reject.
+ */
+export function resolveSupplierIdentity(rawSupplierText: string | null | undefined): {
+  supplierKey: string | null;
+  supplierRaw: string | null;
+} {
+  const supplierKey = normalizeRegistryText(rawSupplierText ?? "");
+  if (!supplierKey) return { supplierKey: null, supplierRaw: null };
+  return { supplierKey, supplierRaw: rawSupplierText ?? null };
+}
+
 export async function loadIntakeRegistries(
   supabase: Supabase,
 ): Promise<{

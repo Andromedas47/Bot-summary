@@ -4,6 +4,48 @@ on:
   pull_request:
 
 jobs:
+  p2e-accountability-round:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      REQUIRE_P2E_POSTGRES: "1"
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGPORT: "5432"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - name: P2E real-PostgreSQL identity and constraint suite
+        run: bun run test:pg:p2e
+      - name: P2E application and produce compatibility tests
+        run: >-
+          bun test
+          src/lib/line/guided-menu/slice3a-open-session.test.ts
+          src/lib/line/produce-structured-session.test.ts
+          src/lib/reconciliation.test.ts
+          src/lib/settlement-finalizer.test.ts
+      - name: Typecheck
+        run: npm run type-check
+      - name: git diff --check against the PR base
+        run: git diff --check "origin/${{ github.base_ref }}...HEAD"
+
   migration-0059:
     runs-on: ubuntu-latest
     services:
@@ -109,6 +151,8 @@ jobs:
       - run: bun install
       - name: Slice B real-PostgreSQL migration/hardening suite
         run: bunx bun test src/lib/purchase-capture/migration-slice-b.pg.test.ts
+      - name: Supplier pairing regression (real PostgreSQL)
+        run: bunx bun test src/lib/purchase-capture/supplier-pairing.pg.test.ts
       - name: Slice B unit tests
         run: >-
           bunx bun test

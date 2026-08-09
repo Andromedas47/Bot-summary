@@ -54,6 +54,8 @@ export interface OpenProduceSessionCommand {
   lineEventId: string;
   lineTimestampMs: number;
   expectedSessionGeneration?: string | null;
+  /** Explicit target for continuations; omitted only for a new main withdrawal. */
+  accountabilityRoundId?: string | null;
 }
 
 export interface AppendProduceSessionCommand {
@@ -91,7 +93,7 @@ export type ProduceSessionCommand =
   | StatusProduceSessionCommand;
 
 export type ProduceCommandResult =
-  | { ok: true; kind: "open"; outcome: "opened" | "rotated" | "idempotent"; sessionKey: string; sessionGeneration: string }
+  | { ok: true; kind: "open"; outcome: "opened" | "rotated" | "idempotent"; sessionKey: string; sessionGeneration: string; accountabilityRoundId?: string | null }
   | { ok: true; kind: "append"; sessionKey: string; session: StructuredPendingSession }
   | { ok: true; kind: "close"; sessionKey: string; reason: "first_close" | "close_already_requested"; session: StructuredPendingSession }
   | {
@@ -236,7 +238,7 @@ export class ProduceSessionCommandService {
     const { data, error } = await (this.supabase as any).rpc(
       guidedMarketLabelNormalized === undefined
         ? "open_or_rotate_produce_structured_session"
-        : "open_or_rotate_guided_produce_structured_session",
+        : "open_accountability_round_produce_session",
       {
         p_session_key:               sessionKey,
         p_source_type:               source.type,
@@ -258,6 +260,9 @@ export class ProduceSessionCommandService {
         p_declared_transaction_type: command.declaredTransactionType,
         p_additional_opener:         command.additionalOpener,
         p_expected_session_generation: command.expectedSessionGeneration ?? null,
+        ...(guidedMarketLabelNormalized === undefined
+          ? {}
+          : { p_accountability_round_id: command.accountabilityRoundId ?? null }),
       },
     );
     if (error) throw new Error(`structured session open failed: ${error.message}`);
@@ -265,6 +270,7 @@ export class ProduceSessionCommandService {
     const result = data as {
       outcome: string;
       session_generation: string;
+      accountability_round_id?: string;
       reason?: string;
     } | null;
     if (!result) return { ok: false, reason: "not_found" };
@@ -275,6 +281,9 @@ export class ProduceSessionCommandService {
     if (result.outcome === "generation_conflict") {
       return { ok: false, reason: "generation_conflict", detail: result.reason };
     }
+    if (!result.accountability_round_id && guidedMarketLabelNormalized !== undefined) {
+      return { ok: false, reason: "not_found", detail: "accountability round missing from guided open" };
+    }
 
     return {
       ok: true,
@@ -282,6 +291,7 @@ export class ProduceSessionCommandService {
       outcome: result.outcome as "opened" | "rotated" | "idempotent",
       sessionKey,
       sessionGeneration: result.session_generation,
+      accountabilityRoundId: result.accountability_round_id ?? null,
     };
   }
 

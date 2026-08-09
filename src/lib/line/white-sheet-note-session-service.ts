@@ -89,6 +89,7 @@ export class WhiteSheetNoteSessionService {
     businessDate: string;
     lineUserId: string | null;
     lineEventId: string;
+    accountabilityRoundId?: string | null;
   }): Promise<{ opened: true; session: ManualWhiteSheetNoteSessionRow } | { opened: false; session: ManualWhiteSheetNoteSessionRow }> {
     const existing = await this.findOpenSession(params.sourceId);
     if (existing) {
@@ -105,6 +106,7 @@ export class WhiteSheetNoteSessionService {
         status: "open",
         opened_by_line_user_id: params.lineUserId,
         opened_line_event_id: params.lineEventId,
+        accountability_round_id: params.accountabilityRoundId ?? null,
       })
       .select()
       .single();

@@ -10,7 +10,8 @@
     "type-check": "tsc --noEmit",
     "test:pg:0059": "node scripts/test-pg-0059.mjs",
     "test:pg:0060": "node scripts/test-pg-0060.mjs",
-    "test:pg:p2e": "bun test src/lib/accountability-round/migration-p2e.pg.test.ts"
+    "test:pg:p2e": "bun test src/lib/accountability-round/migration-p2e.pg.test.ts",
+    "test:pg:p3": "bun test src/lib/profitability/migration-p3.pg.test.ts"
   },
   "dependencies": {
     "@fontsource/sarabun": "^5.2.8",

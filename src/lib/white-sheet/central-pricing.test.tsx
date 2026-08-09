@@ -294,6 +294,7 @@ describe("Phase 14: missing central price fails closed", () => {
       summary: calculation,
       finalizedAt: null,
       finalizedBy: null,
+      profitability: { state: "round_unbound" as const },
     };
     expect(() => requireTrustedWhiteSheetSummary(pageModel)).toThrow(WhiteSheetHardStopError);
     expect(() => buildWhiteSheetSummaryMessagesFromPageModel(pageModel)).toThrow(WhiteSheetHardStopError);

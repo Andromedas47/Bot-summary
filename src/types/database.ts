@@ -2452,6 +2452,28 @@ export interface Database {
         };
         Returns: Json;
       };
+      // ─── P3 profitability snapshots (migration 20260808130000) ─────────
+      // The two satang arguments are `numeric` in PostgreSQL and are typed
+      // `string` here on purpose: they are sent as exact decimal strings and
+      // cast server-side, because a JS number would round a large amount
+      // through an IEEE-754 double before PostgreSQL ever saw it.
+      record_profitability_snapshot: {
+        Args: {
+          p_accountability_round_id:        string;
+          p_quantity_attributions:          Json;
+          p_verified_transfers_satang?:     string | null;
+          p_verified_transfer_source_ids?:  string[];
+          p_purchasing_expenses_satang?:    string | null;
+          p_purchasing_expense_receipt_ids?: string[];
+          p_calculation_version?:           string;
+          p_actor?:                         string | null;
+        };
+        Returns: Json;
+      };
+      get_profitability_snapshot: {
+        Args: { p_accountability_round_id: string; p_revision?: number | null };
+        Returns: Json;
+      };
     };
     CompositeTypes: { [_ in never]: never };
     Enums: {

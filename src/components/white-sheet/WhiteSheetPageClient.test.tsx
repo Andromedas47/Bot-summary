@@ -16,6 +16,7 @@ describe("WhiteSheetPageClient UX hardening", () => {
             summary: matchedWhiteSheetFixture,
             finalizedAt: null,
             finalizedBy: null,
+            profitability: { state: "round_unbound" },
           },
         }}
       />,

@@ -73,9 +73,12 @@ const MIGRATION_CONFIRM_POST = join(
   REPO_ROOT, "supabase", "migrations", "20260805160000_purchase_capture_confirm_post.sql",
 );
 const SLICE_C_HARDENING = join(REPO_ROOT, "supabase", "tests", "purchase_capture_slice_c_hardening.sql");
+const P2E_BOOTSTRAP = join(REPO_ROOT, "supabase", "tests", "p2e_accountability_round_bootstrap.sql");
+const P2E_EXPAND = join(REPO_ROOT, "supabase", "migrations", "20260808105001_p2e_accountability_round_identity.sql");
+const P2E_CONTRACT = join(REPO_ROOT, "supabase", "migrations", "20260808212137_p2e_accountability_round_identity_contract.sql");
 const MIGRATION_0054 = join(REPO_ROOT, "supabase", "migrations", "0054_inventory_cost_valuation.sql");
 
-const APPLY_CHAIN = [
+const PRE_0054_CHAIN = [
   BOOTSTRAP,
   MIGRATION_0052,
   MIGRATION_SESSIONS,
@@ -86,12 +89,22 @@ const APPLY_CHAIN = [
   POST_0053,
   MIGRATION_CONFIRM_POST,
   SLICE_C_HARDENING,
+];
+const APPLY_CHAIN = [
+  ...PRE_0054_CHAIN,
+  MIGRATION_0054,
+];
+const PRODUCTION_ORDER_CHAIN = [
+  ...PRE_0054_CHAIN,
+  P2E_BOOTSTRAP,
+  P2E_EXPAND,
+  P2E_CONTRACT,
   MIGRATION_0054,
 ];
 
 // Stable test UUIDs model P2E's canonical inventory movement provenance. The
-// harness adds the nullable column after applying 0054, exercising the real
-// mixed-version order where P2D is installed first and P2E arrives later.
+// full valuation suite keeps the legacy P2D-first order for defensive null-round
+// coverage; the focused Production-order test applies exact P2E before 0054.
 const ROUND_A = "10000000-0000-4000-8000-000000000001";
 const ROUND_B = "10000000-0000-4000-8000-000000000002";
 
@@ -196,15 +209,19 @@ describe.skipIf(!pgAvailable)("P2D migration 0054 PostgreSQL", () => {
     return spawnPsql(psqlPath, ["-v", "ON_ERROR_STOP=1", "-d", dbName, "-c", script], dbName);
   }
 
-  async function applyChainTo(name: string): Promise<void> {
+  async function applyFilesTo(name: string, files: readonly string[]): Promise<void> {
     const create = await runPsql(psqlPath, [
       "-v", "ON_ERROR_STOP=1", "-d", "postgres", "-c", `CREATE DATABASE ${name}`,
     ]);
     if (create.code !== 0) throw new Error(`CREATE DATABASE ${name} failed: ${create.stderr}`);
-    for (const file of APPLY_CHAIN) {
+    for (const file of files) {
       const r = await runPsql(psqlPath, ["-v", "ON_ERROR_STOP=1", "-d", name, "-f", file], { database: name });
       if (r.code !== 0) throw new Error(`${file} failed against ${name}:\n${r.stderr}\n${r.stdout}`);
     }
+  }
+
+  async function applyChainTo(name: string): Promise<void> {
+    await applyFilesTo(name, APPLY_CHAIN);
     const p2eColumn = await runPsql(
       psqlPath,
       [
@@ -676,6 +693,72 @@ describe.skipIf(!pgAvailable)("P2D migration 0054 PostgreSQL", () => {
   // ═══════════════════════════════════════════════════════════════════════
   // 1. Bootstrap
   // ═══════════════════════════════════════════════════════════════════════
+
+  test(
+    "0054 applies after exact P2E EXPAND and CONTRACT without weakening P2E movement guards",
+    async () => {
+      const name = `p2d_after_p2e_${randomBytes(4).toString("hex")}`;
+      try {
+        for (const file of PRODUCTION_ORDER_CHAIN) {
+          expect(existsSync(file), `missing ${file}`).toBe(true);
+        }
+        await applyFilesTo(name, PRODUCTION_ORDER_CHAIN);
+
+        const query = async (text: string) => {
+          const r = await runPsql(psqlPath, ["-v", "ON_ERROR_STOP=1", "-d", name, "-tAc", text], { database: name });
+          if (r.code !== 0) throw new Error(`SQL failed against ${name}:\n${r.stderr}\n${text}`);
+          return (r.stdout || "").trim();
+        };
+        const fails = async (text: string) => {
+          const r = await runPsql(psqlPath, ["-v", "ON_ERROR_STOP=1", "-d", name, "-tAc", text], { database: name });
+          if (r.code === 0) throw new Error(`expected failure against ${name}:\n${text}`);
+          return r.stderr || r.stdout;
+        };
+
+        expect(await query(`SELECT to_regclass('public.inventory_cost_movements') IS NOT NULL`)).toBe("t");
+        expect(await query(`SELECT to_regprocedure('public.guard_p2e_bound_financial_write_during_expand()') IS NULL`)).toBe("t");
+        expect(await query(`SELECT count(*) FROM pg_trigger WHERE tgrelid='public.inventory_movements'::regclass AND tgname IN ('inventory_movements_bind_accountability_round','inventory_movements_accountability_round_write_once')`)).toBe("2");
+        expect(await query(`SELECT pg_get_constraintdef(oid) LIKE '%accountability_round_id IS NOT NULL%' FROM pg_constraint WHERE conrelid='public.inventory_movements'::regclass AND conname='inventory_movements_round_required_check'`)).toBe("t");
+
+        await query(`
+          INSERT INTO public.accountability_rounds(
+            id,source_type,source_id,owner_line_user_id,business_date,
+            seller_label,market_label,market_label_normalized,created_line_event_id
+          ) VALUES (
+            '${ROUND_A}','group','P2D-G','P2D-U','2026-07-29',
+            'P2D Seller','P2D Market','P2D Market','p2d-after-p2e-round-a'
+          );
+          INSERT INTO public.raw_messages(id) VALUES ('20000000-0000-4000-8000-000000000001');
+          INSERT INTO public.produce_sessions(
+            id,raw_message_id,staff_name,session_date,session_title,accountability_round_id
+          ) VALUES (
+            '20000000-0000-4000-8000-000000000002',
+            '20000000-0000-4000-8000-000000000001',
+            'P2D Seller','2026-07-29','P2D Market','${ROUND_A}'
+          );
+          INSERT INTO public.inventory_movements(
+            id,movement_type,business_date,source_system,source_document_type,
+            source_document_id,dedupe_key,line_count,accountability_round_id
+          ) VALUES (
+            '20000000-0000-4000-8000-000000000003','ISSUE','2026-07-29','test',
+            'produce_session','20000000-0000-4000-8000-000000000002','p2d-after-p2e-issue',1,'${ROUND_A}'
+          );
+          INSERT INTO public.inventory_movement_lines(
+            movement_id,line_ordinal,product_key,unit_key,location_code,signed_quantity
+          ) VALUES (
+            '20000000-0000-4000-8000-000000000003',1,'P2D-P','kg','MAIN',-1
+          )
+        `);
+        expect(await query(`SELECT accountability_round_id::text FROM public.inventory_movements WHERE id='20000000-0000-4000-8000-000000000003'`)).toBe(ROUND_A);
+        expect(await fails(`INSERT INTO public.inventory_movements(id,movement_type,business_date,source_system,source_document_type,source_document_id,dedupe_key,line_count) VALUES (gen_random_uuid(),'GOOD_RETURN','2026-07-29','test','manual',gen_random_uuid(),'p2d-after-p2e-null-round',1)`)).toMatch(/inventory_movements_round_required_check/iu);
+        expect(await fails(`SELECT public.value_inventory_consumption_movement('20000000-0000-4000-8000-000000000003')`)).toMatch(/insufficient_inventory/iu);
+        expect(await query(`SELECT count(*) FROM public.inventory_cost_movements`)).toBe("0");
+      } finally {
+        await dropDb(name);
+      }
+    },
+    { timeout: 400_000 },
+  );
 
   test(
     "the whole chain including 0054 applies clean on a disposable database",

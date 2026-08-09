@@ -444,7 +444,9 @@ describe("reconcile", () => {
 
     expect(result.blocked).toBe(false);
     expect(upserts).toHaveLength(1);
-    expect(upserts[0]!.opts).toEqual({ onConflict: "source_id,business_date" });
+    expect(upserts[0]!.opts).toEqual({
+      onConflict: "source_id,business_date,accountability_round_id",
+    });
     expect(upserts[0]!.opts?.onConflict).not.toBe("work_round_id");
     expect(upserts[0]!.row).toMatchObject({
       source_id: "grp1",

@@ -8,6 +8,7 @@ type CashEntryRow = Database["public"]["Tables"]["digital_white_sheet_cash_entri
 const TABLE = "digital_white_sheet_cash_entries" as const;
 const OTHER_NOTE_MAX_LENGTH = 1000;
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export class WhiteSheetPersistenceError extends Error {
   constructor(message: string) {
@@ -28,6 +29,8 @@ export interface WhiteSheetCashEntryIdentity {
   sourceId: string;
   marketLabelNormalized: string;
   businessDate: string;
+  /** Exact economic cycle. Undefined preserves pre-P2E callers; null is legacy-unbound only. */
+  accountabilityRoundId?: string | null;
 }
 
 /**
@@ -88,6 +91,14 @@ function requireBusinessDate(value: string): string {
     throw new WhiteSheetPersistenceError(`businessDate is not a valid calendar date: ${trimmed}`);
   }
   return trimmed;
+}
+
+function requireAccountabilityRoundId(value: string | null | undefined) {
+  if (value == null) return value;
+  if (!UUID_PATTERN.test(value)) {
+    throw new WhiteSheetPersistenceError("accountabilityRoundId must be a UUID");
+  }
+  return value;
 }
 
 /** True only for a finite, non-negative amount with at most 2 decimal places. */
@@ -164,16 +175,22 @@ export async function loadWhiteSheetCashEntry(
     "marketLabelNormalized",
   );
   const businessDate = requireBusinessDate(rawIdentity.businessDate);
+  const accountabilityRoundId = requireAccountabilityRoundId(rawIdentity.accountabilityRoundId);
 
-  const { data, error } = await supabase
+  let query = supabase
     .from(TABLE)
     .select(
       "labor, location_fee, bag, snack, other, other_note, actual_cash_submitted, updated_at, finalized_at, finalized_by",
     )
     .eq("source_id", sourceId)
     .eq("market_label_normalized", marketLabelNormalized)
-    .eq("business_date", businessDate)
-    .maybeSingle();
+    .eq("business_date", businessDate);
+  if (accountabilityRoundId !== undefined) {
+    query = accountabilityRoundId === null
+      ? query.is("accountability_round_id", null)
+      : query.eq("accountability_round_id", accountabilityRoundId);
+  }
+  const { data, error } = await query.maybeSingle();
 
   if (error) {
     throw new WhiteSheetPersistenceError(`white sheet cash entry query failed: ${error.message}`);
@@ -201,6 +218,7 @@ export async function saveWhiteSheetCashEntry(
     "marketLabelNormalized",
   );
   const businessDate = requireBusinessDate(rawInput.businessDate);
+  const accountabilityRoundId = requireAccountabilityRoundId(rawInput.accountabilityRoundId);
 
   const labor = requireMoney(rawInput.labor, "labor");
   const locationFee = requireMoney(rawInput.locationFee, "locationFee");
@@ -210,13 +228,18 @@ export async function saveWhiteSheetCashEntry(
   const actualCashSubmitted = requireMoney(rawInput.actualCashSubmitted, "actualCashSubmitted");
   const otherNote = requireOtherNote(rawInput.otherNote);
 
-  const { data: existing, error: existingError } = await supabase
+  let existingQuery = supabase
     .from(TABLE)
     .select("id, finalized_at")
     .eq("source_id", sourceId)
     .eq("market_label_normalized", marketLabelNormalized)
-    .eq("business_date", businessDate)
-    .maybeSingle();
+    .eq("business_date", businessDate);
+  if (accountabilityRoundId !== undefined) {
+    existingQuery = accountabilityRoundId === null
+      ? existingQuery.is("accountability_round_id", null)
+      : existingQuery.eq("accountability_round_id", accountabilityRoundId);
+  }
+  const { data: existing, error: existingError } = await existingQuery.maybeSingle();
 
   if (existingError) {
     throw new WhiteSheetPersistenceError(`white sheet cash entry query failed: ${existingError.message}`);
@@ -264,6 +287,7 @@ export async function saveWhiteSheetCashEntry(
       source_id: sourceId,
       market_label_normalized: marketLabelNormalized,
       business_date: businessDate,
+      accountability_round_id: accountabilityRoundId ?? null,
       ...writeValues,
     })
     .select(SELECT_COLUMNS)
@@ -293,12 +317,14 @@ export async function finalizeWhiteSheetCashEntry(
     "marketLabelNormalized",
   );
   const businessDate = requireBusinessDate(rawIdentity.businessDate);
+  const accountabilityRoundId = requireAccountabilityRoundId(rawIdentity.accountabilityRoundId);
   const actorId = requireIdentityField(actor, "actor");
 
   const { data, error } = await supabase.rpc("finalize_white_sheet_cash_entry", {
     p_source_id: sourceId,
     p_market_label_normalized: marketLabelNormalized,
     p_business_date: businessDate,
+    p_accountability_round_id: accountabilityRoundId ?? null,
     p_actor: actorId,
   });
 
@@ -334,6 +360,7 @@ export async function reopenWhiteSheetCashEntry(
     "marketLabelNormalized",
   );
   const businessDate = requireBusinessDate(rawIdentity.businessDate);
+  const accountabilityRoundId = requireAccountabilityRoundId(rawIdentity.accountabilityRoundId);
   const actorId = requireIdentityField(actor, "actor");
   const trimmedReason = reason.trim();
   if (!trimmedReason) {
@@ -344,6 +371,7 @@ export async function reopenWhiteSheetCashEntry(
     p_source_id: sourceId,
     p_market_label_normalized: marketLabelNormalized,
     p_business_date: businessDate,
+    p_accountability_round_id: accountabilityRoundId ?? null,
     p_actor: actorId,
     p_reason: trimmedReason,
   });

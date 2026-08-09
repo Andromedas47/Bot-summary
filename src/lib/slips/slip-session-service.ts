@@ -69,6 +69,7 @@ export interface SlipSessionIngestor {
     sourceType:  string,
     senderId:    string | null,
     header:      SlipSessionHeader,
+    accountabilityRoundId?: string | null,
   ): Promise<{ opened: true; batchId: string } | { opened: false; existingBatchId: string }>;
 
   findActiveSession(sourceId: string): Promise<ActiveSlipSession | null>;
@@ -82,6 +83,7 @@ export class SlipSessionService implements SlipSessionIngestor {
     sourceType: string,
     senderId:   string | null,
     header:     SlipSessionHeader,
+    accountabilityRoundId: string | null = null,
   ): Promise<{ opened: true; batchId: string } | { opened: false; existingBatchId: string }> {
     const log = logger.child({ sourceId });
 
@@ -101,6 +103,7 @@ export class SlipSessionService implements SlipSessionIngestor {
         slip_date:   header.slipDate,
         batch_type:  header.batchType,
         image_count: 0,
+        accountability_round_id: accountabilityRoundId,
       })
       .select("id")
       .single();

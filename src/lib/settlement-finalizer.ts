@@ -45,11 +45,17 @@ async function computeTransactionTotals(
   date:        string,
   staff_name:  string,
   market_name: string,
+  accountabilityRoundId?: string | null,
 ) {
-  const base     = supabase
+  let base = supabase
     .from("produce_transactions")
     .select("transaction_type, total_amount, market_name")
     .eq("transaction_date", date);
+  if (accountabilityRoundId !== undefined) {
+    base = accountabilityRoundId === null
+      ? base.is("accountability_round_id", null)
+      : base.eq("accountability_round_id", accountabilityRoundId);
+  }
 
   const filtered = staff_name ? base.eq("staff_name", staff_name) : base;
   const { data } = await filtered.in("transaction_type", KNOWN_TX_TYPES as unknown as string[]);
@@ -80,16 +86,28 @@ export async function tryFinalizeSettlement(
   sourceId:     string,
   businessDate: string,
   push:         PushFn = defaultPush,
+  accountabilityRoundId?: string | null,
 ): Promise<FinalizeSettlementResult> {
   const log = logger.child({ fn: "tryFinalizeSettlement", sourceId, businessDate });
   const now = new Date().toISOString();
+  const scoped = <T>(query: T): T => {
+    const roundQuery = query as T & {
+      is(column: string, value: null): T;
+      eq(column: string, value: string): T;
+    };
+    return accountabilityRoundId === undefined
+      ? query
+      : accountabilityRoundId === null
+        ? roundQuery.is("accountability_round_id", null)
+        : roundQuery.eq("accountability_round_id", accountabilityRoundId);
+  };
 
   // ── 1. Detect multiple settlement entries (ambiguous) ──────────────────────
-  const { data: entries, error: entryErr } = await supabase
+  const { data: entries, error: entryErr } = await scoped(supabase
     .from("settlement_entries")
     .select("money_transfer, money_cash, expenses, labor, staff_name, market_name, notes")
     .eq("source_id", sourceId)
-    .eq("settlement_date", businessDate);
+    .eq("settlement_date", businessDate));
 
   if (entryErr) throw new Error(`settlement_entries query failed: ${entryErr.message}`);
 
@@ -100,11 +118,11 @@ export async function tryFinalizeSettlement(
 
   if (entries.length > 1) {
     // Never downgrade a row that already sent the final message.
-    const { data: existingFin } = await supabase
+    const { data: existingFin } = await scoped(supabase
       .from("settlement_finalizations")
       .select("status, message_sent_at")
       .eq("source_id", sourceId)
-      .eq("business_date", businessDate)
+      .eq("business_date", businessDate))
       .maybeSingle();
 
     if (existingFin?.status === "sent" || existingFin?.message_sent_at) {
@@ -116,8 +134,8 @@ export async function tryFinalizeSettlement(
     await supabase
       .from("settlement_finalizations")
       .upsert(
-        { source_id: sourceId, business_date: businessDate, status: "ambiguous", updated_at: now },
-        { onConflict: "source_id,business_date" },
+        { source_id: sourceId, business_date: businessDate, accountability_round_id: accountabilityRoundId ?? null, status: "ambiguous", updated_at: now },
+        { onConflict: "source_id,business_date,accountability_round_id" },
       );
     return "ambiguous";
   }
@@ -125,12 +143,12 @@ export async function tryFinalizeSettlement(
   const entry = entries[0];
 
   // ── 2. Open manual slip session ────────────────────────────────────────────
-  const { data: openSession } = await supabase
+  const { data: openSession } = await scoped(supabase
     .from("manual_slip_sessions")
     .select("id")
     .eq("source_id", sourceId)
     .eq("business_date", businessDate)
-    .eq("status", "open")
+    .eq("status", "open"))
     .maybeSingle();
 
   if (openSession) {
@@ -144,13 +162,13 @@ export async function tryFinalizeSettlement(
   // ponytail: batches spanning midnight may have evidences counted in a
   //           different window than last_image_at — accepted rare inconsistency.
   const { startUtc, endUtc } = businessDateToUtcRange(businessDate);
-  const { data: activeBatches } = await supabase
+  const { data: activeBatches } = await scoped(supabase
     .from("slip_batches")
     .select("id")
     .eq("source_id", sourceId)
     .in("status", ["collecting", "closing", "processing"])
     .gte("last_image_at", startUtc)
-    .lt("last_image_at", endUtc)
+    .lt("last_image_at", endUtc))
     .limit(1);
 
   if (activeBatches && activeBatches.length > 0) {
@@ -163,13 +181,13 @@ export async function tryFinalizeSettlement(
   // If their slip_check is still PROCESSING, reconciliation would undercount.
   // Batched evidences in completed/review_needed batches are accepted even if
   // individual checks are still PROCESSING (batch timeout path — known limit).
-  const { data: unbatchedEvs } = await supabase
+  const { data: unbatchedEvs } = await scoped(supabase
     .from("slip_evidences")
     .select("id")
     .eq("source_id", sourceId)
     .gte("received_at", startUtc)
     .lt("received_at", endUtc)
-    .is("batch_id", null);
+    .is("batch_id", null));
 
   const unbatchedIds = (unbatchedEvs ?? []).map((e) => e.id as string);
   if (unbatchedIds.length > 0) {
@@ -195,7 +213,7 @@ export async function tryFinalizeSettlement(
 
   const { data: insertedRow, error: insertErr } = await supabase
     .from("settlement_finalizations")
-    .insert({ source_id: sourceId, business_date: businessDate, status: "sending", claimed_at: now })
+    .insert({ source_id: sourceId, business_date: businessDate, accountability_round_id: accountabilityRoundId ?? null, status: "sending", claimed_at: now })
     .select("id, line_retry_key, status")
     .maybeSingle();
 
@@ -207,12 +225,12 @@ export async function tryFinalizeSettlement(
     }
 
     // Stage 2: claim a pending or failed row.
-    const { data: claimedExisting } = await supabase
+    const { data: claimedExisting } = await scoped(supabase
       .from("settlement_finalizations")
       .update({ status: "sending", claimed_at: now, updated_at: now })
       .eq("source_id", sourceId)
       .eq("business_date", businessDate)
-      .in("status", ["pending", "failed"])
+      .in("status", ["pending", "failed"]))
       .select("id, line_retry_key, status")
       .maybeSingle();
 
@@ -222,14 +240,14 @@ export async function tryFinalizeSettlement(
       // Stage 3: reclaim a stale sending row (process crash / DB-update failure).
       // We only update claimed_at so the stable line_retry_key is preserved.
       const staleCutoff = new Date(Date.now() - STALE_SENDING_MS).toISOString();
-      const { data: reclaimedStale } = await supabase
+      const { data: reclaimedStale } = await scoped(supabase
         .from("settlement_finalizations")
         .update({ claimed_at: now, updated_at: now })
         .eq("source_id", sourceId)
         .eq("business_date", businessDate)
         .eq("status", "sending")
         .is("message_sent_at", null)
-        .lte("claimed_at", staleCutoff)
+        .lte("claimed_at", staleCutoff))
         .select("id, line_retry_key, status")
         .maybeSingle();
 
@@ -238,11 +256,11 @@ export async function tryFinalizeSettlement(
         claimedRow = reclaimedStale;
       } else {
         // Row is in a non-claimable state: re-fetch to determine why.
-        const { data: existing } = await supabase
+        const { data: existing } = await scoped(supabase
           .from("settlement_finalizations")
           .select("status, message_sent_at")
           .eq("source_id", sourceId)
-          .eq("business_date", businessDate)
+          .eq("business_date", businessDate))
           .maybeSingle();
 
         if (existing?.status === "sent" || existing?.message_sent_at) return "already_done";
@@ -262,6 +280,7 @@ export async function tryFinalizeSettlement(
     sourceId,
     businessDate,
     entry.money_transfer ?? 0,
+    accountabilityRoundId,
   );
 
   if (reconcileResult.blocked) {
@@ -279,6 +298,7 @@ export async function tryFinalizeSettlement(
     businessDate,
     entry.staff_name  ?? "",
     entry.market_name ?? "",
+    accountabilityRoundId,
   );
 
   const settlement = calculateSettlementTotals({

@@ -29,6 +29,8 @@ import type { GuidedMenuIdentity } from "./ux-types";
 import type { GuidedJourneyContext, GuidedJourneyState } from "./journey";
 import type { WhiteSheetCashEntryState } from "@/lib/white-sheet/persist";
 
+process.env.LINE_CHANNEL_SECRET ??= "test-channel-secret";
+
 const SOURCE = "G-1";
 const DATE = "2026-07-29";
 const MARKET = "วัดทุ่งลานนา";

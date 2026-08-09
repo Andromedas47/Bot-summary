@@ -60,6 +60,8 @@ export interface PendingSession {
     | "pending" | "processing" | "failed_closed" | "duplicate" | "finalized";
   finalization_error?:            unknown | null;
   finalized_produce_session_id?:  string | null;
+  /** P2E: generated economic-cycle identity; NULL is legacy/unbound. */
+  accountability_round_id?:       string | null;
   /** 0050: structured review hold — non-NULL blocks Produce persistence. */
   finalize_hold_until?:           string | null;
   finalize_confirmed_at?:         string | null;

@@ -24,7 +24,10 @@ describe("requireReopenReason", () => {
 describe("postWhiteSheetLifecycle", () => {
   it("finalizes via the existing finalize API and reports success", async () => {
     const calls: Array<{ url: string; body: unknown }> = [];
-    const result = await postWhiteSheetLifecycle("finalize", SCOPE, {
+    const result = await postWhiteSheetLifecycle("finalize", {
+      ...SCOPE,
+      accountabilityRoundId: "11111111-1111-4111-8111-111111111111",
+    }, {
       fetchImpl: async (input, init) => {
         calls.push({
           url: String(input),
@@ -41,6 +44,7 @@ describe("postWhiteSheetLifecycle", () => {
           sourceId: "src-1",
           market: "ทดสอบไวท์ชีท",
           date: "2026-07-25",
+          accountabilityRoundId: "11111111-1111-4111-8111-111111111111",
         },
       },
     ]);

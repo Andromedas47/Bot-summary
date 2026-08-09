@@ -141,12 +141,18 @@ export async function loadGuidedSlipRows(
 ): Promise<GuidedSlipRow[]> {
   const { startUtc, endUtc } = businessDateToUtcRange(context.businessDate);
 
-  const { data: evidences, error: evidenceError } = await supabase
+  let evidenceQuery = supabase
     .from("slip_evidences")
     .select("id, market_label, received_at")
     .eq("source_id", context.sourceId)
     .gte("received_at", startUtc)
     .lt("received_at", endUtc);
+  if (context.accountabilityRoundId !== undefined) {
+    evidenceQuery = context.accountabilityRoundId === null
+      ? evidenceQuery.is("accountability_round_id", null)
+      : evidenceQuery.eq("accountability_round_id", context.accountabilityRoundId);
+  }
+  const { data: evidences, error: evidenceError } = await evidenceQuery;
   if (evidenceError) {
     throw new Error(`slip evidence lookup failed: ${evidenceError.message}`);
   }
@@ -246,19 +252,26 @@ export async function buildGuidedRoundReport(
     ),
   );
 
-  const [batchRes, manualRes] = await Promise.all([
-    supabase
+  let batchQuery = supabase
       .from("slip_batches")
       .select("id, status")
       .eq("source_id", context.sourceId)
-      .in("status", ["collecting", "closing", "processing"]),
-    supabase
+      .in("status", ["collecting", "closing", "processing"]);
+  let manualQuery = supabase
       .from("manual_slip_sessions")
       .select("id")
       .eq("source_id", context.sourceId)
       .eq("business_date", context.businessDate)
-      .eq("status", "open"),
-  ]);
+      .eq("status", "open");
+  if (context.accountabilityRoundId !== undefined) {
+    batchQuery = context.accountabilityRoundId === null
+      ? batchQuery.is("accountability_round_id", null)
+      : batchQuery.eq("accountability_round_id", context.accountabilityRoundId);
+    manualQuery = context.accountabilityRoundId === null
+      ? manualQuery.is("accountability_round_id", null)
+      : manualQuery.eq("accountability_round_id", context.accountabilityRoundId);
+  }
+  const [batchRes, manualRes] = await Promise.all([batchQuery, manualQuery]);
   if (batchRes.error) {
     throw new Error(`slip batch lookup failed: ${batchRes.error.message}`);
   }
@@ -285,12 +298,14 @@ export async function buildGuidedRoundReport(
     context.businessDate,
     context.marketLabelNormalized,
     knownMarkets,
+    context.accountabilityRoundId,
   );
   const manualTotal = await loadMarketScopedManualSlipTotal(
     supabase,
     context.sourceId,
     context.businessDate,
     context.marketLabelNormalized,
+    context.accountabilityRoundId,
   );
 
   if (verified.unresolvedAcceptedCount > 0 || verified.pendingReferenceCount > 0) {
@@ -301,11 +316,17 @@ export async function buildGuidedRoundReport(
   const manualSlipTotal = round2(manualTotal);
   const checkedSlipTotal = round2(aiVerifiedTotal + manualSlipTotal);
 
-  const { data: entries, error: entryError } = await supabase
+  let entryQuery = supabase
     .from("settlement_entries")
     .select("money_transfer")
     .eq("source_id", context.sourceId)
     .eq("settlement_date", context.businessDate);
+  if (context.accountabilityRoundId !== undefined) {
+    entryQuery = context.accountabilityRoundId === null
+      ? entryQuery.is("accountability_round_id", null)
+      : entryQuery.eq("accountability_round_id", context.accountabilityRoundId);
+  }
+  const { data: entries, error: entryError } = await entryQuery;
   if (entryError) {
     throw new Error(`settlement entry lookup failed: ${entryError.message}`);
   }
@@ -358,6 +379,7 @@ export async function closeGuidedRound(
   whiteSheetSubmitted: boolean,
   push: (to: string, text: string, retryKey?: string) => Promise<unknown> =
     async () => undefined,
+  closeLineEventId?: string,
 ): Promise<GuidedRoundCloseOutcome> {
   const report = await buildGuidedRoundReport(
     supabase,
@@ -373,8 +395,18 @@ export async function closeGuidedRound(
     context.sourceId,
     context.businessDate,
     push,
+    context.accountabilityRoundId ?? null,
   );
   if (settlement === "finalized" || settlement === "already_done") {
+    if (context.accountabilityRoundId && closeLineEventId) {
+      const { error } = await supabase.rpc("close_accountability_round", {
+        p_accountability_round_id: context.accountabilityRoundId,
+        p_source_id: context.sourceId,
+        p_owner_line_user_id: context.lineUserId,
+        p_closed_line_event_id: closeLineEventId,
+      });
+      if (error) throw new Error(`accountability round close failed: ${error.message}`);
+    }
     return { status: "closed", report, settlement };
   }
   return { status: "settlement_refused", report, settlement };
@@ -415,7 +447,8 @@ export class GuidedRoundService {
     context: GuidedJourneyContext,
     whiteSheetSubmitted: boolean,
     push?: (to: string, text: string, retryKey?: string) => Promise<unknown>,
+    closeLineEventId?: string,
   ): Promise<GuidedRoundCloseOutcome> {
-    return closeGuidedRound(this.supabase, context, whiteSheetSubmitted, push);
+    return closeGuidedRound(this.supabase, context, whiteSheetSubmitted, push, closeLineEventId);
   }
 }

@@ -99,22 +99,28 @@ export async function loadDigitalWhiteSheetPageModel(
   supabase: Supabase,
   scope: DigitalWhiteSheetScope,
 ): Promise<DigitalWhiteSheetPageModel> {
+  const accountabilityRoundId =
+    typeof scope.accountabilityRoundId === "string" &&
+    !isProfitabilityUuid(scope.accountabilityRoundId)
+      ? null
+      : scope.accountabilityRoundId;
+  const validatedScope = { ...scope, accountabilityRoundId };
   const marketLabelNormalized = normalizedMarketLabel(scope.marketLabel);
   const entry = await loadWhiteSheetCashEntry(supabase, {
     sourceId: scope.sourceId,
     marketLabelNormalized,
     businessDate: scope.businessDate,
-    accountabilityRoundId: scope.accountabilityRoundId,
+    accountabilityRoundId,
   });
 
   const cashInput = entry.status !== "not_submitted"
     ? { expenses: entry.expenses, actualCashSubmitted: entry.actualCashSubmitted }
     : { expenses: ZERO_EXPENSES, actualCashSubmitted: 0 };
 
-  const summary = await loadDigitalWhiteSheetSummary(supabase, scope, cashInput);
+  const summary = await loadDigitalWhiteSheetSummary(supabase, validatedScope, cashInput);
   const profitability = await loadProfitabilityReadState(
     supabase,
-    scope.accountabilityRoundId,
+    accountabilityRoundId,
   );
 
   return {

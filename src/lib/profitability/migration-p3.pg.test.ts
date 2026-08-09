@@ -12,9 +12,10 @@
  *   supabase/migrations/0052_purchase_receipt_persistence.sql
  *   supabase/tests/purchase_capture_slice_c_pre_0053.sql
  *   supabase/migrations/0053_inventory_movement_ledger.sql
- *   supabase/migrations/0054_inventory_cost_valuation.sql
  *   supabase/tests/p3_profitability_bootstrap.sql
  *   supabase/migrations/20260808105001_p2e_accountability_round_identity.sql
+ *   supabase/migrations/20260808212137_p2e_accountability_round_identity_contract.sql
+ *   supabase/migrations/0054_inventory_cost_valuation.sql
  *   supabase/migrations/20260808130000_p3_profitability_snapshots.sql
  *
  * That chain applies in about a second and is the MINIMUM that makes P3
@@ -79,16 +80,53 @@ const env = {
   PGCLIENTENCODING: "UTF8",
 };
 
+const P3_MIGRATION = join(ROOT, "supabase", "migrations", "20260808130000_p3_profitability_snapshots.sql");
 const APPLY_CHAIN = [
   join(ROOT, "supabase", "tests", "purchase_capture_slice_b_bootstrap.sql"),
   join(ROOT, "supabase", "migrations", "0052_purchase_receipt_persistence.sql"),
   join(ROOT, "supabase", "tests", "purchase_capture_slice_c_pre_0053.sql"),
   join(ROOT, "supabase", "migrations", "0053_inventory_movement_ledger.sql"),
-  join(ROOT, "supabase", "migrations", "0054_inventory_cost_valuation.sql"),
   join(ROOT, "supabase", "tests", "p3_profitability_bootstrap.sql"),
   join(ROOT, "supabase", "migrations", "20260808105001_p2e_accountability_round_identity.sql"),
-  join(ROOT, "supabase", "migrations", "20260808130000_p3_profitability_snapshots.sql"),
+  join(ROOT, "supabase", "migrations", "20260808212137_p2e_accountability_round_identity_contract.sql"),
+  join(ROOT, "supabase", "migrations", "0054_inventory_cost_valuation.sql"),
+  P3_MIGRATION,
 ];
+
+const NON_P3_SCHEMA_FINGERPRINT = `
+  WITH objects AS (
+    SELECT 'column' kind, table_name || '.' || column_name name,
+           data_type || '|' || is_nullable || '|' || coalesce(column_default, '') definition
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name NOT LIKE 'profitability%'
+    UNION ALL
+    SELECT 'constraint', c.conrelid::regclass::text || '.' || c.conname,
+           pg_get_constraintdef(c.oid)
+    FROM pg_constraint c JOIN pg_class r ON r.oid = c.conrelid
+    JOIN pg_namespace n ON n.oid = r.relnamespace
+    WHERE n.nspname = 'public' AND r.relname NOT LIKE 'profitability%'
+    UNION ALL
+    SELECT 'index', tablename || '.' || indexname, indexdef
+    FROM pg_indexes
+    WHERE schemaname = 'public' AND tablename NOT LIKE 'profitability%'
+    UNION ALL
+    SELECT 'function', p.oid::regprocedure::text, pg_get_functiondef(p.oid)
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'public'
+      AND p.proname NOT LIKE 'profitability%'
+      AND p.proname NOT IN ('record_profitability_snapshot', 'get_profitability_snapshot')
+    UNION ALL
+    SELECT 'trigger', t.tgrelid::regclass::text || '.' || t.tgname, pg_get_triggerdef(t.oid)
+    FROM pg_trigger t JOIN pg_class r ON r.oid = t.tgrelid
+    JOIN pg_namespace n ON n.oid = r.relnamespace
+    WHERE n.nspname = 'public' AND NOT t.tgisinternal AND r.relname NOT LIKE 'profitability%'
+    UNION ALL
+    SELECT 'view', c.relname, pg_get_viewdef(c.oid, false)
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public' AND c.relkind IN ('v', 'm') AND c.relname NOT LIKE 'profitability%'
+  )
+  SELECT md5(string_agg(kind || '|' || name || '|' || definition, E'\\n' ORDER BY kind, name))
+  FROM objects`;
 
 type PsqlResult = { code: number; stdout: string; stderr: string };
 
@@ -580,10 +618,17 @@ describe.skipIf(!available)("P3 profitability snapshots (real PostgreSQL)", () =
       const create = await run(["-q", "-v", "ON_ERROR_STOP=1", "-c", `CREATE DATABASE ${db}`]);
       expect(create.code, create.stderr).toBe(0);
       created = true;
+      let nonP3SchemaBefore = "";
       for (const file of APPLY_CHAIN) {
+        if (file === P3_MIGRATION) {
+          const fingerprint = await run(["-q", "-v", "ON_ERROR_STOP=1", "-tAc", NON_P3_SCHEMA_FINGERPRINT], db);
+          expect(fingerprint.code, fingerprint.stderr).toBe(0);
+          nonP3SchemaBefore = fingerprint.stdout;
+        }
         const applied = await run(["-q", "-v", "ON_ERROR_STOP=1", "-f", file], db);
         expect(applied.code, `${file}\n${applied.stderr}`).toBe(0);
       }
+      expect(await sql(NON_P3_SCHEMA_FINGERPRINT)).toBe(nonP3SchemaBefore);
 
       rawMessageId = await insertReturningId(
         `INSERT INTO public.raw_messages (source_id, line_user_id) VALUES (${lit(SOURCE)}, ${lit(OWNER)})`,

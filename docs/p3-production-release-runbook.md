@@ -1,7 +1,7 @@
 # P3 Profitability — Production Release Runbook
 
 Migration: `supabase/migrations/20260808130000_p3_profitability_snapshots.sql`
-Branch: `feat/p3-profit-loss-final`
+Release branch: `codex/p3-release`
 
 Every query in this document is **READ-ONLY** unless a section is explicitly
 headed *APPLY*. No secret, connection string, key or token appears anywhere in
@@ -14,13 +14,13 @@ this file, and none may be added to it.
 P3 reads P2E's accountability round identity and P2D's actual cost. It cannot be
 released before both are in Production.
 
-| Dependency | PR | Head at authoring | Required state |
+| Dependency | PR | Production merge | Required state |
 |---|---|---|---|
-| P2E accountability round identity | [#38](https://github.com/Andromedas47/Bot-summary/pull/38) | `04e5d9f4290f4498cfa6f08a8aa3957285592675` | merged **and** applied to Production |
-| P2D actual cost (migration 0054) | [#36](https://github.com/Andromedas47/Bot-summary/pull/36) | `6ea7423e85257790964dde6412d52cbcbad0440b` | merged **and** applied to Production |
+| P2E accountability round identity | [#38](https://github.com/Andromedas47/Bot-summary/pull/38) | `8cfd20a57c34af8c02df1e137ac6f6a10294f2de` | Production Active: EXPAND `20260809045345`, CONTRACT `20260809045849` |
+| P2D actual cost | [#36](https://github.com/Andromedas47/Bot-summary/pull/36) | `c3c2fbb36713939539d1314f8df382ddd910c1bf` | Production Active: `20260809063116_inventory_cost_valuation` |
 
-P2D additionally carries its own P2C Production UAT precondition. **This runbook
-does not override it.** If that precondition is unmet, stop here.
+P2C Production UAT and both dependency cutovers passed on 2026-08-09. Recheck
+their migration history and schema in preflight; do not infer them from this file.
 
 **Prohibited throughout:** merging #36 or #38 to unblock P3, deploying either
 dependency early, mutating Production data, sending LINE messages, changing cron,
@@ -54,27 +54,11 @@ function body, ACL and RLS flag — plus every legacy round-unbound row — was
 | **D** | P3 app + P3 schema | Safe — the certified path | Covered by the full test suite (§8). |
 | **E** | app rolled back after the P3 schema exists | **Safe** | Rollback returns to case C, which is proven safe. The schema stays; see §7. |
 
-### Migration application order is order-independent
+### Actual dependency order
 
-Supabase applies migrations in version order, so once both dependencies are on
-`main` the order is `0054` (P2D) → `20260808105001` (P2E) → `20260808130000`
-(P3), because `0054` sorts before `20260808105001`.
-
-If P2E merges and **deploys** before P2D lands, `0054` arrives with a version
-lower than an already-applied migration and is applied out of order, after P2E.
-Both P2D and P2E drop and recreate the *same* constraint,
-`inventory_movements_movement_type_check`, so this was explicitly rehearsed in
-both directions. Both orders produce an **identical** `public` schema (§8,
-rehearsals A and B). The constraint is defined with the same six values in both
-migrations, so whichever applies last is indistinguishable.
-
-Two cautions that follow from that, neither blocking:
-
-- Neither P2D nor P2E uses `DROP CONSTRAINT IF EXISTS` for that constraint, so
-  each requires it to be present. It is created by 0053 and is present in
-  Production.
-- If `supabase db push` refuses an out-of-order migration, the fix is a release
-  ordering decision for #36/#38, not a P3 change.
+Production received P2E EXPAND, the compatible application, P2E CONTRACT, then
+P2D. P3 was rehearsed in that exact schema order. Apply P3 as one exact reviewed
+artifact; do not replay dependency migrations or use a bulk history push.
 
 ---
 
@@ -85,14 +69,18 @@ Run every query. Do not proceed on an unexpected result.
 ### 2.1 Both dependencies present, P3 absent
 
 ```sql
--- Expect: p2d_present = t, p2e_present = t, p3_present = f
+-- Expect: p2d_present = t, p2e_expand_present = t,
+--         p2e_contract_present = t, p3_present = f
 SELECT
   EXISTS (SELECT 1 FROM supabase_migrations.schema_migrations
-           WHERE version = '0054' OR name LIKE '0054%'
-              OR version LIKE '0054%')                       AS p2d_present,
+           WHERE version = '20260809063116'
+              OR name = 'inventory_cost_valuation')          AS p2d_present,
   EXISTS (SELECT 1 FROM supabase_migrations.schema_migrations
-           WHERE version LIKE '20260808105001%'
-              OR name LIKE '%p2e_accountability_round_identity%') AS p2e_present,
+           WHERE version = '20260809045345'
+              OR name = 'p2e_accountability_round_identity_expand') AS p2e_expand_present,
+  EXISTS (SELECT 1 FROM supabase_migrations.schema_migrations
+           WHERE version = '20260809045849'
+              OR name = 'p2e_accountability_round_identity_contract') AS p2e_contract_present,
   EXISTS (SELECT 1 FROM supabase_migrations.schema_migrations
            WHERE version LIKE '20260808130000%'
               OR name LIKE '%p3_profitability_snapshots%')   AS p3_present;
@@ -131,8 +119,8 @@ SELECT r.relation,
 -- Expect all 4 rows present = t.
 SELECT f.signature, to_regprocedure(f.signature) IS NOT NULL AS present
   FROM (VALUES
-    ('public.value_inventory_consumption_movement(uuid)'),
-    ('public.value_good_return_movement(uuid,uuid[])'),
+    ('public.value_inventory_consumption_movement(uuid,text)'),
+    ('public.value_good_return_movement(uuid,uuid[],text)'),
     ('public.get_inventory_cost_balances(text,text,text,boolean)'),
     ('public.close_accountability_round(uuid,text,text,text,text)')
   ) AS f(signature)
@@ -271,13 +259,15 @@ SELECT
 
 ## 3. APPLY
 
-```
-supabase db push
-```
+Apply only the exact reviewed contents of
+`supabase/migrations/20260808130000_p3_profitability_snapshots.sql` through the
+controlled Production migration runner. Record the resulting Production
+migration version and file SHA-256 before continuing. Do not use `supabase db
+push`: repository filenames do not match the already-recorded Production
+versions for P2E/P2D, so a bulk push could attempt unrelated history.
 
-Applies `20260808130000_p3_profitability_snapshots.sql` only, assuming both
-dependencies are already applied. The migration is a single additive unit; it
-creates objects and grants and touches no existing row.
+The migration is a single additive unit; it creates objects and grants and
+touches no existing row.
 
 Do **not** hand-edit an applied migration, and do not fabricate a
 `supabase_migrations.schema_migrations` row.
@@ -731,11 +721,10 @@ Production was never contacted.
 
 | Rehearsal | What it proves | Result |
 |---|---|---|
-| **A** — apply in Production version order: `0053` → `0054` (P2D) → P2E → P3 | The intended order applies clean and lands the documented structure | 8/8 clean; all of §4 verified |
-| **B** — apply out of order: `0053` → P2E → `0054` (P2D) → P3 | The out-of-order case, if P2E deploys first, is equally safe | 8/8 clean; `public` schema dump **identical** to A (only pg_dump's random `\restrict` nonce differs) |
-| **C** — additivity: fingerprint the whole pre-P3 catalog and legacy rows, apply P3, fingerprint again | The migration cannot overwrite data or widen anything | Catalog fingerprint and legacy-row fingerprint **byte-identical** before and after |
-| **D** — append-only probe | UPDATE and DELETE on a snapshot both raise | Both refused; probe rolled back, nothing left behind |
-| **E** — clean port: build `origin/main` + P2E + P2D, cherry-pick the P3 commits in order | The future port is mechanical | All commits applied clean; resulting delta **byte-identical** to the published P3 delta |
+| **A** — actual Production dependency order: `0053` → P2E EXPAND → P2E CONTRACT → `0054` → P3 | The deployed dependency shape accepts P3 cleanly | 15/15 tests; 465 assertions |
+| **B** — fingerprint every non-P3 public column, constraint, index, function, trigger and view before P3, then compare after | P3 changes no pre-existing schema object | Fingerprint identical |
+| **C** — append-only and concurrency probes | Mutation is refused; retries and overlapping postings remain deterministic/revisioned | Passed in the 15-test PostgreSQL suite |
+| **D** — clean port from exact P2D main | No stale dependency implementation enters the release | 13/13 source patches map exactly in `git range-diff` |
 
 Note for anyone tempted to validate by rebuilding from scratch: the full
 `0001..0062` history is **not** replayable on an empty database. `0032` requires

@@ -12,12 +12,18 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated, service_role;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO anon, authenticated, service_role;
 
-CREATE TABLE public.raw_messages (
+CREATE TABLE IF NOT EXISTS public.raw_messages (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   source_id text NOT NULL,
   line_user_id text,
   raw_text text NOT NULL DEFAULT ''
 );
+ALTER TABLE public.raw_messages
+  ADD COLUMN IF NOT EXISTS source_id text NOT NULL DEFAULT 'p2e-test';
+ALTER TABLE public.raw_messages
+  ADD COLUMN IF NOT EXISTS line_user_id text;
+ALTER TABLE public.raw_messages
+  ADD COLUMN IF NOT EXISTS raw_text text NOT NULL DEFAULT '';
 
 CREATE TABLE public.pending_sessions (
   session_key text PRIMARY KEY,
@@ -83,7 +89,7 @@ CREATE TABLE public.produce_items (
   basis_price numeric
 );
 
-CREATE TABLE public.inventory_movements (
+CREATE TABLE IF NOT EXISTS public.inventory_movements (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   movement_type text NOT NULL CONSTRAINT inventory_movements_movement_type_check
     CHECK (movement_type IN ('PURCHASE_RECEIPT', 'REVERSAL')),

@@ -35,6 +35,7 @@ import { RE } from "@/lib/parsers/weigh-session/regex";
 import { logger } from "@/lib/logger";
 import { seedCentralPricesFromPersistedWithdrawals } from "@/lib/white-sheet/seed-from-withdrawal";
 import { runProduceFinalizeGate } from "@/lib/produce/entry-validation-gate";
+import { bindPlainTextRound } from "@/lib/produce/plain-text-round-binding";
 import {
   buildBlockingValidationReply,
   buildUnconfirmedReviewReply,
@@ -345,14 +346,45 @@ export async function finalizePendingGeneration(
     }
   }
 
+  // P4A completion: a plain-text session carries no typed open command, so this
+  // is where it joins its accountability round — the last point before the gate
+  // where the parsed seller, market and business date exist. Structured rows
+  // were already bound by open_accountability_round_produce_session and are
+  // left exactly as they are.
+  let accountabilityRoundId = snapshot.accountability_round_id ?? null;
+  let entryGateDetail: string | null = null;
+  if (validationErrors.length === 0 && !seed) {
+    const binding = await bindPlainTextRound(
+      supabase,
+      {
+        sessionKey:        snapshot.session_key,
+        sessionGeneration: snapshot.session_generation,
+        sourceId:          snapshot.source_id,
+        lineUserId:        snapshot.line_user_id,
+      },
+      parsed,
+    );
+    if (binding.status === "refused") {
+      validationErrors.push(`accountability round not resolved: ${binding.reason}`);
+      entryGateDetail = binding.detail;
+    } else {
+      accountabilityRoundId =
+        binding.status === "bound" ? binding.accountabilityRoundId : null;
+    }
+  }
+
   // P4A: the last revalidation, against live master data. A round that was
   // clean at confirm time can stop being clean — a withdrawal voided, an
   // additional batch landing — and an approval never outranks impossible data.
   // Only reached when the parse itself is sound; a document that already failed
   // validation is reported as such rather than as an unmatched product list.
-  let entryGateDetail: string | null = null;
   if (validationErrors.length === 0) {
-    const gate = await runEntryGateForFinalization(supabase, snapshot, parsed);
+    const gate = await runEntryGateForFinalization(
+      supabase,
+      snapshot,
+      accountabilityRoundId,
+      parsed,
+    );
     validationErrors.push(...gate.errors);
     entryGateDetail = gate.detail;
   }
@@ -390,7 +422,7 @@ export async function finalizePendingGeneration(
     declared_transaction_type: parsed.declared_transaction_type,
     ingest_idempotency_key: correlationId,
     ingest_source: "line_webhook",
-    accountability_round_id: snapshot.accountability_round_id ?? null,
+    accountability_round_id: accountabilityRoundId,
   };
   const itemPayload = parsed.items.map((item) => ({
     ...item,
@@ -493,6 +525,7 @@ export async function finalizePendingGeneration(
 async function runEntryGateForFinalization(
   supabase: Supabase,
   snapshot: PendingSession,
+  accountabilityRoundId: string | null,
   parsed: WeighSession,
 ): Promise<{ errors: string[]; detail: string | null }> {
   let gate: Awaited<ReturnType<typeof runProduceFinalizeGate>>;
@@ -502,7 +535,7 @@ async function runEntryGateForFinalization(
       {
         sessionKey: snapshot.session_key,
         sessionGeneration: snapshot.session_generation,
-        accountabilityRoundId: snapshot.accountability_round_id ?? null,
+        accountabilityRoundId,
         businessDate: null,
         marketLabel: null,
         staffLabel: null,

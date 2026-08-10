@@ -417,8 +417,10 @@ jobs:
       - run: bun install
       - name: P4A real-PostgreSQL entry validation gate suite
         run: bun run test:pg:p4a
-      - name: P4A validation domain and gate regression suites
-        run: bunx bun test src/lib/produce/entry-validation.test.ts src/lib/produce/entry-validation-gate.test.ts src/lib/line/guided-menu/produce-entry-gate.test.ts
+      - name: P4A real-PostgreSQL plain-text round binding suite
+        run: bun run test:pg:p4a-round-binding
+      - name: P4A validation domain, gate and round-binding regression suites
+        run: bunx bun test src/lib/produce/entry-validation.test.ts src/lib/produce/entry-validation-gate.test.ts src/lib/produce/plain-text-round-binding.test.ts src/lib/line/guided-menu/produce-entry-gate.test.ts src/lib/line/webhook-plain-text-entry-gate.test.ts
       - name: Typecheck
         run: npm run type-check
       - name: git diff --check against the PR base

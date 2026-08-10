@@ -221,6 +221,12 @@ class BoundaryDatabase {
     const pending = this.rows("pending_sessions")
       .find((row) => row.session_key === args.p_session_key);
 
+    // No accountability_rounds in this double: the honest answer is that the
+    // document has no round to join, which is legacy-unbound behaviour.
+    if (name === "bind_plain_text_accountability_round") {
+      return { data: { outcome: "no_round" }, error: null };
+    }
+
     if (name === "admit_pending_session_event") {
       if (pending) {
         this.insert("pending_session_admission", {

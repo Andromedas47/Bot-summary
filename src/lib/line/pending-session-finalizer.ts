@@ -34,6 +34,11 @@ import {
 import { RE } from "@/lib/parsers/weigh-session/regex";
 import { logger } from "@/lib/logger";
 import { seedCentralPricesFromPersistedWithdrawals } from "@/lib/white-sheet/seed-from-withdrawal";
+import { runProduceFinalizeGate } from "@/lib/produce/entry-validation-gate";
+import {
+  buildBlockingValidationReply,
+  buildUnconfirmedReviewReply,
+} from "@/lib/produce/entry-validation-message";
 import { getRuntimeEnvironment } from "@/lib/runtime-environment";
 
 type Supabase = SupabaseClient<Database>;
@@ -340,6 +345,18 @@ export async function finalizePendingGeneration(
     }
   }
 
+  // P4A: the last revalidation, against live master data. A round that was
+  // clean at confirm time can stop being clean — a withdrawal voided, an
+  // additional batch landing — and an approval never outranks impossible data.
+  // Only reached when the parse itself is sound; a document that already failed
+  // validation is reported as such rather than as an unmatched product list.
+  let entryGateDetail: string | null = null;
+  if (validationErrors.length === 0) {
+    const gate = await runEntryGateForFinalization(supabase, snapshot, parsed);
+    validationErrors.push(...gate.errors);
+    entryGateDetail = gate.detail;
+  }
+
   const rawMessageId = await findCloseRawMessageId(supabase, snapshot);
   if (!rawMessageId) validationErrors.push("close raw message was not found");
 
@@ -408,7 +425,9 @@ export async function finalizePendingGeneration(
         ? buildReviewNotConfirmedMessage()
         : result.reason === "unconfirmed_structured_close"
           ? buildUnconfirmedStructuredCloseMessage()
-          : buildWeighSessionValidationReply(parsed);
+          // P4A supplies its own operator-facing text when the gate is what
+          // refused; anything else keeps the parse-level reply.
+          : (entryGateDetail ?? buildWeighSessionValidationReply(parsed));
   } else if (result.status === "finalized" && !result.notification_id) {
     // Rolling-deploy fallback: the pre-0034 RPC cannot create an outbox row.
     // Once 0034 is installed, notification_id is always returned and success
@@ -463,6 +482,54 @@ export async function finalizePendingGeneration(
   }
 
   return result;
+}
+
+/**
+ * P4A entry gate, as the deferred finalizer runs it: read-only, fail-closed,
+ * and it never presents or confirms anything. A price review that was never
+ * acknowledged, an impossible quantity, an unknown unit — all of them make the
+ * session fail closed here rather than persist and surface in the morning.
+ */
+async function runEntryGateForFinalization(
+  supabase: Supabase,
+  snapshot: PendingSession,
+  parsed: WeighSession,
+): Promise<{ errors: string[]; detail: string | null }> {
+  let gate: Awaited<ReturnType<typeof runProduceFinalizeGate>>;
+  try {
+    gate = await runProduceFinalizeGate(
+      supabase,
+      {
+        sessionKey: snapshot.session_key,
+        sessionGeneration: snapshot.session_generation,
+        accountabilityRoundId: snapshot.accountability_round_id ?? null,
+        businessDate: null,
+        marketLabel: null,
+        staffLabel: null,
+        lineUserId: snapshot.line_user_id,
+      },
+      parsed,
+    );
+  } catch (error) {
+    return {
+      errors: [error instanceof Error ? error.message : "entry validation failed"],
+      detail: null,
+    };
+  }
+
+  if (gate.decision === "blocked") {
+    return {
+      errors: gate.result.blocking.map((exception) => exception.kind),
+      detail: buildBlockingValidationReply(gate.result),
+    };
+  }
+  if (gate.decision === "review_presented") {
+    return {
+      errors: ["price review was never confirmed"],
+      detail: buildUnconfirmedReviewReply(),
+    };
+  }
+  return { errors: [], detail: null };
 }
 
 export async function finalizeDuePendingGenerations(

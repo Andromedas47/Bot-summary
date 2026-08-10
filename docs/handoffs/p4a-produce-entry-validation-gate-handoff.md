@@ -18,6 +18,7 @@ finalize.
 | Branch | `feat/p4a-produce-entry-validation-gate` |
 | Worktree | `.claude/worktrees/p4a-produce-entry-validation-gate` |
 | Base SHA | `d481a51` (`origin/main`, "Merge pull request #39 from Andromedas47/codex/p3-release") |
+| Head SHA | `d7b9fd5` — `feat(produce): gate produce entry on the round's withdrawal master` |
 
 The primary checkout's own dirty state (staged P2E/P2D work on
 `fix/purchase-capture-supplier-key-pairing`, plus `uat-preview-results/`) was
@@ -142,11 +143,25 @@ Blocking exceptions have no confirmation path at all — they must be corrected.
 - `bun test src/lib/line/guided-menu/produce-entry-gate.test.ts` — 7 pass
 - `ALLOW_DISPOSABLE_POSTGRES_TESTS=1 REQUIRE_P4A_POSTGRES=1 bun run test:pg:p4a` — 12 pass, 1 skip
 - `bun test src/lib/line/guided-menu src/lib/line/pending-session-finalizer.test.ts` — 354 pass
+- `bun test` (full suite) — **3211 pass, 54 skip, 3 fail**, 3268 tests / 188 files.
+  The 3 are the documented baseline below; zero new failures.
 - `npm run type-check` — clean
-- Full suite / lint / build — see the status line below.
+- `npm run lint` — 0 errors, 65 pre-existing warnings, none in P4A files
+- `npm run build` — succeeds (worktrees need placeholder Supabase env vars)
+- `git diff --check` — clean
 
-Known baseline on `origin/main`: 3 failing `daily good-return value` LINE-cap
-assertions. A clean PR reproduces exactly those.
+**Baseline.** `src/lib/summary/daily-good-return-value.test.ts` fails 3 LINE-cap
+assertions, exactly the documented `origin/main` baseline. `git diff d481a51`
+shows P4A touches neither that builder, its test, nor `line-chunking.ts`.
+
+**One regression found and fixed during validation.**
+`migration-0049-structured-foundation.test.ts` asserts on the *source text* of
+`pending-session-finalizer.ts`, slicing between `"} else if (hasHeaderInLedger("`
+and the first `"} catch (error) {"`. Defining the new gate helper above
+`finalizePendingGeneration` introduced an earlier `catch` and collapsed that
+slice to `""`. The helper now lives below `finalizePendingGeneration`. Anything
+adding a `try/catch` to that file ahead of the legacy branch will hit the same
+trap.
 
 ## Known limitations (deliberate)
 

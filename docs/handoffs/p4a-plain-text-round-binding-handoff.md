@@ -212,6 +212,27 @@ binding failed closed — correct behaviour, wrong fixture.
    abandoned session therefore leaves an empty open round, exactly as an
    abandoned guided open does.
 
+## Production baseline — read-only preflight, 2026-08-10
+
+Captured before any mutation, with the Supabase MCP.
+
+| | before |
+|---|---|
+| `accountability_rounds` | 0 |
+| `produce_sessions` | 1823 |
+| `produce_items` | 28628 (`c20aaba3889ab8711adeeed5e66d6f96`) |
+| `produce_transactions` | 28627 |
+| `pending_sessions` | 40 |
+| `produce_entry_validation_reviews` | 0 |
+| `inventory_movements` / lines | 4 / 4 (`fad7c2a5ada13f77b07dcef1a621d809`) |
+| `inventory_cost_movement_lines` | 0 |
+| `profitability_snapshots` | 0 |
+
+Schema preconditions verified: `pending_sessions.session_generation` is `uuid`
+(the RPC signature depends on it), `accountability_round_normalize` and
+`open_accountability_round_produce_session` present,
+`bind_plain_text_accountability_round` absent.
+
 ## Human LINE UAT script
 
 The round a return resolves comes from the operator's own pending row (trust 1),

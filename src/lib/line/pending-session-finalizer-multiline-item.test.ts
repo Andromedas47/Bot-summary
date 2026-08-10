@@ -55,6 +55,11 @@ class FinalizerDouble {
     if (name === "try_finalize_pending_generation") {
       return { data: this.rpcResult, error: null };
     }
+    // No accountability_rounds in this double: the honest answer is that the
+    // document has no round to join, which is legacy-unbound behaviour.
+    if (name === "bind_plain_text_accountability_round") {
+      return { data: { outcome: "no_round" }, error: null };
+    }
     return { data: null, error: null };
   };
 }

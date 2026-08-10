@@ -172,7 +172,76 @@ trap.
 - Blocking exceptions are surfaced with `⛔` and reviews with `⚠️`, matching the
   repo's existing vocabulary rather than the `❌` used in the spec sketch.
 
+## Production release — 2026-08-10
+
+Authorized by the operator against the exact reviewed artifact. Schema first,
+then merge, then deploy.
+
+| | |
+|---|---|
+| Migration (repo) | `20260810090000_p4a_produce_entry_validation_gate.sql` |
+| Migration (Production version) | `20260810070313` `p4a_produce_entry_validation_gate` |
+| Merge commit | `dd7d2fa` (PR #40, matched head `3c11a8d`) |
+| `main` after merge | `dd7d2fa` |
+| Production deployment | `dpl_8GyWBMoAq1epRjzuiZBZDy7k3J45`, READY, target `production`, SHA `dd7d2fa` |
+
+Production records the migration under an apply-time timestamp, not the Git
+filename version — the same drift every earlier migration shows. Repo
+`20260810090000` and Production `20260810070313` are the same artifact.
+
+### Exact Production mutations performed
+
+1. Applied the P4A migration (one table, two triggers, two RPCs, grants).
+2. Merged PR #40 into `main`.
+3. Allowed the resulting `main` deployment to Production.
+
+Nothing else. No DML, no backfill, no historical repair, no secret touched.
+
+### Before / after fingerprints — identical
+
+| | Before | After |
+|---|---|---|
+| `produce_sessions` | 1809 | 1809 |
+| `produce_items` | 28580 | 28580 |
+| `produce_items` fingerprint | `b9a7e75f4a0b4bddfba7ebc556193bca` | same |
+| `produce_transactions` | 28579 | 28579 |
+| `inventory_movement_lines` | 4 | 4 |
+| quantity-ledger fingerprint | `fad7c2a5ada13f77b07dcef1a621d809` | same |
+| `inventory_cost_movement_lines` | 0 | 0 |
+| `profitability_snapshots` | 0 | 0 |
+| `accountability_rounds` | 0 | 0 |
+| `pending_sessions` | 40 | 40 |
+| `produce_entry_validation_reviews` | — | 0 |
+
+The four legacy unvalued movement lines are still unvalued. No P0–P3 row moved.
+
+### Operational note — the gate is currently unit-tier only
+
+Production holds **zero** `accountability_rounds`, so no produce session is
+round-bound yet. The master-comparison tier (product identity, unit-vs-master,
+quantity invariant, price review) therefore has nothing to compare against and
+stays inert by design; the unit-vocabulary tier — the `โลก` fix — is active for
+every session. The master tier begins applying the first time a round is opened
+through the guided menu. This is the reviewed fail-closed-without-guessing
+behaviour, not a defect, but it means real-LINE UAT of the price-review path
+cannot happen until rounds are in use.
+
+### Verification performed in Production
+
+- migration history contains exactly one new row, the P4A one
+- table, 10 CHECK constraints, 1 UNIQUE, 1 FK, 4 indexes, both append-only triggers
+- all four functions `SECURITY DEFINER` with `search_path=pg_catalog, public`, owner `postgres`
+- RLS enabled, zero policies; `service_role` holds `SELECT` only; `anon`/`authenticated` hold nothing and cannot EXECUTE either RPC
+- Supabase security advisors report only `rls_enabled_no_policy` (INFO) for the new table — the intended posture, identical to the P3 tables
+- old app + new schema healthy before merging (`/` 307, `/login` 200, crons 401, webhook 405, zero runtime errors)
+- after deploy: same responses, zero runtime errors, log status codes 200/401/405/307 only
+
+A write-probe of the append-only triggers against Production was refused by the
+safety classifier and was **not** worked around. Their runtime behaviour is
+proven on real PostgreSQL 17 in CI; in Production they are verified structurally.
+
 ## Next action
 
-Full-suite/lint/build confirmation, then commit, push, open the PR. **Do not
-merge, do not apply the migration to Production, do not deploy.**
+Real-LINE UAT on the next naturally occurring round — unknown-unit block, then
+correction, then clean close. Do not fabricate a sale, a price adjustment or an
+impossible quantity to exercise it.

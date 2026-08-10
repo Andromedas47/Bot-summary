@@ -52,6 +52,7 @@ import {
   PendingSessionAfterCloseBoundaryError,
   PendingSessionClosedError,
   PendingSessionGenerationConflictError,
+  type PendingSession,
 } from "@/lib/line/pending-session-service";
 import type { StructuredPendingSession } from "@/lib/line/produce-session-commands";
 import { DailySummaryService } from "@/lib/line/daily-summary-service";
@@ -117,6 +118,12 @@ import {
   type DataEntrySessionOwnershipResolver,
 } from "@/lib/line/data-entry-session-ownership";
 import { tryHandlePurchaseCaptureMessage } from "@/lib/purchase-capture/webhook-handler";
+import { bindPlainTextRound } from "@/lib/produce/plain-text-round-binding";
+import { runProduceCloseGate } from "@/lib/produce/entry-validation-gate";
+import {
+  buildBlockingValidationReply,
+  buildPlainTextReviewValidationReply,
+} from "@/lib/produce/entry-validation-message";
 
 type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
@@ -200,6 +207,11 @@ function buildPhysicalInventoryItemParseFailureReply(sequence: number | null): s
     "รายการยังเปิดอยู่",
   ].join("\n");
 }
+
+const PRODUCE_ENTRY_GATE_UNAVAILABLE_REPLY = [
+  "⛔ ระบบตรวจสอบรายการไม่สำเร็จ จึงยังไม่บันทึก",
+  "รายการยังเปิดอยู่ กรุณาส่งข้อความจบรายการอีกครั้ง",
+].join("\n");
 
 const PRODUCE_CLOSE_PENDING_REPLY =
   "รับจบรายการแล้ว กำลังตรวจสอบรายการที่ยังส่งมาไม่ถึง กรุณารอสักครู่";
@@ -896,7 +908,7 @@ export class WebhookService {
     }
 
     if (pending) {
-      const markClose = hasSessionEnd(normalizedText);
+      let markClose = hasSessionEnd(normalizedText);
       const expectedItemCount = markClose
         ? parseExpectedItemCount(normalizedText)
         : null;
@@ -942,6 +954,29 @@ export class WebhookService {
       ) {
         if (replyToken) await this.replyMessage(replyToken, STALE_PRODUCE_SESSION_REPLY);
         return { eventId, eventType: event.type, status: "saved", parsed: false };
+      }
+
+      // P4A completion: the entry gate runs on the plain-text close BEFORE the
+      // immutable close boundary is written. A refusal therefore leaves the
+      // session in capture with its original header and business date, where
+      // the corrected line is still an ordinary item message — and the text
+      // that arrived with this close is still appended, so nothing the operator
+      // typed is lost. Only the ordinary append path is gated: a message that
+      // carries a header AND a closer rotates to a new generation, and the
+      // review it would record would belong to the generation it replaced.
+      let closeGateRefusal: string | null = null;
+      if (
+        markClose
+        && !incomingHeader
+        && (pending as StructuredPendingSession).entry_origin == null
+      ) {
+        closeGateRefusal = await this.runPlainTextCloseGate(
+          pending,
+          text,
+          eventId,
+          log,
+        );
+        if (closeGateRefusal) markClose = false;
       }
 
       let updated;
@@ -1080,6 +1115,18 @@ export class WebhookService {
       }
 
       if (!markClose) {
+        if (closeGateRefusal) {
+          if (replyToken) {
+            try {
+              await this.replyMessage(replyToken, closeGateRefusal);
+            } catch (replyError) {
+              log.error("produce entry gate refusal reply failed", {
+                error: String(replyError),
+              });
+            }
+          }
+          return { eventId, eventType: event.type, status: "saved", parsed: false };
+        }
         const structured = pending as StructuredPendingSession;
         if (structured.entry_origin === "structured_menu" && replyToken) {
           const identity = buildGuidedMenuIdentity({
@@ -1121,7 +1168,7 @@ export class WebhookService {
         try {
           await this.replyMessage(replyToken, PRODUCE_CLOSE_PENDING_REPLY);
         } catch (replyError) {
-          log.error("produce close acknowledgement failed", {
+          log.error("additional close acknowledgement failed", {
             error: String(replyError),
           });
         }
@@ -1145,7 +1192,15 @@ export class WebhookService {
       }
 
       if (hasSessionEnd(normalizedText) || hasItemLine(normalizedText)) {
-        // Complete single-message: has SESSION_END or item lines → parse directly
+        // Complete single-message: has SESSION_END or item lines → parse directly.
+        //
+        // P4A gap, deliberately left as it is: this path writes produce_sessions
+        // with no pending row, so the entry gate never sees it and the session
+        // finalizes with no accountability round. Routing it through pending
+        // would move its validation evidence, its duplicate handling and its
+        // immediate reply onto the deferred finalizer — a legacy behaviour
+        // change well beyond round binding. The multi-message workflow the
+        // operators actually use (หัวรายการ → รายการ → จบรายการ) is fully gated.
         log.info("single complete message detected (has SESSION_END or items), parsing directly");
         return this.runParser(msgEvent, rawMessageId, eventId, event.type, log);
       }
@@ -1540,6 +1595,88 @@ export class WebhookService {
   // Creates a fresh pending generation for an additional batch and, when the
   // message already carries its closer, marks the close so the Release B
   // deferred finalizer picks it up. No produce rows are written here.
+  /**
+   * P4A on the plain-text close, before the close boundary exists.
+   *
+   * Returns the operator-facing refusal, or null to let the close proceed. The
+   * round is bound first — without it there is no withdrawal master and every
+   * return would validate against nothing. A parse-level failure returns null
+   * on purpose: the deferred finalizer already reports those in its own words,
+   * and calling a malformed line an "unknown product" would be misleading.
+   *
+   * The price-review protocol is two closes: the first records the exception
+   * set and shows it, the second — a different LINE event, so a duplicate
+   * delivery can never stand in for it — acknowledges exactly that set.
+   */
+  private async runPlainTextCloseGate(
+    pending:   PendingSession,
+    closeText: string,
+    eventId:   string,
+    log:       ChildLogger,
+  ): Promise<string | null> {
+    const document = `${pending.accumulated_text}\n${closeText}`;
+    const parsed = parseWeighSession(document, bangkokToday());
+    if (getWeighSessionFinalizationErrors(parsed).length > 0) return null;
+
+    try {
+      const binding = await bindPlainTextRound(
+        this.supabase,
+        {
+          sessionKey:        pending.session_key,
+          sessionGeneration: pending.session_generation,
+          sourceId:          pending.source_id,
+          lineUserId:        pending.line_user_id,
+        },
+        parsed,
+      );
+      if (binding.status === "refused") {
+        log.warn("plain-text accountability round binding refused", {
+          sessionKey: pending.session_key,
+          reason:     binding.reason,
+        });
+        return binding.detail;
+      }
+
+      const decision = await runProduceCloseGate(
+        this.supabase,
+        {
+          sessionKey:            pending.session_key,
+          sessionGeneration:     pending.session_generation,
+          accountabilityRoundId:
+            binding.status === "bound" ? binding.accountabilityRoundId : null,
+          businessDate:  parsed.date,
+          marketLabel:   parsed.session_title,
+          staffLabel:    parsed.staff_name,
+          lineUserId:    pending.line_user_id,
+        },
+        parsed,
+        eventId,
+      );
+      if (decision.decision === "blocked") {
+        return buildBlockingValidationReply(decision.result);
+      }
+      if (decision.decision === "review_presented") {
+        return buildPlainTextReviewValidationReply(decision.result);
+      }
+      return null;
+    } catch (error) {
+      // Fail closed. Validating a return against a master we failed to load
+      // would pass everything, which is worse than making the operator retry.
+      log.error("plain-text produce entry gate failed", {
+        sessionKey: pending.session_key,
+        error:      error instanceof Error ? error.message : String(error),
+      });
+      return PRODUCE_ENTRY_GATE_UNAVAILABLE_REPLY;
+    }
+  }
+
+  /**
+   * Seed a pending generation from one complete produce message.
+   *
+   * Used for a pasted additional batch and, since P4A completion, for any
+   * complete main document, so that every plain-text produce session reaches
+   * Produce through the same close boundary and deferred finalizer.
+   */
   private async startAdditionalPendingSession(
     event:          LineMessageEvent,
     pendingService: PendingSessionService,
@@ -1588,7 +1725,7 @@ export class WebhookService {
         try {
           await this.replyMessage(replyToken, PRODUCE_CLOSE_PENDING_REPLY);
         } catch (replyError) {
-          log.error("additional close acknowledgement failed", {
+          log.error("produce close acknowledgement failed", {
             error: String(replyError),
           });
         }

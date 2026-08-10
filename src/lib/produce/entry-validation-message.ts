@@ -98,6 +98,26 @@ export function buildReviewValidationReply(result: ProduceValidationResult): str
   ].join("\n");
 }
 
+/**
+ * Same content, plain-text acknowledgement.
+ *
+ * The plain-text flow has no ยืนยัน button; its second press is a second
+ * "จบรายการ…" message, which carries a different LINE event id and so cannot be
+ * satisfied by a duplicate delivery of the first one.
+ */
+export function buildPlainTextReviewValidationReply(
+  result: ProduceValidationResult,
+): string {
+  return [
+    `⚠️ พบ ${result.reviews.length} รายการที่ราคาไม่ตรงกับรายการเบิก`,
+    "",
+    ...numberedBlocks(result.reviews),
+    "",
+    "ราคาเปลี่ยนระหว่างวันได้ ระบบจะเก็บราคาที่ส่งมาไว้ตามเดิม",
+    "กรุณาตรวจว่าปรับราคาจริง แล้วส่งข้อความจบรายการอีกครั้งเพื่อยืนยัน",
+  ].join("\n");
+}
+
 /** One-line form for a session held because its review was never acknowledged. */
 export function buildUnconfirmedReviewReply(): string {
   return [

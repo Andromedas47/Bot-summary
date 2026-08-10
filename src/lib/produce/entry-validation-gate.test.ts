@@ -4,6 +4,7 @@ import type { WeighSession, WeighSessionItem } from "@/lib/parsers/weigh-session
 import {
   runProduceCloseGate,
   runProduceFinalizeGate,
+  confirmProduceValidationReview,
   ProduceValidationGateError,
   type ProduceValidationSessionRef,
 } from "./entry-validation-gate";
@@ -17,7 +18,7 @@ const OTHER_ROUND = "22222222-2222-4222-8222-222222222222";
 
 const REF: ProduceValidationSessionRef = {
   sessionKey: "group:G1",
-  sessionGeneration: "7",
+  sessionGeneration: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
   accountabilityRoundId: ROUND,
   businessDate: "2026-08-09",
   marketLabel: "วัดทุ่งลานนา",
@@ -138,6 +139,9 @@ class FakeDb {
       if (row.confirmed_at) {
         return Promise.resolve({ data: { status: "already_confirmed" }, error: null });
       }
+      if (row.presented_line_event_id === String(params.p_line_event_id)) {
+        return Promise.resolve({ data: { status: "same_event" }, error: null });
+      }
       row.confirmed_at = new Date().toISOString();
       row.confirmed_by_line_user_id = String(params.p_line_user_id);
       row.confirmed_line_event_id = String(params.p_line_event_id);
@@ -248,6 +252,16 @@ describe("close gate", () => {
 
     expect(replay.decision).toBe("review_presented");
     expect(db.reviews).toHaveLength(1);
+    expect(db.reviews[0].confirmed_at).toBeNull();
+  });
+
+  it("treats the database same-event refusal as unconfirmed", async () => {
+    const db = new FakeDb({ [ROUND]: withdrawal });
+    const first = await runProduceCloseGate(db.client(), REF, priceChange(), "E1");
+
+    expect(
+      await confirmProduceValidationReview(db.client(), REF, first.result.digest, "E1"),
+    ).toBe("same_event");
     expect(db.reviews[0].confirmed_at).toBeNull();
   });
 

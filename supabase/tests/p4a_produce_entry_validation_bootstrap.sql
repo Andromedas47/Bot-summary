@@ -47,7 +47,7 @@ CREATE TABLE public.accountability_rounds (
 CREATE TABLE public.pending_sessions (
   id                      uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   session_key             text NOT NULL,
-  session_generation      bigint NOT NULL DEFAULT 1,
+  session_generation      uuid NOT NULL DEFAULT gen_random_uuid(),
   line_user_id            text,
   accumulated_text        text NOT NULL DEFAULT '',
   accountability_round_id uuid REFERENCES public.accountability_rounds(id),
@@ -78,6 +78,21 @@ CREATE TABLE public.produce_items (
   created_at       timestamptz NOT NULL DEFAULT now()
 );
 
+-- Unrelated accounting sentinels. P4A review migrations must never touch
+-- inventory, cost, or profitability business data.
+CREATE TABLE public.inventory_movements (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  marker text NOT NULL
+);
+CREATE TABLE public.inventory_cost_movements (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  marker text NOT NULL
+);
+CREATE TABLE public.profitability_snapshots (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  marker text NOT NULL
+);
+
 INSERT INTO public.accountability_rounds (
   id, source_type, source_id, owner_line_user_id, business_date,
   seller_label, market_label, market_label_normalized, created_line_event_id
@@ -85,3 +100,19 @@ INSERT INTO public.accountability_rounds (
   '11111111-1111-4111-8111-111111111111', 'group', 'G-round', 'U-owner', DATE '2026-08-09',
   'กี้', 'วัดทุ่งลานนา', 'วัดทุ่งลานนา', 'evt-round-open'
 );
+
+INSERT INTO public.produce_sessions (
+  id, session_date, staff_name, line_user_id, accountability_round_id
+) VALUES (
+  '22222222-2222-4222-8222-222222222222', DATE '2026-08-09',
+  'กี้', 'U-typist', '11111111-1111-4111-8111-111111111111'
+);
+INSERT INTO public.produce_items (
+  session_id, item_number, product_name, price_per_unit, quantity, unit,
+  transaction_type
+) VALUES (
+  '22222222-2222-4222-8222-222222222222', 1, 'อะโวคาโด้', 120, 2, 'โล', 'คืน'
+);
+INSERT INTO public.inventory_movements (marker) VALUES ('inventory-unchanged');
+INSERT INTO public.inventory_cost_movements (marker) VALUES ('cost-unchanged');
+INSERT INTO public.profitability_snapshots (marker) VALUES ('p3-unchanged');

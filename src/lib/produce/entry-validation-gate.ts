@@ -29,7 +29,7 @@ const MASTER_ROW_LIMIT = 2000;
 /** Session identity the gate needs. Never a descriptive tuple. */
 export interface ProduceValidationSessionRef {
   sessionKey: string;
-  /** bigint, so it stays a string end to end — never coerced through a float. */
+  /** UUID shared by guided and plain-text pending sessions. */
   sessionGeneration: string;
   /** NULL is a legacy/unbound session; the round master is then unavailable. */
   accountabilityRoundId: string | null;
@@ -226,9 +226,9 @@ export async function runProduceCloseGate(
     result.digest,
     lineEventId,
   );
-  return confirmation === "not_found"
-    ? { decision: "review_presented", result }
-    : { decision: "proceed", result };
+  return confirmation === "confirmed" || confirmation === "already_confirmed"
+    ? { decision: "proceed", result }
+    : { decision: "review_presented", result };
 }
 
 /**
@@ -251,14 +251,17 @@ export async function runProduceFinalizeGate(
   return { decision: "review_presented", result };
 }
 
-export type ProduceReviewConfirmation = "confirmed" | "already_confirmed" | "not_found";
+export type ProduceReviewConfirmation =
+  | "confirmed"
+  | "already_confirmed"
+  | "not_found"
+  | "same_event";
 
 /**
  * Acknowledge the exception set identified by `digest`.
  *
- * `not_found` means the digest on the button no longer describes the session —
- * a stale press, or a straggler that changed the document after the preview.
- * The caller re-presents; it must never treat that as an approval.
+ * `not_found` means the digest no longer describes the session. `same_event`
+ * means the presenting event was replayed. Neither is an approval.
  */
 export async function confirmProduceValidationReview(
   supabase: AnyClient,
@@ -285,7 +288,12 @@ export async function confirmProduceValidationReview(
     );
   }
   const status = (data as { status?: string } | null)?.status;
-  if (status === "confirmed" || status === "already_confirmed" || status === "not_found") {
+  if (
+    status === "confirmed"
+    || status === "already_confirmed"
+    || status === "not_found"
+    || status === "same_event"
+  ) {
     return status;
   }
   throw new ProduceValidationGateError("validation confirmation returned an unknown status");

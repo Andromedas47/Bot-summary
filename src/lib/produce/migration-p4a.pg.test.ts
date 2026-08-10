@@ -19,6 +19,15 @@ const ROUND = "11111111-1111-4111-8111-111111111111";
 const DIGEST_A = "a".repeat(64);
 const DIGEST_B = "b".repeat(64);
 
+// A pending generation is a uuid in every generation-scoped table in this
+// schema. The review table was the one outlier and no longer is, so the
+// fixtures use real uuids — the value the runtime actually sends.
+const GEN_A = "7a7a7a7a-7a7a-4a7a-8a7a-7a7a7a7a7a7a";
+const GEN_B = "8b8b8b8b-8b8b-4b8b-8b8b-8b8b8b8b8b8b";
+const GEN_A_SQL = `'${GEN_A}'::uuid`;
+const GEN_B_SQL = `'${GEN_B}'::uuid`;
+const GEN_C = "acacacac-acac-4cac-8cac-acacacacacac";
+
 function assertSafe(): void {
   if (process.env.ALLOW_DISPOSABLE_POSTGRES_TESTS !== "1") {
     throw new Error("migration-p4a.pg.test.ts requires ALLOW_DISPOSABLE_POSTGRES_TESTS=1");
@@ -102,12 +111,12 @@ const EXCEPTIONS = `'[{"kind":"price_not_withdrawn","enteredPrice":120,"withdraw
 async function record(
   digest: string,
   eventId: string,
-  options: { round?: string | null; generation?: number } = {},
+  options: { round?: string | null; generation?: string } = {},
 ): Promise<{ confirmed: boolean; presented_line_event_id: string }> {
   const round = options.round === undefined ? `'${ROUND}'::uuid` : options.round === null ? "NULL" : `'${options.round}'::uuid`;
   return JSON.parse(await scalar(`
     SELECT public.record_produce_validation_review(
-      'group:G-round', ${options.generation ?? 7}, ${round}, '${digest}',
+      'group:G-round', '${options.generation ?? GEN_A}'::uuid, ${round}, '${digest}',
       DATE '2026-08-09', 'วัดทุ่งลานนา', 'กี้', ${EXCEPTIONS}, 'U-typist', '${eventId}'
     )`));
 }
@@ -115,7 +124,7 @@ async function record(
 async function confirm(digest: string, eventId: string, actor = "U-typist"): Promise<{ status: string }> {
   return JSON.parse(await scalar(`
     SELECT public.confirm_produce_validation_review(
-      'group:G-round', 7, '${digest}', '${actor}', '${eventId}'
+      'group:G-round', '${GEN_A}'::uuid, '${digest}', '${actor}', '${eventId}'
     )`));
 }
 
@@ -128,6 +137,12 @@ describe.skipIf(!pgAvailable)("P4A produce entry validation gate on PostgreSQL 1
     await apply(join(ROOT, "supabase", "tests", "p4a_produce_entry_validation_bootstrap.sql"));
     await apply(
       join(ROOT, "supabase", "migrations", "20260810090000_p4a_produce_entry_validation_gate.sql"),
+    );
+    // The corrective migration is part of the contract under test: the review
+    // generation is the same uuid identity every other generation-scoped table
+    // uses, which is what makes the price-review path reachable at all.
+    await apply(
+      join(ROOT, "supabase", "migrations", "20260810160000_p4a_review_session_generation_uuid.sql"),
     );
   }, 60_000);
 
@@ -185,13 +200,13 @@ describe.skipIf(!pgAvailable)("P4A produce entry validation gate on PostgreSQL 1
   });
 
   test("the same digest in another generation is a separate review", async () => {
-    await record(DIGEST_A, "E5", { generation: 8 });
+    await record(DIGEST_A, "E5", { generation: GEN_B });
     expect(await scalar(`
       SELECT count(*) FROM public.produce_entry_validation_reviews
       WHERE validation_digest = '${DIGEST_A}'`)).toBe("2");
     expect(await scalar(`
       SELECT confirmed_at IS NULL FROM public.produce_entry_validation_reviews
-      WHERE validation_digest = '${DIGEST_A}' AND session_generation = 8`)).toBe("t");
+      WHERE validation_digest = '${DIGEST_A}' AND session_generation = ${GEN_B_SQL}`)).toBe("t");
   });
 
   test("the audit is append-only", async () => {
@@ -207,20 +222,20 @@ describe.skipIf(!pgAvailable)("P4A produce entry validation gate on PostgreSQL 1
     expect(await expectFailure(`
       UPDATE public.produce_entry_validation_reviews
       SET confirmed_at = NULL, confirmed_by_line_user_id = NULL, confirmed_line_event_id = NULL
-      WHERE validation_digest = '${DIGEST_A}' AND session_generation = 7`))
+      WHERE validation_digest = '${DIGEST_A}' AND session_generation = ${GEN_A_SQL}`))
       .toContain("immutable");
   });
 
   test("a bound review cannot name a round that does not exist", async () => {
     expect(await expectFailure(`
       SELECT public.record_produce_validation_review(
-        'group:G-round', 9, '33333333-3333-4333-8333-333333333333'::uuid, '${"c".repeat(64)}',
+        'group:G-round', '${GEN_C}'::uuid, '33333333-3333-4333-8333-333333333333'::uuid, '${"c".repeat(64)}',
         DATE '2026-08-09', 'm', 's', ${EXCEPTIONS}, 'U-typist', 'E6')`))
       .toContain("foreign key");
   });
 
   test("a legacy unbound session may still be audited", async () => {
-    const unbound = await record("d".repeat(64), "E7", { round: null, generation: 10 });
+    const unbound = await record("d".repeat(64), "E7", { round: null, generation: GEN_C });
     expect(unbound.confirmed).toBe(false);
     expect(await scalar(`
       SELECT accountability_round_id IS NULL FROM public.produce_entry_validation_reviews
@@ -230,13 +245,13 @@ describe.skipIf(!pgAvailable)("P4A produce entry validation gate on PostgreSQL 1
   test("a malformed digest or an empty exception list is rejected", async () => {
     expect(await expectFailure(`
       SELECT public.record_produce_validation_review(
-        'group:G-round', 11, '${ROUND}'::uuid, 'not-a-digest',
+        'group:G-round', '${GEN_C}'::uuid, '${ROUND}'::uuid, 'not-a-digest',
         DATE '2026-08-09', 'm', 's', ${EXCEPTIONS}, 'U-typist', 'E8')`))
       .toContain("validation_digest_check");
 
     expect(await expectFailure(`
       SELECT public.record_produce_validation_review(
-        'group:G-round', 12, '${ROUND}'::uuid, '${"e".repeat(64)}',
+        'group:G-round', '${GEN_C}'::uuid, '${ROUND}'::uuid, '${"e".repeat(64)}',
         DATE '2026-08-09', 'm', 's', '[]'::jsonb, 'U-typist', 'E8')`))
       .toContain("exceptions_check");
   });
@@ -258,7 +273,7 @@ describe.skipIf(!pgAvailable)("P4A produce entry validation gate on PostgreSQL 1
         WHERE table_name = 'produce_entry_validation_reviews' AND grantee = '${role}'`)).toBe("0");
       expect(await scalar(`
         SELECT has_function_privilege('${role}',
-          'public.confirm_produce_validation_review(text,bigint,text,text,text)', 'EXECUTE')`)).toBe("f");
+          'public.confirm_produce_validation_review(text,uuid,text,text,text)', 'EXECUTE')`)).toBe("f");
     }
     expect(await scalar(`
       SELECT string_agg(privilege_type, ',' ORDER BY privilege_type)
@@ -266,7 +281,75 @@ describe.skipIf(!pgAvailable)("P4A produce entry validation gate on PostgreSQL 1
       WHERE table_name = 'produce_entry_validation_reviews' AND grantee = 'service_role'`)).toBe("SELECT");
     expect(await scalar(`
       SELECT has_function_privilege('service_role',
-        'public.confirm_produce_validation_review(text,bigint,text,text,text)', 'EXECUTE')`)).toBe("t");
+        'public.confirm_produce_validation_review(text,uuid,text,text,text)', 'EXECUTE')`)).toBe("t");
+  });
+
+  // The bug this file failed to catch: the column was bigint, so every real
+  // generation raised `invalid input syntax for type bigint` and the price
+  // review could never be presented or confirmed.
+  test("the review generation is the same uuid identity as the pending session", async () => {
+    expect(await scalar(`
+      SELECT data_type FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'produce_entry_validation_reviews'
+        AND column_name = 'session_generation'`)).toBe("uuid");
+    expect(await scalar(`
+      SELECT count(*) FROM information_schema.columns
+      WHERE table_schema = 'public' AND column_name = 'session_generation'
+        AND data_type <> 'uuid'`)).toBe("0");
+
+    for (const name of ["record_produce_validation_review", "confirm_produce_validation_review"]) {
+      expect(await scalar(`
+        SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'public' AND p.proname = '${name}'`),
+        `${name} must have exactly one signature, or a named-argument call is ambiguous`,
+      ).toBe("1");
+      expect(await scalar(`
+        SELECT pg_get_function_identity_arguments(p.oid) FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'public' AND p.proname = '${name}'`))
+        .toContain("p_session_generation uuid");
+    }
+  });
+
+  test("a real uuid generation survives present → confirm with the entered price", async () => {
+    const generation = "5d5d5d5d-5d5d-4d5d-8d5d-5d5d5d5d5d5d";
+    const digest = "f".repeat(64);
+
+    const first = await record(digest, "EU1", { generation });
+    expect(first).toMatchObject({ confirmed: false, presented_line_event_id: "EU1" });
+
+    // A duplicate delivery of the presenting event is not an acknowledgement.
+    expect(await record(digest, "EU1", { generation }).then((r) => r.confirmed)).toBe(false);
+
+    expect(JSON.parse(await scalar(`
+      SELECT public.confirm_produce_validation_review(
+        'group:G-round', '${generation}'::uuid, '${digest}', 'U-typist', 'EU2')`)))
+      .toMatchObject({ status: "confirmed" });
+
+    const row = JSON.parse(await scalar(`
+      SELECT to_jsonb(r) FROM public.produce_entry_validation_reviews r
+      WHERE validation_digest = '${digest}'`));
+    expect(row.session_generation).toBe(generation);
+    expect(row.confirmed_line_event_id).toBe("EU2");
+    // The entered price is what the audit carries — never the withdrawn one.
+    expect(row.exceptions[0].enteredPrice).toBe(120);
+    expect(row.exceptions[0].withdrawnPrices).toEqual([100]);
+
+    // A stale digest for the same generation is still not an approval.
+    expect(JSON.parse(await scalar(`
+      SELECT public.confirm_produce_validation_review(
+        'group:G-round', '${generation}'::uuid, '${"0".repeat(64)}', 'U-typist', 'EU3')`)))
+      .toMatchObject({ status: "not_found" });
+  });
+
+  test("the corrective migration refuses to retype a table that already has rows", async () => {
+    const migration = join(
+      ROOT, "supabase", "migrations", "20260810160000_p4a_review_session_generation_uuid.sql",
+    );
+    const result = await psql(["-v", "ON_ERROR_STOP=1", "-f", migration]);
+    expect(result.code).not.toBe(0);
+    expect(`${result.stderr}${result.stdout}`).toContain("refusing to retype session_generation");
   });
 
   test("both writers pin their search_path", async () => {

@@ -29,7 +29,11 @@ const MASTER_ROW_LIMIT = 2000;
 /** Session identity the gate needs. Never a descriptive tuple. */
 export interface ProduceValidationSessionRef {
   sessionKey: string;
-  /** bigint, so it stays a string end to end — never coerced through a float. */
+  /**
+   * The pending generation, as the uuid every generation-scoped table in this
+   * schema uses. It stays a string end to end and is never mapped, hashed or
+   * numbered — the audit row records the real generation or it audits nothing.
+   */
   sessionGeneration: string;
   /** NULL is a legacy/unbound session; the round master is then unavailable. */
   accountabilityRoundId: string | null;

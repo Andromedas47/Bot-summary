@@ -276,6 +276,51 @@ No backfill, no historical repair, no P0–P3 accounting change, no secret
 touched. The first round will be created by the first plain-text withdrawal
 closed after this deployment — nothing was pre-created.
 
+## Price-review bug found by Production UAT — 2026-08-10
+
+Production UAT proved round binding, unknown-unit blocking and product-typo
+blocking, then hit this in the Vercel log at ~17:42 Asia/Bangkok:
+
+```
+plain-text produce entry gate failed
+validation review lookup failed: invalid input syntax for type bigint: "<uuid>"
+```
+
+**Cause.** `20260810090000` declared
+`produce_entry_validation_reviews.session_generation` as `bigint`, and both
+review RPCs took it as `bigint`. A pending generation is a **uuid**:
+`PendingSessionService` mints it with `crypto.randomUUID()`, and every other
+generation-scoped column in the schema is uuid —
+`pending_sessions`, `pending_session_admission`, `pending_session_ingest`,
+`produce_session_notifications`, `physical_inventory_sessions`,
+`purchase_capture_sessions`, `purchase_capture_session_ingests`. The review
+table was the only outlier. Every review lookup, record and confirm therefore
+failed, so the price-review path could never present or acknowledge.
+
+This was **never plain-text-specific**. The guided flow passes the same uuid
+through `entryValidationRef`; it simply never reached the code, because until
+round binding shipped there was no round to validate against.
+
+**Fix.** `20260810160000_p4a_review_session_generation_uuid.sql` adopts the
+identity the rest of the schema already uses: drop the `> 0` CHECK (meaningless
+for a uuid), `ALTER COLUMN … TYPE uuid`, and recreate both RPCs with a `uuid`
+parameter. No mapping, no hash, no truncation, no numeric surrogate — the audit
+row carries the real generation or it audits nothing.
+
+The migration **asserts the table is empty** and refuses otherwise: with rows
+present a bigint→uuid change has no meaning-preserving `USING` clause, and
+inventing one would be exactly the fabrication this rules out. It also asserts
+`pending_sessions.session_generation` really is uuid before adopting that type.
+The RPCs are dropped and recreated in one transaction rather than added as uuid
+overloads, because two same-named functions differing in one parameter type
+would make a named-argument PostgREST call ambiguous.
+
+**Rollout.** The fix contains **no runtime code change** — the only non-test
+source edit is a doc comment. The deployed build already sends uuid strings, so
+the corrected schema turns a call that always failed into one that works;
+old-app-on-corrected-schema and new-app-on-corrected-schema are the same code
+path, and there is no window in which anything regresses.
+
 ## Human LINE UAT script
 
 The round a return resolves comes from the operator's own pending row (trust 1),

@@ -24,6 +24,14 @@ import {
   parseWeighSession,
 } from "@/lib/parsers/weigh-session/parser";
 import { resolveGuidedProduceFinalization } from "./produce-finalization";
+import {
+  runProduceCloseGate,
+  type ProduceValidationSessionRef,
+} from "@/lib/produce/entry-validation-gate";
+import {
+  buildBlockingValidationReply,
+  buildReviewValidationReply,
+} from "@/lib/produce/entry-validation-message";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 import { bangkokBusinessDateNow } from "@/lib/business-date";
 import { produceCommandSourceFromIdentity } from "./session-opener";
@@ -31,6 +39,27 @@ import type { GuidedMenuIdentity } from "./ux-types";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyClient = SupabaseClient<any>;
+
+/** Shown when the gate itself could not answer — fail closed, never "fine". */
+const GUIDED_ENTRY_GATE_UNAVAILABLE = [
+  "ตรวจสอบรายการกับข้อมูลเบิกไม่สำเร็จ",
+  "ระบบยังไม่ได้บันทึกอะไร กรุณาลองใหม่อีกครั้ง",
+].join("\n");
+
+/** Session identity for the entry gate. Seller and LINE actor stay distinct. */
+function entryValidationRef(
+  session: StructuredPendingSession,
+): ProduceValidationSessionRef {
+  return {
+    sessionKey: session.session_key,
+    sessionGeneration: session.session_generation,
+    accountabilityRoundId: session.accountability_round_id ?? null,
+    businessDate: session.business_date ?? null,
+    marketLabel: session.market_label ?? null,
+    staffLabel: session.staff_label ?? null,
+    lineUserId: session.line_user_id,
+  };
+}
 
 /** Why a guided session action could not proceed. Never shown raw to LINE. */
 export type GuidedCaptureRefusal =
@@ -61,7 +90,14 @@ export type GuidedCaptureCloseOutcome =
    * finalizer applies. No close boundary was created, so the round stays in
    * capture and corrections are still accepted.
    */
-  | ({ status: "validation_failed"; errors: string[] } & GuidedSessionSnapshot)
+  | ({ status: "validation_failed"; errors: string[]; detail?: string } & GuidedSessionSnapshot)
+  /**
+   * P4A: the entry gate found price lines that differ from the round's
+   * withdrawal prices. Allowed, but not silently — no close boundary was
+   * created, so the operator can either correct the line or press again to
+   * acknowledge exactly the exception set that was shown.
+   */
+  | ({ status: "review_required"; detail: string } & GuidedSessionSnapshot)
   | { status: "refused"; reason: GuidedCaptureRefusal }
   | { status: "conflict"; reason: string; detail?: string };
 
@@ -83,7 +119,9 @@ export type GuidedCaptureFinalizeOutcome =
    * The session cannot finalize successfully, checked with the SAME validation
    * the finalizer applies. Refused before the confirm RPC — zero writes.
    */
-  | ({ status: "validation_failed"; errors: string[] } & GuidedSessionSnapshot)
+  | ({ status: "validation_failed"; errors: string[]; detail?: string } & GuidedSessionSnapshot)
+  /** P4A: unacknowledged price exceptions. Nothing was released. */
+  | ({ status: "review_required"; detail: string } & GuidedSessionSnapshot)
   /** The close barrier says the round is not ready — nothing was released. */
   | {
       status: "not_ready";
@@ -182,6 +220,11 @@ export class GuidedSessionCaptureService {
           closeRequested: current.closeRequested,
         };
       }
+      // P4A entry gate. Runs only once the parse itself is sound, so a broken
+      // document is still reported as a broken document rather than as a pile
+      // of unmatched products.
+      const gate = await this.runEntryGate(current, input.lineEventId);
+      if (gate) return gate;
     }
 
     const result = await this.commands.execute(
@@ -251,6 +294,12 @@ export class GuidedSessionCaptureService {
       };
     }
 
+    // P4A entry gate again. Master data can move under a closed round — a
+    // withdrawal voided, an additional batch finalized — so the verdict is
+    // recomputed here rather than trusted from the close preview.
+    const gate = await this.runEntryGate(current, input.lineEventId);
+    if (gate) return gate;
+
     const result = await this.commands.execute(
       {
         kind: "confirm",
@@ -281,6 +330,61 @@ export class GuidedSessionCaptureService {
       result.session,
       result.reason === "already_confirmed" ? "already_confirmed" : "confirmed",
     );
+  }
+
+  /**
+   * The P4A entry gate, in the one shape both the close press and the confirm
+   * press need: a refusal outcome, or null to carry on.
+   *
+   * A gate that cannot answer (round master unreadable) refuses. Validating a
+   * return against a master we failed to load would pass everything.
+   */
+  private async runEntryGate(
+    current: GuidedSessionSnapshot,
+    lineEventId: string,
+  ): Promise<
+    | ({ status: "validation_failed"; errors: string[]; detail: string } & GuidedSessionSnapshot)
+    | ({ status: "review_required"; detail: string } & GuidedSessionSnapshot)
+    | null
+  > {
+    const snapshot = {
+      session: current.session,
+      parsed: current.parsed,
+      closeRequested: current.closeRequested,
+    };
+    let gate: Awaited<ReturnType<typeof runProduceCloseGate>>;
+    try {
+      gate = await runProduceCloseGate(
+        this.supabase,
+        entryValidationRef(current.session),
+        current.parsed,
+        lineEventId,
+      );
+    } catch (error) {
+      return {
+        status: "validation_failed",
+        errors: [error instanceof Error ? error.message : "entry validation failed"],
+        detail: GUIDED_ENTRY_GATE_UNAVAILABLE,
+        ...snapshot,
+      };
+    }
+
+    if (gate.decision === "blocked") {
+      return {
+        status: "validation_failed",
+        errors: gate.result.blocking.map((exception) => exception.kind),
+        detail: buildBlockingValidationReply(gate.result),
+        ...snapshot,
+      };
+    }
+    if (gate.decision === "review_presented") {
+      return {
+        status: "review_required",
+        detail: buildReviewValidationReply(gate.result),
+        ...snapshot,
+      };
+    }
+    return null;
   }
 
   /**

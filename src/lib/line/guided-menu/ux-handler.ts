@@ -1090,12 +1090,29 @@ export class GuidedMenuUxHandler {
     // The round cannot finalize, so NO close boundary was created. The operator
     // stays in capture: "จบรายการ" is offered again and a corrected item line is
     // still an ordinary append — no administrator, no reopen contract.
+    // P4A: price lines that differ from the round's withdrawal prices. The
+    // round is still open — the operator either corrects the line or presses
+    // "จบรายการ" again, which acknowledges exactly this exception set.
+    if (outcome.status === "review_required") {
+      const controls = await this.buildCaptureStageControls(input.identity);
+      return resultEnvelope(
+        "session_validation_review",
+        buildCapturedItemsMessages({
+          summary: outcome.detail,
+          stageControl: controls?.flex,
+          quickReply: controls?.quickReply,
+          maxMessages: LINE_REPLY_MESSAGE_MAX,
+        }),
+        { close_reason: "review_required", close_requested: false, saved: false },
+      );
+    }
+
     if (outcome.status === "validation_failed") {
       const controls = await this.buildCaptureStageControls(input.identity);
       return resultEnvelope(
         "session_validation_failed",
         buildCapturedItemsMessages({
-          summary: [
+          summary: outcome.detail ?? [
             GUIDED_MENU_COPY.produceCloseValidationFailed,
             "",
             buildWeighSessionValidationReply(outcome.parsed),
@@ -1157,6 +1174,22 @@ export class GuidedMenuUxHandler {
         "session_action_conflict",
         [buildSessionActionConflictMessage()],
         { reason: outcome.reason },
+      );
+    }
+
+    // P4A: unacknowledged price exceptions. Nothing was released; pressing
+    // "ยืนยัน" again acknowledges exactly the set shown here.
+    if (outcome.status === "review_required") {
+      const controls = await this.buildConfirmStageControls(input.identity);
+      return resultEnvelope(
+        "session_validation_review",
+        buildCapturedItemsMessages({
+          summary: outcome.detail,
+          stageControl: controls?.flex,
+          quickReply: controls?.quickReply,
+          maxMessages: LINE_REPLY_MESSAGE_MAX,
+        }),
+        { produce_finalization: null, saved: false, reason: "review_required" },
       );
     }
 
@@ -1230,7 +1263,10 @@ export class GuidedMenuUxHandler {
       );
     }
 
-    const detail = buildWeighSessionValidationReply(outcome.parsed);
+    // The P4A gate supplies its own operator-facing detail; everything else
+    // falls back to the parse-level reply, so no internal text reaches LINE.
+    const detail =
+      ("detail" in outcome && outcome.detail) || buildWeighSessionValidationReply(outcome.parsed);
     const screen =
       outcome.status === "validation_failed"
         ? ("session_validation_failed" as const)

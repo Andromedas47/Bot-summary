@@ -450,7 +450,7 @@ function lineEventTimestampMs(payload: unknown, createdAt: string | null | undef
  *    created, and each is attributed by the business date its own text names.
  *    There is no locked rule capping backdating, so P1 imposes no ceiling.
  */
-async function countUnresolvedPendingSessions(
+export async function countUnresolvedPendingSessions(
   supabase: Supabase,
   businessDate: string,
 ): Promise<number> {

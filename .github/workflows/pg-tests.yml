@@ -381,3 +381,45 @@ jobs:
         run: npm run type-check
       - name: git diff --check against the PR base
         run: git diff --check "origin/${{ github.base_ref }}...HEAD"
+
+  p4a-produce-entry-validation:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ALLOW_DISPOSABLE_POSTGRES_TESTS: "1"
+      # The P4A gate decides whether produce may be persisted at all. Its
+      # append-only audit, its idempotency and its privileges are verified
+      # against real PostgreSQL or not at all — an unreachable database is a
+      # HARD FAILURE of this job, never a green skip.
+      REQUIRE_P4A_POSTGRES: "1"
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGPORT: "5432"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - name: P4A real-PostgreSQL entry validation gate suite
+        run: bun run test:pg:p4a
+      - name: P4A validation domain and gate regression suites
+        run: bunx bun test src/lib/produce/entry-validation.test.ts src/lib/produce/entry-validation-gate.test.ts src/lib/line/guided-menu/produce-entry-gate.test.ts
+      - name: Typecheck
+        run: npm run type-check
+      - name: git diff --check against the PR base
+        run: git diff --check "origin/${{ github.base_ref }}...HEAD"

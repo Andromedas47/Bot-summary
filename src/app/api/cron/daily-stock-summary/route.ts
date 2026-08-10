@@ -11,6 +11,8 @@ import {
   buildNoHouseStockMessage,
   fetchAuthoritativeHouseStockReport,
 } from "@/lib/physical-inventory/house-stock-report";
+import { countUnresolvedPendingSessions } from "@/lib/sales/load";
+import { buildPendingValidationNotice } from "@/lib/summary/pending-validation-notice";
 import {
   parseStockSummaryTargets,
   houseStockSummaryRetryKey,
@@ -128,7 +130,25 @@ export async function GET(req: NextRequest) {
   // with the manual `สรุปคงเหลือ` command) and no longer drive this message;
   // anomalyCount/anomalyMarketCount/hasAnomalies are this report's own
   // truth about fail-closed, market-level valuation problems.
-  const goodReturnMessages = buildDailyGoodReturnValueMessages(report, { latest });
+  // P4A: produce the entry gate is holding never reaches produce_transactions,
+  // so the report above simply cannot see it. Appended, never prepended, so the
+  // existing messages keep their push retry-key indices. A lookup failure is
+  // logged and the report still goes out — losing the whole morning delivery
+  // over a warning line would be the worse outcome.
+  let unresolvedPendingCount = 0;
+  try {
+    unresolvedPendingCount = await countUnresolvedPendingSessions(supabase, businessDate);
+  } catch (error) {
+    logger.warn("daily stock summary pending-validation lookup failed", {
+      businessDate,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  const pendingValidationNotice = buildPendingValidationNotice(unresolvedPendingCount);
+  const goodReturnMessages = [
+    ...buildDailyGoodReturnValueMessages(report, { latest }),
+    ...(pendingValidationNotice ? [pendingValidationNotice] : []),
+  ];
   const houseStockMessages = houseStockReport?.messages ?? buildNoHouseStockMessage(businessDate);
   const productCount = report.products.length;
   const incompleteMarketCount = new Set(stockSummary.incomplete.map((row) => row.marketName)).size;

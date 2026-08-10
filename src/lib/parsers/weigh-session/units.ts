@@ -54,6 +54,58 @@ export function isKnownUnit(raw: string): boolean {
   return CANONICAL_UNITS.has(trimmed) || trimmed in UNIT_ALIASES || trimmed in UNIT_CONVERSIONS;
 }
 
+/**
+ * The closest known unit to `raw`, for a "did you mean" suggestion only.
+ *
+ * Suggestion, never substitution: an unknown unit stays exactly as written and
+ * the caller has to get a human to decide. Only a single-character difference
+ * counts (โลก → โล), which is the transcription-slip distance; anything looser
+ * would start proposing genuinely different units to each other.
+ */
+export function nearestKnownUnit(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed || isKnownUnit(trimmed)) return null;
+
+  let best: string | null = null;
+  for (const candidate of [
+    ...CANONICAL_UNITS,
+    ...Object.keys(UNIT_ALIASES),
+    ...Object.keys(UNIT_CONVERSIONS),
+  ]) {
+    if (Math.abs(candidate.length - trimmed.length) > 1) continue;
+    if (boundedEditDistance(trimmed, candidate, 1) === null) continue;
+    // Ties resolve to the canonical spelling of the candidate, so an alias
+    // never gets suggested when its canonical form is equally close.
+    const canonical = normalizeUnitAlias(candidate);
+    if (best === null || canonical.length < best.length) best = canonical;
+  }
+  return best;
+}
+
+/** Edit distance if it is ≤ `max`, otherwise null. Bounded, so it stays cheap. */
+export function boundedEditDistance(a: string, b: string, max: number): number | null {
+  if (Math.abs(a.length - b.length) > max) return null;
+  let previous = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = [i];
+    let rowMin = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      const value = Math.min(
+        previous[j] + 1,
+        current[j - 1] + 1,
+        previous[j - 1] + cost,
+      );
+      current.push(value);
+      if (value < rowMin) rowMin = value;
+    }
+    if (rowMin > max) return null;
+    previous = current;
+  }
+  const distance = previous[b.length];
+  return distance <= max ? distance : null;
+}
+
 /** Normalizes spelling only (no rescaling). Unknown units pass through unchanged. */
 export function normalizeUnitAlias(raw: string): string {
   const trimmed = raw.trim();

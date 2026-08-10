@@ -292,6 +292,8 @@ export type GuidedMenuScreen =
   | "session_finalizing"
   | "session_finalize_failed"
   | "session_validation_failed"
+  /** P4A: entry-gate exceptions that a human may acknowledge (price change). */
+  | "session_validation_review"
   | "session_action_conflict"
   | "session_menu_dismissed"
   | "no_open_session"

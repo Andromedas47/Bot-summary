@@ -233,6 +233,49 @@ Schema preconditions verified: `pending_sessions.session_generation` is `uuid`
 `open_accountability_round_produce_session` present,
 `bind_plain_text_accountability_round` absent.
 
+## Production release — 2026-08-10
+
+Exactly three mutations, in the mandated order.
+
+| | |
+|---|---|
+| Migration (repo) | `20260810120000_p4a_plain_text_round_binding.sql` |
+| Migration (Production) | `p4a_plain_text_round_binding` |
+| Merge commit / `main` | `9d2106ba680bd345f202db637da056b4eade6906` (PR #41, `--match-head-commit e443d22`) |
+| Deployment | `dpl_AzBq9LsbLbhxvUGxbjnRDy7CqSUN` — READY, target `production`, SHA `9d2106b`, alias `bot-summary.vercel.app`, `aliasError: null` |
+
+**Schema / security.** `bind_plain_text_accountability_round` is
+`SECURITY DEFINER`, owner `postgres`, `search_path=public, extensions, pg_temp`.
+`service_role` holds EXECUTE; `anon` and `authenticated` hold none. No new
+table, no new column, so no new RLS surface. Supabase advisors report the same
+four pre-existing ERRORs as before (the two `produce_transactions*` SECURITY
+DEFINER views from 0037 and two RLS-disabled tables); the new function appears
+nowhere in advisor output, including `function_search_path_mutable`.
+
+**Old app + new schema.** Verified before the merge: `/` 307, `/login` 200,
+webhook 401. The deployed build never calls the new RPC, so this step was
+expected to be a no-op and was.
+
+**Runtime after deployment.** `/` 307, `/login` 200, webhook 401, both crons
+401, zero error or fatal runtime logs, log status codes 200/401 only.
+
+**Data integrity, before vs after — every value identical.**
+
+| | before | after |
+|---|---|---|
+| `accountability_rounds` | 0 | 0 |
+| `produce_sessions` | 1823 | 1823 |
+| `produce_items` | 28628 / `c20aaba3…` | 28628 / `c20aaba3…` |
+| `inventory_movement_lines` | 4 / `fad7c2a5…` | 4 / `fad7c2a5…` |
+| `inventory_cost_movement_lines` | 0 | 0 |
+| `profitability_snapshots` | 0 | 0 |
+| `produce_entry_validation_reviews` | 0 | 0 |
+| `pending_sessions` (bound) | 40 (0) | 40 (0) |
+
+No backfill, no historical repair, no P0–P3 accounting change, no secret
+touched. The first round will be created by the first plain-text withdrawal
+closed after this deployment — nothing was pre-created.
+
 ## Human LINE UAT script
 
 The round a return resolves comes from the operator's own pending row (trust 1),

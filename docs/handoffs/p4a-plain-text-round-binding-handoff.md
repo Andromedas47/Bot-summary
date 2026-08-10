@@ -321,6 +321,42 @@ the corrected schema turns a call that always failed into one that works;
 old-app-on-corrected-schema and new-app-on-corrected-schema are the same code
 path, and there is no window in which anything regresses.
 
+### Price-review fix release — 2026-08-10
+
+| | |
+|---|---|
+| Migration | `20260810160000_p4a_review_session_generation_uuid.sql` → Production `p4a_review_session_generation_uuid` |
+| Merge / `main` | `8375a3ee19490ed17073a2355ed1f7346a670fdb` (PR #42, `--match-head-commit dcba127`) |
+| Deployment | `dpl_HespiHm8hGvFvPYo4FFqSrUPQ2cx` — READY, `bot-summary.vercel.app`, `aliasError: null` |
+
+Verified after apply: **zero** `session_generation` columns in the whole schema
+are anything other than `uuid`; the review column is `uuid`; both RPCs have
+exactly one signature each, taking `p_session_generation uuid`, `SECURITY
+DEFINER`, owner `postgres`, `search_path=pg_catalog, public`, `service_role`
+EXECUTE only. The identity UNIQUE constraint, all four indexes and both
+append-only triggers survived the retype. RLS on, zero policies. Runtime after
+deploy: `/` 307, `/login` 200, webhook 401, cron 401, zero error/fatal logs.
+
+Data across the migration — unchanged: rounds 5, produce_sessions 1830,
+produce_items 28637 (`3af0b0f1…`), inventory lines 4 (`fad7c2a5…`), cost lines
+0, P3 snapshots 0, review rows 0.
+
+### Production UAT evidence — round binding proven
+
+Read back independently from Production after the human UAT. Five rounds, every
+one `plaintext:`-created, seller `เทส`, market `ทดสอบ`, one per business date:
+
+| business date | sessions | transaction types |
+|---|---|---|
+| 2025-01-20 | 2 | `เบิก`, `คืน` |
+| 2025-01-21 | 1 | `เบิก` |
+| 2025-01-22 | 1 | `เบิก` |
+| 2025-01-25 | 1 | `เบิก` |
+| 2025-01-26 | 2 | `เบิก`, `คืน` |
+
+Two rounds carry a withdrawal **and** its return under one round id — the
+inheritance contract, proven on real Production data rather than in a fixture.
+
 ## Human LINE UAT script
 
 The round a return resolves comes from the operator's own pending row (trust 1),

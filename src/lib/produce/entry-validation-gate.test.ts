@@ -17,7 +17,7 @@ const OTHER_ROUND = "22222222-2222-4222-8222-222222222222";
 
 const REF: ProduceValidationSessionRef = {
   sessionKey: "group:G1",
-  sessionGeneration: "7",
+  sessionGeneration: "9f1c0b5e-2a44-4d7e-8c31-6b0e2f5a7d13",
   accountabilityRoundId: ROUND,
   businessDate: "2026-08-09",
   marketLabel: "วัดทุ่งลานนา",

@@ -47,7 +47,7 @@ CREATE TABLE public.accountability_rounds (
 CREATE TABLE public.pending_sessions (
   id                      uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   session_key             text NOT NULL,
-  session_generation      bigint NOT NULL DEFAULT 1,
+  session_generation      uuid NOT NULL DEFAULT gen_random_uuid(),
   line_user_id            text,
   accumulated_text        text NOT NULL DEFAULT '',
   accountability_round_id uuid REFERENCES public.accountability_rounds(id),

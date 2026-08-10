@@ -212,6 +212,83 @@ binding failed closed — correct behaviour, wrong fixture.
    abandoned session therefore leaves an empty open round, exactly as an
    abandoned guided open does.
 
+## Human LINE UAT script
+
+The round a return resolves comes from the operator's own pending row (trust 1),
+which does not depend on the enforcement cutover. The whole script therefore
+works on a **past** business date, so nothing lands in the current day's 08:00
+or 08:10 reports. Use seller `เทส`, market `ทดสอบ`, date `20/1/2568`, and send
+each line as its own LINE message.
+
+```
+A. withdrawal        เทส-ทดสอบ เบิก 20/1/2568
+                     1.มังคุด45บาท
+                     10โล
+                     จบรายการเบิก            → summary, round created
+
+B. unknown unit      เทส-ทดสอบ ชั่งคืน 20/1/2568
+                     1.มังคุด45บาท
+                     4โลก
+                     จบรายการชั่งคืน          → ⛔ blocked, suggests โล
+
+C. correction        4โล
+                     จบรายการชั่งคืน          → accepted, 20/1/2568 unchanged
+
+D. product typo      เทส-ทดสอบ เบิก 20/1/2568   (new round)
+                     1.ทับทิม15บาท
+                     10ลูก
+                     จบรายการเบิก
+                     เทส-ทดสอบ ชั่งคืน 20/1/2568
+                     1.ทับทิบ15บาท
+                     4ลูก
+                     จบรายการชั่งคืน          → ⛔ blocked, suggests ทับทิม
+
+E. price change      เทส-ทดสอบ เบิก 20/1/2568   (new round)
+                     1.อะโวคาโด้100บาท
+                     5โล
+                     จบรายการเบิก
+                     เทส-ทดสอบ ชั่งคืน 20/1/2568
+                     1.อะโวคาโด้120บาท
+                     2โล
+                     จบรายการชั่งคืน          → ⚠️ review, shows 100 vs 120
+                     จบรายการชั่งคืน          → accepted, 120 preserved
+
+F. multi-price       เทส-ทดสอบ เบิก 20/1/2568   (new round)
+                     1.หมอนทอง100บาท
+                     5โล
+                     2.หมอนทอง119บาท
+                     5โล
+                     จบรายการเบิก
+                     เทส-ทดสอบ ชั่งคืน 20/1/2568
+                     1.หมอนทอง100บาท
+                     3โล
+                     2.หมอนทอง119บาท
+                     2โล
+                     จบรายการชั่งคืน          → clean, no false price warning
+
+G. impossible qty    เทส-ทดสอบ เบิก 20/1/2568   (new round)
+                     1.แก้วมังกร35บาท
+                     5โล
+                     จบรายการเบิก
+                     เทส-ทดสอบ ชั่งคืน 20/1/2568
+                     1.แก้วมังกร35บาท
+                     4โล
+                     จบรายการชั่งคืน          → accepted
+                     เทส-ทดสอบ คืนเสีย 20/1/2568
+                     1.แก้วมังกร35บาท
+                     2โล
+                     จบรายการคืนเสีย          → ⛔ blocked, 4+2 > 5
+```
+
+Each new withdrawal opens its own round, so D–G do not interfere with each
+other even though seller, market and date are identical — which is itself the
+same-description-rounds proof, live.
+
+"Return with no withdrawal" is deliberately not in the script: on a pre-cutover
+date it is legacy-unbound by design, and proving it would need a business date
+on or after `PLAIN_TEXT_ROUND_ENFORCEMENT_FROM`, which would touch current
+reporting. It is covered by the PostgreSQL suite instead.
+
 ## Exact next action
 
 Full regression, then commit / push / PR / CI, then the Production release order

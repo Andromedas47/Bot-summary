@@ -7,6 +7,10 @@ import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
 import { isStrictBusinessDate } from "./cron";
 import { isQaMarketLabel } from "./qa-scopes";
 import { resolveCentralPricesForDate } from "@/lib/white-sheet/load";
+import {
+  loadRoundReturnStatuses,
+  roundsWithIncompleteReturn,
+} from "@/lib/produce/round-return-status";
 import type { LatestDataLookup } from "@/lib/summary/latest-data-hint";
 import type { Database } from "@/types/database";
 import {
@@ -49,7 +53,7 @@ const LOOKUP_CHUNK_SIZE = 500;
  * blocks its identity instead of disappearing.
  */
 const PRODUCE_SELECT =
-  "id, session_id, market_name, product_name, quantity, unit, transaction_type, base_transaction_type, price_per_unit, basis_quantity, raw_message_id, session_kind, item_created_at" as const;
+  "id, session_id, market_name, product_name, quantity, unit, transaction_type, base_transaction_type, price_per_unit, basis_quantity, raw_message_id, session_kind, item_created_at, accountability_round_id" as const;
 
 /**
  * parse_errors rows that mean data may be missing. "unsupported_type" is
@@ -956,6 +960,7 @@ function adaptRows(
     const marketLabel = normalizedMarketLabel(row.market_name);
     return {
       sourceId: sourceByRawMessageId.get(row.raw_message_id) ?? null,
+      accountabilityRoundId: row.accountability_round_id ?? null,
       marketName: marketLabel || null,
       sessionId: row.session_id,
       sessionKind: row.session_kind,
@@ -1008,6 +1013,11 @@ export async function loadSalesReport(
     sourceByRawMessageId,
   );
 
+  // P2E round identity: the canonical market label for display, and the rounds
+  // whose ชั่งคืน is known to be unfinished. The second one is what stops a
+  // blocked return from being reported as a confident sold-out day.
+  const roundStatuses = await loadRoundReturnStatuses(supabase, businessDate);
+
   // QA scopes are dropped HERE, before the calculator sees them, so they can
   // never reach a rollup, a trusted/blocked count or a blocker list. Hiding
   // them at render time would leave them inside the totals.
@@ -1024,5 +1034,11 @@ export async function loadSalesReport(
     priceConflicts: pricing.conflicts,
     scopeBlockers,
     sessionAudits: sessionAudits.filter((audit) => keep(audit.marketName)),
+    roundMarketLabels: new Map(
+      roundStatuses
+        .filter((round) => round.marketLabel)
+        .map((round) => [round.accountabilityRoundId, round.marketLabel]),
+    ),
+    incompleteReturnRounds: roundsWithIncompleteReturn(roundStatuses),
   });
 }

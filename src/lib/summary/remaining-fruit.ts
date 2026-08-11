@@ -112,6 +112,12 @@ export interface RemainingFruitSourceRow {
   unit: string | null;
   transaction_type: string;
   price_per_unit?: number | null;
+  /**
+   * P2E round identity. When present it — not the raw market label — is what a
+   * withdrawal and its return provably share, so reconciliation keys on it.
+   * Optional: legacy rows predate rounds and stay label-keyed.
+   */
+  accountability_round_id?: string | null;
   /** Identity fields used only for session-aware dedup — optional so existing callers/fixtures keep compiling. */
   session_id?: string;
   sender_name?: string | null;

@@ -13,7 +13,8 @@
     "test:pg:p2e": "bun test src/lib/accountability-round/migration-p2e.pg.test.ts",
     "test:pg:p3": "bun test src/lib/profitability/migration-p3.pg.test.ts",
     "test:pg:p4a": "bun test src/lib/produce/migration-p4a.pg.test.ts",
-    "test:pg:p4a-round-binding": "bun test src/lib/produce/migration-p4a-round-binding.pg.test.ts"
+    "test:pg:p4a-round-binding": "bun test src/lib/produce/migration-p4a-round-binding.pg.test.ts",
+    "test:pg:round-market-identity": "bun test src/lib/produce/migration-round-market-identity.pg.test.ts"
   },
   "dependencies": {
     "@fontsource/sarabun": "^5.2.8",

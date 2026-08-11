@@ -116,7 +116,7 @@ describe("binding outcomes", () => {
     const db = fakeDb({ outcome: "bound", accountability_round_id: "round-1" });
     const result = await bindPlainTextRound(db, REF, withdrawal());
 
-    expect(result).toEqual({ status: "bound", accountabilityRoundId: "round-1" });
+    expect(result).toEqual({ status: "bound", accountabilityRoundId: "round-1", marketLabel: null });
     expect(db.calls[0]).toMatchObject({
       name: "bind_plain_text_accountability_round",
       p_session_key: SESSION_KEY,
@@ -135,6 +135,7 @@ describe("binding outcomes", () => {
     expect(await bindPlainTextRound(db, REF, goodReturn())).toEqual({
       status: "bound",
       accountabilityRoundId: "round-1",
+      marketLabel: null,
     });
   });
 

@@ -27,6 +27,17 @@ export interface MarketAnomaly { marketName: string; productName: string; unit: 
 /** hasActivity: any non-QA, resolved-bucket produce transaction row existed for this date — distinguishes a genuine sold-out day (withdrawals, zero good returns) from a genuinely empty date (no relevant rows at all). */
 export interface GoodReturnValueReport { businessDate: string; products: GoodReturnValueProduct[]; anomalies: MarketAnomaly[]; hasActivity: boolean; }
 
+/**
+ * Canonical market/seller labels for the day's accountability rounds.
+ *
+ * Production 2026-08-10 proved why this indirection exists: round
+ * d96d2898 held a withdrawal labelled `ทุ่งลานนา` and its returns labelled
+ * `วัดทุ่งลานนา`, so label-keyed reconciliation reported `วัดทุ่งลานนา — เบิก 0`
+ * and raised ไม่พบรายการเบิกที่ตรงกัน against a withdrawal that was sitting in
+ * the very same round. The round's own label is the one stable display identity.
+ */
+export type RoundLabelLookup = ReadonlyMap<string, { marketLabel: string }>;
+
 interface Cell {
   market: string; product: string; unit: string; resolvedMarket: boolean;
   withdrawn: number; returned: number; damaged: number;
@@ -72,14 +83,20 @@ const anomalyOrder = (a: MarketAnomaly, b: MarketAnomaly) =>
  * still surfaces as a market-level anomaly even when it contributes zero to
  * the physical aggregate.
  */
-export function buildDailyGoodReturnValueReport(businessDate: string, rows: readonly RemainingFruitSourceRow[]): GoodReturnValueReport {
+export function buildDailyGoodReturnValueReport(businessDate: string, rows: readonly RemainingFruitSourceRow[], rounds: RoundLabelLookup = new Map()): GoodReturnValueReport {
   const source = dedupeRemainingSourceRows(rows); const known = new Set(source.map((row) => normalizeProductName(row.product_name))); const cells = new Map<string, Cell>();
   source.forEach((row, index) => {
     const bucket = transactionBucket(row.transaction_type); if (!bucket) return;
-    const market = cleanMarketName(row.market_name); if (market && isQaMarketLabel(market)) return;
+    // Round identity first, and its canonical label with it. A round is proof
+    // two rows belong together; a market label is only ever a description of
+    // one row, and Production has shown the two disagreeing inside one round.
+    const roundId = row.accountability_round_id ?? null;
+    const roundLabel = roundId ? rounds.get(roundId)?.marketLabel?.trim() || null : null;
+    const market = roundLabel ?? cleanMarketName(row.market_name); if (market && isQaMarketLabel(market)) return;
     const product = normalizeProductName(row.product_name, undefined, known); const unit = row.unit?.trim() ? normalizeUnitAlias(row.unit.trim()) : "";
     // Never let two unresolved rows become matching price/withdrawal evidence.
-    const key = market ? `${market}||${product}||${unit}` : `unresolved:${index}`;
+    const identity = roundId ? `round:${roundId}` : market;
+    const key = identity ? `${identity}||${product}||${unit}` : `unresolved:${index}`;
     const cell = cells.get(key) ?? { market: market ?? (row.market_name?.trim() || "ไม่ทราบตลาด"), product, unit, resolvedMarket: Boolean(market), withdrawn: 0, returned: 0, damaged: 0, invalidWithdrawn: false, invalidReturned: false, invalidDamaged: false, prices: new Set<number>(), hasWithdrawal: false, invalidPrice: false };
     if (row.quantity === null || !Number.isFinite(row.quantity) || row.quantity < 0) {
       if (bucket === "เบิก") cell.invalidWithdrawn = true; else if (bucket === "คืน") cell.invalidReturned = true; else cell.invalidDamaged = true;

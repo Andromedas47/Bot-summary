@@ -19,6 +19,9 @@ let sessionResult: QueryResult = { data: [], error: null };
 let messageResult: QueryResult = { data: [], error: null };
 let physicalSnapshotResult: QueryResult = { data: [], error: null };
 let physicalItemResult: QueryResult = { data: [], error: null };
+/** P2E round identity + the unfinalized documents attributed to those rounds. */
+let roundResult: QueryResult = { data: [], error: null };
+let pendingResult: QueryResult = { data: [], error: null };
 
 /**
  * Answer produce_transactions per query rather than per table.
@@ -48,6 +51,7 @@ function chain(result: () => QueryResult, produceAware = false, pricedSnapshotAw
   node.in = self;
   node.ilike = self;
   node.is = self;
+  node.not = self;
   node.order = self;
   node.eq = (column: string, value: unknown) => {
     filters[`eq:${column}`] = value;
@@ -72,6 +76,8 @@ mock.module("@/lib/supabase/server", () => ({
       if (table === "raw_messages") return chain(() => messageResult);
       if (table === "physical_inventory_snapshots") return chain(() => physicalSnapshotResult, false, true);
       if (table === "physical_inventory_items") return chain(() => physicalItemResult);
+      if (table === "accountability_rounds") return chain(() => roundResult);
+      if (table === "pending_sessions") return chain(() => pendingResult);
       throw new Error(`Unexpected table: ${table}`);
     },
   }),
@@ -115,6 +121,8 @@ beforeEach(() => {
   messageResult = { data: [], error: null };
   physicalSnapshotResult = { data: [], error: null };
   physicalItemResult = { data: [], error: null };
+  roundResult = { data: [], error: null };
+  pendingResult = { data: [], error: null };
   produceByQuery = null;
   process.env.CRON_SECRET = "stock-secret";
   delete process.env.STOCK_SUMMARY_LINE_TARGETS;
@@ -592,5 +600,85 @@ describe("daily stock summary cron — empty business date", () => {
     expect(body.latestLookupStatus).toBeNull();
     expect(body.messages[0]).toContain("📦 สรุปของดีชั่งคืนประจำวัน");
     expect(body.messages.join("\n")).not.toContain(LATEST_DATA_UNAVAILABLE_NOTICE);
+  });
+});
+
+/**
+ * Production regression, business date 2026-08-10.
+ *
+ * One accountability round held a withdrawal labelled ทุ่งลานนา and returns
+ * labelled วัดทุ่งลานนา; a second round held a withdrawal whose return was
+ * refused by P4A and never landed. The 08:00 report reported the first as
+ * "เบิก 0 / ไม่พบรายการเบิกที่ตรงกัน" and said nothing at all about the second.
+ */
+describe("daily stock summary cron — accountability round identity", () => {
+  const LANNA = "d96d2898-43f7-4eeb-9477-5e8b942da477";
+  const SAP_PHUN = "b0e8b69f-69b0-4af4-98ea-522bcd051d38";
+
+  beforeEach(() => {
+    produceResult = {
+      data: [
+        {
+          market_name: "ทุ่งลานนา", product_name: "หมอนทอง", quantity: 20,
+          unit: "โล", transaction_type: TX_WITHDRAW, price_per_unit: 40,
+          accountability_round_id: LANNA,
+        },
+        {
+          market_name: "วัดทุ่งลานนา", product_name: "หมอนทอง", quantity: 7,
+          unit: "โล", transaction_type: TX_RETURN, accountability_round_id: LANNA,
+        },
+        {
+          market_name: "ทรัพย์พัน2", product_name: "แอปเปิ้ล", quantity: 45,
+          unit: "ลูก", transaction_type: TX_WITHDRAW, price_per_unit: 8,
+          accountability_round_id: SAP_PHUN,
+        },
+      ],
+      error: null,
+    };
+    roundResult = {
+      data: [
+        { id: LANNA, seller_label: "ดำ", market_label: "ทุ่งลานนา" },
+        { id: SAP_PHUN, seller_label: "มิ้น", market_label: "ทรัพย์พัน2" },
+      ],
+      error: null,
+    };
+  });
+
+  test("a return filed under the alias label never reports เบิก 0", async () => {
+    const body = await (await GET(request("?debug=1&date=2026-08-10"))).json();
+    const messages = body.messages.join("\n");
+
+    expect(body.anomalyCount).toBe(0);
+    expect(messages).not.toContain("ไม่พบรายการเบิกที่ตรงกัน");
+    expect(messages).not.toContain("วัดทุ่งลานนา");
+  });
+
+  test("a refused return is named as incomplete, not left silent", async () => {
+    pendingResult = {
+      data: [{
+        accountability_round_id: SAP_PHUN,
+        finalization_status: "pending",
+        accumulated_text: "มิ้น-ทรัพย์พัน2 ชั่งคืน\n1.แอปเปิ้ล8บาท\n45ลูก\nจบรายการชั่งคืน",
+        close_requested_at: null,
+      }],
+      error: null,
+    };
+
+    const body = await (await GET(request("?debug=1&date=2026-08-10"))).json();
+    const messages = body.messages.join("\n");
+
+    expect(messages).toContain("⚠️ ตลาดที่มีเบิกแต่ยังไม่มีรายการคืนที่บันทึกสำเร็จ");
+    expect(messages).toContain("ทรัพย์พัน2 — มิ้น");
+    expect(messages).toContain("พบการส่งชั่งคืน แต่ยังบันทึกไม่สำเร็จ เนื่องจากรายการต้องแก้ไข");
+    // The reconciled round is NOT listed: its return landed.
+    expect(messages).not.toContain("ทุ่งลานนา — ดำ");
+  });
+
+  test("with no return evidence the round is reported as simply not returned", async () => {
+    const body = await (await GET(request("?debug=1&date=2026-08-10"))).json();
+    const messages = body.messages.join("\n");
+
+    expect(messages).toContain("ทรัพย์พัน2 — มิ้น");
+    expect(messages).toContain("เบิก 1 รายการ แต่ยังไม่พบรายการชั่งคืนที่บันทึกสำเร็จ");
   });
 });

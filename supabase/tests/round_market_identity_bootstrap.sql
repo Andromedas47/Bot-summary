@@ -78,6 +78,40 @@ CREATE TABLE public.line_guided_menu_market_aliases (
   active      boolean NOT NULL DEFAULT true
 );
 
+-- Verbatim from 20260808105001. Without it a test could retire an orphan that
+-- Production's immutability guard would refuse, so the guard is part of the
+-- fixture: the retirement UPDATE must touch only status, closed_at and
+-- closed_line_event_id, and must never reach a round that is already terminal.
+CREATE OR REPLACE FUNCTION public.accountability_rounds_guard_update()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF NEW.id IS DISTINCT FROM OLD.id
+     OR NEW.source_type IS DISTINCT FROM OLD.source_type
+     OR NEW.source_id IS DISTINCT FROM OLD.source_id
+     OR NEW.owner_line_user_id IS DISTINCT FROM OLD.owner_line_user_id
+     OR NEW.business_date IS DISTINCT FROM OLD.business_date
+     OR NEW.seller_label IS DISTINCT FROM OLD.seller_label
+     OR NEW.market_label IS DISTINCT FROM OLD.market_label
+     OR NEW.market_label_normalized IS DISTINCT FROM OLD.market_label_normalized
+     OR NEW.created_line_event_id IS DISTINCT FROM OLD.created_line_event_id
+     OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+    RAISE EXCEPTION 'P2E: accountability round identity and attributes are immutable';
+  END IF;
+  IF OLD.status <> 'open' AND NEW IS DISTINCT FROM OLD THEN
+    RAISE EXCEPTION 'P2E: terminal accountability round is immutable';
+  END IF;
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER accountability_rounds_guard_update
+BEFORE UPDATE ON public.accountability_rounds
+FOR EACH ROW EXECUTE FUNCTION public.accountability_rounds_guard_update();
+
 -- Verbatim from 20260808105001, because the binding RPC compares against it.
 CREATE OR REPLACE FUNCTION public.accountability_round_normalize(p_value text)
 RETURNS text

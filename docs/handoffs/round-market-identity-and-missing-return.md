@@ -18,6 +18,68 @@ Duplicate open rounds exist for ต้อม/พาชิโอ้ (3) and ม�
 one of each carries transactions. Any "clear the binding and rediscover" repair
 would hit `ambiguous` on those, which is why none is proposed.
 
+## 1b. Why the duplicate open rounds exist
+
+`ต้อม-พาชิโอ้ ชั่งคืน 10/8/2569` is refused in Production with
+`⛔ มีรอบที่เปิดค้างอยู่มากกว่า 1 รอบ`. Read-only, the three rounds are:
+
+| round | created | creation key suffix | tx | produce sessions | pending |
+|---|---|---|---|---|---|
+| `ac51a41b` | 13:25:12 | `…:0d51347c` | 0 | 0 | 0 |
+| `d740e9d5` | 13:33:55 | `…:9a691b1f` | 0 | 0 | 0 |
+| `924fd122` | 13:34:51 | `…:cc758591` | 19 | 1 | 0 |
+
+All three carry `created_line_event_id = 'plaintext:<one session_key>:<generation>'`
+with the SAME session_key — one LINE group, one typist. They differ only in the
+pending generation. `พาชิโอ้รวม` repeats the shape: `f60d8598` (09:05:13, empty)
+then `f46b3d90` (09:07:24, 43 transactions), two minutes apart. Across the whole
+database every empty open round — 4 of 20 — is a `plaintext:` round.
+
+The lifecycle that produces them:
+
+1. `runPlainTextCloseGate` (and the deferred finalizer) call
+   `bindPlainTextRound` **before** the entry gate that decides whether the
+   document may persist. A withdrawal therefore commits its round first.
+2. The gate blocks (P4A tier, or a price review awaiting its second close).
+   `markClose` is reset to `false`; nothing persists. The round stays open and
+   empty.
+3. The operator re-sends the corrected document. It carries the header, and the
+   accumulated text already ends in a closer, so
+   `requiresFreshPendingGeneration` is true and `replaceGeneration` rotates to a
+   new `session_generation`. The one-shot path
+   (`startAdditionalPendingSession`) rotates unconditionally.
+4. Round creation is idempotent per **generation** —
+   `v_creation_key = 'plaintext:' || session_key || ':' || session_generation` —
+   so the new generation mints a second round. It has to be per generation: P2E
+   allows a seller to open two genuine withdrawal rounds for the same market and
+   day, so the key cannot be seller/market/date.
+5. The first round is now unreachable. Its generation no longer exists, no
+   pending row points at it, and nothing was ever persisted into it. Its only
+   remaining effect is to sit in Trust 2's candidate set and make the day's
+   ชั่งคืน `ambiguous`.
+
+Not the cause: session-generation rotation itself (it is correct and required),
+stale `pending_sessions.accountability_round_id` (the column is repointed at the
+new round), or the propagation trigger. A parse-level failure creates nothing —
+both callers skip binding when `getWeighSessionFinalizationErrors` is non-empty —
+so only documents that parsed cleanly and were then refused leak a round.
+
+**Fix.** Creating a round retires the round the previous generation of the same
+plain-text session left behind, when that round holds nothing: no produce
+session, no pending generation. Status becomes `cancelled` with the successor's
+creation key as the closing event — terminalized, never deleted. It is scoped to
+one session_key, one seller, one business date and one reviewed market, so a
+seller running several markets in one group keeps every one of them, and a
+legitimate second withdrawal round is safe because by then the first one has
+persisted its session. Discovery is untouched: ambiguity still fails closed, and
+the binding never prefers "the round with transactions".
+
+This is prevention, not repair. The four rounds already in Production stay
+exactly as they are; the next ต้อม/พาชิโอ้ withdrawal retires the two empties as
+a side effect of the ordinary lifecycle. To unblock the 2026-08-10 return before
+that, an admin closes the unused rounds — which is what the existing refusal
+already tells the operator to do.
+
 ## 2. Root causes
 
 **Market drift.** `bind_plain_text_accountability_round` compared normalized
@@ -51,6 +113,8 @@ column, no data change):
   one catalog code. Never fuzzy, never similarity-based.
 - The binding RPC uses that equality in both trust paths and gains a
   `market_mismatch` outcome that names the round's market.
+- Creating a round cancels the empty round left by a previous generation of the
+  same plain-text session (see §1b).
 
 Application:
 
@@ -123,3 +187,12 @@ confirm the market appears under
 `⚠️ ตลาดที่มีเบิกแต่ยังไม่มีรายการคืนที่บันทึกสำเร็จ` with
 `พบการส่งชั่งคืน แต่ยังบันทึกไม่สำเร็จ`, and that Daily Sales does **not** count
 it under `✅ ถือว่าขายหมดเพราะไม่มีรายการคืน`.
+
+**UAT C — a blocked withdrawal retry leaves one round.** In a test group, send a
+withdrawal whose product spelling P4A refuses, with its closer, so the gate
+blocks. Then re-send the whole corrected document including the header. Verify
+read-only that for that seller/market/business date exactly ONE
+`accountability_rounds` row is `open`, and that the first one is `cancelled`
+with `closed_line_event_id` equal to the second one's `created_line_event_id`.
+Then send the ชั่งคืน: it must be accepted, not
+`⛔ มีรอบที่เปิดค้างอยู่มากกว่า 1 รอบ`.

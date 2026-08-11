@@ -24,6 +24,14 @@
 --      operator is told which market the round belongs to instead of receiving
 --      the misleading "no withdrawal round found". Still fail-closed: nothing
 --      is bound, nothing is persisted, nothing is rewritten.
+--   3. Orphan retention. Round creation is keyed to the pending GENERATION, and
+--      an operator retry that re-sends the header rotates that generation — so
+--      a withdrawal blocked by P4A leaves behind an open round holding nothing,
+--      which then makes the legitimate ชั่งคืน `ambiguous`. Production
+--      2026-08-10/11, seller ต้อม: rounds ac51a41b (13:25), d740e9d5 (13:33)
+--      and f60d8598 (09:05) are exactly that — same session_key, three
+--      generations, zero transactions. Creating the successor now terminalizes
+--      the unused predecessor. Discovery is untouched and stays fail-closed.
 BEGIN;
 
 DO $$
@@ -292,6 +300,61 @@ BEGIN
     RAISE EXCEPTION 'P4A: plain-text pending generation could not be bound';
   END IF;
 
+  -- Retire the predecessor this retry replaced.
+  --
+  -- The round is created BEFORE the entry gate that decides whether the document
+  -- may persist. A gate refusal leaves the round behind; the operator's
+  -- corrected re-send carries the header, which rotates the pending generation,
+  -- which mints a second round under a second creation key. The first is then
+  -- unreachable — its generation no longer exists — and its only remaining
+  -- effect is to make that market's ชั่งคืน `ambiguous`.
+  --
+  -- Runs after the pending row above has been repointed at the new round, so
+  -- "no pending generation points here" is the honest test it looks like.
+  --
+  -- Narrow on purpose:
+  --   * only rounds this same plain-text session_key created (same group, same
+  --     typist) — never a guided-menu round, never another operator's;
+  --   * only the same seller, business date and REVIEWED market, so a seller
+  --     running several markets in one group keeps every one of them;
+  --   * only rounds holding nothing. A round with no produce session and no
+  --     pending generation has no transactions, no inventory movement and no
+  --     settlement, because every one of those descends from a produce session.
+  -- A legitimate second withdrawal for the same market and day is untouched: by
+  -- then the first round has persisted its session.
+  --
+  -- Terminalized, never deleted: status becomes 'cancelled' and the successor's
+  -- creation key is recorded as the closing event, so the retry chain stays
+  -- readable. Creation path only — discovery never repairs anything, because
+  -- ambiguity must stay fail-closed.
+  IF p_is_new_round THEN
+    UPDATE public.accountability_rounds o
+    SET status = 'cancelled',
+        closed_at = now(),
+        closed_line_event_id = v_creation_key
+    WHERE o.status = 'open'
+      AND o.id <> v_round_id
+      AND o.source_type = p_source_type
+      AND o.source_id = btrim(p_source_id)
+      AND o.owner_line_user_id = btrim(p_line_user_id)
+      AND o.business_date = p_business_date
+      AND public.accountability_round_normalize(o.seller_label) = v_seller
+      AND public.accountability_round_same_market(o.market_label_normalized, v_market)
+      AND starts_with(
+            o.created_line_event_id,
+            'plaintext:' || btrim(p_session_key) || ':'
+          )
+      AND o.created_line_event_id <> v_creation_key
+      AND NOT EXISTS (
+        SELECT 1 FROM public.produce_sessions s
+        WHERE s.accountability_round_id = o.id
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM public.pending_sessions p
+        WHERE p.accountability_round_id = o.id
+      );
+  END IF;
+
   RETURN jsonb_build_object(
     'outcome', 'bound',
     'accountability_round_id', v_round_id,
@@ -308,7 +371,10 @@ COMMENT ON FUNCTION public.bind_plain_text_accountability_round(
   'Binds one plain-text pending generation to a P2E accountability round. A main '
   'withdrawal creates one (idempotent per generation); every other document kind '
   'resolves an existing open round and fails closed on zero, multiple, or '
-  'different-market candidates. Market equality is the reviewed catalog''s, never fuzzy.';
+  'different-market candidates. Market equality is the reviewed catalog''s, never fuzzy. '
+  'Creating a round also cancels the empty round a previous generation of the same '
+  'plain-text session left behind, so a blocked-then-corrected withdrawal cannot make '
+  'the day''s return ambiguous.';
 
 REVOKE ALL ON FUNCTION public.accountability_round_market_code(text)
   FROM PUBLIC, anon, authenticated;

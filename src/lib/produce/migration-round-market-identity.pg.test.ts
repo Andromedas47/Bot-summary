@@ -282,6 +282,129 @@ describe.skipIf(!pgAvailable)("round market identity on PostgreSQL 17", () => {
       .toBe(Number(before) + 1);
   });
 
+  /**
+   * Production 2026-08-10/11, seller ต้อม, market พาชิโอ้: rounds ac51a41b
+   * (13:25), d740e9d5 (13:33) and 924fd122 (13:34) share one session_key and
+   * differ only in the generation suffix of their creation key. Only the last
+   * holds transactions; the first two are what turned the day's ชั่งคืน into
+   * `⛔ มีรอบที่เปิดค้างอยู่มากกว่า 1 รอบ`.
+   *
+   * The round is created before the entry gate that blocks persistence, and a
+   * corrected re-send carries the header, which rotates the pending generation
+   * and mints a second round. Creating the successor must retire the orphan.
+   */
+  test("a blocked withdrawal and its corrected retry leave ONE selectable round", async () => {
+    const key = "group:G-retry:user:U-retry";
+    const attempt1 = "22222222-2222-4222-8222-222222222222";
+    const attempt2 = "33333333-3333-4333-8333-333333333333";
+    const returnGen = "44444444-4444-4444-8444-444444444444";
+    const open = () => scalar(`
+      SELECT count(*)::text FROM public.accountability_rounds
+      WHERE status = 'open' AND business_date = DATE '${DATE}'
+        AND public.accountability_round_normalize(seller_label) = 'ขวัญ'
+        AND public.accountability_round_same_market(market_label_normalized, 'ทุ่งลานนา')`);
+    const attempt = (generation: string, market = "ทุ่งลานนา", newRound = true) => bind({
+      sessionKey: key, generation, sourceId: "G-retry", owner: "U-retry",
+      seller: "ขวัญ", market, newRound,
+    });
+
+    await scalar(`
+      INSERT INTO public.pending_sessions (session_key, session_generation, source_id, line_user_id)
+      VALUES ('${key}', '${attempt1}'::uuid, 'G-retry', 'U-retry') RETURNING 1`);
+
+    // First attempt: the round is created, then the gate refuses. Nothing
+    // persists, so no produce session ever references this round.
+    const first = await attempt(attempt1);
+    expect(first.outcome).toBe("bound");
+    expect(await open()).toBe("1");
+
+    // The operator re-sends the corrected document with its header, which
+    // rotates the generation — the exact Production sequence.
+    await rotate(attempt2, key);
+    const second = await attempt(attempt2);
+    expect(second.outcome).toBe("bound");
+    expect(second.accountability_round_id).not.toBe(first.accountability_round_id);
+
+    // The orphan is terminalized, not deleted: the evidence chain survives.
+    expect(await scalar(`
+      SELECT status FROM public.accountability_rounds
+      WHERE id = '${first.accountability_round_id}'`)).toBe("cancelled");
+    expect(await scalar(`
+      SELECT closed_line_event_id FROM public.accountability_rounds
+      WHERE id = '${first.accountability_round_id}'`))
+      .toBe(`plaintext:${key}:${attempt2}`);
+    expect(await open()).toBe("1");
+
+    // The ชั่งคืน that Production could not file now resolves, without the
+    // binding ever preferring "the round with transactions".
+    await rotate(returnGen, key);
+    const returned = await attempt(returnGen, "วัดทุ่งลานนา", false);
+    expect(returned.outcome).toBe("already_bound");
+    expect(returned.accountability_round_id).toBe(second.accountability_round_id);
+  });
+
+  test("a round that already holds a produce session is never retired", async () => {
+    // A seller legitimately opens a second withdrawal round for the same market
+    // and day. By then the first round has persisted, so it must survive — this
+    // is why the guard is "holds nothing", not "is older".
+    const key = "group:G-second:user:U-second";
+    const first = "55555555-5555-4555-8555-555555555555";
+    const later = "66666666-6666-4666-8666-666666666666";
+    const attempt = (generation: string) => bind({
+      sessionKey: key, generation, sourceId: "G-second", owner: "U-second",
+      seller: "แดง", market: "ทุ่งลานนา", newRound: true,
+    });
+
+    await scalar(`
+      INSERT INTO public.pending_sessions (session_key, session_generation, source_id, line_user_id)
+      VALUES ('${key}', '${first}'::uuid, 'G-second', 'U-second') RETURNING 1`);
+    const one = await attempt(first);
+    expect(one.outcome).toBe("bound");
+    await scalar(`
+      INSERT INTO public.produce_sessions (session_date, staff_name, accountability_round_id)
+      VALUES (DATE '${DATE}', 'แดง', '${one.accountability_round_id}') RETURNING 1`);
+
+    await rotate(later, key);
+    const two = await attempt(later);
+    expect(two.outcome).toBe("bound");
+    expect(await scalar(`
+      SELECT status FROM public.accountability_rounds
+      WHERE id = '${one.accountability_round_id}'`)).toBe("open");
+    // Both remain open, so the day's return is `ambiguous` — fail-closed, and
+    // correct: two real withdrawal rounds genuinely cannot be told apart here.
+    expect(two.accountability_round_id).not.toBe(one.accountability_round_id);
+  });
+
+  test("retiring an orphan never crosses seller, market, group or typist", async () => {
+    // ต้อม runs three markets in one group. A new พาซิโอ้ผลไม้ withdrawal must
+    // not touch the ราชพฤกษ์ round the earlier test opened for the same seller,
+    // and must not touch another group's rounds at all.
+    const survivors = await scalar(`
+      SELECT count(*)::text FROM public.accountability_rounds
+      WHERE status = 'open' AND source_id = 'G-tom'`);
+    const fresh = "77777777-7777-4777-8777-777777777777";
+    await rotate(fresh, TOM_SESSION);
+    const result = await bind({
+      sessionKey: TOM_SESSION, generation: fresh, sourceId: "G-tom", owner: "U-tom",
+      seller: "ต้อม", market: "พาซิโอ้ผลไม้", newRound: true,
+    });
+    expect(result.outcome).toBe("bound");
+    // The พาซิโอ้ผลไม้ orphan from Test 2 is retired; ราชพฤกษ์ is not, and the
+    // count therefore stays where it was: one gone, one added.
+    expect(await scalar(`
+      SELECT count(*)::text FROM public.accountability_rounds
+      WHERE status = 'open' AND source_id = 'G-tom'`)).toBe(survivors);
+    expect(await scalar(`
+      SELECT count(*)::text FROM public.accountability_rounds
+      WHERE status = 'open' AND source_id = 'G-tom'
+        AND public.accountability_round_same_market(market_label_normalized, 'ราชพฤกษ์')`))
+      .toBe("1");
+    // Another group's rounds are untouched by any of this.
+    expect(await scalar(`
+      SELECT count(*)::text FROM public.accountability_rounds
+      WHERE status = 'open' AND source_id = 'G-lanna'`)).toBe("1");
+  });
+
   test("the market helpers are not executable by anon or authenticated", async () => {
     for (const signature of [
       "public.accountability_round_market_code(text)",

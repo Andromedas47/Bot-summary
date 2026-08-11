@@ -1191,16 +1191,35 @@ export class WebhookService {
         );
       }
 
-      if (hasSessionEnd(normalizedText) || hasItemLine(normalizedText)) {
-        // Complete single-message: has SESSION_END or item lines → parse directly.
-        //
-        // P4A gap, deliberately left as it is: this path writes produce_sessions
-        // with no pending row, so the entry gate never sees it and the session
-        // finalizes with no accountability round. Routing it through pending
-        // would move its validation evidence, its duplicate handling and its
-        // immediate reply onto the deferred finalizer — a legacy behaviour
-        // change well beyond round binding. The multi-message workflow the
-        // operators actually use (หัวรายการ → รายการ → จบรายการ) is fully gated.
+      const complete = hasSessionEnd(normalizedText) || hasItemLine(normalizedText);
+
+      // A pasted complete document takes the same route as a multi-message one.
+      //
+      // Closing the P4A bypass: the legacy direct path below writes
+      // produce_sessions with no pending row, so bindPlainTextRound and the
+      // entry gate never see it. On 2026-08-11 operators started pasting whole
+      // documents and Production took 20 sessions with accountability_round_id
+      // NULL, unchecked product names (กล้วหว้า/น้ำว้า) and unchecked units
+      // (แพค/กล่อง) — all answered บันทึกแล้ว ✅.
+      //
+      // The seller-market header is exactly the condition that makes a document
+      // bindable: without it the round contract has no seller and no market, so
+      // the remaining legacy shapes (a pasted LINE export, "รายการชั่งเบิกไปตลาด")
+      // would be `unbound` however they were routed, and keep the direct path
+      // with its immediate validation evidence, dedup and reply.
+      if (RE.SELLER_MARKET.test(incomingSessionHeader) && complete) {
+        log.info("complete produce document detected — routing through pending generation", {
+          sessionKey,
+          hasCloser: hasSessionEnd(normalizedText),
+        });
+        return this.startAdditionalPendingSession(
+          msgEvent, pendingService, sessionKey, sourceId, lineUserId,
+          text, normalizedText, eventId, log,
+        );
+      }
+
+      if (complete) {
+        // Legacy single-message, no seller-market identity → parse directly.
         log.info("single complete message detected (has SESSION_END or items), parsing directly");
         return this.runParser(msgEvent, rawMessageId, eventId, event.type, log);
       }

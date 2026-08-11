@@ -419,8 +419,14 @@ jobs:
         run: bun run test:pg:p4a
       - name: P4A real-PostgreSQL plain-text round binding suite
         run: bun run test:pg:p4a-round-binding
+      - name: Market identity consistency real-PostgreSQL suite
+        run: bun run test:pg:round-market-identity
       - name: P4A validation domain, gate and round-binding regression suites
         run: bunx bun test src/lib/produce/entry-validation.test.ts src/lib/produce/entry-validation-gate.test.ts src/lib/produce/plain-text-round-binding.test.ts src/lib/line/guided-menu/produce-entry-gate.test.ts src/lib/line/webhook-plain-text-entry-gate.test.ts
+      # Round-keyed reconciliation and the missing-return classification. These
+      # reproduce the 2026-08-10 Production failures without a database.
+      - name: Round market identity and missing-return regression suites
+        run: bunx bun test src/lib/produce/round-return-status.test.ts src/lib/summary/round-market-identity.test.ts src/lib/sales/round-return-sold-out.test.ts
       - name: Typecheck
         run: npm run type-check
       - name: git diff --check against the PR base

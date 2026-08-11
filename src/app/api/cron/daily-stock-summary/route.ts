@@ -12,7 +12,14 @@ import {
   fetchAuthoritativeHouseStockReport,
 } from "@/lib/physical-inventory/house-stock-report";
 import { countUnresolvedPendingSessions } from "@/lib/sales/load";
-import { buildPendingValidationNotice } from "@/lib/summary/pending-validation-notice";
+import {
+  buildMissingReturnNotices,
+  buildPendingValidationNotice,
+} from "@/lib/summary/pending-validation-notice";
+import {
+  loadRoundReturnStatuses,
+  type RoundReturnStatus,
+} from "@/lib/produce/round-return-status";
 import {
   parseStockSummaryTargets,
   houseStockSummaryRetryKey,
@@ -84,11 +91,23 @@ export async function GET(req: NextRequest) {
   let report;
   let stockSummary;
   let houseStockReport;
+  let roundStatuses: RoundReturnStatus[] = [];
   try {
     const rows = await fetchRemainingFruitRows(supabase, businessDate);
+    // Round identity is loaded BEFORE the report is built: it supplies both the
+    // canonical market label the report displays and the missing-return
+    // classification appended below. A failure here is a real failure — a
+    // silently label-keyed report is the bug this replaced.
+    roundStatuses = await loadRoundReturnStatuses(supabase, businessDate);
     report = buildDailyGoodReturnValueReport(
       businessDate,
       rows,
+      new Map(
+        roundStatuses.map((row) => [
+          row.accountabilityRoundId,
+          { marketLabel: row.marketLabel },
+        ]),
+      ),
     );
     stockSummary = buildStockSummaryFromRows(businessDate, rows);
     houseStockReport = await fetchAuthoritativeHouseStockReport(supabase, businessDate);
@@ -145,8 +164,13 @@ export async function GET(req: NextRequest) {
     });
   }
   const pendingValidationNotice = buildPendingValidationNotice(unresolvedPendingCount);
+  // Per-round detail first, then the day-wide count. The count still covers
+  // documents no round can claim (a session that never opened, a parse that
+  // died before the market was known); the detail covers the ones it can.
+  const missingReturnNotices = buildMissingReturnNotices(roundStatuses);
   const goodReturnMessages = [
     ...buildDailyGoodReturnValueMessages(report, { latest }),
+    ...missingReturnNotices,
     ...(pendingValidationNotice ? [pendingValidationNotice] : []),
   ];
   const houseStockMessages = houseStockReport?.messages ?? buildNoHouseStockMessage(businessDate);

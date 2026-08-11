@@ -28,7 +28,7 @@ export async function fetchRemainingFruitRows(
   while (true) {
     let query = supabase
       .from("produce_transactions")
-      .select("market_name, product_name, quantity, unit, transaction_type, price_per_unit, session_id, sender_name")
+      .select("market_name, product_name, quantity, unit, transaction_type, price_per_unit, session_id, sender_name, accountability_round_id")
       .eq("transaction_date", date)
       .in("transaction_type", [...KNOWN_TX_TYPES])
       .order("item_created_at", { ascending: true })

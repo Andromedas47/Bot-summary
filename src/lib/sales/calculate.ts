@@ -115,6 +115,13 @@ export interface SalesSourceRow {
    * the row is then keyed by session and blocked, never merged into a market.
    */
   sourceId: string | null;
+  /**
+   * P2E accountability round. When present it IS the market identity: a
+   * withdrawal and its return provably share it, and Production 2026-08-10
+   * showed the two documents disagreeing about the market label inside one
+   * round. Null for legacy rows, which stay on the (source + label) identity.
+   */
+  accountabilityRoundId?: string | null;
   /** Raw session title; display label only, never an identity on its own. */
   marketName: string | null;
   sessionId: string;
@@ -139,6 +146,14 @@ export interface SalesCalculationInput {
   scopeBlockers?: readonly SalesScopeBlocker[];
   /** Sessions whose persisted rows do not reconcile with what they claimed. */
   sessionAudits?: readonly SalesSessionAudit[];
+  /** Canonical market label per accountability round — the display identity. */
+  roundMarketLabels?: ReadonlyMap<string, string>;
+  /**
+   * Rounds whose ชั่งคืน is known to be unfinished: a return document is open,
+   * or one was sent and refused. Their identities keep their arithmetic — the
+   * withdrawal really was issued — but they may never be called sold out.
+   */
+  incompleteReturnRounds?: ReadonlySet<string>;
 }
 
 /** One atomic market + product + unit result — the only place a number is computed. */
@@ -165,6 +180,11 @@ export interface SalesIdentityRow {
    * roll up — but it appears in its market and in the blocked list.
    */
   isSessionPlaceholder?: boolean;
+  /**
+   * The round behind this identity has return evidence that never landed. The
+   * quantities below stand; the "no return row means sold out" reading does not.
+   */
+  returnEvidenceIncomplete?: boolean;
 }
 
 /**
@@ -175,13 +195,19 @@ export interface SalesIdentityRow {
  * Independent of value trust: a VALUE_BLOCKED row (missing/conflicting
  * central price) still qualifies, since its quantity is trusted. A
  * QUANTITY_BLOCKED row never qualifies — soldQuantity is null.
+ *
+ * `returnEvidenceIncomplete` is the one addition to the original contract:
+ * absence of a return row means zero ONLY when nothing is known to be missing.
+ * Production 2026-08-10 (มิ้น / ทรัพย์พัน2) had a full return document sitting
+ * refused by P4A while this rule reported the round as confidently sold out.
  */
 export function isSoldOutByAbsentReturn(row: SalesIdentityRow): boolean {
   return (
     row.withdrawnQuantity > 0 &&
     row.goodReturnQuantity === 0 &&
     row.damagedReturnQuantity === 0 &&
-    row.soldQuantity !== null
+    row.soldQuantity !== null &&
+    !row.returnEvidenceIncomplete
   );
 }
 
@@ -257,6 +283,11 @@ function unresolvedMarketKey(sessionId: string): string {
   return `session${MARKET_KEY_SEPARATOR}${sessionId}`;
 }
 
+/** Key for a row that carries a P2E round — the strongest identity available. */
+export function salesRoundMarketKey(accountabilityRoundId: string): string {
+  return `round${MARKET_KEY_SEPARATOR}${accountabilityRoundId}`;
+}
+
 export function satangToBahtText(satang: number): string {
   const negative = satang < 0;
   const absolute = Math.abs(satang);
@@ -307,6 +338,7 @@ interface IdentityAggregate {
   marketKey: string;
   marketLabel: string;
   sourceId: string | null;
+  accountabilityRoundId: string | null;
   productName: string;
   unit: string;
   withdrawn: bigint;
@@ -471,10 +503,23 @@ function identityLabel(marketName: string | null): string {
 }
 
 /** The fields any market key derivation needs — a row or a session audit. */
-type MarketIdentitySource = Pick<SalesSourceRow, "sourceId" | "marketName" | "sessionId">;
+type MarketIdentitySource = Pick<
+  SalesSourceRow,
+  "sourceId" | "marketName" | "sessionId" | "accountabilityRoundId"
+>;
 
-/** True only when BOTH halves of the market identity are present. */
+/** The round this row belongs to, or null. Blank strings are not identities. */
+function roundId(row: MarketIdentitySource): string | null {
+  const value = row.accountabilityRoundId?.trim();
+  return value ? value : null;
+}
+
+/**
+ * True when the row has a usable market identity: a round, or BOTH halves of
+ * the legacy (source + label) identity.
+ */
 function isMarketResolved(row: MarketIdentitySource): boolean {
+  if (roundId(row)) return true;
   return Boolean(row.sourceId) && identityLabel(row.marketName).length > 0;
 }
 
@@ -482,8 +527,14 @@ function isMarketResolved(row: MarketIdentitySource): boolean {
  * The one derivation of a row's market key. The duplicate-session scan and the
  * aggregation loop must agree exactly, or a duplicate could be detected against
  * a key no identity is ever filed under.
+ *
+ * A round wins over the label pair: it is the only key a withdrawal and its
+ * return provably share, and it is exactly what label-keying got wrong in
+ * Production on 2026-08-10.
  */
 function rowMarketKey(row: MarketIdentitySource): string {
+  const round = roundId(row);
+  if (round) return salesRoundMarketKey(round);
   return isMarketResolved(row)
     ? salesMarketKey(row.sourceId as string, identityLabel(row.marketName))
     : unresolvedMarketKey(row.sessionId);
@@ -520,8 +571,14 @@ export function calculateSalesReport(input: SalesCalculationInput): SalesReport 
 
   const aggregates = new Map<string, IdentityAggregate>();
 
+  const roundLabels = input.roundMarketLabels ?? new Map<string, string>();
+  const incompleteRounds = input.incompleteReturnRounds ?? new Set<string>();
+
   for (const row of input.rows) {
-    const label = identityLabel(row.marketName);
+    const round = row.accountabilityRoundId?.trim() || null;
+    // The round's own label is authoritative for display; the row's label is
+    // the fallback for legacy rows and for a round the lookup did not return.
+    const label = (round ? roundLabels.get(round)?.trim() : "") || identityLabel(row.marketName);
     const marketResolved = isMarketResolved(row);
     const marketKey = rowMarketKey(row);
 
@@ -546,6 +603,7 @@ export function calculateSalesReport(input: SalesCalculationInput): SalesReport 
         marketKey,
         marketLabel: marketResolved ? label : "",
         sourceId: marketResolved ? (row.sourceId as string) : null,
+        accountabilityRoundId: round,
         productName,
         unit,
         withdrawn: BigInt(0),
@@ -646,6 +704,9 @@ export function calculateSalesReport(input: SalesCalculationInput): SalesReport 
       expectedSalesSatang,
       status,
       reasons: [...reasons],
+      returnEvidenceIncomplete:
+        aggregate.accountabilityRoundId !== null
+        && incompleteRounds.has(aggregate.accountabilityRoundId),
     };
   });
 

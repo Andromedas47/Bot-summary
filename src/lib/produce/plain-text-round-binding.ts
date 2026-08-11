@@ -31,13 +31,19 @@ type AnyClient = SupabaseClient<any>;
 export const PLAIN_TEXT_ROUND_ENFORCEMENT_FROM = "2026-08-11";
 
 export type PlainTextRoundBinding =
-  | { status: "bound"; accountabilityRoundId: string }
+  | {
+      status: "bound";
+      accountabilityRoundId: string;
+      /** The ROUND's own market label — canonical for everything downstream. */
+      marketLabel: string | null;
+    }
   /** Legacy-compatible: no round, so only P4A's unit-vocabulary tier applies. */
   | { status: "unbound" }
   | { status: "refused"; reason: PlainTextRoundRefusal; detail: string };
 
 export type PlainTextRoundRefusal =
   | "no_round"
+  | "market_mismatch"
   | "ambiguous"
   | "not_found"
   | "identity_mismatch"
@@ -56,6 +62,26 @@ const NO_ROUND_REPLY = [
   "ระบบยังไม่ได้บันทึกอะไร",
   "กรุณาบันทึกรายการเบิกของรอบนี้ก่อน แล้วส่งรายการนี้ใหม่",
 ].join("\n");
+
+/**
+ * The round exists — under another market.
+ *
+ * Production 2026-08-10 turned this state into silent data corruption: the
+ * return was filed into the withdrawal's round while carrying its own market
+ * label, and the next morning's report showed that market with เบิก 0. Naming
+ * the round's market is what an operator can act on; "no withdrawal found"
+ * sends them to re-enter a withdrawal that already exists.
+ */
+function marketMismatchReply(roundMarketLabel: string | null, sentMarketLabel: string): string {
+  return [
+    "⛔ ตลาดไม่ตรงกับรอบเบิกที่เปิดอยู่",
+    roundMarketLabel
+      ? `รอบนี้เปิดไว้ที่ตลาด "${roundMarketLabel}" แต่รายการนี้ระบุ "${sentMarketLabel}"`
+      : `รายการนี้ระบุตลาด "${sentMarketLabel}" ซึ่งไม่ตรงกับรอบที่เปิดอยู่`,
+    "ระบบยังไม่ได้บันทึกอะไร",
+    "กรุณาแก้ชื่อตลาดให้ตรงกับรอบเบิก แล้วส่งใหม่",
+  ].join("\n");
+}
 
 const AMBIGUOUS_REPLY = [
   "⛔ มีรอบที่เปิดค้างอยู่มากกว่า 1 รอบ ของคนขาย/ตลาด/วันที่เดียวกัน",
@@ -143,6 +169,7 @@ export async function bindPlainTextRound(
   const result = (data ?? {}) as {
     outcome?: string;
     accountability_round_id?: string | null;
+    market_label?: string | null;
   };
 
   switch (result.outcome) {
@@ -152,8 +179,20 @@ export async function bindPlainTextRound(
         ? {
             status: "bound",
             accountabilityRoundId: result.accountability_round_id,
+            marketLabel: result.market_label ?? null,
           }
         : { status: "refused", reason: "bind_failed", detail: BIND_FAILED_REPLY };
+    case "market_mismatch":
+      // Always fail closed, on every business date. Unlike `no_round` there is
+      // no legacy reading of this state: a round WAS found for this seller and
+      // day, so the pre-cutover "the withdrawal predates the release" excuse
+      // cannot apply, and persisting under a second market label is the exact
+      // corruption this refusal exists to prevent.
+      return {
+        status: "refused",
+        reason: "market_mismatch",
+        detail: marketMismatchReply(result.market_label ?? null, market),
+      };
     case "no_round":
       // Before the cutover the withdrawal side of this round predates the
       // release, so there is genuinely nothing to find and legacy behaviour is

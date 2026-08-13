@@ -8,6 +8,11 @@ import {
   bangkokBusinessDateNow,
 } from "@/lib/business-date";
 import { seedCentralPricesFromPersistedWithdrawals } from "@/lib/white-sheet/seed-from-withdrawal";
+import {
+  UNKNOWN_PRODUCT_CODE_ERROR,
+  resolveItemLineProductCode,
+  unknownProductCodeError,
+} from "@/lib/produce/product-code/resolver";
 import { RE } from "./regex";
 import { conversionFactor, isKnownUnit, normalizeUnitAlias, resolveUnitQuantity } from "./units";
 import type {
@@ -126,8 +131,17 @@ export function parseWeighSession(
 
     // ── Header state: wait for session title ───────────────────────────────
     if (state === "header") {
+      // A document may open on its first item instead of a header, so codes are
+      // resolved here too. A real header line never matches: the pattern needs
+      // digits immediately after a single namespace character, which "กี้-ตลาด
+      // เบิก 13/8/2569" has nowhere.
+      const headerCode = resolveItemLineProductCode(content);
+      if (headerCode.kind === "unknown") {
+        parseErrors.push(unknownProductCodeError(headerCode.code, line));
+        continue;
+      }
       // Accept both prefixed (LINE export) and bare (direct typed) header lines.
-      const headerItem = parseItemLine(content, nextItemNumber(items, pendingItem));
+      const headerItem = parseItemLine(headerCode.content, nextItemNumber(items, pendingItem));
       if (headerItem === "orphan_basis") {
         parseErrors.push(`orphan basis line (no product name): "${line}"`);
         continue;
@@ -235,7 +249,23 @@ export function parseWeighSession(
         continue;
       }
 
-      const parsedItem = parseItemLine(content, nextItemNumber(items, pendingItem));
+      // Product Code resolution — the narrowest boundary that exists: the line
+      // is already past the quantity and price-continuation branches, so what
+      // remains is an item line, and only its leading product token is
+      // rewritten. A code-shaped token with no registry entry never becomes a
+      // literal product named "ม999"; it fails closed like any other parse
+      // error, which is what stops the round from taking on junk identity.
+      const codeResolution = resolveItemLineProductCode(content);
+      if (codeResolution.kind === "unknown") {
+        closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
+        pendingItem = null;
+        pendingItemLines = [];
+        parseErrors.push(unknownProductCodeError(codeResolution.code, line));
+        continue;
+      }
+      const itemContent = codeResolution.content;
+
+      const parsedItem = parseItemLine(itemContent, nextItemNumber(items, pendingItem));
       if (parsedItem === "orphan_basis") {
         closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
         pendingItem = null;
@@ -251,7 +281,7 @@ export function parseWeighSession(
         // price and quantity follow on later lines. Never a special-case for
         // any specific product — any name whose trailing token isn't a known
         // unit word qualifies (see units.ts).
-        const nameOnly = content.match(RE.ITEM_NAME_ONLY);
+        const nameOnly = itemContent.match(RE.ITEM_NAME_ONLY);
         if (nameOnly && !isKnownUnit(nameOnly[2].trim())) {
           closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
           pendingItem = {
@@ -354,6 +384,14 @@ export function buildWeighSessionValidationReply(session: WeighSession): string 
   const failCount        = session.parse_errors.length + invalidItemCount;
 
   const details = getWeighSessionFinalizationErrors(session).map((error) => {
+    // An unregistered code is named explicitly rather than shown as a line the
+    // bot "could not read" — the operator's next move is to check the code, not
+    // to retype the line. Nothing about this row was saved.
+    const unknownCode = error.match(UNKNOWN_PRODUCT_CODE_ERROR);
+    if (unknownCode) {
+      return `- ${unknownCode[2]} → ไม่พบรหัสสินค้า ${unknownCode[1]} ในทะเบียนรหัสสินค้า`;
+    }
+
     const quotedLine = error.match(/"([^"]+)"/)?.[1];
     if (quotedLine) return `- ${quotedLine}`;
 

@@ -1,0 +1,266 @@
+/**
+ * Real PostgreSQL 17 proof for the Produce Product Code Dictionary migration.
+ *
+ * Three things need proving before this runs against Production:
+ *
+ *  1. the seed lands exactly as approved — 253 rows, the right namespace
+ *     counts, the right canonical names, all enabled;
+ *  2. a code is permanent — it cannot be deleted, renumbered, or repointed at
+ *     another product, because either would silently rewrite the identity of
+ *     every transaction already keyed by it;
+ *  3. applying it twice changes nothing, and applying it at all leaves the
+ *     produce history byte-for-byte where it was.
+ */
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { randomBytes } from "node:crypto";
+import { PRODUCT_CODE_ENTRIES } from "./product-code/dictionary";
+
+const ROOT = join(import.meta.dir, "..", "..", "..");
+const WIN_PSQL = "C:\\Program Files\\PostgreSQL\\17\\bin\\psql.exe";
+const PSQL = existsSync(WIN_PSQL) ? WIN_PSQL : "psql";
+const PGHOST = process.env.PGHOST ?? "localhost";
+const PGUSER = process.env.PGUSER ?? "postgres";
+const PGPASSWORD = process.env.PGPASSWORD ?? "postgres";
+const PGPORT = process.env.PGPORT ?? "5432";
+const DATABASE = `pcd_${randomBytes(4).toString("hex")}`;
+const DB_NAME_PATTERN = /^pcd_[a-f0-9]+$/;
+const ALLOWED_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+
+const MIGRATION = join(
+  ROOT, "supabase", "migrations", "20260813090000_produce_product_code_dictionary.sql",
+);
+const BOOTSTRAP = join(
+  ROOT, "supabase", "tests", "produce_product_code_dictionary_bootstrap.sql",
+);
+
+function assertSafe(): void {
+  if (process.env.ALLOW_DISPOSABLE_POSTGRES_TESTS !== "1") {
+    throw new Error("migration-product-code-dictionary.pg.test.ts requires ALLOW_DISPOSABLE_POSTGRES_TESTS=1");
+  }
+  if (!ALLOWED_HOSTS.has(PGHOST)) throw new Error(`refusing PGHOST=${PGHOST}`);
+  if (!DB_NAME_PATTERN.test(DATABASE)) throw new Error(`refusing database=${DATABASE}`);
+}
+
+type PsqlResult = { code: number; stdout: string; stderr: string };
+
+async function psql(args: string[], database = DATABASE, stdin?: string): Promise<PsqlResult> {
+  const proc = Bun.spawn([PSQL, "-X", ...args], {
+    cwd: ROOT,
+    stdin: stdin === undefined ? undefined : new TextEncoder().encode(stdin),
+    // Thai canonical names are the whole point of this table; without an
+    // explicit UTF-8 client encoding a Windows psql returns question marks.
+    env: { ...process.env, PGHOST, PGUSER, PGPASSWORD, PGPORT, PGDATABASE: database, PGCLIENTENCODING: "UTF8" },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { code, stdout, stderr };
+}
+
+function run(sql: string): Promise<PsqlResult> {
+  return psql(["-v", "ON_ERROR_STOP=1", "-tA", "-f", "-"], DATABASE, sql);
+}
+
+async function scalar(sql: string): Promise<string> {
+  const result = await run(sql);
+  if (result.code !== 0) throw new Error(`${result.stderr || result.stdout}\nSQL: ${sql}`);
+  return result.stdout.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+}
+
+async function expectFailure(sql: string): Promise<string> {
+  const result = await run(sql);
+  expect(result.code, `expected failure but succeeded:\n${sql}`).not.toBe(0);
+  return `${result.stderr}${result.stdout}`;
+}
+
+async function apply(file: string): Promise<void> {
+  const result = await psql(["-v", "ON_ERROR_STOP=1", "-f", file]);
+  expect(result.code, `${file}\n${result.stderr}\n${result.stdout}`).toBe(0);
+}
+
+async function probe(): Promise<boolean> {
+  if (process.env.ALLOW_DISPOSABLE_POSTGRES_TESTS !== "1" || !ALLOWED_HOSTS.has(PGHOST)) return false;
+  try {
+    const result = await psql(["-tAc", "SHOW server_version_num"], "postgres");
+    return result.code === 0 && Number(result.stdout.trim()) >= 170000;
+  } catch {
+    return false;
+  }
+}
+
+const pgAvailable = await probe();
+let databaseCreated = false;
+if (!pgAvailable && process.env.REQUIRE_PRODUCT_CODE_POSTGRES === "1") {
+  throw new Error("REQUIRE_PRODUCT_CODE_POSTGRES=1 but the PostgreSQL 17 harness is unavailable");
+}
+
+/** Captured before the migration, compared after — history must not move. */
+let historyFingerprint = "";
+
+describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17", () => {
+  beforeAll(async () => {
+    assertSafe();
+    const created = await psql(["-d", "postgres", "-c", `CREATE DATABASE ${DATABASE}`], "postgres");
+    expect(created.code, created.stderr).toBe(0);
+    databaseCreated = true;
+
+    await apply(BOOTSTRAP);
+    historyFingerprint = await scalar(`
+      SELECT count(*)::text || ':' || md5(string_agg(
+        product_name || '|' || quantity || '|' || price_per_unit || '|' || transaction_date,
+        E'\n' ORDER BY product_name))
+      FROM public.produce_transactions`);
+
+    await apply(MIGRATION);
+  });
+
+  afterAll(async () => {
+    if (!databaseCreated) return;
+    await psql(["-d", "postgres", "-c", `DROP DATABASE IF EXISTS ${DATABASE} WITH (FORCE)`], "postgres");
+  });
+
+  // ── The seed is the approved dictionary ───────────────────────────────────
+
+  test("seeds exactly the 253 approved codes, all enabled", async () => {
+    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("253");
+    expect(await scalar(
+      "SELECT count(*)::text FROM public.produce_product_codes WHERE code_enabled",
+    )).toBe("253");
+  });
+
+  test("keeps the approved namespace ranges", async () => {
+    const rows = await scalar(`
+      SELECT string_agg(category_code || '=' || n, ',' ORDER BY category_code)
+      FROM (
+        SELECT category_code, count(*) AS n
+        FROM public.produce_product_codes GROUP BY category_code
+      ) t`);
+    expect(rows).toBe("ท=26,ป=36,ผ=118,พ=7,ม=62,ห=4");
+  });
+
+  test("stores the canonical name of every code exactly as approved", async () => {
+    // The whole dictionary, not a sample: a single mistyped canonical name is a
+    // product identity that will never match what an operator types.
+    // Compared as a map, not a sorted string: Thai orders differently under the
+    // database collation than it does in JavaScript, and this test is about the
+    // mapping being right, not about anybody's sort order.
+    const actual = JSON.parse(await scalar(
+      "SELECT jsonb_object_agg(product_code, canonical_name)::text FROM public.produce_product_codes",
+    )) as Record<string, string>;
+
+    const expected = Object.fromEntries(
+      PRODUCT_CODE_ENTRIES.map((e) => [e.code, e.canonicalName]),
+    );
+
+    expect(actual).toEqual(expected);
+  });
+
+  test("resolves representative codes across every namespace", async () => {
+    for (const [code, name] of [
+      ["ม02", "กล้วยน้ำว้า"], ["ผ118", "ข้าวคั่ว"], ["ป36", "หอยเชลล์"],
+      ["ท26", "ภูเขาไฟลูกค้าเคลม"], ["ห04", "เห็ดออรินจิ"], ["พ07", "มะระถุง"],
+    ]) {
+      expect(await scalar(
+        `SELECT canonical_name FROM public.produce_product_codes WHERE product_code = '${code}'`,
+      )).toBe(name);
+    }
+  });
+
+  // ── A code is permanent ───────────────────────────────────────────────────
+
+  test("refuses to delete a released code", async () => {
+    const error = await expectFailure(
+      "DELETE FROM public.produce_product_codes WHERE product_code = 'ม02'",
+    );
+    expect(error).toContain("must not be deleted");
+    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("253");
+  });
+
+  test("refuses to repoint a code at a different product", async () => {
+    const error = await expectFailure(
+      "UPDATE public.produce_product_codes SET canonical_name = 'ทุเรียน' WHERE product_code = 'ม02'",
+    );
+    expect(error).toContain("identity is immutable");
+    expect(await scalar(
+      "SELECT canonical_name FROM public.produce_product_codes WHERE product_code = 'ม02'",
+    )).toBe("กล้วยน้ำว้า");
+  });
+
+  test("refuses to renumber a code", async () => {
+    const error = await expectFailure(
+      "UPDATE public.produce_product_codes SET product_code = 'ม63' WHERE product_code = 'ม02'",
+    );
+    expect(error).toContain("identity is immutable");
+  });
+
+  test("allows retiring a code without touching its product", async () => {
+    await scalar(
+      "UPDATE public.produce_product_codes SET code_enabled = false WHERE product_code = 'พ07' RETURNING '1'",
+    );
+    expect(await scalar(
+      "SELECT code_enabled::text || ':' || canonical_name FROM public.produce_product_codes WHERE product_code = 'พ07'",
+    )).toBe("false:มะระถุง");
+
+    // Put it back so the later re-apply assertion sees the seeded state.
+    await scalar(
+      "UPDATE public.produce_product_codes SET code_enabled = true WHERE product_code = 'พ07' RETURNING '1'",
+    );
+  });
+
+  test("refuses a malformed or mis-prefixed code", async () => {
+    expect(await expectFailure(`
+      INSERT INTO public.produce_product_codes (product_code, category_code, category_name, canonical_name)
+      VALUES ('ก01', 'ก', 'ผลไม้', 'ทดสอบ')`)).toContain("violates check constraint");
+
+    expect(await expectFailure(`
+      INSERT INTO public.produce_product_codes (product_code, category_code, category_name, canonical_name)
+      VALUES ('ม63', 'ผ', 'ผลไม้', 'ทดสอบ')`)).toContain("produce_product_codes_category_prefix");
+  });
+
+  test("refuses a duplicate code", async () => {
+    expect(await expectFailure(`
+      INSERT INTO public.produce_product_codes (product_code, category_code, category_name, canonical_name)
+      VALUES ('ม02', 'ม', 'ผลไม้', 'อย่างอื่น')`)).toContain("duplicate key");
+  });
+
+  // ── Deploy safety ─────────────────────────────────────────────────────────
+
+  test("is repeat-safe — applying it again is a no-op", async () => {
+    await apply(MIGRATION);
+    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("253");
+    expect(await scalar(
+      "SELECT canonical_name FROM public.produce_product_codes WHERE product_code = 'ม02'",
+    )).toBe("กล้วยน้ำว้า");
+  });
+
+  test("leaves the produce history exactly as it found it", async () => {
+    const after = await scalar(`
+      SELECT count(*)::text || ':' || md5(string_agg(
+        product_name || '|' || quantity || '|' || price_per_unit || '|' || transaction_date,
+        E'\n' ORDER BY product_name))
+      FROM public.produce_transactions`);
+
+    expect(after).toBe(historyFingerprint);
+  });
+
+  test("is readable by service_role and nobody else", async () => {
+    expect(await scalar(`
+      SELECT privilege_type FROM information_schema.role_table_grants
+      WHERE table_name = 'produce_product_codes' AND grantee = 'service_role'`)).toBe("SELECT");
+
+    expect(await scalar(`
+      SELECT count(*)::text FROM information_schema.role_table_grants
+      WHERE table_name = 'produce_product_codes' AND grantee IN ('anon', 'authenticated', 'PUBLIC')`))
+      .toBe("0");
+
+    expect(await scalar(`
+      SELECT relrowsecurity::text FROM pg_class
+      WHERE oid = 'public.produce_product_codes'::regclass`)).toBe("true");
+  });
+});

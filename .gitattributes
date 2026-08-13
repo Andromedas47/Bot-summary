@@ -1,2 +1,7 @@
 # Shell scripts must keep LF endings; CRLF makes bash fail with "\r: command not found".
 *.sh text eol=lf
+
+# The approved Product Code Dictionary. CRLF here trips the `git diff --check`
+# step every pg-tests job ends with, and the file is read byte-for-byte by the
+# source-parity test.
+src/lib/produce/product-code/dictionary.csv text eol=lf

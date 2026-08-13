@@ -431,3 +431,63 @@ jobs:
         run: npm run type-check
       - name: git diff --check against the PR base
         run: git diff --check "origin/${{ github.base_ref }}...HEAD"
+
+  produce-product-code-dictionary:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ALLOW_DISPOSABLE_POSTGRES_TESTS: "1"
+      # The dictionary decides what product a coded line means. Its seed, its
+      # code-stability guards and its historical no-touch guarantee are proven
+      # against real PostgreSQL or not at all — an unreachable database is a
+      # HARD FAILURE of this job, never a green skip.
+      REQUIRE_PRODUCT_CODE_POSTGRES: "1"
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGPORT: "5432"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - name: Product Code Dictionary real-PostgreSQL migration suite
+        run: bun run test:pg:product-code
+      - name: Dictionary source parity, resolver and parser integration
+        run: >-
+          bunx bun test
+          src/lib/produce/product-code/dictionary.test.ts
+          src/lib/parsers/weigh-session/parser-product-code.test.ts
+          src/lib/produce/product-code-entry-validation.test.ts
+          src/lib/line/webhook-product-code-one-shot.test.ts
+      - name: Parser and P4A regression suites (codes resolve inside the parse)
+        run: >-
+          bunx bun test
+          src/lib/parsers/weigh-session
+          src/lib/produce/entry-validation.test.ts
+          src/lib/produce/entry-validation-gate.test.ts
+          src/lib/produce/plain-text-round-binding.test.ts
+      - name: One-shot bypass regression guard (PR #45 must not regress)
+        run: >-
+          bunx bun test
+          src/lib/line/webhook-one-shot-bypass.test.ts
+          src/lib/line/webhook-plain-text-entry-gate.test.ts
+          src/lib/line/pending-session-finalizer.test.ts
+      - name: Typecheck
+        run: npm run type-check
+      - name: git diff --check against the PR base
+        run: git diff --check "origin/${{ github.base_ref }}...HEAD"

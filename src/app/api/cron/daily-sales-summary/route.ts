@@ -2,7 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { logger } from "@/lib/logger";
 import { pushLineMessage } from "@/lib/line/reply";
-import { findLatestSalesDataDate, loadSalesReport } from "@/lib/sales/load";
+import {
+  findLatestSalesDataDate,
+  loadProduceFailureScan,
+  loadSalesReport,
+} from "@/lib/sales/load";
+import { runDailyClosePreflight } from "@/lib/produce/preflight-service";
 import { buildSalesAutoMessages, salesAutoNeedsLatestDataHint } from "@/lib/sales/message";
 import type { LatestDataLookup } from "@/lib/summary/latest-data-hint";
 import {
@@ -102,7 +107,33 @@ export async function GET(req: NextRequest) {
 
   let report;
   try {
-    report = await loadSalesReport(supabase, businessDate, { includeQaScopes });
+    // ONE failure scan for both the readiness verdict and the report, so the
+    // 08:10 push and the preflight can never disagree about what is unresolved.
+    const failures = await loadProduceFailureScan(supabase, businessDate);
+    report = await loadSalesReport(supabase, businessDate, { includeQaScopes, failures });
+    // Observability only: the readiness verdict is logged next to the report it
+    // describes. It never changes, delays or suppresses the delivery — a report
+    // the business can partly trust is still worth more than silence.
+    try {
+      const preflight = await runDailyClosePreflight(supabase, businessDate, { failures });
+      logger.info("daily sales summary readiness", {
+        business_date: businessDate,
+        report_status: preflight.status,
+        blocked_rounds: preflight.summary.blockedRounds,
+        unresolved_price_products: preflight.summary.unresolvedPriceProducts,
+        active_failed_sessions: preflight.summary.activeFailedSessions,
+        superseded_failures: preflight.summary.supersededFailures,
+        integrity_issues: preflight.summary.integrityIssues,
+        verified_line_count: report.allMarkets.trustedRowCount,
+        unresolved_line_count:
+          report.allMarkets.valueBlockedRowCount + report.allMarkets.quantityBlockedRowCount,
+      });
+    } catch (error) {
+      logger.warn("daily sales summary readiness lookup failed", {
+        businessDate,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error("daily sales summary cron failed - report build error", {

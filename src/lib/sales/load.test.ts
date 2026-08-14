@@ -19,6 +19,7 @@ interface Fixture {
   importedSessions?: Record<string, unknown>[];
   produceItems?: Record<string, unknown>[];
   centralPrices?: Record<string, unknown>[];
+  accountabilityRounds?: Record<string, unknown>[];
   errors?: Partial<Record<string, string>>;
 }
 
@@ -43,6 +44,7 @@ function fakeSupabase(fixture: Fixture): SupabaseClient<Database> {
       case "imported_sessions": return fixture.importedSessions ?? [];
       case "produce_items": return fixture.produceItems ?? [];
       case "central_selling_prices": return fixture.centralPrices ?? [];
+      case "accountability_rounds": return fixture.accountabilityRounds ?? [];
       default: throw new Error(`Unexpected table: ${table}`);
     }
   };
@@ -438,6 +440,63 @@ describe("P1 pending-session lifecycle", () => {
 
     expect(report.scopeBlockers).toEqual([{ kind: "unresolved_pending_session", count: 1 }]);
     expect(report.allMarkets.quantityAuthoritative).toBe(false);
+  });
+
+  test("a failed_closed session the operator corrected and re-sent stops blocking", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          // Same round, later successful main session: the correction landed.
+          pending: [
+            {
+              ...FAILED_CLOSED,
+              accumulated_text: [
+                "18:53 เสือ ตลาดกี้ เบิก 25/07/2569",
+                "18:53 เสือ 1.หมอนทอง119บาท",
+                "38โล",
+              ].join("\n"),
+              accountability_round_id: "round-1",
+            },
+          ],
+          produce: [
+            produceRow({ id: "ok-1", session_id: "session-ok", raw_message_id: "raw-ok" }),
+          ],
+          sessions: [
+            {
+              id: "session-ok",
+              total_items: 1,
+              parser_errors: null,
+              staff_name: "เสือ",
+              session_title: "ตลาดกี้",
+              session_date: DATE,
+              session_kind: "main",
+              accountability_round_id: "round-1",
+              raw_message_id: "raw-ok",
+              finalized_at: "2026-07-25T06:00:00.000Z",
+              voided_at: null,
+            },
+          ],
+          rawMessages: [{ id: "raw-ok", source_id: SOURCE_A }],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([]);
+  });
+
+  test("a failed_closed session whose round was retired is not an active problem", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          pending: [{ ...FAILED_CLOSED, accountability_round_id: "round-dead" }],
+          accountabilityRounds: [{ id: "round-dead", status: "cancelled" }],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([]);
   });
 
   test("finalized and duplicate are not blockers", async () => {
@@ -1054,6 +1113,90 @@ describe("P1 durable evidence for a rejected produce message", () => {
     expect(report.blocked.some((row) => row.reasons.includes("produce_message_never_landed"))).toBe(true);
     expect(report.markets[0].marketLabel).toBe("ตลาดกี้");
     expect(report.allMarkets.quantityAuthoritative).toBe(false);
+  });
+
+  /**
+   * Case A: the seller sent a bad document, it was refused, and the corrected
+   * one landed. The refused raw message stays in raw_messages forever — nothing
+   * ever rewrites is_processed — so before the lifecycle layer the morning
+   * report announced it as an unrecorded weighing every single day.
+   */
+  const NAMED_LOST = ["18:53 เสือ ตลาดกี้ เบิก 25/07/2569", "18:53 เสือ 1.หมอนทอง119บาท", "38โล"].join("\n");
+
+  function correctionFixture(successor: Record<string, unknown> = {}): Fixture {
+    return baseFixture({
+      produce: [produceRow({ id: "ok-1", session_id: "session-ok", raw_message_id: "raw-ok" })],
+      sessions: [
+        {
+          id: "session-ok",
+          total_items: 1,
+          parser_errors: null,
+          staff_name: "เสือ",
+          session_title: "ตลาดกี้",
+          session_date: DATE,
+          session_kind: "main",
+          accountability_round_id: null,
+          raw_message_id: "raw-ok",
+          finalized_at: "2026-07-25T07:00:00.000Z",
+          voided_at: null,
+          ...successor,
+        },
+      ],
+      rawMessages: [
+        lostMessage({ raw_text: NAMED_LOST }),
+        { id: "raw-ok", source_id: SOURCE_A },
+      ],
+    });
+  }
+
+  test("a refused message that was corrected and re-sent stops polluting the report", async () => {
+    const report = await loadSalesReport(fakeSupabase(correctionFixture()), DATE);
+
+    expect(report.blocked.some((row) => row.reasons.includes("produce_message_never_landed"))).toBe(
+      false,
+    );
+    expect(report.scopeBlockers).toEqual([]);
+    expect(report.allMarkets.quantityAuthoritative).toBe(true);
+  });
+
+  test("the correction must come from the same market", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(correctionFixture({ session_title: "ตลาดน้อย" })),
+      DATE,
+    );
+    expect(report.blocked.some((row) => row.reasons.includes("produce_message_never_landed"))).toBe(
+      true,
+    );
+  });
+
+  test("the correction must come from the same seller", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(correctionFixture({ staff_name: "ดำ" })),
+      DATE,
+    );
+    expect(report.blocked.some((row) => row.reasons.includes("produce_message_never_landed"))).toBe(
+      true,
+    );
+  });
+
+  test("a success that landed BEFORE the refusal is not a correction", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(correctionFixture({ finalized_at: "2026-07-25T05:00:00.000Z" })),
+      DATE,
+    );
+    expect(report.blocked.some((row) => row.reasons.includes("produce_message_never_landed"))).toBe(
+      true,
+    );
+  });
+
+  test("an additional batch is additive and never counts as the correction", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(correctionFixture({ session_kind: "additional" })),
+      DATE,
+    );
+    expect(report.blocked.some((row) => row.reasons.includes("produce_message_never_landed"))).toBe(
+      true,
+    );
   });
 
   test("a lost message whose header names no market becomes a scope blocker", async () => {

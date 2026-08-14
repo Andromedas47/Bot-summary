@@ -11,7 +11,6 @@ import {
   satangToBahtText,
   type SalesBlockReason,
   type SalesIdentityRow,
-  type SalesMarketSummary,
   type SalesProductSummary,
   type SalesReport,
   type SalesScopeBlocker,
@@ -113,6 +112,96 @@ const REASON_LABELS: Record<SalesBlockReason, string> = {
 
 const UNRESOLVED_MARKET_LABEL = "ไม่ระบุตลาด";
 
+/** The three states a market block can be in. One block, one verdict. */
+export const SALES_MARKET_VERIFIED = "✅ ยืนยันครบ";
+export const SALES_MARKET_PARTIAL = "⚠️ ยืนยันได้บางส่วน";
+export const SALES_MARKET_BLOCKED = "⛔ ยังปิดยอดไม่ได้";
+export const SALES_MARKET_CONFIRMED_PREFIX = "ยอดที่ยืนยันแล้ว";
+export const SALES_MARKET_EXCLUDED_HEADING = "ยังไม่รวม:";
+export const SALES_MARKET_CAUSE_HEADING = "สาเหตุ:";
+/** Printed in every market block when a day-level blocker exists (see above). */
+export const SALES_MARKET_SCOPE_CAVEAT = "• ข้อมูลบางส่วนของวันนี้ยังไม่ครบ (ดูหัวข้อด้านบน)";
+
+/**
+ * Markets merged by their display label.
+ *
+ * One real market can reach the calculator under more than one key: a
+ * round-keyed identity for documents bound to a P2E round, and the legacy
+ * (source + label) identity for those that are not. Rendering them as separate
+ * lines is what produced Production's confusing pair —
+ *
+ *   ตลาด72 — ยอดเงินยังคำนวณไม่ได้
+ *   ตลาด72 — 8,186.50 บาท (บางส่วน)
+ *
+ * — two lines about one market, neither of them the whole answer. The keys stay
+ * distinct inside the calculator (they are different provenance and must not be
+ * merged there); only the presentation joins them, and the joined subtotal is
+ * an exact sum of the same satang integers, so nothing is re-derived.
+ *
+ * A label that spans several LINE sources already carries a source suffix from
+ * resolveDisplayLabels, so this can never merge two genuinely different markets.
+ */
+export interface SalesMarketGroup {
+  marketLabel: string;
+  rows: SalesIdentityRow[];
+  total: SalesTotal;
+}
+
+function mergeTotals(totals: readonly SalesTotal[]): SalesTotal {
+  return totals.reduce<SalesTotal>(
+    (merged, total) => ({
+      expectedSalesSatang: merged.expectedSalesSatang + total.expectedSalesSatang,
+      quantityAuthoritative: merged.quantityAuthoritative && total.quantityAuthoritative,
+      valueAuthoritative: merged.valueAuthoritative && total.valueAuthoritative,
+      trustedRowCount: merged.trustedRowCount + total.trustedRowCount,
+      valueBlockedRowCount: merged.valueBlockedRowCount + total.valueBlockedRowCount,
+      quantityBlockedRowCount: merged.quantityBlockedRowCount + total.quantityBlockedRowCount,
+    }),
+    {
+      expectedSalesSatang: 0,
+      quantityAuthoritative: true,
+      valueAuthoritative: true,
+      trustedRowCount: 0,
+      valueBlockedRowCount: 0,
+      quantityBlockedRowCount: 0,
+    },
+  );
+}
+
+export function groupMarketsByLabel(report: SalesReport): SalesMarketGroup[] {
+  const groups = new Map<string, { rows: SalesIdentityRow[]; totals: SalesTotal[] }>();
+
+  for (const market of report.markets) {
+    const label = marketLabel(market);
+    const group = groups.get(label) ?? { rows: [], totals: [] };
+    group.rows.push(...market.rows);
+    group.totals.push(market.total);
+    groups.set(label, group);
+  }
+
+  return [...groups]
+    .map(([label, group]) => ({
+      marketLabel: label,
+      rows: group.rows,
+      total: mergeTotals(group.totals),
+    }))
+    .sort((a, b) => a.marketLabel.localeCompare(b.marketLabel, "th"));
+}
+
+/**
+ * A market's verdict, from its ROWS rather than its total's trust flags.
+ *
+ * The flags also carry the day-wide scope demotion, which would paint every
+ * market partial the moment one unattributable document exists — burying the
+ * market that is actually broken. Scope blockers keep their own section; this
+ * says only what is true about this market's own identities.
+ */
+export function marketVerdict(group: SalesMarketGroup): "verified" | "partial" | "blocked" {
+  if (group.total.quantityBlockedRowCount > 0) return "blocked";
+  if (group.total.valueBlockedRowCount > 0) return "partial";
+  return "verified";
+}
+
 export function salesReasonLabel(reason: SalesBlockReason): string {
   return REASON_LABELS[reason];
 }
@@ -207,12 +296,54 @@ function identityLines(row: SalesIdentityRow): string[] {
   return lines;
 }
 
-function marketBlock(market: SalesMarketSummary): string {
+function marketBlock(group: SalesMarketGroup): string {
   return [
-    `🏪 ${marketLabel(market)}`,
-    totalBlock(SALES_MARKET_TOTAL_HEADING, market.total),
-    ...market.rows.flatMap(identityLines),
+    `🏪 ${group.marketLabel}`,
+    totalBlock(SALES_MARKET_TOTAL_HEADING, group.total),
+    ...group.rows.sort(compareRowsForDisplay).flatMap(identityLines),
   ].join("\n");
+}
+
+function compareRowsForDisplay(a: SalesIdentityRow, b: SalesIdentityRow): number {
+  return (
+    a.productName.localeCompare(b.productName, "th") || a.unit.localeCompare(b.unit, "th")
+  );
+}
+
+/**
+ * The scheduled report's per-market block: ONE verdict, one subtotal, and an
+ * explicit list of what the subtotal leaves out and why.
+ *
+ * This replaces the old "label — figure" line, which could not say what was
+ * missing, and the separate reason-count section, which counted the same rows a
+ * second time under a different heading.
+ */
+function marketStatusBlock(group: SalesMarketGroup, hasScopeBlockers: boolean): string {
+  const verdict = marketVerdict(group);
+  const excluded = group.rows.filter((row) => row.status !== "TRUSTED");
+
+  const lines = [`🏪 ${group.marketLabel}`];
+  // A scope blocker is a document that could belong to ANY market, so no market
+  // may claim to be complete while one exists. It never upgrades a verdict —
+  // only ever withholds the "ยืนยันครบ" claim.
+  if (verdict === "verified" && !hasScopeBlockers) {
+    lines.push(SALES_MARKET_VERIFIED, `${SALES_MARKET_TOTAL_HEADING} ${valueText(group.total)}`);
+    return lines.join("\n");
+  }
+
+  lines.push(verdict === "blocked" ? SALES_MARKET_BLOCKED : SALES_MARKET_PARTIAL);
+  lines.push(
+    `${SALES_MARKET_CONFIRMED_PREFIX} ${satangToBahtText(group.total.expectedSalesSatang)} บาท`,
+  );
+  lines.push(verdict === "blocked" ? SALES_MARKET_CAUSE_HEADING : SALES_MARKET_EXCLUDED_HEADING);
+  for (const row of excluded.sort(compareRowsForDisplay)) {
+    const identity = row.isSessionPlaceholder
+      ? row.productName
+      : `${row.productName} (${unitLabel(row.unit)})`;
+    lines.push(`• ${identity} — ${row.reasons.map(salesReasonLabel).join(", ")}`);
+  }
+  if (hasScopeBlockers) lines.push(SALES_MARKET_SCOPE_CAVEAT);
+  return lines.join("\n");
 }
 
 /**
@@ -237,30 +368,13 @@ function valueText(total: SalesTotal): string {
 }
 
 /**
- * Blocked entries as reason counts, for the Auto report.
- *
- * The morning push answers "how much did we sell, and how much of it can I
- * trust". Two hundred individual blocked lines answer neither and bury the
- * number. Every blocked row is still listed in full by the manual
- * สรุปยอดขาย command and by the cron route's debug preview — this groups,
- * it never drops.
+ * The Auto report used to end with blocked entries grouped as reason COUNTS,
+ * separate from the per-market figures. Those counts described exactly the rows
+ * the market lines already summarised, under a different heading and a
+ * different grouping, so nothing reconciled: a header saying "ยืนยันไม่ได้ 10
+ * รายการ" could not be traced to any ten visible lines. Each blocked row is now
+ * named inside its own market block instead — see marketStatusBlock.
  */
-function blockedReasonBlocks(report: SalesReport): string[] {
-  if (report.blocked.length === 0) return [];
-
-  const counts = new Map<SalesBlockReason, number>();
-  for (const row of report.blocked) {
-    // A row blocked for two reasons counts under both: these are reason totals,
-    // not a partition of the rows.
-    for (const reason of row.reasons) counts.set(reason, (counts.get(reason) ?? 0) + 1);
-  }
-
-  const lines = [...counts.entries()]
-    .sort((a, b) => b[1] - a[1] || salesReasonLabel(a[0]).localeCompare(salesReasonLabel(b[0]), "th"))
-    .map(([reason, count]) => `• ${salesReasonLabel(reason)} — ${count} รายการ`);
-
-  return [[SALES_BLOCKED_HEADING, ...lines].join("\n")];
-}
 
 /** One line per blocked identity. Every blocked entry is listed — never a sample. */
 function blockedLine(row: SalesIdentityRow): string {
@@ -336,7 +450,7 @@ export function buildSalesSummaryBlocks(report: SalesReport): string[] {
     `${header}\n\n${overallTotalBlock(report.allMarkets, true)}`,
     ...scopeBlockerBlocks(report),
     ...blockedBlocks(report),
-    ...report.markets.map(marketBlock),
+    ...groupMarketsByLabel(report).map(marketBlock),
     ...productBlocks(report),
   ];
 }
@@ -391,6 +505,16 @@ export function buildSalesAutoBlocks(
   }
   if (hasNoRows(report)) return noRowsBlocks(report, header);
 
+  // WHAT ONE "รายการ" IS, everywhere in this report: one market + product +
+  // unit identity, after canonical product and unit resolution — exactly one
+  // SalesIdentityRow. Not a transaction row, not a message, not a session.
+  //
+  // Because of that the three counts below partition the same set:
+  //   ยืนยันได้     TRUSTED rows
+  //   ยืนยันไม่ได้   VALUE_BLOCKED + QUANTITY_BLOCKED rows
+  // and every row in the second group is printed by name inside its market
+  // block, so "ยืนยันไม่ได้ 10 รายการ" always has ten lines a human can point
+  // at. ถือว่าขายหมด is a SUBSET of ยืนยันได้/ยืนยันไม่ได้, never a third bucket.
   const soldOutCount = soldOutByAbsentReturnCount(report);
   const counts = [
     `✅ ยืนยันได้ ${report.allMarkets.trustedRowCount} รายการ`,
@@ -400,17 +524,22 @@ export function buildSalesAutoBlocks(
     ...(soldOutCount > 0 ? [`✅ ${SALES_SOLD_OUT_NO_RETURN_LABEL} — ${soldOutCount} รายการ`] : []),
   ].join("\n");
 
-  const marketTotals = report.markets.map(
-    (market) => `${marketLabel(market)} — ${valueText(market.total)}`,
+  // One coherent block per market, in place of the old figure-only line plus a
+  // separate reason-count section: the same rows were previously described in
+  // two places and reconciled in neither.
+  const hasScopeBlockers = report.scopeBlockers.length > 0;
+  const marketBlocks = groupMarketsByLabel(report).map((group) =>
+    marketStatusBlock(group, hasScopeBlockers),
   );
 
   return [
     `${header}\n\n${overallTotalBlock(report.allMarkets, false)}\n\n${counts}`,
     ...scopeBlockerBlocks(report),
-    ...(marketTotals.length > 0
-      ? [[SALES_MARKET_SECTION_HEADING, ...marketTotals].join("\n")]
+    // The section heading rides with the first market so LINE chunking can
+    // never place a bare heading at the end of one message.
+    ...(marketBlocks.length > 0
+      ? [`${SALES_MARKET_SECTION_HEADING}\n\n${marketBlocks[0]}`, ...marketBlocks.slice(1)]
       : []),
-    ...blockedReasonBlocks(report),
   ];
 }
 

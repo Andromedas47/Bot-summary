@@ -12,6 +12,7 @@ import {
   fetchAuthoritativeHouseStockReport,
 } from "@/lib/physical-inventory/house-stock-report";
 import { countUnresolvedPendingSessions } from "@/lib/sales/load";
+import { runDailyClosePreflight } from "@/lib/produce/preflight-service";
 import {
   buildMissingReturnNotices,
   buildPendingValidationNotice,
@@ -154,14 +155,42 @@ export async function GET(req: NextRequest) {
   // existing messages keep their push retry-key indices. A lookup failure is
   // logged and the report still goes out — losing the whole morning delivery
   // over a warning line would be the worse outcome.
+  //
+  // The count is the Daily Close Preflight's own ACTIVE-failure count, not a
+  // raw is_processed tally: a document the seller corrected and re-sent
+  // successfully is not a missing entry, and announcing it every morning was
+  // what buried the real ones.
   let unresolvedPendingCount = 0;
+  let preflightStatus: string | null = null;
+  let preflightBlockedRounds = 0;
   try {
-    unresolvedPendingCount = await countUnresolvedPendingSessions(supabase, businessDate);
+    const preflight = await runDailyClosePreflight(supabase, businessDate);
+    unresolvedPendingCount = preflight.summary.activeFailedSessions;
+    preflightStatus = preflight.status;
+    preflightBlockedRounds = preflight.summary.blockedRounds;
+    logger.info("daily stock summary readiness", {
+      business_date: businessDate,
+      report_status: preflight.status,
+      blocked_rounds: preflight.summary.blockedRounds,
+      unresolved_price_products: preflight.summary.unresolvedPriceProducts,
+      active_failed_sessions: preflight.summary.activeFailedSessions,
+      superseded_failures: preflight.summary.supersededFailures,
+      integrity_issues: preflight.summary.integrityIssues,
+    });
   } catch (error) {
-    logger.warn("daily stock summary pending-validation lookup failed", {
+    // Degrade to the narrow count rather than losing the morning delivery.
+    logger.warn("daily stock summary readiness lookup failed", {
       businessDate,
       error: error instanceof Error ? error.message : String(error),
     });
+    try {
+      unresolvedPendingCount = await countUnresolvedPendingSessions(supabase, businessDate);
+    } catch (fallbackError) {
+      logger.warn("daily stock summary pending-validation lookup failed", {
+        businessDate,
+        error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+      });
+    }
   }
   const pendingValidationNotice = buildPendingValidationNotice(unresolvedPendingCount);
   // Per-round detail first, then the day-wide count. The count still covers
@@ -190,6 +219,9 @@ export async function GET(req: NextRequest) {
       anomalyCount,
       anomalyMarketCount,
       hasAnomalies,
+      preflightStatus,
+      preflightBlockedRounds,
+      unresolvedPendingCount,
       latestLookupStatus: latest?.status ?? null,
       latestDataDate: latest?.status === "found" ? latest.hint.date : null,
       latestDataMarketCount: latest?.status === "found" ? latest.hint.marketCount : null,

@@ -11,6 +11,19 @@ import {
   loadRoundReturnStatuses,
   roundsWithIncompleteReturn,
 } from "@/lib/produce/round-return-status";
+import {
+  activeFailureIds,
+  activeIncompleteReturnRoundIds,
+  classifyProduceFailures,
+  type ProduceFailureAttempt,
+  type ProduceFailureClassification,
+} from "@/lib/produce/failure-lifecycle";
+import {
+  loadProduceFailureEvidence,
+  pendingFailureAttempt,
+  rawMessageFailureAttempt,
+  type ProduceFailureEvidence,
+} from "@/lib/produce/failure-lifecycle-source";
 import type { LatestDataLookup } from "@/lib/summary/latest-data-hint";
 import type { Database } from "@/types/database";
 import {
@@ -68,6 +81,14 @@ const BLOCKING_PARSE_ERROR_TYPES = ["parser_crash", "timeout", "validation_error
  * ('pending', 'processing', 'failed_closed') is produce that never landed.
  */
 const RESOLVED_PENDING_STATUSES = new Set(["finalized", "duplicate"]);
+
+/**
+ * Identity columns a failed pending session needs before its lifecycle can be
+ * decided. Structured sessions fill them; plain-text ones leave them null and
+ * are read from the accumulated text instead.
+ */
+const PENDING_FAILURE_SELECT =
+  "id, session_key, session_generation, accumulated_text, created_at, finalization_status, business_date, source_id, staff_label, market_label, declared_transaction_type, accountability_round_id" as const;
 
 /** Safety stop for the undated scope scans — a short read must never pass silently. */
 const SCOPE_SCAN_MAX_PAGES = 50;
@@ -337,16 +358,24 @@ async function loadSessionIssues(
  * A pending session that never produced a produce_session, or a message whose
  * parse crashed, may hold produce lines for ANY market — so neither can be
  * attributed, and both demote every total in the scope.
+ *
+ * ONLY active failures count. A refused document that a later successful
+ * document provably replaced is history, not a missing entry, and reporting it
+ * as one is what buried the real problems under stale noise.
  */
 async function loadScopeBlockers(
   supabase: Supabase,
   businessDate: string,
+  failures: ProduceFailureScan,
 ): Promise<SalesScopeBlocker[]> {
   // No time window here: both scans are attributed by the produce business date
   // their own evidence names, not by when the row happened to be written.
   const blockers: SalesScopeBlocker[] = [];
 
-  const unresolvedPending = await countUnresolvedPendingSessions(supabase, businessDate);
+  const unresolvedPending = failures.attempts.filter(
+    (attempt) =>
+      attempt.origin === "pending_session" && failures.activeIds.has(attempt.attemptId),
+  ).length;
   if (unresolvedPending > 0) {
     blockers.push({ kind: "unresolved_pending_session", count: unresolvedPending });
   }
@@ -454,10 +483,10 @@ function lineEventTimestampMs(payload: unknown, createdAt: string | null | undef
  *    created, and each is attributed by the business date its own text names.
  *    There is no locked rule capping backdating, so P1 imposes no ceiling.
  */
-export async function countUnresolvedPendingSessions(
+async function scanUnresolvedPendingAttempts(
   supabase: Supabase,
   businessDate: string,
-): Promise<number> {
+): Promise<ProduceFailureAttempt[]> {
   // pending_sessions is not part of the generated Database types (it is
   // operational webhook state, never a report source), so this one read uses a
   // loosened client exactly as PendingSessionService does.
@@ -471,14 +500,26 @@ export async function countUnresolvedPendingSessions(
     accumulated_text?: string | null;
     created_at?: string | null;
     finalization_status?: string | null;
+    business_date?: string | null;
+    source_id?: string | null;
+    staff_label?: string | null;
+    market_label?: string | null;
+    declared_transaction_type?: string | null;
+    accountability_round_id?: string | null;
   }>("pending session", (from, to) =>
     looseClient
       .from("pending_sessions")
-      .select("id, session_key, session_generation, accumulated_text, created_at, finalization_status")
+      .select(PENDING_FAILURE_SELECT)
       // Resolved rows are the overwhelming majority and can never be evidence
       // of missing produce, so they are excluded server-side; the client-side
       // check below is the authority either way.
-      .not("finalization_status", "in", `(${[...RESOLVED_PENDING_STATUSES].join(",")})`)
+      // SQL `NULL NOT IN (...)` is UNKNOWN, not true. Include legacy nulls
+      // explicitly or they disappear before the fail-closed client check.
+      .or(
+        `finalization_status.is.null,finalization_status.not.in.(${[
+          ...RESOLVED_PENDING_STATUSES,
+        ].join(",")})`,
+      )
       .order("id", { ascending: true })
       .range(from, to),
   );
@@ -486,23 +527,97 @@ export async function countUnresolvedPendingSessions(
   const unresolved = rows.filter(
     (row) => !RESOLVED_PENDING_STATUSES.has(row.finalization_status ?? "pending"),
   );
-  if (unresolved.length === 0) return 0;
+  if (unresolved.length === 0) return [];
 
   const eventTimes = await pendingIngestEventTimes(looseClient, unresolved);
 
-  return unresolved.filter((row) => {
+  const attempts: ProduceFailureAttempt[] = [];
+  for (const row of unresolved) {
     // The lookup succeeded (it throws otherwise), so a missing entry proves the
     // session predates the ingest ledger — the documented legacy fallback.
-    const eventTimestampMs = eventTimes.get(row.id)
+    const firstEventTimestampMs = eventTimes.first.get(row.id)
       ?? (row.created_at ? Date.parse(row.created_at) : null);
-    const date = produceBusinessDate(
-      row.accumulated_text,
-      Number.isFinite(eventTimestampMs as number) ? (eventTimestampMs as number) : null,
-    );
-    // No date evidence at all: count it. Excluding an unresolved session
+    const attemptedAtMsRaw = eventTimes.last.get(row.id) ?? firstEventTimestampMs;
+    const attemptedAtMs = Number.isFinite(attemptedAtMsRaw as number)
+      ? (attemptedAtMsRaw as number)
+      : null;
+    const dateTimestampMs = Number.isFinite(firstEventTimestampMs as number)
+      ? (firstEventTimestampMs as number)
+      : null;
+    const date = produceBusinessDate(row.accumulated_text, dateTimestampMs);
+    // No date evidence at all: keep it. Excluding an unresolved session
     // because its date is unknown is the one direction that loses evidence.
-    return date === null || date === businessDate;
-  }).length;
+    if (date !== null && date !== businessDate) continue;
+    attempts.push(pendingFailureAttempt(row, attemptedAtMs, date));
+  }
+
+  return attempts;
+}
+
+/**
+ * Unresolved pending produce sessions for a business date, EXCLUDING any that a
+ * later successful document provably replaced.
+ *
+ * Kept as a standalone entry point because the 08:00 stock report needs only
+ * this number; callers that also need the audits use loadProduceFailureScan and
+ * pay for the evidence lookup once.
+ */
+export async function countUnresolvedPendingSessions(
+  supabase: Supabase,
+  businessDate: string,
+): Promise<number> {
+  const [attempts, evidence] = await Promise.all([
+    scanUnresolvedPendingAttempts(supabase, businessDate),
+    loadProduceFailureEvidence(supabase, businessDate),
+  ]);
+  const classifications = classifyProduceFailures(attempts, evidence.outcomes, {
+    cancelledRoundIds: evidence.cancelledRoundIds,
+  });
+  return activeFailureIds(classifications).size;
+}
+
+/**
+ * Every failed/unfinalized produce document attributed to a business date,
+ * together with its lifecycle verdict.
+ *
+ * This is the single place the two report paths and the Daily Close Preflight
+ * agree on what "still unresolved" means. The raw candidate rows travel with it
+ * so the session audit can render the ones that are still active without
+ * scanning raw_messages a second time.
+ */
+export interface ProduceFailureScan {
+  attempts: ProduceFailureAttempt[];
+  classifications: ProduceFailureClassification[];
+  activeIds: Set<string>;
+  evidence: ProduceFailureEvidence;
+  lostMessages: LostProduceCandidate[];
+}
+
+export async function loadProduceFailureScan(
+  supabase: Supabase,
+  businessDate: string,
+): Promise<ProduceFailureScan> {
+  const [pendingAttempts, lostMessages, evidence] = await Promise.all([
+    scanUnresolvedPendingAttempts(supabase, businessDate),
+    scanLostProduceMessages(supabase, businessDate),
+    loadProduceFailureEvidence(supabase, businessDate),
+  ]);
+
+  const attempts = [
+    ...pendingAttempts,
+    ...lostMessages.map((row) => row.attempt),
+  ];
+  const classifications = classifyProduceFailures(attempts, evidence.outcomes, {
+    cancelledRoundIds: evidence.cancelledRoundIds,
+  });
+
+  return {
+    attempts,
+    classifications,
+    activeIds: activeFailureIds(classifications),
+    evidence,
+    lostMessages,
+  };
 }
 
 /**
@@ -525,10 +640,11 @@ async function pendingIngestEventTimes(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   looseClient: SupabaseClient<any>,
   rows: readonly { id: string; session_key?: string | null; session_generation?: string | null }[],
-): Promise<Map<string, number>> {
-  const earliest = new Map<string, number>();
+): Promise<{ first: Map<string, number>; last: Map<string, number> }> {
+  const first = new Map<string, number>();
+  const last = new Map<string, number>();
   const keys = rows.map((row) => row.session_key).filter((key): key is string => Boolean(key));
-  if (keys.length === 0) return earliest;
+  if (keys.length === 0) return { first, last };
 
   const byKeyAndGeneration = new Map<string, string>();
   for (const row of rows) {
@@ -548,12 +664,14 @@ async function pendingIngestEventTimes(
       );
       const timestamp = Number(ingest.line_timestamp_ms);
       if (!rowId || !Number.isFinite(timestamp)) continue;
-      const current = earliest.get(rowId);
-      if (current === undefined || timestamp < current) earliest.set(rowId, timestamp);
+      const earliest = first.get(rowId);
+      const latest = last.get(rowId);
+      if (earliest === undefined || timestamp < earliest) first.set(rowId, timestamp);
+      if (latest === undefined || timestamp > latest) last.set(rowId, timestamp);
     }
   }
 
-  return earliest;
+  return { first, last };
 }
 
 /**
@@ -654,6 +772,7 @@ async function loadSessionAudits(
   businessDate: string,
   rows: readonly ProduceTransactionRow[],
   sourceByRawMessageId: ReadonlyMap<string, string>,
+  failures: ProduceFailureScan,
 ): Promise<SalesSessionAudit[]> {
   const { data, error } = await supabase
     .from("produce_sessions")
@@ -695,7 +814,7 @@ async function loadSessionAudits(
   }
 
   audits.push(...(await auditNullDatedSessions(supabase, businessDate)));
-  audits.push(...(await auditLostProduceMessages(supabase, businessDate)));
+  audits.push(...auditLostProduceMessages(failures));
   return audits;
 }
 
@@ -739,10 +858,17 @@ function isCompleteProduceMessage(text: string): boolean {
  * narrowing is a provable SUPERSET of RE.SESSION_START (see
  * PRODUCE_TEXT_FILTER), which cannot exclude a produce message.
  */
-async function auditLostProduceMessages(
+interface LostProduceCandidate {
+  id: string;
+  sourceId: string | null;
+  rawText: string | null;
+  attempt: ProduceFailureAttempt;
+}
+
+async function scanLostProduceMessages(
   supabase: Supabase,
   businessDate: string,
-): Promise<SalesSessionAudit[]> {
+): Promise<LostProduceCandidate[]> {
   const candidates = await fetchAllScopeRows<{
     id: string;
     raw_text: string | null;
@@ -760,24 +886,57 @@ async function auditLostProduceMessages(
       .range(from, to),
   );
 
-  const lost = candidates.filter((row) => {
-    if (!row.raw_text || !isCompleteProduceMessage(row.raw_text)) return false;
-    const date = produceBusinessDate(
-      row.raw_text,
-      lineEventTimestampMs(row.payload, row.created_at),
-    );
-    return date === null || date === businessDate;
-  });
+  const lost: Array<{
+    row: (typeof candidates)[number];
+    eventTimestampMs: number | null;
+    date: string | null;
+  }> = [];
+  for (const row of candidates) {
+    if (!row.raw_text || !isCompleteProduceMessage(row.raw_text)) continue;
+    const eventTimestampMs = lineEventTimestampMs(row.payload, row.created_at);
+    const date = produceBusinessDate(row.raw_text, eventTimestampMs);
+    if (date !== null && date !== businessDate) continue;
+    lost.push({ row, eventTimestampMs, date });
+  }
   if (lost.length === 0) return [];
 
-  const accounted = await accountedProduceMessages(supabase, lost);
+  const accounted = await accountedProduceMessages(
+    supabase,
+    lost.map((entry) => entry.row),
+  );
 
   return lost
-    .filter((row) => !accounted.has(row.id))
+    .filter((entry) => !accounted.has(entry.row.id))
+    .map((entry) => ({
+      id: entry.row.id,
+      sourceId: entry.row.source_id,
+      rawText: entry.row.raw_text,
+      attempt: rawMessageFailureAttempt(
+        { id: entry.row.id, raw_text: entry.row.raw_text, source_id: entry.row.source_id },
+        entry.eventTimestampMs,
+        entry.date,
+      ),
+    }));
+}
+
+/**
+ * Lost produce messages that are STILL lost.
+ *
+ * A rejected message the seller corrected and re-sent successfully stays in
+ * raw_messages forever (nothing rewrites is_processed retroactively), and it
+ * used to be announced every morning as an unrecorded weighing. It is now
+ * dropped here — and only here, in the reporting layer. The row itself, and
+ * every other piece of audit evidence, is untouched.
+ */
+function auditLostProduceMessages(
+  failures: ProduceFailureScan,
+): SalesSessionAudit[] {
+  return failures.lostMessages
+    .filter((row) => failures.activeIds.has(row.attempt.attemptId))
     .map((row) => ({
       sessionId: `raw:${row.id}`,
-      sourceId: row.source_id,
-      marketName: normalizedMarketLabel(parseWeighSession(row.raw_text ?? "").session_title) || null,
+      sourceId: row.sourceId,
+      marketName: normalizedMarketLabel(parseWeighSession(row.rawText ?? "").session_title) || null,
       reasons: ["produce_message_never_landed"] as const,
     }));
 }
@@ -980,6 +1139,14 @@ export interface LoadSalesReportOptions {
    * the raw picture; nothing is ever deleted or repaired either way.
    */
   includeQaScopes?: boolean;
+  /**
+   * An already-loaded failure scan. The cron routes build one for the Daily
+   * Close Preflight and hand it here so the report and the preflight are
+   * computed from the SAME classification, not two independent scans.
+   */
+  failures?: ProduceFailureScan;
+  /** Already-loaded date rows, used by cron paths to avoid a duplicate page scan. */
+  rows?: ProduceTransactionRow[];
 }
 
 export async function loadSalesReport(
@@ -993,13 +1160,18 @@ export async function loadSalesReport(
     throw new SalesDataError("businessDate must be a real ISO date (YYYY-MM-DD)");
   }
 
-  const rows = await fetchSalesProduceRows(supabase, businessDate);
+  const rows = options.rows ?? (await fetchSalesProduceRows(supabase, businessDate));
   const rawMessageIds = [...new Set(rows.map((row) => row.raw_message_id))];
+
+  // Loaded once and shared: the scope blockers and the session audits must
+  // agree on which failures are still active, or the header count and the
+  // detail list stop reconciling.
+  const failures = options.failures ?? (await loadProduceFailureScan(supabase, businessDate));
 
   const [sourceByRawMessageId, sessionIssues, scopeBlockers, pricing] = await Promise.all([
     mapRawMessageSources(supabase, rawMessageIds),
     loadSessionIssues(supabase, rows),
-    loadScopeBlockers(supabase, businessDate),
+    loadScopeBlockers(supabase, businessDate, failures),
     // Central price resolution — including the BR-01 conflict scan — is reused
     // verbatim from the White Sheet loader so P1 can never price a sale through
     // a second, divergent pricing algorithm.
@@ -1011,6 +1183,7 @@ export async function loadSalesReport(
     businessDate,
     rows,
     sourceByRawMessageId,
+    failures,
   );
 
   // P2E round identity: the canonical market label for display, and the rounds
@@ -1039,6 +1212,9 @@ export async function loadSalesReport(
         .filter((round) => round.marketLabel)
         .map((round) => [round.accountabilityRoundId, round.marketLabel]),
     ),
-    incompleteReturnRounds: roundsWithIncompleteReturn(roundStatuses),
+    incompleteReturnRounds: new Set([
+      ...roundsWithIncompleteReturn(roundStatuses),
+      ...activeIncompleteReturnRoundIds(failures.attempts, failures.classifications),
+    ]),
   });
 }

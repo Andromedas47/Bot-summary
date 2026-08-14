@@ -14,6 +14,7 @@ import {
   buildSalesAutoMessages,
   buildSalesSummaryBlocks,
   buildSalesSummaryMessages,
+  groupMarketsByLabel,
   SALES_AUTO_TITLE,
   SALES_BLOCKED_HEADING,
   SALES_EMPTY_NOTICE,
@@ -22,6 +23,11 @@ import {
   SALES_NO_RETURN_ROW_LABEL,
   SALES_NO_ROWS_BLOCKED_NOTICE,
   SALES_MARKET_SECTION_HEADING,
+  SALES_MARKET_PARTIAL,
+  SALES_MARKET_SCOPE_CAVEAT,
+  SALES_MARKET_EXCLUDED_HEADING,
+  SALES_MARKET_CAUSE_HEADING,
+  SALES_MARKET_VERIFIED,
   SALES_PRODUCT_SECTION_HEADING,
   SALES_PARTIAL_HEADING,
   SALES_PARTIAL_TOTAL_HEADING,
@@ -169,7 +175,7 @@ describe("P1 automatic message — executive summary", () => {
     expect(text).toContain("⚠️ ยืนยันไม่ได้ 1 รายการ");
   });
 
-  test("gives per-market confirmed totals, marking partial ones", () => {
+  test("gives one coherent status block per market", () => {
     const text = buildSalesAutoBlocks(
       report([
         ...TRUSTED_ROWS,
@@ -178,11 +184,52 @@ describe("P1 automatic message — executive summary", () => {
     ).join("\n\n");
 
     expect(text).toContain(SALES_MARKET_SECTION_HEADING);
-    expect(text).toContain("ตลาดกี้ — 840.00 บาท");
-    expect(text).toContain(`ตลาดน้อย — ${SALES_VALUE_UNAVAILABLE}`);
+    // Fully verified: a verdict and a total, nothing else.
+    expect(text).toContain(`🏪 ตลาดกี้\n${SALES_MARKET_VERIFIED}\nยอดขายรวม 840.00 บาท`);
+    // Unpriced: the market says what it could confirm and names what it excluded.
+    expect(text).toContain(`🏪 ตลาดน้อย\n${SALES_MARKET_PARTIAL}`);
+    expect(text).toContain("ยอดที่ยืนยันแล้ว 0.00 บาท");
+    expect(text).toContain("• ชะอม (กำ) — ไม่มีราคากลาง");
+    // The old pair of lines about one market is gone.
+    expect(text).not.toContain(`ตลาดน้อย — ${SALES_VALUE_UNAVAILABLE}`);
   });
 
-  test("groups blocked entries by reason instead of listing every row", () => {
+  test("a day-level blocker adds only a day-level caveat, not a product omission heading", () => {
+    const text = buildSalesAutoBlocks(
+      report(TRUSTED_ROWS, { scopeBlockers: [{ kind: "unresolved_pending_session", count: 1 }] }),
+    ).join("\n\n");
+
+    expect(text).toContain(SALES_MARKET_SCOPE_CAVEAT);
+    expect(text).not.toContain(SALES_MARKET_EXCLUDED_HEADING);
+    expect(text).not.toContain(SALES_MARKET_CAUSE_HEADING);
+  });
+
+  test("trusted and unresolved counts partition every identity exactly once", () => {
+    const built = report([
+      ...TRUSTED_ROWS,
+      row({ marketName: "ตลาดน้อย", sessionId: "s-b", productName: "ชะอม", unit: "กำ", quantity: 5 }),
+      row({ marketName: "ตลาดสาม", sessionId: "s-c", productName: "แตงโม", unit: "ลูก", quantity: null }),
+    ]);
+    const identityRows = built.markets.flatMap((market) => market.rows);
+    const unresolved = identityRows.filter((row) => row.status !== "TRUSTED");
+    const groups = groupMarketsByLabel(built);
+
+    expect(
+      built.allMarkets.trustedRowCount
+      + built.allMarkets.valueBlockedRowCount
+      + built.allMarkets.quantityBlockedRowCount,
+    ).toBe(identityRows.length);
+    expect(unresolved).toHaveLength(
+      built.allMarkets.valueBlockedRowCount + built.allMarkets.quantityBlockedRowCount,
+    );
+    expect(built.blocked.map((row) => row.marketKey + row.productName + row.unit).sort()).toEqual(
+      unresolved.map((row) => row.marketKey + row.productName + row.unit).sort(),
+    );
+    expect(groups.flatMap((group) => group.rows)).toHaveLength(identityRows.length);
+    expect(new Set(groups.map((group) => group.marketLabel)).size).toBe(groups.length);
+  });
+
+  test("every unresolved line is named inside its own market, never only counted", () => {
     const many: SalesSourceRow[] = [];
     for (let index = 0; index < 40; index += 1) {
       many.push(row({ productName: `สินค้า${index}`, unit: "กำ", quantity: 5 }));
@@ -192,12 +239,28 @@ describe("P1 automatic message — executive summary", () => {
     const text = buildSalesAutoBlocks(built).join("\n\n");
 
     expect(built.blocked).toHaveLength(40);
-    expect(text).toContain(SALES_BLOCKED_HEADING);
-    expect(text).toContain("1 รายการอาจพบมากกว่า 1 สาเหตุ");
-    // Each is withdrawal-only and unpriced: quantity-trusted, value-blocked.
-    expect(text).toContain("• ไม่มีราคากลาง — 40 รายการ");
-    // The rows themselves are the manual command's job, not the morning push.
-    expect(text).not.toContain("สินค้า0 (กำ)");
+    // The header count reconciles with lines a human can actually point at.
+    expect(text).toContain("⚠️ ยืนยันไม่ได้ 40 รายการ");
+    expect(text).toContain("• สินค้า0 (กำ) — ไม่มีราคากลาง");
+    expect(text).toContain("• สินค้า39 (กำ) — ไม่มีราคากลาง");
+    // …and the separate reason-count section that double-counted them is gone.
+    expect(text).not.toContain("ไม่มีราคากลาง — 40 รายการ");
+  });
+
+  test("one market with one unresolved price stays a single block", () => {
+    const text = buildSalesAutoBlocks(
+      report(
+        [
+          ...TRUSTED_ROWS,
+          row({ productName: "อะโวคาโด", unit: "โล", quantity: 3 }),
+        ],
+        { priceConflicts: new Set([centralPriceMapKey("อะโวคาโด", "โล")]) },
+      ),
+    ).join("\n\n");
+
+    expect(text.match(/🏪 ตลาดกี้/g)).toHaveLength(1);
+    expect(text).toContain(SALES_MARKET_PARTIAL);
+    expect(text).toContain("• อะโวคาโด (กิโล) — ราคากลางขัดแย้ง รอผู้ดูแลยืนยัน");
   });
 
   test("drops the full product dump", () => {

@@ -229,7 +229,10 @@ function rebalanceParts<T>(initialParts: readonly (readonly T[])[], renderPart: 
  * via its own retry-keyed pushLineMessage call, so LINE_REPLY_MAX_MESSAGES
  * (a webhook-reply-flow concept) does not apply here.
  */
-export function buildDailyGoodReturnValueMessages(report: GoodReturnValueReport, options: { latest?: LatestDataLookup } = {}): string[] {
+export function buildDailyGoodReturnValueMessages(
+  report: GoodReturnValueReport,
+  options: { latest?: LatestDataLookup; hasIncompleteReturnEvidence?: boolean } = {},
+): string[] {
   // An anomaly-only report (zero product rows, but invalid-only good-return
   // evidence still flagged) is neither a sold-out day nor a genuinely empty
   // one — it falls through to the normal render path below, which already
@@ -237,6 +240,13 @@ export function buildDailyGoodReturnValueMessages(report: GoodReturnValueReport,
   if (!report.products.length && !report.anomalies.length) {
     const date = formatThaiDate(report.businessDate);
     if (report.hasActivity) {
+      if (options.hasIncompleteReturnEvidence) {
+        return [[
+          "📦 สรุปของดีชั่งคืนประจำวัน",
+          `ข้อมูลวันที่ ${date}`,
+          "วันนี้ยังไม่มีของดีชั่งคืนจากตลาด\nมีรายการชั่งคืนที่ยังบันทึกไม่สำเร็จ จึงยังสรุปว่าขายหมดไม่ได้",
+        ].join("\n\n")];
+      }
       // Withdrawals happened but nothing was weighed back — that is sold out, not missing data.
       return [["📦 สรุปของดีชั่งคืนประจำวัน", `ข้อมูลวันที่ ${date}`, "วันนี้ไม่มีของดีชั่งคืนจากตลาด\nสินค้าที่ไม่ได้คืนถือว่าขายออกแล้ว"].join("\n\n")];
     }

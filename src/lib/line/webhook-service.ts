@@ -84,6 +84,9 @@ import { parseRemainingFruitCommandFromMessage } from "@/lib/summary/remaining-f
 import { fetchRemainingFruitRows } from "@/lib/summary/remaining-fruit-data";
 import { buildRemainingFruitMessagesFromRows } from "@/lib/summary/remaining-fruit-message";
 import { parseSalesSummaryCommandFromMessage } from "@/lib/sales/command";
+import { parsePreflightCommandFromMessage } from "@/lib/produce/preflight-command";
+import { runDailyClosePreflight } from "@/lib/produce/preflight-service";
+import { buildPreflightMessages } from "@/lib/produce/preflight-message";
 import { loadSalesReport } from "@/lib/sales/load";
 import { buildSalesSummaryMessages } from "@/lib/sales/message";
 import { previousBangkokBusinessDate } from "@/lib/sales/cron";
@@ -849,6 +852,12 @@ export class WebhookService {
     const salesCmd = parseSalesSummaryCommandFromMessage(text);
     if (salesCmd) {
       return this.processSalesSummaryCommand(msgEvent, salesCmd, eventId, event.type, log);
+    }
+
+    // Daily Close Preflight — read-only, same bypass as the two reports above.
+    const preflightCmd = parsePreflightCommandFromMessage(text);
+    if (preflightCmd) {
+      return this.processPreflightCommand(msgEvent, preflightCmd, eventId, event.type, log);
     }
 
     // ── 3.5. Slip session commands (checked before produce session logic) ─────
@@ -2089,6 +2098,35 @@ export class WebhookService {
       log.error("sales summary command failed", { error: errorMessage });
       if (replyToken) {
         await this.replyMessage(replyToken, "ไม่สามารถสร้างสรุปยอดขายได้ กรุณาลองใหม่");
+      }
+      return { eventId, eventType, status: "error", parsed: false, error: errorMessage };
+    }
+  }
+
+  // ── Daily Close Preflight command ─────────────────────────────────────────
+  private async processPreflightCommand(
+    event:     LineMessageEvent,
+    command:   ReturnType<typeof parsePreflightCommandFromMessage> & object,
+    eventId:   string,
+    eventType: string,
+    log:       ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const replyToken = event.replyToken;
+    // Same default as the two scheduled reports: the day that just closed.
+    const businessDate = command.businessDate ?? previousBangkokBusinessDate();
+
+    log.info("daily close preflight command", { businessDate });
+
+    try {
+      const result = await runDailyClosePreflight(this.supabase, businessDate);
+      const messages = buildPreflightMessages(result);
+      if (replyToken) await this.replyMessages(replyToken, messages);
+      return { eventId, eventType, status: "saved", parsed: false };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("daily close preflight command failed", { error: errorMessage });
+      if (replyToken) {
+        await this.replyMessage(replyToken, "ไม่สามารถตรวจความพร้อมได้ กรุณาลองใหม่");
       }
       return { eventId, eventType, status: "error", parsed: false, error: errorMessage };
     }

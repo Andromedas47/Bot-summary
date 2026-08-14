@@ -5,6 +5,7 @@ import { CentralPriceError } from "@/lib/white-sheet/pricing";
 import {
   getServerCentralPrice,
   getServerCentralPriceHistory,
+  loadServerCentralPriceReview,
   setServerCentralPrice,
 } from "@/lib/white-sheet/server";
 
@@ -20,6 +21,31 @@ export async function GET(req: NextRequest) {
   const unit = req.nextUrl.searchParams.get("unit");
   const businessDate = req.nextUrl.searchParams.get("businessDate");
   const includeHistory = req.nextUrl.searchParams.get("history") === "1";
+
+  // Review mode: every product+unit the day's withdrawals priced, with the
+  // candidate prices, how often each appeared and in which markets — the list an
+  // administrator needs before choosing. Read-only; it decides nothing.
+  if (req.nextUrl.searchParams.get("review") === "1") {
+    if (!businessDate) {
+      return NextResponse.json({ error: "businessDate is required" }, { status: 400 });
+    }
+    try {
+      const items = await loadServerCentralPriceReview(businessDate);
+      return NextResponse.json({
+        businessDate,
+        items,
+        unresolved: items.filter((item) => item.status === "unresolved"),
+      });
+    } catch (err) {
+      if (err instanceof CentralPriceError) {
+        return NextResponse.json({ error: err.message }, { status: 400 });
+      }
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : "central price review failed" },
+        { status: 500 },
+      );
+    }
+  }
 
   if (!productName || !unit || !businessDate) {
     return NextResponse.json(

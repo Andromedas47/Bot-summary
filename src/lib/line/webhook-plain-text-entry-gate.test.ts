@@ -135,16 +135,16 @@ class PlainTextGateDatabase {
   };
 }
 
-function pendingRow(accumulatedText: string): Row {
+function pendingRow(accumulatedText: string, userId = "user-1"): Row {
   const now = new Date().toISOString();
   return {
     id: "pending-1",
-    session_key: SESSION_KEY,
+    session_key: userId === "user-1" ? SESSION_KEY : `group:group-1:user:${userId}`,
     source_id: "group-1",
     session_generation: GENERATION,
     accumulated_text: accumulatedText,
     latest_reply_token: null,
-    line_user_id: "user-1",
+    line_user_id: userId,
     created_at: now,
     updated_at: now,
     close_event_timestamp_ms: null,
@@ -174,11 +174,11 @@ function master(rows: Array<Partial<Row>>): Row[] {
   }));
 }
 
-function textEvent(text: string, eventId: string): LineMessageEvent {
+function textEvent(text: string, eventId: string, userId = "user-1"): LineMessageEvent {
   return {
     type: "message",
     timestamp: Date.now(),
-    source: { type: "group", groupId: "group-1", userId: "user-1" },
+    source: { type: "group", groupId: "group-1", userId },
     replyToken: `reply-${eventId}`,
     webhookEventId: eventId,
     message: { id: `msg-${eventId}`, type: "text", text },
@@ -236,6 +236,25 @@ describe("P4A on the plain-text close", () => {
     expect(replies[0]).toContain("⛔");
     expect(replies[0]).toContain("เกิน");
     expect(db.pending.close_event_timestamp_ms).toBeNull();
+  });
+
+  it("cross-user binding reaches P4A and blocks a product absent from the withdrawal", async () => {
+    const actor = "user-B";
+    const db = new PlainTextGateDatabase(
+      pendingRow([RETURN_HEADER, "1.ทุเรียน45บาท", "4โล"].join("\n"), actor),
+      master([{}]),
+    );
+    const before = db.tables.produce_transactions.length;
+    const replies: string[] = [];
+    await build(db, replies).processEvents([
+      textEvent("จบรายการชั่งคืน", "close-cross-user", actor),
+    ], "dest");
+
+    expect(replies[0]).not.toContain("ไม่พบรอบเบิกของรายการนี้");
+    expect(replies[0]).toContain("ทุเรียน");
+    expect(replies[0]).toContain("ไม่พบในรายการเบิกของรอบนี้");
+    expect(db.pending.close_event_timestamp_ms).toBeNull();
+    expect(db.tables.produce_transactions).toHaveLength(before);
   });
 
   it("shows a changed price for review, then accepts the second close as the acknowledgement", async () => {

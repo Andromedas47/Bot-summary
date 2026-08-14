@@ -22,11 +22,14 @@ import {
   loadDailyClosePreflight,
   type DailyClosePreflightResult,
 } from "./daily-close-preflight";
+import type { RoundReturnStatus } from "./round-return-status";
 
 type Supabase = SupabaseClient<Database>;
 
 export interface RunDailyClosePreflightOptions {
   failures?: ProduceFailureScan;
+  rows?: Awaited<ReturnType<typeof fetchSalesProduceRows>>;
+  roundStatuses?: readonly RoundReturnStatus[];
 }
 
 export async function runDailyClosePreflight(
@@ -35,7 +38,9 @@ export async function runDailyClosePreflight(
   options: RunDailyClosePreflightOptions = {},
 ): Promise<DailyClosePreflightResult> {
   const [rows, failures] = await Promise.all([
-    fetchSalesProduceRows(supabase, businessDate),
+    options.rows
+      ? Promise.resolve(options.rows)
+      : fetchSalesProduceRows(supabase, businessDate),
     options.failures
       ? Promise.resolve(options.failures)
       : loadProduceFailureScan(supabase, businessDate),
@@ -55,5 +60,7 @@ export async function runDailyClosePreflight(
     withdrawalRows,
     outcomes: failures.evidence.outcomes,
     cancelledRoundIds: failures.evidence.cancelledRoundIds,
+    roundStatuses: options.roundStatuses,
+    produceRows: rows,
   });
 }

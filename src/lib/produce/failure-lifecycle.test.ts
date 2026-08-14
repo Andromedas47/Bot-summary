@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   activeFailureIds,
+  activeIncompleteReturnRoundIds,
   classifyProduceFailure,
   classifyProduceFailures,
   type FinalizedProduceOutcome,
@@ -101,6 +102,11 @@ describe("produce failure lifecycle", () => {
     expect(result.state).toBe("active_failed");
   });
 
+  test("an unknown session kind is not assumed to be a main replacement", () => {
+    expect(classifyProduceFailure(attempt(), [outcome({ sessionKind: null })]).state)
+      .toBe("active_failed");
+  });
+
   test("two candidate successors fail closed and are flagged ambiguous", () => {
     const result = classifyProduceFailure(attempt(), [
       outcome({ produceSessionId: "s1", finalizedAtMs: 2_000 }),
@@ -132,11 +138,26 @@ describe("produce failure lifecycle", () => {
   describe("round path", () => {
     const bound = attempt({ accountabilityRoundId: "round-1" });
 
-    test("the same round and kind, later, is proof", () => {
+    test("the same round and every other identity dimension, later, is proof", () => {
       const result = classifyProduceFailure(bound, [
-        outcome({ accountabilityRoundId: "round-1", marketLabel: "อะไรก็ได้" }),
+        outcome({ accountabilityRoundId: "round-1" }),
       ]);
       expect(result.state).toBe("superseded");
+    });
+
+    test("a round id never overrides seller, exact market, source, or date", () => {
+      for (const changed of [
+        { staffLabel: "จิ๋ว" },
+        { marketLabel: "ราชพฤกษ์" },
+        { sourceId: "group:C2" },
+        { businessDate: "2026-08-12" },
+      ]) {
+        expect(
+          classifyProduceFailure(bound, [
+            outcome({ accountabilityRoundId: "round-1", ...changed }),
+          ]).state,
+        ).toBe("active_failed");
+      }
     });
 
     test("another round never supersedes, however similar the labels", () => {
@@ -152,6 +173,13 @@ describe("produce failure lifecycle", () => {
       expect(result.state).toBe("active_failed");
     });
 
+    test("an unbound attempt is never rescued by a bound outcome", () => {
+      const result = classifyProduceFailure(attempt(), [
+        outcome({ accountabilityRoundId: "round-1" }),
+      ]);
+      expect(result.state).toBe("active_failed");
+    });
+
     test("a retired round is abandoned, not an active failure", () => {
       const result = classifyProduceFailure(bound, [], {
         cancelledRoundIds: new Set(["round-1"]),
@@ -159,6 +187,21 @@ describe("produce failure lifecycle", () => {
       expect(result.state).toBe("abandoned");
       expect(result.ambiguousSuccessor).toBe(false);
     });
+  });
+
+  test("only active bound return attempts suppress sold-out inference", () => {
+    const attempts = [
+      attempt({ attemptId: "return-active", accountabilityRoundId: "round-1" }),
+      attempt({ attemptId: "withdraw-active", accountabilityRoundId: "round-2", transactionKind: "เบิก" }),
+      attempt({ attemptId: "return-fixed", accountabilityRoundId: "round-3" }),
+    ];
+    const classifications = [
+      classifyProduceFailure(attempts[0], []),
+      classifyProduceFailure(attempts[1], []),
+      classifyProduceFailure(attempts[2], [outcome({ accountabilityRoundId: "round-3" })]),
+    ];
+
+    expect(activeIncompleteReturnRoundIds(attempts, classifications)).toEqual(new Set(["round-1"]));
   });
 
   test("label comparison is normalized, not fuzzy", () => {

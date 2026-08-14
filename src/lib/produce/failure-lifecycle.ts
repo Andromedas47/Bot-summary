@@ -109,39 +109,27 @@ function identityText(value: string | null | undefined): string | null {
 /**
  * True when `outcome` is a provable replacement for `attempt`.
  *
- * Two paths, and only two:
+ * EVERY identity dimension must match explicitly: source, business date,
+ * market, seller, transaction kind and accountability round. A missing value is
+ * never a wildcard. In particular, a bound document cannot be replaced by an
+ * unbound one (or vice versa), and a round id does not excuse a mismatching
+ * seller/market/source/date.
  *
- * ROUND PATH — the attempt names an accountability round. The round IS the
- * identity: seller, market and business date are all fixed by it, and a
- * withdrawal and its return provably share it. Same round + same transaction
- * kind + strictly later is proof.
- *
- * IDENTITY PATH — no round (a legacy or never-bound document). Then EVERY
- * dimension must match explicitly: source, business date, market, seller and
- * transaction kind, and any one of them being unknown disqualifies the match.
- * This is what stops a different market's or a different seller's success from
- * excusing this failure.
- *
- * Both paths require strict ordering: a document that landed BEFORE the failed
+ * Replacement also requires strict ordering: a document that landed BEFORE the failed
  * attempt cannot be its correction.
  */
 function isSuccessorOf(
   attempt: ProduceFailureAttempt,
   outcome: FinalizedProduceOutcome,
 ): boolean {
-  // Additive batches are never replacements — see FinalizedProduceOutcome.
-  if (outcome.sessionKind !== null && outcome.sessionKind !== "main") return false;
+  // Only a proven main batch is a replacement. Null is unknown, not legacy-main.
+  if (outcome.sessionKind !== "main") return false;
 
   const kind = attempt.transactionKind;
   if (!kind || outcome.transactionKind !== kind) return false;
 
   if (attempt.attemptedAtMs === null || outcome.finalizedAtMs === null) return false;
   if (outcome.finalizedAtMs <= attempt.attemptedAtMs) return false;
-
-  const attemptRound = identityText(attempt.accountabilityRoundId);
-  if (attemptRound) {
-    return identityText(outcome.accountabilityRoundId) === attemptRound;
-  }
 
   const source = identityText(attempt.sourceId);
   const date = identityText(attempt.businessDate);
@@ -154,6 +142,8 @@ function isSuccessorOf(
     && identityText(outcome.businessDate) === date
     && identityText(outcome.marketLabel) === market
     && identityText(outcome.staffLabel) === staff
+    && identityText(outcome.accountabilityRoundId)
+      === identityText(attempt.accountabilityRoundId)
   );
 }
 
@@ -207,5 +197,24 @@ export function activeFailureIds(
 ): Set<string> {
   return new Set(
     classifications.filter((row) => row.state === "active_failed").map((row) => row.attemptId),
+  );
+}
+
+/** Bound rounds with a still-active return/damage attempt. */
+export function activeIncompleteReturnRoundIds(
+  attempts: readonly ProduceFailureAttempt[],
+  classifications: readonly ProduceFailureClassification[],
+): Set<string> {
+  const active = activeFailureIds(classifications);
+  return new Set(
+    attempts
+      .filter(
+        (attempt) =>
+          active.has(attempt.attemptId)
+          && attempt.transactionKind !== null
+          && attempt.transactionKind !== "เบิก"
+          && identityText(attempt.accountabilityRoundId) !== null,
+      )
+      .map((attempt) => identityText(attempt.accountabilityRoundId) as string),
   );
 }

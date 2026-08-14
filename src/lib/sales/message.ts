@@ -331,6 +331,15 @@ function marketStatusBlock(group: SalesMarketGroup, hasScopeBlockers: boolean): 
     return lines.join("\n");
   }
 
+  if (verdict === "verified") {
+    lines.push(
+      SALES_MARKET_PARTIAL,
+      `${SALES_MARKET_CONFIRMED_PREFIX} ${satangToBahtText(group.total.expectedSalesSatang)} บาท`,
+      SALES_MARKET_SCOPE_CAVEAT,
+    );
+    return lines.join("\n");
+  }
+
   lines.push(verdict === "blocked" ? SALES_MARKET_BLOCKED : SALES_MARKET_PARTIAL);
   lines.push(
     `${SALES_MARKET_CONFIRMED_PREFIX} ${satangToBahtText(group.total.expectedSalesSatang)} บาท`,

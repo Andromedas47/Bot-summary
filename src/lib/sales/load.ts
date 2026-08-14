@@ -13,6 +13,7 @@ import {
 } from "@/lib/produce/round-return-status";
 import {
   activeFailureIds,
+  activeIncompleteReturnRoundIds,
   classifyProduceFailures,
   type ProduceFailureAttempt,
   type ProduceFailureClassification,
@@ -512,7 +513,13 @@ async function scanUnresolvedPendingAttempts(
       // Resolved rows are the overwhelming majority and can never be evidence
       // of missing produce, so they are excluded server-side; the client-side
       // check below is the authority either way.
-      .not("finalization_status", "in", `(${[...RESOLVED_PENDING_STATUSES].join(",")})`)
+      // SQL `NULL NOT IN (...)` is UNKNOWN, not true. Include legacy nulls
+      // explicitly or they disappear before the fail-closed client check.
+      .or(
+        `finalization_status.is.null,finalization_status.not.in.(${[
+          ...RESOLVED_PENDING_STATUSES,
+        ].join(",")})`,
+      )
       .order("id", { ascending: true })
       .range(from, to),
   );
@@ -528,12 +535,16 @@ async function scanUnresolvedPendingAttempts(
   for (const row of unresolved) {
     // The lookup succeeded (it throws otherwise), so a missing entry proves the
     // session predates the ingest ledger — the documented legacy fallback.
-    const eventTimestampMs = eventTimes.get(row.id)
+    const firstEventTimestampMs = eventTimes.first.get(row.id)
       ?? (row.created_at ? Date.parse(row.created_at) : null);
-    const attemptedAtMs = Number.isFinite(eventTimestampMs as number)
-      ? (eventTimestampMs as number)
+    const attemptedAtMsRaw = eventTimes.last.get(row.id) ?? firstEventTimestampMs;
+    const attemptedAtMs = Number.isFinite(attemptedAtMsRaw as number)
+      ? (attemptedAtMsRaw as number)
       : null;
-    const date = produceBusinessDate(row.accumulated_text, attemptedAtMs);
+    const dateTimestampMs = Number.isFinite(firstEventTimestampMs as number)
+      ? (firstEventTimestampMs as number)
+      : null;
+    const date = produceBusinessDate(row.accumulated_text, dateTimestampMs);
     // No date evidence at all: keep it. Excluding an unresolved session
     // because its date is unknown is the one direction that loses evidence.
     if (date !== null && date !== businessDate) continue;
@@ -629,10 +640,11 @@ async function pendingIngestEventTimes(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   looseClient: SupabaseClient<any>,
   rows: readonly { id: string; session_key?: string | null; session_generation?: string | null }[],
-): Promise<Map<string, number>> {
-  const earliest = new Map<string, number>();
+): Promise<{ first: Map<string, number>; last: Map<string, number> }> {
+  const first = new Map<string, number>();
+  const last = new Map<string, number>();
   const keys = rows.map((row) => row.session_key).filter((key): key is string => Boolean(key));
-  if (keys.length === 0) return earliest;
+  if (keys.length === 0) return { first, last };
 
   const byKeyAndGeneration = new Map<string, string>();
   for (const row of rows) {
@@ -652,12 +664,14 @@ async function pendingIngestEventTimes(
       );
       const timestamp = Number(ingest.line_timestamp_ms);
       if (!rowId || !Number.isFinite(timestamp)) continue;
-      const current = earliest.get(rowId);
-      if (current === undefined || timestamp < current) earliest.set(rowId, timestamp);
+      const earliest = first.get(rowId);
+      const latest = last.get(rowId);
+      if (earliest === undefined || timestamp < earliest) first.set(rowId, timestamp);
+      if (latest === undefined || timestamp > latest) last.set(rowId, timestamp);
     }
   }
 
-  return earliest;
+  return { first, last };
 }
 
 /**
@@ -1131,6 +1145,8 @@ export interface LoadSalesReportOptions {
    * computed from the SAME classification, not two independent scans.
    */
   failures?: ProduceFailureScan;
+  /** Already-loaded date rows, used by cron paths to avoid a duplicate page scan. */
+  rows?: ProduceTransactionRow[];
 }
 
 export async function loadSalesReport(
@@ -1144,7 +1160,7 @@ export async function loadSalesReport(
     throw new SalesDataError("businessDate must be a real ISO date (YYYY-MM-DD)");
   }
 
-  const rows = await fetchSalesProduceRows(supabase, businessDate);
+  const rows = options.rows ?? (await fetchSalesProduceRows(supabase, businessDate));
   const rawMessageIds = [...new Set(rows.map((row) => row.raw_message_id))];
 
   // Loaded once and shared: the scope blockers and the session audits must
@@ -1196,6 +1212,9 @@ export async function loadSalesReport(
         .filter((round) => round.marketLabel)
         .map((round) => [round.accountabilityRoundId, round.marketLabel]),
     ),
-    incompleteReturnRounds: roundsWithIncompleteReturn(roundStatuses),
+    incompleteReturnRounds: new Set([
+      ...roundsWithIncompleteReturn(roundStatuses),
+      ...activeIncompleteReturnRoundIds(failures.attempts, failures.classifications),
+    ]),
   });
 }

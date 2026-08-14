@@ -617,6 +617,9 @@ export interface LoadDailyClosePreflightOptions {
   /** Reuses an already-loaded classification set when the caller has one. */
   outcomes?: readonly FinalizedProduceOutcome[];
   cancelledRoundIds?: ReadonlySet<string>;
+  /** Already-loaded facts from a report path; avoids repeating paged reads. */
+  roundStatuses?: readonly RoundReturnStatus[];
+  produceRows?: readonly DateProduceRow[];
 }
 
 export async function loadDailyClosePreflight(
@@ -630,8 +633,12 @@ export async function loadDailyClosePreflight(
       : await loadProduceFailureEvidence(supabase, businessDate);
 
   const [roundStatuses, produceRows, storedPrices] = await Promise.all([
-    loadRoundReturnStatuses(supabase, businessDate),
-    fetchDateProduceRows(supabase, businessDate),
+    options.roundStatuses
+      ? Promise.resolve(options.roundStatuses)
+      : loadRoundReturnStatuses(supabase, businessDate),
+    options.produceRows
+      ? Promise.resolve(options.produceRows)
+      : fetchDateProduceRows(supabase, businessDate),
     loadCentralPriceDetailsForDate(supabase, businessDate),
   ]);
   const openRounds = await loadOpenRoundRecords(supabase, businessDate, produceRows);

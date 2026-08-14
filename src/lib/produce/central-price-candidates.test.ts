@@ -67,6 +67,25 @@ describe("central price review", () => {
     expect(rows.map((row) => row.pricePerUnit)).toEqual([50, 70]);
   });
 
+  test("seed 50, conflict 70, approve 50, then override 70 follows the state machine", () => {
+    const rows50 = [withdrawal({ pricePerUnit: 50 })];
+    const rows50And70 = [...rows50, withdrawal({ pricePerUnit: 70 })];
+
+    expect(buildCentralPriceReview(rows50, DATE, new Map([
+      ["อะโวคาโด โล", seeded(5_000)],
+    ]))[0]).toMatchObject({ status: "seeded", approvedPriceSatang: 5_000 });
+    expect(buildCentralPriceReview(rows50And70, DATE, new Map([
+      ["อะโวคาโด โล", seeded(5_000)],
+    ]))[0]).toMatchObject({ status: "unresolved", approvedPriceSatang: 5_000 });
+    expect(buildCentralPriceReview(rows50And70, DATE, new Map([
+      ["อะโวคาโด โล", approved(5_000)],
+    ]))[0]).toMatchObject({ status: "approved", approvedPriceSatang: 5_000 });
+    expect(buildCentralPriceReview(rows50And70, DATE, new Map([
+      ["อะโวคาโด โล", approved(7_000)],
+    ]))[0]).toMatchObject({ status: "approved", approvedPriceSatang: 7_000 });
+    expect(rows50And70.map((row) => row.pricePerUnit)).toEqual([50, 70]);
+  });
+
   test("no stored price at all is missing, not approved", () => {
     const review = buildCentralPriceReview([withdrawal()], DATE, new Map());
     expect(review[0].status).toBe("missing");

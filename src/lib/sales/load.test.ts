@@ -67,7 +67,10 @@ function fakeSupabase(fixture: Fixture): SupabaseClient<Database> {
       };
       node.in = self;
       node.not = self;
-      node.or = self;
+      node.or = (filter: string) => {
+        filterLog.push(`${table}.or:${filter}`);
+        return node;
+      };
       node.gte = self;
       node.is = (column: string, value: unknown) => {
         filterLog.push(`${table}.is:${column}=${String(value)}`);
@@ -442,6 +445,18 @@ describe("P1 pending-session lifecycle", () => {
     expect(report.allMarkets.quantityAuthoritative).toBe(false);
   });
 
+  test("a null legacy finalization status survives the SQL prefilter", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(baseFixture({ pending: [{ ...FAILED_CLOSED, finalization_status: null }] })),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([{ kind: "unresolved_pending_session", count: 1 }]);
+    expect(filterLog).toContain(
+      "pending_sessions.or:finalization_status.is.null,finalization_status.not.in.(finalized,duplicate)",
+    );
+  });
+
   test("a failed_closed session the operator corrected and re-sent stops blocking", async () => {
     const report = await loadSalesReport(
       fakeSupabase(
@@ -455,6 +470,11 @@ describe("P1 pending-session lifecycle", () => {
                 "18:53 เสือ 1.หมอนทอง119บาท",
                 "38โล",
               ].join("\n"),
+              business_date: DATE,
+              source_id: SOURCE_A,
+              staff_label: "เสือ",
+              market_label: "ตลาดกี้",
+              declared_transaction_type: "เบิก",
               accountability_round_id: "round-1",
             },
           ],
@@ -483,6 +503,95 @@ describe("P1 pending-session lifecycle", () => {
     );
 
     expect(report.scopeBlockers).toEqual([]);
+  });
+
+  test("a success after the header but before the failed document ended is not later", async () => {
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          pending: [{
+            ...FAILED_CLOSED,
+            session_key: "group:g1:user:u1",
+            session_generation: "gen-1",
+            accumulated_text: [
+              "18:53 เสือ ตลาดกี้ เบิก 25/07/2569",
+              "18:53 เสือ 1.หมอนทอง119บาท",
+              "38โล",
+            ].join("\n"),
+            business_date: DATE,
+            source_id: SOURCE_A,
+            staff_label: "เสือ",
+            market_label: "ตลาดกี้",
+            declared_transaction_type: "เบิก",
+            accountability_round_id: "round-1",
+          }],
+          pendingIngest: [
+            { session_key: "group:g1:user:u1", session_generation: "gen-1", line_timestamp_ms: 1_000 },
+            { session_key: "group:g1:user:u1", session_generation: "gen-1", line_timestamp_ms: 3_000 },
+          ],
+          produce: [produceRow({ id: "ok-1", session_id: "session-ok", raw_message_id: "raw-ok" })],
+          sessions: [{
+            id: "session-ok",
+            total_items: 1,
+            parser_errors: null,
+            staff_name: "เสือ",
+            session_title: "ตลาดกี้",
+            session_date: DATE,
+            session_kind: "main",
+            accountability_round_id: "round-1",
+            raw_message_id: "raw-ok",
+            finalized_at: new Date(2_000).toISOString(),
+            voided_at: null,
+          }],
+          rawMessages: [{ id: "raw-ok", source_id: SOURCE_A }],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.scopeBlockers).toEqual([{ kind: "unresolved_pending_session", count: 1 }]);
+  });
+
+  test("an active failed return after an earlier persisted zero return suppresses sold-out", async () => {
+    const roundId = "round-active-return";
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          produce: [
+            produceRow({ id: "w", quantity: 10, transaction_type: "เบิก", accountability_round_id: roundId }),
+            produceRow({ id: "r", quantity: 0, transaction_type: "คืน", accountability_round_id: roundId }),
+          ],
+          sessions: [{
+            id: "session-1",
+            total_items: 2,
+            parser_errors: null,
+            staff_name: "เสือ",
+            session_title: "ตลาดกี้",
+            session_date: DATE,
+            session_kind: "main",
+            accountability_round_id: roundId,
+            raw_message_id: "raw-1",
+            finalized_at: "2026-07-25T03:00:00.000Z",
+            voided_at: null,
+          }],
+          pending: [{
+            ...FAILED_CLOSED,
+            id: "failed-return",
+            accumulated_text: "18:53 เสือ ตลาดกี้ คืน 25/07/2569\n1.หมอนทอง\n0 โล",
+            created_at: "2026-07-25T04:00:00.000Z",
+            source_id: SOURCE_A,
+            staff_label: "เสือ",
+            market_label: "ตลาดกี้",
+            business_date: DATE,
+            declared_transaction_type: "คืน",
+            accountability_round_id: roundId,
+          }],
+        }),
+      ),
+      DATE,
+    );
+
+    expect(report.markets[0].rows[0].returnEvidenceIncomplete).toBe(true);
   });
 
   test("a failed_closed session whose round was retired is not an active problem", async () => {

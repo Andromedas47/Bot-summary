@@ -21,7 +21,8 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { RE } from "@/lib/parsers/weigh-session/regex";
-import { transactionBucket } from "@/lib/summary/transactions";
+import { baseTransactionType, transactionBucket } from "@/lib/summary/transactions";
+import { transactionKindFromText } from "./failure-lifecycle-source";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyClient = SupabaseClient<any>;
@@ -129,8 +130,20 @@ interface RoundRow {
 interface PendingRow {
   accountability_round_id: string | null;
   finalization_status: string | null;
+  declared_transaction_type: string | null;
   accumulated_text: string | null;
   close_requested_at: string | null;
+}
+
+/** Unknown stays fail-closed; a proven withdrawal cannot be return evidence. */
+export function pendingRowCanBeReturn(
+  declaredTransactionType: string | null,
+  accumulatedText: string | null,
+): boolean {
+  const kind = (declaredTransactionType
+    ? baseTransactionType(declaredTransactionType)
+    : null) ?? transactionKindFromText(accumulatedText);
+  return kind !== "เบิก";
 }
 
 const CHUNK = 200;
@@ -204,7 +217,7 @@ export async function loadRoundReturnStatuses(
     const { data, error } = await supabase
       .from("pending_sessions")
       .select(
-        "accountability_round_id, finalization_status, accumulated_text, close_requested_at",
+        "accountability_round_id, finalization_status, declared_transaction_type, accumulated_text, close_requested_at",
       )
       .in("accountability_round_id", chunk);
     if (error) throw new Error(`pending session round lookup failed: ${error.message}`);
@@ -213,6 +226,7 @@ export async function loadRoundReturnStatuses(
       // Client-side authority, exactly as the Sales loader does: a status the
       // server filter did not anticipate must count as unresolved, not vanish.
       if (RESOLVED_PENDING_STATUSES.has(row.finalization_status ?? "pending")) continue;
+      if (!pendingRowCanBeReturn(row.declared_transaction_type, row.accumulated_text)) continue;
       evidence.push({
         accountabilityRoundId: row.accountability_round_id,
         finalizationStatus: row.finalization_status,

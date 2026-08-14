@@ -163,11 +163,15 @@ export async function GET(req: NextRequest) {
   let unresolvedPendingCount = 0;
   let preflightStatus: string | null = null;
   let preflightBlockedRounds = 0;
+  let hasIncompleteReturnEvidence = roundStatuses.some(
+    (round) => round.state === "blocked" || round.state === "pending",
+  );
   try {
-    const preflight = await runDailyClosePreflight(supabase, businessDate);
+    const preflight = await runDailyClosePreflight(supabase, businessDate, { roundStatuses });
     unresolvedPendingCount = preflight.summary.activeFailedSessions;
     preflightStatus = preflight.status;
     preflightBlockedRounds = preflight.summary.blockedRounds;
+    hasIncompleteReturnEvidence ||= preflight.summary.blockedRounds > 0;
     logger.info("daily stock summary readiness", {
       business_date: businessDate,
       report_status: preflight.status,
@@ -198,7 +202,7 @@ export async function GET(req: NextRequest) {
   // died before the market was known); the detail covers the ones it can.
   const missingReturnNotices = buildMissingReturnNotices(roundStatuses);
   const goodReturnMessages = [
-    ...buildDailyGoodReturnValueMessages(report, { latest }),
+    ...buildDailyGoodReturnValueMessages(report, { latest, hasIncompleteReturnEvidence }),
     ...missingReturnNotices,
     ...(pendingValidationNotice ? [pendingValidationNotice] : []),
   ];

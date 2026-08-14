@@ -6,12 +6,44 @@ import type { RoundReturnStatus } from "./round-return-status";
 import {
   buildDailyClosePreflight,
   groupUnboundProduce,
+  loadDailyClosePreflight,
   roundPriceKeysFromRows,
   type DailyClosePreflightInput,
   type PreflightRoundRecord,
 } from "./daily-close-preflight";
 
 const DATE = "2026-08-13";
+
+test("preloaded round statuses and produce rows skip duplicate paged reads", async () => {
+  const queried: string[] = [];
+  const supabase = {
+    from(table: string) {
+      queried.push(table);
+      if (table === "produce_transactions" || table === "pending_sessions") {
+        throw new Error(`duplicate read: ${table}`);
+      }
+      const result = { data: [], error: null };
+      const node: Record<string, unknown> = {};
+      const self = () => node;
+      node.select = self;
+      node.eq = self;
+      node.then = (resolve: (value: unknown) => unknown) => Promise.resolve(result).then(resolve);
+      return node;
+    },
+  };
+
+  const result = await loadDailyClosePreflight(supabase as never, DATE, {
+    failureAttempts: [],
+    withdrawalRows: [],
+    outcomes: [],
+    cancelledRoundIds: new Set(),
+    roundStatuses: [],
+    produceRows: [],
+  });
+
+  expect(result.status).toBe("ready");
+  expect(queried).toEqual(["central_selling_prices", "accountability_rounds"]);
+});
 
 function round(overrides: Partial<RoundReturnStatus> = {}): RoundReturnStatus {
   return {

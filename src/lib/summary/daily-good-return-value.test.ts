@@ -383,6 +383,18 @@ describe("daily good-return value", () => {
     expect(text).not.toContain("ไม่ครบ");
   });
 
+  test("a blocked return prevents the withdrawals-only report from claiming sold out", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-01", [
+      base({ transaction_type: "เบิก", quantity: 2, price_per_unit: 10 }),
+    ]);
+    const text = buildDailyGoodReturnValueMessages(report, {
+      hasIncompleteReturnEvidence: true,
+    }).join("\n");
+
+    expect(text).toContain("จึงยังสรุปว่าขายหมดไม่ได้");
+    expect(text).not.toContain("สินค้าที่ไม่ได้คืนถือว่าขายออกแล้ว");
+  });
+
   test("26. completely empty date: genuine no-data wording with latest-data hint", () => {
     const report = buildDailyGoodReturnValueReport("2026-08-01", []);
     expect(report.hasActivity).toBe(false);

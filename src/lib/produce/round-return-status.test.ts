@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test";
 import {
   classifyRoundReturns,
   hasCloserLine,
+  pendingRowCanBeReturn,
   roundsWithIncompleteReturn,
   type RoundReturnEvidence,
   type RoundWithdrawal,
@@ -41,6 +42,12 @@ describe("closer detection", () => {
     expect(hasCloserLine("ขวัญ-ราชพฤกษ์ ชั่งคืน\n1.แก้วมังกร35บาท")).toBe(false);
     expect(hasCloserLine(null)).toBe(false);
   });
+});
+
+test("a pending withdrawal in the round is not mistaken for missing return evidence", () => {
+  expect(pendingRowCanBeReturn("เบิก", "เสือ ตลาดกี้ เบิก\n1.หมอนทอง\n10 โล")).toBe(false);
+  expect(pendingRowCanBeReturn(null, "เสือ ตลาดกี้ คืน\n1.หมอนทอง\n2 โล")).toBe(true);
+  expect(pendingRowCanBeReturn(null, null)).toBe(true);
 });
 
 describe("round return classification", () => {

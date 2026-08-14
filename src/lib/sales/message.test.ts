@@ -14,6 +14,7 @@ import {
   buildSalesAutoMessages,
   buildSalesSummaryBlocks,
   buildSalesSummaryMessages,
+  groupMarketsByLabel,
   SALES_AUTO_TITLE,
   SALES_BLOCKED_HEADING,
   SALES_EMPTY_NOTICE,
@@ -23,6 +24,9 @@ import {
   SALES_NO_ROWS_BLOCKED_NOTICE,
   SALES_MARKET_SECTION_HEADING,
   SALES_MARKET_PARTIAL,
+  SALES_MARKET_SCOPE_CAVEAT,
+  SALES_MARKET_EXCLUDED_HEADING,
+  SALES_MARKET_CAUSE_HEADING,
   SALES_MARKET_VERIFIED,
   SALES_PRODUCT_SECTION_HEADING,
   SALES_PARTIAL_HEADING,
@@ -188,6 +192,41 @@ describe("P1 automatic message — executive summary", () => {
     expect(text).toContain("• ชะอม (กำ) — ไม่มีราคากลาง");
     // The old pair of lines about one market is gone.
     expect(text).not.toContain(`ตลาดน้อย — ${SALES_VALUE_UNAVAILABLE}`);
+  });
+
+  test("a day-level blocker adds only a day-level caveat, not a product omission heading", () => {
+    const text = buildSalesAutoBlocks(
+      report(TRUSTED_ROWS, { scopeBlockers: [{ kind: "unresolved_pending_session", count: 1 }] }),
+    ).join("\n\n");
+
+    expect(text).toContain(SALES_MARKET_SCOPE_CAVEAT);
+    expect(text).not.toContain(SALES_MARKET_EXCLUDED_HEADING);
+    expect(text).not.toContain(SALES_MARKET_CAUSE_HEADING);
+  });
+
+  test("trusted and unresolved counts partition every identity exactly once", () => {
+    const built = report([
+      ...TRUSTED_ROWS,
+      row({ marketName: "ตลาดน้อย", sessionId: "s-b", productName: "ชะอม", unit: "กำ", quantity: 5 }),
+      row({ marketName: "ตลาดสาม", sessionId: "s-c", productName: "แตงโม", unit: "ลูก", quantity: null }),
+    ]);
+    const identityRows = built.markets.flatMap((market) => market.rows);
+    const unresolved = identityRows.filter((row) => row.status !== "TRUSTED");
+    const groups = groupMarketsByLabel(built);
+
+    expect(
+      built.allMarkets.trustedRowCount
+      + built.allMarkets.valueBlockedRowCount
+      + built.allMarkets.quantityBlockedRowCount,
+    ).toBe(identityRows.length);
+    expect(unresolved).toHaveLength(
+      built.allMarkets.valueBlockedRowCount + built.allMarkets.quantityBlockedRowCount,
+    );
+    expect(built.blocked.map((row) => row.marketKey + row.productName + row.unit).sort()).toEqual(
+      unresolved.map((row) => row.marketKey + row.productName + row.unit).sort(),
+    );
+    expect(groups.flatMap((group) => group.rows)).toHaveLength(identityRows.length);
+    expect(new Set(groups.map((group) => group.marketLabel)).size).toBe(groups.length);
   });
 
   test("every unresolved line is named inside its own market, never only counted", () => {

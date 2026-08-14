@@ -136,6 +136,7 @@ interface SessionRow {
   session_kind: string | null;
   accountability_round_id: string | null;
   raw_message_id: string | null;
+  voided_at: string | null;
   finalized_at: string | null;
   created_at: string | null;
 }
@@ -165,7 +166,7 @@ export async function loadFinalizedProduceOutcomes(
   const { data, error } = await supabase
     .from("produce_sessions")
     .select(
-      "id, staff_name, session_title, session_date, session_kind, accountability_round_id, raw_message_id, finalized_at, created_at",
+      "id, staff_name, session_title, session_date, session_kind, accountability_round_id, raw_message_id, voided_at, finalized_at, created_at",
     )
     .eq("session_date", businessDate)
     .is("voided_at", null);
@@ -189,6 +190,7 @@ export async function loadFinalizedProduceOutcomes(
     transactionKind: kinds.get(session.id) ?? null,
     accountabilityRoundId: session.accountability_round_id,
     sessionKind: session.session_kind,
+    voidedAtMs: timestampMs(session.voided_at),
     finalizedAtMs: timestampMs(session.finalized_at) ?? timestampMs(session.created_at),
   }));
 }

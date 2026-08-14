@@ -173,11 +173,11 @@ describe("produce failure lifecycle", () => {
       expect(result.state).toBe("active_failed");
     });
 
-    test("an unbound attempt is never rescued by a bound outcome", () => {
+    test("an unbound attempt is superseded by one bound outcome with exact business identity", () => {
       const result = classifyProduceFailure(attempt(), [
         outcome({ accountabilityRoundId: "round-1" }),
       ]);
-      expect(result.state).toBe("active_failed");
+      expect(result.state).toBe("superseded");
     });
 
     test("a retired round is abandoned, not an active failure", () => {
@@ -186,6 +186,23 @@ describe("produce failure lifecycle", () => {
       });
       expect(result.state).toBe("abandoned");
       expect(result.ambiguousSuccessor).toBe(false);
+    });
+  });
+
+  test("a voided later success is not a successor", () => {
+    const result = classifyProduceFailure(attempt(), [outcome({ voidedAtMs: 2_100 })]);
+    expect(result.state).toBe("active_failed");
+  });
+
+  test("a voided success is ignored in favor of its sole active replacement", () => {
+    const result = classifyProduceFailure(attempt(), [
+      outcome({ produceSessionId: "voided", finalizedAtMs: 2_000, voidedAtMs: 2_500 }),
+      outcome({ produceSessionId: "replacement", finalizedAtMs: 3_000 }),
+    ]);
+    expect(result).toMatchObject({
+      state: "superseded",
+      supersededByProduceSessionId: "replacement",
+      ambiguousSuccessor: false,
     });
   });
 

@@ -1244,7 +1244,9 @@ describe("P1 durable evidence for a rejected produce message", () => {
           session_title: "ตลาดกี้",
           session_date: DATE,
           session_kind: "main",
-          accountability_round_id: null,
+          // Production correction shape: the raw failure is unbound, while the
+          // successful retry is attached to the canonical accountability round.
+          accountability_round_id: "round-ok",
           raw_message_id: "raw-ok",
           finalized_at: "2026-07-25T07:00:00.000Z",
           voided_at: null,
@@ -1252,8 +1254,8 @@ describe("P1 durable evidence for a rejected produce message", () => {
         },
       ],
       rawMessages: [
-        lostMessage({ raw_text: NAMED_LOST }),
-        { id: "raw-ok", source_id: SOURCE_A },
+        lostMessage({ raw_text: NAMED_LOST, user_id: "operator-a" }),
+        { id: "raw-ok", source_id: SOURCE_A, user_id: "operator-a" },
       ],
     });
   }
@@ -1265,6 +1267,19 @@ describe("P1 durable evidence for a rejected produce message", () => {
       false,
     );
     expect(report.scopeBlockers).toEqual([]);
+    expect(report.allMarkets.quantityAuthoritative).toBe(true);
+  });
+
+  test("a corrected retry by another LINE user still supersedes the unbound failure", async () => {
+    const fixture = correctionFixture({ line_user_id: "operator-b" });
+    fixture.rawMessages = fixture.rawMessages?.map((row) =>
+      row.id === "raw-ok" ? { ...row, user_id: "operator-b" } : row
+    );
+    const report = await loadSalesReport(fakeSupabase(fixture), DATE);
+
+    expect(report.blocked.some((row) => row.reasons.includes("produce_message_never_landed"))).toBe(
+      false,
+    );
     expect(report.allMarkets.quantityAuthoritative).toBe(true);
   });
 

@@ -78,6 +78,8 @@ export interface FinalizedProduceOutcome {
    * treating one as a replacement would silently drop the original intent.
    */
   sessionKind: string | null;
+  /** Defensive audit field; loaders already exclude voided rows. */
+  voidedAtMs?: number | null;
   finalizedAtMs: number | null;
 }
 
@@ -109,11 +111,12 @@ function identityText(value: string | null | undefined): string | null {
 /**
  * True when `outcome` is a provable replacement for `attempt`.
  *
- * EVERY identity dimension must match explicitly: source, business date,
- * market, seller, transaction kind and accountability round. A missing value is
- * never a wildcard. In particular, a bound document cannot be replaced by an
- * unbound one (or vice versa), and a round id does not excuse a mismatching
- * seller/market/source/date.
+ * EVERY business identity dimension must match explicitly: source, business
+ * date, market, seller and transaction kind. A bound attempt additionally
+ * requires its exact accountability round. An unbound attempt has no round
+ * identity to compare, so a bound successor may replace it only through the
+ * complete business-identity path above. A round id never excuses a
+ * mismatching seller/market/source/date.
  *
  * Replacement also requires strict ordering: a document that landed BEFORE the failed
  * attempt cannot be its correction.
@@ -124,6 +127,7 @@ function isSuccessorOf(
 ): boolean {
   // Only a proven main batch is a replacement. Null is unknown, not legacy-main.
   if (outcome.sessionKind !== "main") return false;
+  if (outcome.voidedAtMs != null) return false;
 
   const kind = attempt.transactionKind;
   if (!kind || outcome.transactionKind !== kind) return false;
@@ -137,13 +141,21 @@ function isSuccessorOf(
   const staff = identityText(attempt.staffLabel);
   if (!source || !date || !market || !staff) return false;
 
+  if (
+    identityText(outcome.sourceId) !== source
+    || identityText(outcome.businessDate) !== date
+    || identityText(outcome.marketLabel) !== market
+    || identityText(outcome.staffLabel) !== staff
+  ) return false;
+
+  // A known round is authoritative and must match exactly. A raw/unbound
+  // attempt has no round dimension, so null is not treated as a wildcard over
+  // partial identity: it is allowed only after every business dimension above
+  // has been proven equal.
+  const attemptRound = identityText(attempt.accountabilityRoundId);
   return (
-    identityText(outcome.sourceId) === source
-    && identityText(outcome.businessDate) === date
-    && identityText(outcome.marketLabel) === market
-    && identityText(outcome.staffLabel) === staff
-    && identityText(outcome.accountabilityRoundId)
-      === identityText(attempt.accountabilityRoundId)
+    attemptRound === null
+    || identityText(outcome.accountabilityRoundId) === attemptRound
   );
 }
 

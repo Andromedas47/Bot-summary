@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { finalizePendingGeneration } from "./pending-session-finalizer";
 import type { PendingSession } from "./pending-session-service";
+import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
+import { validateProduceEntry } from "@/lib/produce/entry-validation";
 
 // Close-barrier regression: prior LINE events/messages for the SAME session
 // are still being admitted/ingested as separate rows when จบรายการเบิก
@@ -115,11 +117,27 @@ function snapshot(accumulatedText: string, generation = GENERATION): PendingSess
 }
 
 function tables(messages: string[]): Record<string, Row[]> {
+  // อินตผารัม is not an approved dictionary spelling, so the merged document
+  // carries a vocabulary review. It was presented and confirmed at the close
+  // gate; the deferred finalizer only re-checks it, and this is that record.
+  const review = validateProduceEntry({
+    parsed: parseWeighSession(messages.join("\n")),
+    roundRows: [],
+    roundBound: false,
+  });
   return {
     pending_session_ingest: ingestRows(messages),
     raw_messages: [{ id: "raw-close-1", line_event_id: "close-event-1" }],
     produce_transactions: [],
     daily_summaries: [],
+    produce_entry_validation_reviews: review.reviews.length > 0
+      ? [{
+          session_key: SESSION_KEY,
+          session_generation: GENERATION,
+          validation_digest: review.digest,
+          confirmed_at: "2026-08-15T00:00:00Z",
+        }]
+      : [],
   };
 }
 

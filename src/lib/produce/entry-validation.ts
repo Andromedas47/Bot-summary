@@ -31,6 +31,11 @@ import {
 } from "@/lib/parsers/weigh-session/units";
 import { normalizeProductName } from "@/lib/summary/remaining-fruit";
 import { baseTransactionType } from "@/lib/summary/transactions";
+import {
+  isApprovedProductName,
+  suggestDictionaryProducts,
+  type ProductVocabularySuggestion,
+} from "./product-vocabulary";
 
 /** Quantities are numeric(10,3); prices numeric(10,2). Compare inside that grid. */
 const QUANTITY_EPSILON = 0.0005;
@@ -75,6 +80,19 @@ export type ProduceValidationException =
       goodReturnQuantity: number;
       damagedQuantity: number;
       excessQuantity: number;
+    }
+  /**
+   * A withdrawal is about to mint a product identity that is not an approved
+   * dictionary spelling. Distinct from product_not_withdrawn: that one is a
+   * RETURN that does not match an existing withdrawal master; this one is the
+   * withdrawal master itself being created under a suspicious name.
+   */
+  | {
+      kind: "unknown_product_vocabulary";
+      severity: "review_required";
+      itemNumber: number;
+      productName: string;
+      suggestions: ProductVocabularySuggestion[];
     }
   /** An intentional price change is allowed — but it has to be acknowledged. */
   | {
@@ -245,6 +263,12 @@ export function validateProduceEntry(input: ProduceValidationInput): ProduceVali
       .map((exception) => exception.itemNumber),
   );
 
+  // ── 1b. Product vocabulary, on withdrawals only. A return is checked against
+  // the round's master instead (§2) — that master is the authority for what
+  // this round actually holds, and it is exactly what this section protects
+  // from being created under a misspelled name in the first place.
+  reviews.push(...vocabularyExceptions(parsed));
+
   // ── 2. Identity and price of every return line, against the master.
   // An unbound legacy session has no knowable round, so the only master it can
   // have is whatever its own document declares. With no withdrawal anywhere,
@@ -333,6 +357,33 @@ export function validateProduceEntry(input: ProduceValidationInput): ProduceVali
       ? "review_required"
       : "clean";
   return { status, blocking, reviews, digest };
+}
+
+/**
+ * Withdrawal lines whose product name is not an approved dictionary spelling.
+ *
+ * One exception per distinct name, at its first item number: the operator has
+ * one spelling to fix, not one per line that carries it. Ordered by item
+ * number so the reply is deterministic.
+ */
+function vocabularyExceptions(parsed: WeighSession): ProduceValidationException[] {
+  const seen = new Set<string>();
+  const exceptions: ProduceValidationException[] = [];
+  for (const item of [...parsed.items].sort((a, b) => a.item_number - b.item_number)) {
+    if (baseTransactionType(item.transaction_type) !== "เบิก") continue;
+    const name = item.product_name.normalize("NFC").replace(/\s+/g, " ").trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    if (isApprovedProductName(name)) continue;
+    exceptions.push({
+      kind: "unknown_product_vocabulary",
+      severity: "review_required",
+      itemNumber: item.item_number,
+      productName: item.product_name,
+      suggestions: suggestDictionaryProducts(name),
+    });
+  }
+  return exceptions;
 }
 
 /**

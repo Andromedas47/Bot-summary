@@ -45,6 +45,11 @@ import {
   type CentralPriceReviewItem,
   type WithdrawalPriceRow,
 } from "./central-price-candidates";
+import {
+  detectDuplicateAnomalies,
+  type DuplicateAnomaly,
+  type DuplicateSessionSummary,
+} from "./duplicate-detector";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyClient = SupabaseClient<any>;
@@ -63,6 +68,10 @@ export type PreflightIssueCode =
   | "duplicate_open_accountability_round"
   /** Persisted produce that should carry a round and does not. */
   | "unbound_produce_transaction"
+  /** Two withdrawal sessions with the same canonical business fingerprint. */
+  | "exact_duplicate_withdrawal"
+  /** One withdrawal multiset equals the union of others. Evidence, not proof. */
+  | "possible_composite_duplicate"
   /** Recorded for audit only — a failure a later success replaced. */
   | "superseded_failed_session"
   /** Recorded for audit only — a failure an authorized workflow retired. */
@@ -155,6 +164,8 @@ export interface DailyClosePreflightInput {
   priceReview: readonly CentralPriceReviewItem[];
   openRounds: readonly PreflightRoundRecord[];
   unboundProduce: readonly UnboundProduceGroup[];
+  /** Read-only duplicate evidence for the date. Nothing here mutates anything. */
+  duplicateAnomalies?: readonly DuplicateAnomaly[];
   /**
    * The central-price identities (`centralPriceMapKey`) each round actually
    * sells. A disputed price is a DAY-wide fact — the identity is deliberately
@@ -351,6 +362,63 @@ function unboundProduceIssues(groups: readonly UnboundProduceGroup[]): Preflight
   );
 }
 
+/**
+ * Duplicate evidence, translated into preflight issues.
+ *
+ * An EXACT duplicate blocks: two identical withdrawal sets for the same seller,
+ * market and date add the whole withdrawal to calculated sales twice, which is
+ * precisely the 2026-08-14 inflation. Nothing is merged or voided here — the
+ * date simply is not reportable until a human decides which set is real.
+ *
+ * A COMPOSITE overlap only warns. The identities differ (different sellers,
+ * different markets), so the system has evidence, not proof, and must never
+ * bind or merge distinct sellers on its own.
+ */
+function duplicateAnomalyIssues(
+  anomalies: readonly DuplicateAnomaly[],
+): PreflightIssue[] {
+  const label = (session: DuplicateSessionSummary) =>
+    `${session.sellerLabel || "?"} — ${session.marketLabel || "?"}`;
+  const evidence = (sessions: readonly DuplicateSessionSummary[]) => [
+    ...sessions.map((session) => session.sessionId),
+    ...sessions
+      .map((session) => session.accountabilityRoundId)
+      .filter((id): id is string => !!id),
+  ];
+
+  return anomalies.map((anomaly) => {
+    if (anomaly.kind === "exact_duplicate_withdrawal") {
+      const [first] = anomaly.sessions;
+      return issue(
+        "exact_duplicate_withdrawal",
+        "blocker",
+        `พบรายการเบิกซ้ำ ${anomaly.sessions.length} ชุด ที่มีเนื้อหาเหมือนกันทุกรายการ `
+        + `(${label(first)} ${first.itemCount} รายการ ${first.totalAmount} บาท)`,
+        {
+          staffName: first.sellerLabel || null,
+          marketName: first.marketLabel || null,
+          accountabilityRoundId: first.accountabilityRoundId,
+          evidenceIds: [...evidence(anomaly.sessions), `fingerprint:${anomaly.fingerprint}`],
+        },
+      );
+    }
+
+    return issue(
+      "possible_composite_duplicate",
+      "warning",
+      `รายการเบิกของ ${label(anomaly.whole)} ${anomaly.whole.itemCount} รายการ `
+      + `ตรงกับผลรวมของ ${anomaly.parts.map((part) => `${label(part)} ${part.itemCount} รายการ`).join(" + ")} `
+      + "— ต้องให้ผู้ดูแลตรวจสอบ ระบบไม่รวมหรือลบให้เอง",
+      {
+        staffName: anomaly.whole.sellerLabel || null,
+        marketName: anomaly.whole.marketLabel || null,
+        accountabilityRoundId: anomaly.whole.accountabilityRoundId,
+        evidenceIds: evidence([anomaly.whole, ...anomaly.parts]),
+      },
+    );
+  });
+}
+
 export function buildDailyClosePreflight(
   input: DailyClosePreflightInput,
 ): DailyClosePreflightResult {
@@ -414,6 +482,7 @@ export function buildDailyClosePreflight(
   const integrityIssues: PreflightIssue[] = [
     ...duplicateRoundIssues(input.openRounds),
     ...unboundProduceIssues(input.unboundProduce),
+    ...duplicateAnomalyIssues(input.duplicateAnomalies ?? []),
   ];
 
   // A refused document no round can claim could belong to ANY market, so it is
@@ -525,6 +594,15 @@ export interface DateProduceRow {
   accountability_round_id: string | null;
   product_name?: string | null;
   unit?: string | null;
+  /** The duplicate detector's inputs. Optional so existing callers still fit. */
+  session_kind?: string | null;
+  staff_name?: string | null;
+  quantity?: number | string | null;
+  price_per_unit?: number | string | null;
+  transaction_type?: string | null;
+  basis_quantity?: number | string | null;
+  basis_unit?: string | null;
+  basis_price?: number | string | null;
 }
 
 /**
@@ -567,7 +645,7 @@ async function fetchDateProduceRows(
   for (let offset = 0; ; offset += PAGE) {
     const { data, error } = await supabase
       .from("produce_transactions")
-      .select("session_id, market_name, accountability_round_id, product_name, unit")
+      .select("session_id, market_name, staff_name, session_kind, accountability_round_id, product_name, unit, quantity, price_per_unit, transaction_type, basis_quantity, basis_unit, basis_price")
       .eq("transaction_date", businessDate)
       .order("id", { ascending: true })
       .range(offset, offset + PAGE - 1);
@@ -658,6 +736,8 @@ export async function loadDailyClosePreflight(
     openRounds,
     unboundProduce: groupUnboundProduce(produceRows),
     roundPriceKeys: roundPriceKeysFromRows(produceRows, businessDate),
+    // Read-only, over the rows already in hand. No extra query, no writes.
+    duplicateAnomalies: detectDuplicateAnomalies(businessDate, produceRows),
   });
 
   logger.info("daily_close_preflight", {

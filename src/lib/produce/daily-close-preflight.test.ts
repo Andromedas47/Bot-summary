@@ -461,3 +461,97 @@ describe("daily close preflight", () => {
     expect(result.status).toBe("ready_with_warnings");
   });
 });
+
+describe("duplicate anomalies in the preflight", () => {
+  const exact = {
+    kind: "exact_duplicate_withdrawal",
+    fingerprint: "abc123",
+    sessions: [
+      {
+        sessionId: "s-a",
+        accountabilityRoundId: "d5ae8a20-6e41-4293-8065-dcfab9ff2b97",
+        sellerLabel: "แทน",
+        marketLabel: "ราชพฤก",
+        itemCount: 16,
+        totalAmount: 7187,
+        fingerprint: "abc123",
+      },
+      {
+        sessionId: "s-b",
+        accountabilityRoundId: "0874d4f3-9e6a-4aba-afad-02f6c848fcaf",
+        sellerLabel: "แทน",
+        marketLabel: "ราชพฤก",
+        itemCount: 16,
+        totalAmount: 7187,
+        fingerprint: "abc123",
+      },
+    ],
+  } as const;
+
+  const composite = {
+    kind: "possible_composite_duplicate",
+    whole: {
+      sessionId: "s-palee",
+      accountabilityRoundId: "1846c8a3-3c46-4181-92b7-fc85a1834c20",
+      sellerLabel: "ป้าลี",
+      marketLabel: "ตลาด72",
+      itemCount: 30,
+      totalAmount: 19571.5,
+      fingerprint: "whole",
+    },
+    parts: [
+      {
+        sessionId: "s-kwan",
+        accountabilityRoundId: "69e0770b-9cea-4273-99c3-2ae40d98ca9e",
+        sellerLabel: "ขวัญ",
+        marketLabel: "72ผลไม้",
+        itemCount: 27,
+        totalAmount: 15901.5,
+        fingerprint: "part-1",
+      },
+      {
+        sessionId: "s-do",
+        accountabilityRoundId: "bbf1c5bf-460f-451f-a64a-41f2a43a1338",
+        sellerLabel: "โด้",
+        marketLabel: "72ทุเรียน",
+        itemCount: 3,
+        totalAmount: 3670,
+        fingerprint: "part-2",
+      },
+    ],
+  } as const;
+
+  test("an exact duplicate blocks the date and names both rounds", () => {
+    const result = buildDailyClosePreflight(input({ duplicateAnomalies: [exact] }));
+
+    expect(result.status).toBe("blocked");
+    const found = result.integrityIssues.find((i) => i.code === "exact_duplicate_withdrawal");
+    expect(found?.severity).toBe("blocker");
+    expect(found?.evidenceIds).toEqual([
+      "s-a", "s-b",
+      "d5ae8a20-6e41-4293-8065-dcfab9ff2b97",
+      "0874d4f3-9e6a-4aba-afad-02f6c848fcaf",
+      "fingerprint:abc123",
+    ]);
+  });
+
+  test("a composite overlap only warns, and never proposes a merge", () => {
+    const result = buildDailyClosePreflight(input({ duplicateAnomalies: [composite] }));
+
+    expect(result.status).toBe("ready_with_warnings");
+    const found = result.integrityIssues.find((i) => i.code === "possible_composite_duplicate");
+    expect(found?.severity).toBe("warning");
+    expect(found?.evidenceIds).toContain("s-palee");
+    expect(found?.evidenceIds).toContain("s-kwan");
+    expect(found?.evidenceIds).toContain("s-do");
+    // Evidence for a human, not an instruction to the system.
+    expect(found?.message).toContain("ผู้ดูแลตรวจสอบ");
+  });
+
+  test("CASE Q — a day with no duplicates reconciles exactly as before", () => {
+    const before = buildDailyClosePreflight(input());
+    const after = buildDailyClosePreflight(input({ duplicateAnomalies: [] }));
+    expect(after).toEqual(before);
+    expect(after.summary.integrityIssues).toBe(0);
+  });
+});

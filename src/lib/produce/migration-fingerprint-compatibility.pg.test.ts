@@ -149,6 +149,39 @@ function sqlTextArray(values: string[]): string {
   return `ARRAY[${values.map(q).join(", ")}]::text[]`;
 }
 
+/** The two jsonb payloads the finalizer takes, as the application builds them. */
+function payloadFor(
+  parsed: WeighSession,
+  rawMessageId: string,
+  sessionKey: string,
+  generation: string,
+): { session: string; items: string } {
+  const items = parsed.items.map((item) => ({
+    item_number: item.item_number,
+    product_name: item.product_name,
+    price_per_unit: item.price_per_unit,
+    quantity: item.quantity,
+    unit: item.unit,
+    section: item.section,
+    transaction_type: item.transaction_type,
+  }));
+  return {
+    session: JSON.stringify({
+      raw_message_id: rawMessageId,
+      staff_name: parsed.staff_name,
+      session_date: parsed.date,
+      session_title: parsed.session_title,
+      transaction_types: [...new Set(items.map((i) => i.transaction_type))].sort().join(","),
+      session_kind: "main",
+      declared_transaction_type: parsed.declared_transaction_type,
+      ingest_idempotency_key: `${sessionKey}:${generation}`,
+      ingest_source: "line_webhook",
+      item_count: parsed.items.length,
+    }),
+    items: JSON.stringify(items),
+  };
+}
+
 async function finalize(options: FinalizeOptions): Promise<{ status: string; reason?: string }> {
   const { parsed } = options;
   const kind = options.sessionKind ?? "main";
@@ -228,8 +261,40 @@ async function produceSessionCount(): Promise<number> {
   return Number(await scalar("SELECT count(*)::text FROM public.produce_sessions"));
 }
 
+/**
+ * The application does not call this function positionally. Supabase's client
+ * posts a JSON object to PostgREST, which invokes the function with NAMED
+ * arguments — so the only call shape worth proving is the named one. The old
+ * build sends exactly the eight parameters it knows about and omits
+ * `p_compatibility_hashes` entirely; the new build sends nine.
+ *
+ * This is psql rather than PostgREST — the harness has no HTTP layer — so it
+ * reproduces the argument *binding* PostgREST performs, not its HTTP routing.
+ * That is the half that can break: resolution against a function whose ninth
+ * parameter is defaulted.
+ */
+function namedCall(args: Record<string, string>): string {
+  const bound = Object.entries(args).map(([name, value]) => `${name} => ${value}`);
+  return `SELECT public.try_finalize_pending_generation(${bound.join(", ")})`;
+}
+
+/** The eight parameters every deployed build has always sent. */
+function oldAppArgs(sessionKey: string, generation: string, hash: string, session: string, items: string) {
+  return {
+    p_session_key: q(sessionKey),
+    p_expected_generation: `${q(generation)}::uuid`,
+    p_expected_line_user_id: q(ACTOR),
+    p_snapshot_revision: "1",
+    p_session_hash: q(hash),
+    p_raw_text: "'raw'",
+    p_session: `${q(session)}::jsonb`,
+    p_items: `${q(items)}::jsonb`,
+  };
+}
+
 const pgAvailable = await probe();
 let databaseCreated = false;
+let forbiddenState: PsqlResult;
 if (!pgAvailable && process.env.REQUIRE_FINGERPRINT_COMPATIBILITY_POSTGRES === "1") {
   throw new Error(
     "REQUIRE_FINGERPRINT_COMPATIBILITY_POSTGRES=1 but the PostgreSQL 17 harness is unavailable",
@@ -246,7 +311,22 @@ describe.skipIf(!pgAvailable)("fingerprint compatibility on PostgreSQL 17", () =
     // The 0061 function, then the compatibility reissue on top of it — the same
     // order Production applies them in.
     await apply(join(ROOT, "supabase", "migrations", "0061_pending_session_runtime_environment.sql"));
-    await apply(join(ROOT, "supabase", "migrations", "20260815140000_produce_fingerprint_compatibility.sql"));
+
+    // STATE 0 — old schema. Before the compatibility migration lands, prove the
+    // forbidden rollout state really is forbidden: the new application's call
+    // shape cannot resolve against the deployed 8-argument function. Captured
+    // here because this is the only moment the old schema exists.
+    forbiddenState = await psql([
+      "-c",
+      `SELECT public.try_finalize_pending_generation(
+         p_session_key => 'x', p_expected_generation => gen_random_uuid(),
+         p_expected_line_user_id => 'u', p_snapshot_revision => 1,
+         p_session_hash => 'h', p_raw_text => 'r',
+         p_session => '{}'::jsonb, p_items => '[]'::jsonb,
+         p_compatibility_hashes => ARRAY['a']::text[])`,
+    ]);
+
+    await apply(join(ROOT, "supabase", "migrations", "20260815150000_produce_fingerprint_compatibility.sql"));
   }, 120_000);
 
   afterAll(async () => {
@@ -268,6 +348,14 @@ describe.skipIf(!pgAvailable)("fingerprint compatibility on PostgreSQL 17", () =
       SELECT to_regprocedure(
         'public.try_finalize_pending_generation(text,uuid,text,integer,text,text,jsonb,jsonb,text[])'
       ) IS NOT NULL`)).toBe("t");
+  });
+
+  // ── Rolling-deploy state machine ───────────────────────────────────────────
+
+  test("FORBIDDEN — new app call shape against the OLD schema does not resolve", () => {
+    // Captured in beforeAll, against the real pre-migration function.
+    expect(forbiddenState.code).not.toBe(0);
+    expect(forbiddenState.stderr).toMatch(/does not exist|p_compatibility_hashes/i);
   });
 
   test("CASE 7 — a new session writes only its own V2 identity plus reservations", async () => {
@@ -522,5 +610,65 @@ describe.skipIf(!pgAvailable)("fingerprint compatibility on PostgreSQL 17", () =
       )`));
     expect(result.status).toBe("stale_snapshot");
     expect(await scalar("SELECT count(*)::text FROM public.imported_sessions")).toBe("0");
+  });
+
+  // ── Rolling-deploy state machine, in the application's own call shape ──────
+
+  test("STATE 1 — OLD app named call shape works on the compatibility schema", async () => {
+    // The deployed build sends the eight parameters it knows about and omits
+    // p_compatibility_hashes. This is the proof that applying the migration
+    // first cannot break the build that is already running.
+    await scalar("DELETE FROM public.imported_sessions; SELECT 1");
+    const parsed = withdrawal("พาซิโอ้", { extra: true });
+    const sessionKey = `group:G:oldapp:${randomBytes(3).toString("hex")}`;
+    const { generation, rawMessageId } = await seedPending(sessionKey);
+    const { session, items } = payloadFor(parsed, rawMessageId, sessionKey, generation);
+
+    const result = JSON.parse(await scalar(
+      namedCall(oldAppArgs(sessionKey, generation, computeSessionHash(parsed), session, items)),
+    ));
+
+    expect(result.status).toBe("finalized");
+    // Omitting the parameter defaults it to NULL, so only the V2 identity is
+    // taken — exactly the pre-migration behaviour.
+    expect(await scalar("SELECT count(*)::text FROM public.imported_sessions")).toBe("1");
+    expect(await scalar(`
+      SELECT session_hash FROM public.imported_sessions`)).toBe(computeSessionHash(parsed));
+  });
+
+  test("STATE 2 — NEW app named call shape works on the compatibility schema", async () => {
+    await scalar("DELETE FROM public.imported_sessions; SELECT 1");
+    const parsed = withdrawal("พาซีโอ้", { extra: true });
+    const sessionKey = `group:G:newapp:${randomBytes(3).toString("hex")}`;
+    const { generation, rawMessageId } = await seedPending(sessionKey);
+    const { session, items } = payloadFor(parsed, rawMessageId, sessionKey, generation);
+    const compatibility = weighSessionCompatibilityFingerprints(parsed);
+    expect(compatibility.length).toBeGreaterThan(0);
+
+    const result = JSON.parse(await scalar(namedCall({
+      ...oldAppArgs(sessionKey, generation, computeSessionHash(parsed), session, items),
+      p_compatibility_hashes: sqlTextArray(compatibility),
+    })));
+
+    expect(result.status).toBe("finalized");
+    // The V2 identity and the whole V1 class, every row stamped with this
+    // generation so ghost recovery can prove ownership later.
+    expect(await scalar(`
+      SELECT count(*)::text FROM public.imported_sessions
+      WHERE reserved_by_generation = ${q(generation)}::uuid`))
+      .toBe(String(1 + compatibility.length));
+    expect(await scalar(`
+      SELECT count(*)::text FROM public.imported_sessions
+      WHERE reserved_by_generation IS NULL`)).toBe("0");
+  });
+
+  test("provenance makes a historical reservation distinguishable from this attempt's", async () => {
+    await scalar("DELETE FROM public.imported_sessions; SELECT 1");
+    // A row the PREVIOUS release wrote carries no provenance, and that is what
+    // makes it unreleasable by any future attempt.
+    await seedImported("historical-v1-hash", "พาซีโอ้");
+    expect(await scalar(`
+      SELECT reserved_by_generation IS NULL FROM public.imported_sessions
+      WHERE session_hash = 'historical-v1-hash'`)).toBe("t");
   });
 });

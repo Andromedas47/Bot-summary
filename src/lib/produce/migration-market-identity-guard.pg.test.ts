@@ -229,7 +229,13 @@ describe.skipIf(!pgAvailable)("produce market identity guard on PostgreSQL 17", 
       INSERT INTO public.line_guided_menu_market_aliases (alias_label, market_code) VALUES
         ('ทุ่งลานนา', 'wat_thung_lanna');
       SELECT 1`);
-    await apply(join(ROOT, "supabase", "migrations", "20260815120000_produce_market_identity_guard.sql"));
+    // This database is scoped to round binding, so it does not carry the
+    // pending-session schema the finalizer needs. The compatibility layer must
+    // still be proven to land first: filename order is asserted in
+    // migration-order.test.ts, and the RPC itself in
+    // migration-fingerprint-compatibility.pg.test.ts, whose bootstrap does
+    // carry that schema.
+    await apply(join(ROOT, "supabase", "migrations", "20260815160000_produce_market_identity_guard.sql"));
   }, 60_000);
 
   afterAll(async () => {
@@ -237,10 +243,11 @@ describe.skipIf(!pgAvailable)("produce market identity guard on PostgreSQL 17", 
     await psql(["-d", "postgres", "-c", `DROP DATABASE IF EXISTS ${DATABASE}`], "postgres");
   }, 60_000);
 
+
   // ── A/B/C — the reviewed catalog is the only thing that collapses labels ────
 
   test("the migration is idempotent and seeds exactly the reviewed rows", async () => {
-    await apply(join(ROOT, "supabase", "migrations", "20260815120000_produce_market_identity_guard.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260815160000_produce_market_identity_guard.sql"));
     expect(await scalar(`
       SELECT count(*)::text FROM public.line_guided_menu_market_aliases
       WHERE market_code = 'paseo'`)).toBe("2");

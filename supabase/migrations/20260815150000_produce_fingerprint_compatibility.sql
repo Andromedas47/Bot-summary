@@ -58,6 +58,31 @@ BEGIN
 END;
 $preflight$;
 
+-- Reservation provenance.
+--
+-- Widening duplicate lookup across V0/V1/V2 makes the existing ghost-recovery
+-- delete dangerous: a resend under a reviewed canonical spelling matches a
+-- historical reservation written under an alias spelling, but can never match
+-- that session's item hashes, because computeItemHash folds the market label in.
+-- Read as "duplicate exists, nothing persisted", the old code deleted genuine
+-- historical evidence and let the duplicate persist a second time.
+--
+-- One nullable column fixes it by making ownership provable instead of guessed:
+--   NULL     historical, or reserved by some other attempt — NEVER releasable
+--   <uuid>   reserved by that pending generation — releasable by that generation
+--
+-- Nullable and unbackfilled on purpose. Every pre-existing row stays NULL, which
+-- is exactly the "do not touch" class. Read-only Production measurement behind
+-- this: 1,934 reservations, 4 with no corresponding produce rows, and three of
+-- those are parse artefacts plus one test row — refusing to release unstamped
+-- reservations strands nothing real.
+ALTER TABLE public.imported_sessions
+  ADD COLUMN IF NOT EXISTS reserved_by_generation uuid;
+
+COMMENT ON COLUMN public.imported_sessions.reserved_by_generation IS
+  'Pending generation that reserved this hash. NULL = historical evidence or '
+  'another attempt''s reservation; ghost recovery must never delete it.';
+
 -- Reissued in full from 0061 — Postgres replaces a function as a whole unit,
 -- not as a diff — with exactly two changes: the new parameter, and the
 -- compatibility reservation block marked below.
@@ -424,7 +449,7 @@ BEGIN
     WITH reserved AS (
       INSERT INTO public.imported_sessions (
         session_hash, transaction_date, staff_name, market_name,
-        transaction_type, raw_text
+        transaction_type, raw_text, reserved_by_generation
       )
       SELECT
         h,
@@ -432,7 +457,8 @@ BEGIN
         p_session->>'staff_name',
         COALESCE(p_session->>'session_title', ''),
         COALESCE(p_session->>'transaction_types', ''),
-        p_raw_text
+        p_raw_text,
+        p_expected_generation
       FROM unnest(v_compatibility) AS h
       ON CONFLICT (session_hash) DO NOTHING
       RETURNING 1
@@ -458,7 +484,7 @@ BEGIN
 
   INSERT INTO public.imported_sessions (
     session_hash, transaction_date, staff_name, market_name,
-    transaction_type, raw_text
+    transaction_type, raw_text, reserved_by_generation
   )
   VALUES (
     p_session_hash,
@@ -466,7 +492,8 @@ BEGIN
     p_session->>'staff_name',
     COALESCE(p_session->>'session_title', ''),
     COALESCE(p_session->>'transaction_types', ''),
-    p_raw_text
+    p_raw_text,
+    p_expected_generation
   )
   ON CONFLICT (session_hash) DO NOTHING
   RETURNING id INTO v_imported_id;

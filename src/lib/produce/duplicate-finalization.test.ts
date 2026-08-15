@@ -20,6 +20,7 @@ import { describe, expect, it } from "bun:test";
 import { finalizePendingGeneration } from "@/lib/line/pending-session-finalizer";
 import { computeSessionHash } from "@/lib/line/session-dedup-service";
 import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
+import { validateProduceEntry } from "./entry-validation";
 import { getRuntimeEnvironment } from "@/lib/runtime-environment";
 import type { PendingSession } from "@/lib/line/pending-session-service";
 
@@ -152,6 +153,23 @@ class FakeDatabase {
       line_timestamp_ms: 1_000,
       raw_text: document,
     });
+    // The document reached the deferred finalizer, so it already went through
+    // the close gate. อะโวคาโด้ is not an approved dictionary spelling, and the
+    // operator confirmed that vocabulary review there; the finalizer only
+    // re-checks it. Without this the resend is held, never classified.
+    const review = validateProduceEntry({
+      parsed: parseWeighSession(document),
+      roundRows: [],
+      roundBound: true,
+    });
+    if (review.reviews.length > 0) {
+      this.insert("produce_entry_validation_reviews", {
+        session_key: sessionKey,
+        session_generation: generation,
+        validation_digest: review.digest,
+        confirmed_at: new Date().toISOString(),
+      });
+    }
     return this.insert("pending_sessions", {
       session_key: sessionKey,
       session_generation: generation,

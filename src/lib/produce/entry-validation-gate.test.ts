@@ -387,3 +387,78 @@ describe("finalize gate", () => {
     expect(gate.decision).toBe("blocked");
   });
 });
+
+// ── Product vocabulary guard at withdrawal intake ────────────────────────────
+
+/** A withdrawal whose product name is not an approved dictionary spelling. */
+const suspiciousWithdrawal = (name = "มะม่วงเขียวรกต") =>
+  session([item({ product_name: name, transaction_type: "เบิก", quantity: 8 })]);
+
+describe("unknown product vocabulary", () => {
+  it("presents the review instead of finalizing, and persists nothing", async () => {
+    const db = new FakeDb({ [ROUND]: [] });
+    const gate = await runProduceCloseGate(
+      db.client(),
+      REF,
+      suspiciousWithdrawal(),
+      "E1",
+    );
+
+    expect(gate.decision).toBe("review_presented");
+    expect(gate.result.reviews.map((exception) => exception.kind)).toEqual([
+      "unknown_product_vocabulary",
+    ]);
+    expect(db.reviews).toHaveLength(1);
+    expect(db.reviews[0].confirmed_at).toBeNull();
+  });
+
+  it("proceeds once the operator confirms it is a genuinely new product", async () => {
+    const db = new FakeDb({ [ROUND]: [] });
+    const newProduct = suspiciousWithdrawal("ฝรั่งสายพันธุ์ใหม่");
+
+    expect((await runProduceCloseGate(db.client(), REF, newProduct, "E1")).decision)
+      .toBe("review_presented");
+    const second = await runProduceCloseGate(db.client(), REF, newProduct, "E2");
+
+    expect(second.decision).toBe("proceed");
+    // Confirmation acknowledges the name; it never registers or rewrites it.
+    expect(newProduct.items[0].product_name).toBe("ฝรั่งสายพันธุ์ใหม่");
+    expect(db.reviews).toHaveLength(1);
+  });
+
+  it("does not carry a confirmation over to a corrected document", async () => {
+    const db = new FakeDb({ [ROUND]: [] });
+    await runProduceCloseGate(db.client(), REF, suspiciousWithdrawal(), "E1");
+    await runProduceCloseGate(db.client(), REF, suspiciousWithdrawal(), "E2");
+
+    // The operator fixes the spelling. Different content, different digest.
+    const corrected = suspiciousWithdrawal("มะม่วงเขียวมรกต");
+    const gate = await runProduceFinalizeGate(db.client(), REF, corrected);
+    expect(gate.decision).toBe("proceed");
+    expect(gate.result.status).toBe("clean");
+  });
+
+  it("does not let a confirmation survive a straggler item", async () => {
+    const db = new FakeDb({ [ROUND]: [] });
+    await runProduceCloseGate(db.client(), REF, suspiciousWithdrawal(), "E1");
+    await runProduceCloseGate(db.client(), REF, suspiciousWithdrawal(), "E2");
+
+    const withStraggler = session([
+      item({ product_name: "มะม่วงเขียวรกต", transaction_type: "เบิก", quantity: 8 }),
+      item({ product_name: "องุ่นดำ", transaction_type: "เบิก", quantity: 2 }),
+    ]);
+    const gate = await runProduceFinalizeGate(db.client(), REF, withStraggler);
+    expect(gate.decision).toBe("review_presented");
+  });
+
+  it("holds the whole document, not the offending line", async () => {
+    const db = new FakeDb({ [ROUND]: [] });
+    const mixed = session([
+      item({ product_name: "องุ่นดำ", transaction_type: "เบิก", quantity: 2 }),
+      item({ product_name: "อินทผรัม", transaction_type: "เบิก", quantity: 3 }),
+    ]);
+    const gate = await runProduceCloseGate(db.client(), REF, mixed, "E1");
+    expect(gate.decision).toBe("review_presented");
+    expect(gate.result.status).toBe("review_required");
+  });
+});

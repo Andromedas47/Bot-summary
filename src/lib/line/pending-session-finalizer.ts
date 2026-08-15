@@ -681,8 +681,8 @@ async function runEntryGateForFinalization(
   }
   if (gate.decision === "review_presented") {
     return {
-      errors: ["price review was never confirmed"],
-      detail: buildUnconfirmedReviewReply(),
+      errors: ["entry validation review was never confirmed"],
+      detail: buildUnconfirmedReviewReply(gate.result),
     };
   }
   return { errors: [], detail: null };

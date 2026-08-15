@@ -429,16 +429,29 @@ export async function finalizePendingGeneration(
     item_hash: computeItemHash(parsed, item),
   }));
 
+  const businessFingerprint = computeSessionHash(parsed);
   const result = await service.tryFinalizeGeneration(
     snapshot.session_key,
     snapshot.session_generation,
     snapshot.line_user_id,
     snapshot.ingest_revision,
-    computeSessionHash(parsed),
+    businessFingerprint,
     finalText,
     sessionPayload,
     itemPayload,
   );
+
+  if (result.status === "duplicate") {
+    await reportBusinessDuplicate(supabase, {
+      log,
+      snapshot,
+      parsed,
+      fingerprint: businessFingerprint,
+      reason: result.reason ?? "content_fingerprint",
+      existingSessionId: result.session_id ?? null,
+      rawMessageId,
+    });
+  }
 
 
   log.info("produce finalization completed", {
@@ -467,7 +480,7 @@ export async function finalizePendingGeneration(
     log.warn("produce notification outbox unavailable; using direct push fallback");
     message = notificationPayload;
   } else if (result.status === "duplicate") {
-    message = "รายการนี้เคยบันทึกแล้ว";
+    message = buildBusinessDuplicateMessage();
   }
 
   if (message) {
@@ -514,6 +527,116 @@ export async function finalizePendingGeneration(
   }
 
   return result;
+}
+
+/**
+ * What the operator sees when an exact business duplicate is refused.
+ *
+ * It states the outcome and stops. It never asks them to resend — the data IS
+ * recorded, under the submission that arrived first, and a resend would only
+ * be refused again.
+ */
+export function buildBusinessDuplicateMessage(): string {
+  return ["⚠️ พบรายการนี้ถูกบันทึกไว้แล้ว", "ระบบไม่บันทึกซ้ำ"].join("\n");
+}
+
+/**
+ * Everything a duplicate refusal has to leave behind.
+ *
+ * 1. Structured evidence — the business identity and the fingerprint that
+ *    matched, plus the attempted session/source/user as audit metadata. No
+ *    secrets and no raw document text.
+ * 2. The empty accountability round the attempt minted is cancelled. The RPC
+ *    refuses unless the round provably holds nothing, so a round with real
+ *    business data can never be retired by this path.
+ * 3. The close raw message is marked processed. The produce IS recorded — under
+ *    the first submission — so leaving this message unprocessed would make the
+ *    Sales reconciliation report it as produce that never landed.
+ *
+ * All three are best-effort: the authoritative refusal has already committed,
+ * and nothing here may turn a clean duplicate into a finalizer error.
+ */
+async function reportBusinessDuplicate(
+  supabase: Supabase,
+  context: {
+    log: ReturnType<typeof logger.child>;
+    snapshot: PendingSession;
+    parsed: WeighSession;
+    fingerprint: string;
+    reason: string;
+    existingSessionId: string | null;
+    rawMessageId: string | null;
+  },
+): Promise<void> {
+  const { log, snapshot, parsed, fingerprint } = context;
+
+  let existingSessionIds: string[] = context.existingSessionId
+    ? [context.existingSessionId]
+    : [];
+  if (existingSessionIds.length === 0 && parsed.date) {
+    try {
+      const { data } = await supabase
+        .from("produce_sessions")
+        .select("id")
+        .eq("session_date", parsed.date)
+        .eq("staff_name", parsed.staff_name)
+        .eq("session_title", parsed.session_title ?? "")
+        .is("voided_at", null)
+        .limit(10);
+      existingSessionIds = (data ?? []).map((row) => row.id as string);
+    } catch {
+      // Evidence enrichment only. A failed lookup must not change the outcome.
+    }
+  }
+
+  log.warn("produce business duplicate blocked", {
+    reason: context.reason,
+    businessDate: parsed.date,
+    sellerLabel: parsed.staff_name,
+    marketLabel: parsed.session_title,
+    transactionType: parsed.declared_transaction_type
+      ?? [...new Set(parsed.items.map((item) => item.transaction_type))].sort().join(","),
+    businessFingerprint: fingerprint,
+    existingProduceSessionIds: existingSessionIds,
+    attemptedSessionKey: snapshot.session_key,
+    attemptedSessionGeneration: snapshot.session_generation,
+    attemptedSourceId: snapshot.source_id,
+    attemptedLineUserId: snapshot.line_user_id,
+    attemptedAccountabilityRoundId: snapshot.accountability_round_id ?? null,
+  });
+
+  try {
+    const { data, error } = await supabase.rpc("cancel_duplicate_plain_text_round", {
+      p_session_key: snapshot.session_key,
+      p_session_generation: snapshot.session_generation,
+    });
+    if (error) throw new Error(error.message);
+    const outcome = (data as { outcome?: string } | null)?.outcome ?? "unknown";
+    if (outcome !== "no_round") {
+      log.info("duplicate accountability round lifecycle", {
+        outcome,
+        accountabilityRoundId:
+          (data as { accountability_round_id?: string } | null)?.accountability_round_id ?? null,
+      });
+    }
+  } catch (error) {
+    log.error("duplicate accountability round cleanup failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  if (context.rawMessageId) {
+    try {
+      await supabase
+        .from("raw_messages")
+        .update({ is_processed: true, processed_at: new Date().toISOString() })
+        .eq("id", context.rawMessageId);
+    } catch (error) {
+      log.error("duplicate raw message processed flag failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 }
 
 /**

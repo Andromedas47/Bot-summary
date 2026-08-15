@@ -1932,6 +1932,13 @@ export interface Database {
       };
     };
     Functions: {
+      cancel_duplicate_plain_text_round: {
+        Args: {
+          p_session_key: string;
+          p_session_generation: string;
+        };
+        Returns: Json;
+      };
       close_accountability_round: {
         Args: {
           p_accountability_round_id: string;

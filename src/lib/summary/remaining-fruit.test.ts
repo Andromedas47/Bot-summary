@@ -4,6 +4,7 @@ import {
   dedupeRemainingSourceRows,
   UNIDENTIFIED_MARKET_SECTION,
   type RemainingFruitSourceRow,
+  normalizeProductName,
 } from "./remaining-fruit";
 
 const TX_WITHDRAW = "\u0E40\u0E1A\u0E34\u0E01";
@@ -566,5 +567,25 @@ describe("QA/test-market exclusion (P0)", () => {
 
     expect(report.markets.find((m) => m.marketName === "ทดสอบ")).toBeDefined();
     expect(report.overall.find((o) => o.fruitName === "แตงโม")?.totalRemainingForResale).toBe(1004);
+  });
+});
+
+describe("PRODUCT_ALIASES — อะโวคาโด spellings", () => {
+  // Required by the alias map's own rule: every entry gets a regression test.
+  // Added 2026-08-15 from the Production duplicate incident — แทน — ราชพฤก sent
+  // one 16-item withdrawal from two LINE groups whose ONLY difference was the
+  // tone mark on this product, and both persisted.
+  test("the tone-marked spelling is the same product", () => {
+    expect(normalizeProductName("อะโวคาโด้")).toBe("อะโวคาโด");
+  });
+
+  test("the previously deployed spellings still canonicalize", () => {
+    for (const spelling of ["อะโวคาโด", "อโวคาโด", "อโวคาโด้", "อะโวอาโด้"]) {
+      expect(normalizeProductName(spelling)).toBe("อะโวคาโด");
+    }
+  });
+
+  test("a genuinely different fruit is not swept in", () => {
+    expect(normalizeProductName("อะโวคาโดเวียดนาม")).not.toBe("อะโวคาโด");
   });
 });

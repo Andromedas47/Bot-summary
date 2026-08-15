@@ -2,7 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { normalizedMarketLabel } from "@/lib/market";
 import { RE } from "@/lib/parsers/weigh-session/regex";
 import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
-import { computeItemHash, computeSessionHash } from "@/lib/line/session-dedup-service";
+import { computeItemHash, sessionHashCandidates } from "@/lib/line/session-dedup-service";
 import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
 import { isStrictBusinessDate } from "./cron";
 import { isQaMarketLabel } from "./qa-scopes";
@@ -66,7 +66,7 @@ const LOOKUP_CHUNK_SIZE = 500;
  * blocks its identity instead of disappearing.
  */
 const PRODUCE_SELECT =
-  "id, session_id, market_name, product_name, quantity, unit, transaction_type, base_transaction_type, price_per_unit, basis_quantity, raw_message_id, session_kind, item_created_at, accountability_round_id" as const;
+  "id, session_id, market_name, staff_name, product_name, quantity, unit, transaction_type, base_transaction_type, price_per_unit, basis_quantity, basis_unit, basis_price, raw_message_id, session_kind, item_created_at, accountability_round_id" as const;
 
 /**
  * parse_errors rows that mean data may be missing. "unsupported_type" is
@@ -995,14 +995,17 @@ async function accountedProduceMessages(
     .map((row) => {
       const parsed = parseWeighSession(row.raw_text ?? "");
       const itemHashes = parsed.items.map((item) => computeItemHash(parsed, item));
-      return { id: row.id, sessionHash: computeSessionHash(parsed), itemHashes };
+      // Both identities: rows imported before the canonical business
+      // fingerprint shipped are reserved under the legacy hash and must keep
+      // proving themselves, or every one of them becomes a false "lost produce".
+      return { id: row.id, sessionHashes: sessionHashCandidates(parsed), itemHashes };
     })
     // No items → nothing to prove landed. Fail closed.
     .filter((row) => row.itemHashes.length > 0);
   if (unexplained.length === 0) return accounted;
 
   const importedSessionHashes = new Set<string>();
-  for (const chunk of chunks([...new Set(unexplained.map((row) => row.sessionHash))], LOOKUP_CHUNK_SIZE)) {
+  for (const chunk of chunks([...new Set(unexplained.flatMap((row) => row.sessionHashes))], LOOKUP_CHUNK_SIZE)) {
     const { data, error } = await supabase
       .from("imported_sessions")
       .select("session_hash")
@@ -1011,7 +1014,8 @@ async function accountedProduceMessages(
     for (const row of data ?? []) importedSessionHashes.add(row.session_hash);
   }
 
-  const reserved = unexplained.filter((row) => importedSessionHashes.has(row.sessionHash));
+  const reserved = unexplained.filter((row) =>
+    row.sessionHashes.some((hash) => importedSessionHashes.has(hash)));
   if (reserved.length === 0) return accounted;
 
   // Persisted rows per item hash, so multiplicity is respected.

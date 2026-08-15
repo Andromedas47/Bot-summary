@@ -48,6 +48,15 @@ export function confirmedGoodReturnTotalSatang(products: readonly GoodReturnValu
 }
 
 /**
+ * A product is incomplete for category presentation when any market is still
+ * untrustworthy — including invalid-only evidence that contributes no quantity
+ * (anomalyMarketCount > 0, unvaluedQuantity === 0). Confirmed satang is unchanged.
+ */
+function categoryRowNeedsReview(row: Pick<GoodReturnValueProduct, "unvaluedQuantity" | "anomalyMarketCount">): boolean {
+  return row.unvaluedQuantity > 0 || row.anomalyMarketCount > 0;
+}
+
+/**
  * Partition report rows by dictionary category. Every product belongs to exactly
  * one bucket, so SUM(confirmedSatang) === confirmed grand total.
  */
@@ -59,7 +68,7 @@ export function goodReturnCategoryTotals(products: readonly GoodReturnValueProdu
     const bucket = buckets.get(dictionaryCategoryFor(row.productName))!;
     bucket.confirmedSatang += row.valueSatang;
     bucket.itemCount += 1;
-    if (row.unvaluedQuantity > 0) {
+    if (categoryRowNeedsReview(row)) {
       bucket.unresolvedItemCount += 1;
       bucket.unresolvedProductNames.push(row.productName);
     }
@@ -213,7 +222,7 @@ function formatCategoryTotal(row: GoodReturnCategoryTotal): string {
   const money = satangToBahtText(row.confirmedSatang);
   const items = `${row.itemCount} รายการ`;
   if (row.unresolvedItemCount > 0) {
-    return `${heading} — ยืนยันได้ ${money} บาท • ${items}\n   ⚠️ รอตรวจ ${row.unresolvedItemCount} รายการ`;
+    return `${heading} — ยืนยันได้ ${money} บาท • ${items}\n   ⚠️ มีข้อมูลรอตรวจ ${row.unresolvedItemCount} รายการ`;
   }
   return `${heading} — ${money} บาท • ${items}`;
 }
@@ -240,9 +249,9 @@ function categorySummaryBlock(report: GoodReturnValueReport): string | null {
       lines.push(...cappedNameList(names, "   "));
     }
   }
-  const unresolved = report.products.filter((row) => row.unvaluedQuantity > 0);
+  const unresolved = report.products.filter(categoryRowNeedsReview);
   if (unresolved.length) {
-    lines.push(`⚠️ รอตรวจมูลค่า ${unresolved.length} รายการ`);
+    lines.push(`⚠️ มีข้อมูลรอตรวจ ${unresolved.length} รายการ`);
     lines.push(...cappedNameList(unresolved.map((row) => row.productName), ""));
   }
   return lines.join("\n");

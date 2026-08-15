@@ -449,8 +449,10 @@ describe("daily good-return value", () => {
     expect(text).toContain("มีข้อมูลผิดปกติจาก 1 ตลาด (จำนวนไม่ทราบ)");
     expect(text).toContain("ตลาด B — หมอนทอง — กก.");
     expect(text).toContain("รวมมูลค่าของดีที่ยืนยันได้ 200.00 บาท");
-    // Not counted as fully calculated: anomalyMarketCount > 0 keeps it out of the complete count.
     expect(text).toContain("✅ สินค้าที่คำนวณมูลค่าได้ครบ 0 รายการ");
+    expect(text).toContain("🥭 ทุเรียน — ยืนยันได้ 200.00 บาท");
+    expect(text).toContain("⚠️ มีข้อมูลรอตรวจ 1 รายการ");
+    expect(text).toContain("• หมอนทอง");
   });
 
   test("29. no 0 กก. physical product row is ever emitted for invalid-only evidence", () => {
@@ -518,6 +520,38 @@ describe("daily good-return value", () => {
     expect(confirmedGoodReturnTotalSatang(report.products)).toBe(8_000);
   });
 
+  test("anomalyMarketCount-only product stays confirmed but flags the category", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-14", [
+      base({ market_name: "ตลาด A", product_name: "กระเทียมกลีบ", transaction_type: "เบิก", quantity: 60, price_per_unit: 100 }),
+      base({ market_name: "ตลาด A", product_name: "กระเทียมกลีบ", quantity: 50 }),
+      base({ market_name: "ตลาด B", product_name: "กระเทียมกลีบ", transaction_type: "เบิก", quantity: 10, price_per_unit: 100 }),
+      base({ market_name: "ตลาด B", product_name: "กระเทียมกลีบ", quantity: null }),
+    ]);
+    expect(report.products).toHaveLength(1);
+    expect(report.products[0]).toMatchObject({
+      productName: "กระเทียมกลีบ",
+      quantity: 50,
+      valuedQuantity: 50,
+      valueSatang: 500_000,
+      unvaluedQuantity: 0,
+      anomalyMarketCount: 1,
+    });
+    const veg = goodReturnCategoryTotals(report.products).find((row) => row.id === "ผ")!;
+    expect(veg.confirmedSatang).toBe(500_000);
+    expect(veg.unresolvedItemCount).toBe(1);
+    expect(veg.unresolvedProductNames).toEqual(["กระเทียมกลีบ"]);
+    const grand = confirmedGoodReturnTotalSatang(report.products);
+    expect(grand).toBe(500_000);
+    expect(goodReturnCategoryTotals(report.products).reduce((sum, row) => sum + row.confirmedSatang, 0)).toBe(grand);
+    const text = buildDailyGoodReturnValueMessages(report).join("\n");
+    expect(text).toContain("🥬 ผัก — ยืนยันได้ 5,000.00 บาท • 1 รายการ");
+    expect(text).toContain("⚠️ มีข้อมูลรอตรวจ 1 รายการ");
+    expect(text).toContain("• กระเทียมกลีบ");
+    expect(text).toContain("มีข้อมูลผิดปกติจาก 1 ตลาด (จำนวนไม่ทราบ)");
+    expect(text).toContain("รวมมูลค่าของดีที่ยืนยันได้ 5,000.00 บาท");
+    expect(text).not.toContain("🥬 ผัก — 5,000.00 บาท");
+  });
+
   test("12. category subtotal sum equals confirmed grand total exactly", () => {
     const report = buildDailyGoodReturnValueReport("2026-08-14", [
       ...valuedPair("หมอนทองเก่า", 2, 171.4),
@@ -550,7 +584,7 @@ describe("daily good-return value", () => {
     const text = buildDailyGoodReturnValueMessages(report).join("\n");
     expect(text).toContain("ราคาที่พบ: 40.00 บาท, 50.00 บาท");
     expect(text).toContain("ยืนยันได้ 0.00 บาท");
-    expect(text).toContain("⚠️ รอตรวจมูลค่า 1 รายการ");
+    expect(text).toContain("⚠️ มีข้อมูลรอตรวจ 1 รายการ");
     expect(text).toContain("• แตงโม");
   });
 

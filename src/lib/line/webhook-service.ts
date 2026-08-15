@@ -54,6 +54,7 @@ import {
   PendingSessionGenerationConflictError,
   type PendingSession,
 } from "@/lib/line/pending-session-service";
+import { NEW_HEADER_REQUIRED_REPLY } from "@/lib/line/pending-produce-reorder";
 import type { StructuredPendingSession } from "@/lib/line/produce-session-commands";
 import { DailySummaryService } from "@/lib/line/daily-summary-service";
 import { SessionDedupService } from "@/lib/line/session-dedup-service";
@@ -199,9 +200,6 @@ const ALREADY_CLOSING_REPLY = "รับทราบแล้ว กำลัง
 
 const STALE_PRODUCE_SESSION_REPLY =
   "พบรายการเดิมที่ยังปิดไม่สมบูรณ์ กรุณาให้ทีมงานเคลียร์รายการเดิมก่อนเริ่มรายการใหม่";
-
-const NEW_HEADER_REQUIRED_REPLY =
-  "ไม่พบรายการที่เปิดอยู่ กรุณาพิมพ์หัวรายการใหม่ก่อนส่งรายการ";
 
 function buildPhysicalInventoryItemParseFailureReply(sequence: number | null): string {
   return [
@@ -997,23 +995,25 @@ export class WebhookService {
         )
       ) {
         try {
-          updated = await pendingService.replaceGeneration({
+          const opened = await pendingService.openPlainTextGeneration({
             sessionKey,
             sourceId,
             expectedSessionGeneration: pending.session_generation,
             text,
             replyToken,
-            lineUserId,
+            lineUserId: lineUserId!,
             lineEventId: eventId,
             lineTimestampMs: event.timestamp,
             markClose,
             expectedItemCount: expectedItemCount ?? undefined,
           });
+          updated = opened.session;
 
-          if (!updated) {
+          if (!opened.opened || !updated) {
             log.warn("pending session generation replacement lost concurrency race", {
               sessionKey,
               staleSessionGeneration: pending.session_generation,
+              reason: opened.reason,
             });
             if (replyToken) {
               await this.replyMessage(replyToken, STALE_PRODUCE_SESSION_REPLY);
@@ -1027,6 +1027,7 @@ export class WebhookService {
             replacementSessionGeneration: updated.session_generation,
             incomingHeader,
             markClose,
+            reconciledCount: opened.reconciled_count ?? 0,
           });
         } catch (replaceError) {
           const errorMessage = replaceError instanceof Error
@@ -1047,6 +1048,62 @@ export class WebhookService {
             }
           }
           return { eventId, eventType: event.type, status: "saved", parsed: false };
+        }
+      } else if (
+        (pending as StructuredPendingSession).entry_origin == null
+        && !incomingHeader
+        && !markClose
+        && hasItemLine(normalizedText)
+        && pending.plain_text_opened_line_timestamp_ms != null
+      ) {
+        try {
+          const reordered = await pendingService.appendOrDeferProduceItem({
+            rawMessageId,
+            sessionKey,
+            sourceId,
+            lineUserId: lineUserId!,
+            lineEventId: eventId,
+            lineTimestampMs: event.timestamp,
+            text,
+            replyToken: replyToken ?? null,
+          });
+          log.info("Produce reorder admission completed", {
+            action: reordered.action,
+            sourceId,
+            lineUserId,
+            lineEventId: eventId,
+            lineTimestampMs: event.timestamp,
+            sessionKey,
+            sessionGeneration: reordered.session_generation ?? pending.session_generation,
+            openerEventId: pending.plain_text_opened_line_event_id ?? null,
+            openerTimestampMs: pending.plain_text_opened_line_timestamp_ms,
+            closeEventId: pending.close_line_event_id,
+            closeTimestampMs: pending.close_event_timestamp_ms,
+          });
+          if (
+            reordered.action === "rejected_before_opener"
+            || reordered.action === "rejected_after_close"
+            || reordered.action === "rejected_orphan"
+          ) {
+            if (replyToken) await this.replyMessage(replyToken, NEW_HEADER_REQUIRED_REPLY);
+          }
+          return { eventId, eventType: event.type, status: "saved", parsed: false };
+        } catch (reorderError) {
+          const errorMessage = reorderError instanceof Error
+            ? reorderError.message
+            : String(reorderError);
+          log.error("Produce reorder admission failed", {
+            sessionKey,
+            lineEventId: eventId,
+            error: errorMessage,
+          });
+          return {
+            eventId,
+            eventType: event.type,
+            status: "error",
+            parsed: false,
+            error: errorMessage,
+          };
         }
       } else {
         try {
@@ -1236,22 +1293,35 @@ export class WebhookService {
       // Header-only → start accumulating (store raw text so parser sees TIME_PREFIX sender)
       log.info("session header detected — starting pending session", { sessionKey });
       try {
-        await pendingService.create(sessionKey, sourceId, text, replyToken, lineUserId);
+        const opened = await pendingService.openPlainTextGeneration({
+          sessionKey,
+          sourceId,
+          lineUserId: lineUserId!,
+          lineEventId: eventId,
+          lineTimestampMs: event.timestamp,
+          text,
+          replyToken: replyToken ?? null,
+          markClose: false,
+        });
+        if (!opened.opened) throw new Error(opened.reason);
+        log.info("plain-text pending opener committed", {
+          action: opened.reconciled_count ? "reconciled" : "opened",
+          sessionKey,
+          sessionGeneration: opened.session?.session_generation,
+          openerEventId: eventId,
+          openerTimestampMs: event.timestamp,
+          reconciledCount: opened.reconciled_count ?? 0,
+        });
       } catch (createErr) {
         const msg = createErr instanceof Error ? createErr.message : String(createErr);
         log.error("pending session create failed", { sessionKey, error: msg });
-      }
-      // Register the header event in the barrier ledger so its text is counted
-      // when the close barrier checks ingest vs admission parity.
-      try {
-        await pendingService.admit(sessionKey, eventId, event.timestamp);
-        await pendingService.registerIngest(sessionKey, eventId, event.timestamp, text);
-      } catch (barrierErr) {
-        log.warn("pending session header barrier registration failed", {
-          sessionKey,
+        return {
           eventId,
-          error: barrierErr instanceof Error ? barrierErr.message : String(barrierErr),
-        });
+          eventType: event.type,
+          status: "error",
+          parsed: false,
+          error: msg,
+        };
       }
       return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
@@ -1262,19 +1332,42 @@ export class WebhookService {
     }
 
     if (hasItemLine(normalizedText)) {
-      // An item line with no active session — most commonly a continuation
-      // sent after the prior generation was terminalized (parser/validation
-      // failure, or fail-closed reconstruction). Must not silently create or
-      // append; the sender needs to restart with a fresh header.
-      log.info("item line received without active pending session", { sessionKey });
-      if (replyToken) {
-        try {
+      try {
+        const reordered = await pendingService.appendOrDeferProduceItem({
+          rawMessageId,
+          sessionKey,
+          sourceId,
+          lineUserId: lineUserId!,
+          lineEventId: eventId,
+          lineTimestampMs: event.timestamp,
+          text,
+          replyToken: replyToken ?? null,
+        });
+        log.info("Produce item persisted for bounded reorder", {
+          action: reordered.action,
+          sourceId,
+          lineUserId,
+          lineEventId: eventId,
+          lineTimestampMs: event.timestamp,
+          sessionKey,
+          sessionGeneration: reordered.session_generation ?? null,
+        });
+        if (reordered.action !== "deferred" && reordered.action !== "admitted"
+            && reordered.action !== "reconciled" && replyToken) {
           await this.replyMessage(replyToken, NEW_HEADER_REQUIRED_REPLY);
-        } catch (e) {
-          log.error("new-header-required reply failed", { error: String(e) });
         }
+        return { eventId, eventType: event.type, status: "saved", parsed: false };
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        log.error("Produce item defer failed", { sessionKey, eventId, error: errorMessage });
+        return {
+          eventId,
+          eventType: event.type,
+          status: "error",
+          parsed: false,
+          error: errorMessage,
+        };
       }
-      return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
 
     log.debug("no parser matched text message — left unprocessed");
@@ -1721,32 +1814,28 @@ export class WebhookService {
     const expectedItemCount = markClose ? parseExpectedItemCount(normalizedText) : null;
 
     try {
-      // create() seeds the row; replaceGeneration() then rotates to a fresh
-      // generation, registers this event in the admission/ingest ledgers, and
-      // applies the close boundary — the same tested path header rotation uses.
-      await pendingService.create(sessionKey, sourceId, text, replyToken, lineUserId);
-      const created = await pendingService.get(sessionKey);
-      if (!created) throw new Error("pending session missing after create");
-
-      const replaced = await pendingService.replaceGeneration({
+      const opened = await pendingService.openPlainTextGeneration({
         sessionKey,
         sourceId,
-        expectedSessionGeneration: created.session_generation,
         text,
         replyToken,
-        lineUserId,
+        lineUserId: lineUserId!,
         lineEventId: eventId,
         lineTimestampMs: event.timestamp,
         markClose,
         expectedItemCount: expectedItemCount ?? undefined,
       });
-      if (!replaced) throw new Error("additional pending session lost concurrency race");
+      const replaced = opened.session;
+      if (!opened.opened || !replaced) {
+        throw new Error(`additional pending session open refused: ${opened.reason}`);
+      }
 
       log.info("additional produce session opened as pending generation", {
         sessionKey,
         sessionGeneration: replaced.session_generation,
         markClose,
         expectedItemCount,
+        reconciledCount: opened.reconciled_count ?? 0,
       });
 
       if (markClose && replyToken) {

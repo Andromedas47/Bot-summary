@@ -7,6 +7,7 @@ import {
   processDueProduceNotifications,
   resendProduceNotification,
 } from "@/lib/line/produce-notification-delivery";
+import { processExpiredPendingProduceEvents } from "@/lib/line/pending-produce-reorder";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -31,15 +32,20 @@ export async function GET(req: NextRequest) {
 
   try {
     const supabase = createServiceClient();
+    // Resolve/reject the bounded reorder ledger before any closing generation
+    // is allowed to enter authoritative Produce persistence.
+    const deferredProduceEvents = await processExpiredPendingProduceEvents(supabase);
     const result = await finalizeDuePendingGenerations(supabase);
     const notifications = await processDueProduceNotifications(supabase);
     logger.info("pending produce finalizer completed", {
       ...result,
+      deferredProduceEvents,
       notifications,
     });
     return NextResponse.json({
       ok: true,
       ...result,
+      deferredProduceEvents,
       notifications,
       triggeredAt: new Date().toISOString(),
     });

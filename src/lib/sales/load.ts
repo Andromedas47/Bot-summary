@@ -869,6 +869,37 @@ async function scanLostProduceMessages(
   supabase: Supabase,
   businessDate: string,
 ): Promise<LostProduceCandidate[]> {
+  const { data: rejectedDeferred, error: deferredError } = await supabase
+    .from("pending_produce_deferred_events")
+    .select("raw_message_id, source_id, raw_text, line_timestamp_ms, status")
+    .in("status", [
+      "rejected_orphan",
+      "rejected_before_opener",
+      "rejected_after_close",
+    ]);
+  if (deferredError) {
+    throw new SalesDataError(
+      `deferred Produce evidence lookup failed: ${deferredError.message}`,
+    );
+  }
+  const deferredLost: LostProduceCandidate[] = (rejectedDeferred ?? [])
+    .filter((row) => row.status.startsWith("rejected_")
+      && produceBusinessDate(row.raw_text, row.line_timestamp_ms) === businessDate)
+    .map((row) => ({
+      id: row.raw_message_id,
+      sourceId: row.source_id,
+      rawText: row.raw_text,
+      attempt: rawMessageFailureAttempt(
+        {
+          id: row.raw_message_id,
+          raw_text: row.raw_text,
+          source_id: row.source_id,
+        },
+        row.line_timestamp_ms,
+        businessDate,
+      ),
+    }));
+
   const candidates = await fetchAllScopeRows<{
     id: string;
     raw_text: string | null;
@@ -898,14 +929,14 @@ async function scanLostProduceMessages(
     if (date !== null && date !== businessDate) continue;
     lost.push({ row, eventTimestampMs, date });
   }
-  if (lost.length === 0) return [];
+  if (lost.length === 0) return deferredLost;
 
   const accounted = await accountedProduceMessages(
     supabase,
     lost.map((entry) => entry.row),
   );
 
-  return lost
+  const completeLost = lost
     .filter((entry) => !accounted.has(entry.row.id))
     .map((entry) => ({
       id: entry.row.id,
@@ -917,6 +948,7 @@ async function scanLostProduceMessages(
         entry.date,
       ),
     }));
+  return [...completeLost, ...deferredLost];
 }
 
 /**

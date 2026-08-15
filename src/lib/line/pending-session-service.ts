@@ -68,6 +68,65 @@ export interface PendingSession {
   finalize_confirm_line_event_id?: string | null;
   /** 0061: environment ownership — see src/lib/runtime-environment.ts. */
   runtime_environment?:           "production" | "preview" | "development" | null;
+  /** Hotfix: authoritative opener boundary for a plain-text generation. */
+  plain_text_opened_line_event_id?: string | null;
+  plain_text_opened_line_timestamp_ms?: number | null;
+}
+
+export interface OpenPlainTextGenerationInput {
+  sessionKey: string;
+  sourceId: string;
+  lineUserId: string;
+  lineEventId: string;
+  lineTimestampMs: number;
+  text: string;
+  replyToken: string | null;
+  markClose: boolean;
+  expectedItemCount?: number;
+  expectedSessionGeneration?: string;
+}
+
+export interface OpenPlainTextGenerationResult {
+  opened: boolean;
+  reason: string;
+  reconciled_count?: number;
+  session?: PendingSession;
+}
+
+export type DeferredProduceAction =
+  | "admitted"
+  | "reconciled"
+  | "deferred"
+  | "rejected_orphan"
+  | "rejected_before_opener"
+  | "rejected_after_close";
+
+export interface AppendOrDeferProduceItemResult {
+  action: DeferredProduceAction;
+  reason?: string;
+  idempotent?: boolean;
+  session_generation?: string | null;
+  session?: PendingSession;
+}
+
+export interface ExpiredDeferredProduceEvent {
+  line_event_id: string;
+  raw_message_id: string;
+  session_key: string;
+  source_id: string;
+  line_user_id: string;
+  line_timestamp_ms: number;
+  raw_text: string;
+  reply_token: string | null;
+  status: Exclude<DeferredProduceAction, "admitted" | "reconciled" | "deferred">;
+  defer_reason: string;
+  session_generation: string | null;
+  opener_line_event_id: string | null;
+  opener_line_timestamp_ms: number | null;
+  close_line_event_id: string | null;
+  close_line_timestamp_ms: number | null;
+  received_at: string;
+  resolved_at: string;
 }
 
 export interface ConfirmFinalizationResult {
@@ -135,6 +194,15 @@ interface PendingRawMessage {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyClient = SupabaseClient<any>;
 
+function isMissingReorderRpc(error: unknown): boolean {
+  const value = error as { message?: unknown } | null;
+  const message = error instanceof Error
+    ? error.message
+    : typeof value?.message === "string" ? value.message : String(error);
+  return /open_pending_plain_text_generation|append_or_defer_pending_produce_item|claim_expired_pending_produce_events/i.test(message)
+    && /unexpected rpc/i.test(message);
+}
+
 export class PendingSessionService {
   constructor(private readonly supabase: AnyClient) {}
 
@@ -154,6 +222,135 @@ export class PendingSessionService {
     }
     if (!data) return { session: null, reason: "no_row" };
     return { session: data as PendingSession, reason: "found" };
+  }
+
+  async openPlainTextGeneration(
+    input: OpenPlainTextGenerationInput,
+  ): Promise<OpenPlainTextGenerationResult> {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { data, error } = await (this.supabase as any).rpc(
+        "open_pending_plain_text_generation",
+        {
+          p_session_key: input.sessionKey,
+          p_source_id: input.sourceId,
+          p_line_user_id: input.lineUserId,
+          p_line_event_id: input.lineEventId,
+          p_line_timestamp_ms: input.lineTimestampMs,
+          p_raw_text: input.text,
+          p_reply_token: input.replyToken,
+          p_mark_close: input.markClose,
+          p_expected_item_count: input.expectedItemCount ?? null,
+          p_expected_session_generation: input.expectedSessionGeneration ?? null,
+          p_runtime_environment: getRuntimeEnvironment(),
+        },
+      );
+      if (error) {
+        if (isMissingReorderRpc(error)) return this.openPlainTextGenerationLegacy(input);
+        throw new Error(`plain-text pending generation open failed: ${error.message}`);
+      }
+      // A few repository fakes model an unknown RPC as a null success. The
+      // deployed database never does; retain the rolling legacy contract there.
+      if (!data) return this.openPlainTextGenerationLegacy(input);
+      return data as OpenPlainTextGenerationResult;
+    } catch (error) {
+      if (isMissingReorderRpc(error)) return this.openPlainTextGenerationLegacy(input);
+      throw error;
+    }
+  }
+
+  private async openPlainTextGenerationLegacy(
+    input: OpenPlainTextGenerationInput,
+  ): Promise<OpenPlainTextGenerationResult> {
+    let existing = await this.get(input.sessionKey);
+    if (!existing) {
+      await this.create(
+        input.sessionKey,
+        input.sourceId,
+        input.text,
+        input.replyToken,
+        input.lineUserId,
+      );
+      existing = await this.get(input.sessionKey);
+    }
+    if (!existing) throw new Error("pending session missing after legacy create");
+    const expected = input.expectedSessionGeneration ?? existing.session_generation;
+    const session = await this.replaceGeneration({
+      sessionKey: input.sessionKey,
+      sourceId: input.sourceId,
+      expectedSessionGeneration: expected,
+      text: input.text,
+      replyToken: input.replyToken,
+      lineUserId: input.lineUserId,
+      lineEventId: input.lineEventId,
+      lineTimestampMs: input.lineTimestampMs,
+      markClose: input.markClose,
+      expectedItemCount: input.expectedItemCount,
+    });
+    return {
+      opened: session !== null,
+      reason: session ? "legacy_schema_fallback" : "generation_conflict",
+      reconciled_count: 0,
+      session: session ?? undefined,
+    };
+  }
+
+  async appendOrDeferProduceItem(input: {
+    rawMessageId: string;
+    sessionKey: string;
+    sourceId: string;
+    lineUserId: string;
+    lineEventId: string;
+    lineTimestampMs: number;
+    text: string;
+    replyToken: string | null;
+  }): Promise<AppendOrDeferProduceItemResult> {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { data, error } = await (this.supabase as any).rpc(
+        "append_or_defer_pending_produce_item",
+        {
+          p_raw_message_id: input.rawMessageId,
+          p_session_key: input.sessionKey,
+          p_source_id: input.sourceId,
+          p_line_user_id: input.lineUserId,
+          p_line_event_id: input.lineEventId,
+          p_line_timestamp_ms: input.lineTimestampMs,
+          p_raw_text: input.text,
+          p_reply_token: input.replyToken,
+          p_runtime_environment: getRuntimeEnvironment(),
+        },
+      );
+      if (error) {
+        if (isMissingReorderRpc(error)) return { action: "rejected_orphan" };
+        throw new Error(`Produce item reorder admission failed: ${error.message}`);
+      }
+      if (!data) return { action: "rejected_orphan" };
+      return data as AppendOrDeferProduceItemResult;
+    } catch (error) {
+      if (isMissingReorderRpc(error)) return { action: "rejected_orphan" };
+      throw error;
+    }
+  }
+
+  async claimExpiredDeferredProduceEvents(
+    limit = 25,
+  ): Promise<ExpiredDeferredProduceEvent[]> {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { data, error } = await (this.supabase as any).rpc(
+        "claim_expired_pending_produce_events",
+        { p_limit: limit, p_runtime_environment: getRuntimeEnvironment() },
+      );
+      if (error) {
+        if (isMissingReorderRpc(error)) return [];
+        throw new Error(`expired Produce reorder claim failed: ${error.message}`);
+      }
+      return (data ?? []) as ExpiredDeferredProduceEvent[];
+    } catch (error) {
+      if (isMissingReorderRpc(error)) return [];
+      throw error;
+    }
   }
 
   async create(

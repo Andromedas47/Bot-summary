@@ -36,6 +36,8 @@ const UNIT_ALIASES: Record<string, string> = {
   "แพ็ค": "แพค", "แพ็ก": "แพค", "เเพ็ค": "แพค", "เเพค": "แพค",
   "แพต": "แพค", "แพ็ด": "แพค", "แผค": "แพค",
   "กก.": "โล", "กก": "โล", "กิโล": "โล", "กิโลกรัม": "โล",
+  // Shop-confirmed shorthand. Same container, factor 1 — never a quantity change.
+  "ปุก": "กระปุก",
 };
 
 // Explicit, shop-verified conversion factors. Quantity in the raw unit

@@ -42,7 +42,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { normalizedMarketLabel } from "@/lib/market";
+import { canonicalMarketLabel } from "@/lib/market";
 import { normalizeUnitAlias } from "@/lib/parsers/weigh-session/units";
 import type { WeighSession, WeighSessionItem } from "@/lib/parsers/weigh-session/types";
 import { normalizeProductName } from "@/lib/summary/remaining-fruit";
@@ -87,15 +87,20 @@ export function normalizeSellerLabel(value: string | null | undefined): string {
 /**
  * The market identity, falling back to the raw label when it cannot be resolved.
  *
- * `normalizedMarketLabel` answers "" for a title the market boundary does not
+ * `canonicalMarketLabel` answers "" for a title the market boundary does not
  * recognise, and two DIFFERENT unrecognised markets would then share one
  * identity — a false duplicate, which refuses legitimate business data. Falling
  * back to the trimmed raw label keeps them apart. It errs toward persisting,
  * which is the correct direction for a blocker.
+ *
+ * Reviewed aliases resolve here for the same reason they resolve in
+ * `accountability_round_same_market`: a spelling variant of one market is one
+ * business identity, and it must not be able to buy itself a second
+ * fingerprint. `พาซีโอ้` and `พาซิโอ้` are the same withdrawal.
  */
 function marketIdentity(value: string | null | undefined): string {
-  const normalized = normalizedMarketLabel(value);
-  return normalized || (value ?? "").normalize("NFC").replace(/\s+/g, " ").trim();
+  const canonical = canonicalMarketLabel(value);
+  return canonical || (value ?? "").normalize("NFC").replace(/\s+/g, " ").trim();
 }
 
 /**

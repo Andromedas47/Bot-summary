@@ -201,3 +201,49 @@ describe("binding outcomes", () => {
     expect(db.calls).toHaveLength(0);
   });
 });
+
+describe("near-match market refusal", () => {
+  function tomWithdrawal(market: string) {
+    return doc([
+      `ต้อม-${market} เบิก 14/8/2569`,
+      "1.มังคุด45บาท",
+      "10โล",
+      "จบรายการเบิก",
+    ]);
+  }
+
+  it("refuses and names the existing round's market instead of opening a second one", async () => {
+    const db = fakeDb({
+      outcome: "market_near_match",
+      accountability_round_id: "4aa36324-79a1-4ee3-9161-e64b86d81632",
+      market_label: "พาซิโอ้",
+    });
+
+    const result = await bindPlainTextRound(db, REF, tomWithdrawal("พาชิโอ้"));
+
+    expect(result.status).toBe("refused");
+    if (result.status !== "refused") throw new Error("unreachable");
+    expect(result.reason).toBe("market_near_match");
+    expect(result.detail).toContain("พาชิโอ้");
+    expect(result.detail).toContain("พาซิโอ้");
+    expect(result.detail).toContain("ยังไม่ได้เปิดรอบใหม่");
+    // The RPC was asked to create; it refused, and nothing here overrides that.
+    expect(db.calls[0].p_is_new_round).toBe(true);
+  });
+
+  it("fails closed on a pre-cutover business date too", async () => {
+    const db = fakeDb({
+      outcome: "market_near_match",
+      accountability_round_id: "round-1",
+      market_label: "พาซิโอ้",
+    });
+    const parsed = doc([
+      `ต้อม-พาชิโอ้ เบิก ${LEGACY_DATE}`,
+      "1.มังคุด45บาท",
+      "10โล",
+      "จบรายการเบิก",
+    ]);
+    expect(parsed.date! < PLAIN_TEXT_ROUND_ENFORCEMENT_FROM).toBe(true);
+    expect((await bindPlainTextRound(db, REF, parsed)).status).toBe("refused");
+  });
+});

@@ -15,6 +15,7 @@
     "test:pg:p4a": "bun test src/lib/produce/migration-p4a.pg.test.ts",
     "test:pg:p4a-round-binding": "bun test src/lib/produce/migration-p4a-round-binding.pg.test.ts",
     "test:pg:round-market-identity": "bun test src/lib/produce/migration-round-market-identity.pg.test.ts",
+    "test:pg:market-identity-guard": "bun test src/lib/produce/migration-market-identity-guard.pg.test.ts",
     "test:pg:product-code": "bun test src/lib/produce/migration-product-code-dictionary.pg.test.ts"
   },
   "dependencies": {

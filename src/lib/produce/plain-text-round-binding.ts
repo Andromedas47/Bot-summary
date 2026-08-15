@@ -44,6 +44,7 @@ export type PlainTextRoundBinding =
 export type PlainTextRoundRefusal =
   | "no_round"
   | "market_mismatch"
+  | "market_near_match"
   | "ambiguous"
   | "not_found"
   | "identity_mismatch"
@@ -80,6 +81,33 @@ function marketMismatchReply(roundMarketLabel: string | null, sentMarketLabel: s
       : `รายการนี้ระบุตลาด "${sentMarketLabel}" ซึ่งไม่ตรงกับรอบที่เปิดอยู่`,
     "ระบบยังไม่ได้บันทึกอะไร",
     "กรุณาแก้ชื่อตลาดให้ตรงกับรอบเบิก แล้วส่งใหม่",
+  ].join("\n");
+}
+
+/**
+ * A withdrawal whose market is one character from a round that already holds
+ * this seller's day.
+ *
+ * Production 2026-08-14, ต้อม: `พาซีโอ้` opened a second accountability round
+ * beside `พาซิโอ้`, and the day's returns then had two masters to choose from.
+ * The two confirmed spellings are reviewed aliases now, so this reply is for the
+ * NEXT variant nobody has reviewed yet. It suggests and refuses; it never
+ * merges, because a typo and a genuinely new market look identical from here and
+ * only the operator knows which this is.
+ */
+function marketNearMatchReply(
+  roundMarketLabel: string | null,
+  sentMarketLabel: string,
+): string {
+  return [
+    "⛔ ชื่อตลาดใกล้เคียงกับรอบที่เปิดอยู่ แต่ไม่ตรงกัน",
+    `ส่งมา: "${sentMarketLabel}"`,
+    ...(roundMarketLabel ? [`รอบที่มีอยู่: "${roundMarketLabel}"`] : []),
+    "ระบบยังไม่ได้บันทึกอะไร และยังไม่ได้เปิดรอบใหม่",
+    roundMarketLabel
+      ? `หากเป็นตลาดเดียวกัน ให้แก้ชื่อตลาดเป็น "${roundMarketLabel}" แล้วส่งใหม่`
+      : "หากเป็นตลาดเดียวกัน ให้แก้ชื่อตลาดให้ตรงกับรอบเดิม แล้วส่งใหม่",
+    "หากเป็นคนละตลาดจริง กรุณาแจ้งผู้ดูแลให้เพิ่มชื่อตลาดนี้ก่อน",
   ].join("\n");
 }
 
@@ -192,6 +220,16 @@ export async function bindPlainTextRound(
         status: "refused",
         reason: "market_mismatch",
         detail: marketMismatchReply(result.market_label ?? null, market),
+      };
+    case "market_near_match":
+      // Fail closed on every business date, for the same reason as
+      // market_mismatch: a round WAS found for this seller and day, so there is
+      // no pre-cutover reading of this state. Creating the second round is the
+      // corruption the guard exists to prevent.
+      return {
+        status: "refused",
+        reason: "market_near_match",
+        detail: marketNearMatchReply(result.market_label ?? null, market),
       };
     case "no_round":
       // Before the cutover the withdrawal side of this round predates the

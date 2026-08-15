@@ -113,3 +113,83 @@ export function displayMarketName(value: string | null | undefined, fallback = "
 export function normalizedMarketLabel(marketName: string | null | undefined): string {
   return displayMarketName(marketName, "").normalize("NFC").trim();
 }
+
+/**
+ * The reviewed market alias registry — the TypeScript mirror of
+ * `line_guided_menu_market_aliases`.
+ *
+ * There is ONE market identity in this system and the reviewed catalog owns it.
+ * Postgres reads it from the catalog tables via
+ * `accountability_round_market_code`; the duplicate fingerprint has to compute
+ * the same identity offline and deterministically (it is a hash input, and a
+ * hash that depends on a database round-trip is not a hash), so the reviewed
+ * rows are mirrored here.
+ *
+ * The mirror is not allowed to drift: `market-alias-registry.test.ts` parses the
+ * catalog migrations and fails if these entries and the seeded rows disagree.
+ *
+ * Reviewed aliases only. Every entry traces to a shop-confirmed spelling of a
+ * market that already exists in the catalog. Nothing is inferred, and a label
+ * that is not in here keeps exact-normalized-equality — two unknown labels are
+ * never merged.
+ */
+export const REVIEWED_MARKET_ALIASES: Readonly<Record<string, string>> = {
+  // 0055 — the reviewed catalog as first seeded.
+  "ตลาด72": "เฉลิมฯ72",
+  "เฉลิม72": "เฉลิมฯ72",
+  "พาชิโอ้ทุเรียน": "พาซิโอ้ทุเรียน",
+  "พาสิโอ้ทุเรียน": "พาซิโอ้ทุเรียน",
+  "พาชิโอ้ ทุเรียน": "พาซิโอ้ทุเรียน",
+  "พาชิโอ้ผลไม้": "พาซิโอ้ผลไม้",
+  "พาชิโอ้ ผลไม้": "พาซิโอ้ผลไม้",
+  "ตลาดพาซิโอ้ผลไม้": "พาซิโอ้ผลไม้",
+  "พาสิโอ้ผลไม้": "พาซิโอ้ผลไม้",
+  "พาชิโอ้ผัก": "พาซิโอ้ผัก",
+  "พาสิโอ้ผัก": "พาซิโอ้ผัก",
+  "ตลาดราชพฤก": "ราชพฤกษ์",
+  "ตลาดราชพฤกษ์": "ราชพฤกษ์",
+  "ราชพฤก": "ราชพฤกษ์",
+  "เลียบทางด่วน": "เลียบด่วน",
+  "วัดตะกลํ่า": "วัดตะกล่ำ",
+  "ตลาดทุ่งลานนา": "วัดทุ่งลานนา",
+  "ตลาดวัดทุ่งลานนา": "วัดทุ่งลานนา",
+  "ทุ่งลานนา": "วัดทุ่งลานนา",
+  "หน้าเซเว่น": "หน้าเซเวน",
+  "ทรัพย์พัน2": "ทรัพย์พัน",
+  // Production 2026-08-14/15, seller ต้อม, group C98f83da…: the same market
+  // opened two accountability rounds because these two spellings were not
+  // reviewed. Confirmed by the shop as one market.
+  "พาซีโอ้": "พาซิโอ้",
+  "พาสิโอ้": "พาซิโอ้",
+};
+
+/** Canonical market labels, i.e. the reviewed catalog's own `label` column. */
+export const REVIEWED_MARKET_LABELS: readonly string[] = [
+  "เฉลิมฯ72",
+  "เลียบด่วน",
+  "พาซิโอ้",
+  "พาซิโอ้ทุเรียน",
+  "พาซิโอ้ผลไม้",
+  "พาซิโอ้ผัก",
+  "ราชพฤกษ์",
+  "รถเร่",
+  "ทรัพย์พัน",
+  "หน้าเซเวน",
+  "วัดตะกล่ำ",
+  "วัดทุ่งลานนา",
+  "วิหาร",
+];
+
+/**
+ * The market identity a label belongs to — reviewed alias resolved.
+ *
+ * This is the value anything comparing two markets must compare. It is
+ * deliberately NOT fuzzy: a label the reviewed catalog does not know comes back
+ * normalized but otherwise untouched, so an unreviewed variant stays its own
+ * identity and fails closed downstream rather than merging into a neighbour.
+ */
+export function canonicalMarketLabel(marketName: string | null | undefined): string {
+  const normalized = normalizedMarketLabel(marketName);
+  if (!normalized) return "";
+  return REVIEWED_MARKET_ALIASES[normalized] ?? normalized;
+}

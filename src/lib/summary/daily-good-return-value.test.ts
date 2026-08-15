@@ -1,8 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { buildDailyGoodReturnValueMessages, buildDailyGoodReturnValueReport } from "./daily-good-return-value";
+import {
+  buildDailyGoodReturnValueMessages,
+  buildDailyGoodReturnValueReport,
+  confirmedGoodReturnTotalSatang,
+  goodReturnCategoryTotals,
+} from "./daily-good-return-value";
 import { LINE_MESSAGE_MAX_CODE_POINTS, countCodePoints } from "./line-chunking";
 import type { RemainingFruitSourceRow } from "./remaining-fruit";
 import type { GoodReturnValueProduct } from "./daily-good-return-value";
+import { dictionaryCategoryFor } from "@/lib/produce/product-code/category";
 
 const base = (overrides: Partial<RemainingFruitSourceRow>): RemainingFruitSourceRow => ({ market_name: "ตลาด A", product_name: "หมอนทอง", quantity: 1, unit: "โล", transaction_type: "คืน", ...overrides });
 const valued = (productName: string): GoodReturnValueProduct => ({ productName, unit: "โล", quantity: 1, valuedQuantity: 1, unvaluedQuantity: 0, valueSatang: 1_000, anomalyMarketCount: 0 });
@@ -28,10 +34,14 @@ describe("daily good-return value", () => {
     expect(buildDailyGoodReturnValueMessages(report).join("\n")).not.toMatch(/^\d+\. .*0\.00 บาท/m);
   });
 
-  test("caps each scheduled message at fifteen product rows with continuous numbering", () => {
+  test("numbers product rows continuously and prints category totals once", () => {
     const rows = Array.from({ length: 16 }, (_, i) => [base({ product_name: `P${i}`, transaction_type: "เบิก", quantity: 2, price_per_unit: 10 }), base({ product_name: `P${i}`, quantity: 1 })]).flat();
     const messages = buildDailyGoodReturnValueMessages(buildDailyGoodReturnValueReport("2026-08-01", rows));
-    expect(messages).toHaveLength(2); expect(messages[0]).toContain("รายการ 1–15"); expect(messages[1]).toContain("รายการ 16–16"); expect(messages[0]).toContain("15. "); expect(messages[1]).toContain("16. ");
+    const joined = messages.join("\n");
+    expect(joined).toContain("15. ");
+    expect(joined).toContain("16. ");
+    expect(joined.match(/💰 สรุปมูลค่าของดีชั่งคืนแยกตามหมวด/g)).toHaveLength(1);
+    expect(joined).toContain("รวมมูลค่าของดีที่ยืนยันได้ 160.00 บาท");
   });
 
   test("fails closed on every invalid withdrawal price while accepting a proven zero", () => {
@@ -87,13 +97,13 @@ describe("daily good-return value", () => {
     expect(messages.at(-1)).toContain("ไม่ได้แสดงสินค้าบางส่วน 2 รายการ เนื่องจากขีดจำกัด LINE");
   });
 
-  test("combines capacity and oversized display omissions in final summary only", () => {
+  test("combines oversized display omissions in the final summary only", () => {
     const products = [valued("ย".repeat(3_920)), ...Array.from({ length: 75 }, (_, index) => valued(`P${index}`))];
     const messages = buildDailyGoodReturnValueMessages({ businessDate: "2026-08-01", products, anomalies: [], hasActivity: true });
-    expect(messages.length).toBeLessThanOrEqual(5);
     expect(messages.every((message) => countCodePoints(message) <= LINE_MESSAGE_MAX_CODE_POINTS)).toBe(true);
-    expect(messages.at(-1)).toContain("ไม่ได้แสดงสินค้าบางส่วน 31 รายการ เนื่องจากขีดจำกัด LINE");
+    expect(messages.at(-1)).toContain("ไม่ได้แสดงสินค้าบางส่วน 1 รายการ เนื่องจากขีดจำกัด LINE");
     expect(messages.slice(0, -1).join("\n")).not.toContain("ไม่ได้แสดงสินค้าบางส่วน");
+    expect(messages.join("\n").match(/💰 สรุปมูลค่าของดีชั่งคืนแยกตามหมวด/g)).toHaveLength(1);
   });
 
   // ── Market-level anomaly business rules ───────────────────────────────────
@@ -262,22 +272,20 @@ describe("daily good-return value", () => {
     const expectedTotal = report.products.reduce((sum, row) => sum + row.valueSatang, 0);
 
     const messages = buildDailyGoodReturnValueMessages(report);
-    expect(messages.length).toBeLessThanOrEqual(5);
     const joined = messages.join("\n\n");
+    expect(messages.every((message) => countCodePoints(message) <= LINE_MESSAGE_MAX_CODE_POINTS)).toBe(true);
 
-    // Summary present.
+    // Summary present once, including category money.
     expect(joined).toContain("รวมมูลค่าของดีที่ยืนยันได้");
+    expect(joined.match(/💰 สรุปมูลค่าของดีชั่งคืนแยกตามหมวด/g)).toHaveLength(1);
     // At least one real anomaly block with a market name is delivered.
     expect(joined).toContain("⚠️ รายละเอียดข้อมูลผิดปกติ");
     expect(joined).toMatch(/ตลาดผิดปกติ\d+ — ทุเรียน/);
 
-    // Separate, correctly-computed omission counts.
     const omittedProductMatch = joined.match(/ไม่ได้แสดงสินค้าบางส่วน (\d+) รายการ เนื่องจากขีดจำกัด LINE/);
     const omittedAnomalyMatch = joined.match(/ไม่ได้แสดงรายละเอียดผิดปกติ (\d+) รายการ เนื่องจากขีดจำกัด LINE/);
-    expect(omittedProductMatch).not.toBeNull();
-    const omittedProductCount = Number(omittedProductMatch![1]);
+    const omittedProductCount = omittedProductMatch ? Number(omittedProductMatch[1]) : 0;
     const omittedAnomalyCount = omittedAnomalyMatch ? Number(omittedAnomalyMatch[1]) : 0;
-    expect(omittedProductCount).toBeGreaterThan(0);
 
     // No duplicate delivered products or anomalies.
     const productNumbers = [...joined.matchAll(/^(\d+)\. .+ — [\d.,]+ /gm)].map((m) => Number(m[1]));
@@ -289,10 +297,9 @@ describe("daily good-return value", () => {
     const totalLine = joined.match(/รวมมูลค่าของดีที่ยืนยันได้ ([\d,]+\.\d{2}) บาท/);
     expect(totalLine).not.toBeNull();
     expect(Math.round(Number(totalLine![1].replace(/,/g, "")) * 100)).toBe(expectedTotal);
+    expect(goodReturnCategoryTotals(report.products).reduce((sum, row) => sum + row.confirmedSatang, 0)).toBe(expectedTotal);
 
-    // Reproduce omittedAnomalyCount independently: total anomalies minus how many anomaly numbers were actually delivered.
     expect(omittedAnomalyCount + anomalyNumbers.length).toBe(report.anomalies.length);
-    // Reproduce omittedProductCount independently via delivered product numbering.
     expect(omittedProductCount + productNumbers.length).toBe(report.products.length);
   });
 
@@ -469,5 +476,143 @@ describe("daily good-return value", () => {
     const messages = buildDailyGoodReturnValueMessages(report);
     expect(messages.every((message) => countCodePoints(message) <= LINE_MESSAGE_MAX_CODE_POINTS)).toBe(true);
     expect(messages.length).toBeLessThanOrEqual(5);
+  });
+
+  const valuedPair = (productName: string, quantity: number, price: number, market = "ตลาด A"): RemainingFruitSourceRow[] => [
+    base({ market_name: market, product_name: productName, transaction_type: "เบิก", quantity: quantity + 1, price_per_unit: price }),
+    base({ market_name: market, product_name: productName, quantity }),
+  ];
+
+  test("10. confirmed amount contributes to the matching dictionary category subtotal", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-14", [
+      ...valuedPair("หมอนทอง", 1, 100),
+      ...valuedPair("มะม่วงเขียวมรกต", 2, 50),
+      ...valuedPair("กวางตุ้งไทย", 4, 20),
+      ...valuedPair("กะปิ", 5, 10),
+      ...valuedPair("เห็ดนางฟ้า", 1, 30),
+      ...valuedPair("ผลไม้กล่อง", 1, 40),
+      ...valuedPair("สินค้าABC", 3, 8),
+    ]);
+    const totals = Object.fromEntries(goodReturnCategoryTotals(report.products).map((row) => [row.id, row]));
+    expect(totals.ท).toMatchObject({ confirmedSatang: 10_000, itemCount: 1, unresolvedItemCount: 0 });
+    expect(totals.ม).toMatchObject({ confirmedSatang: 10_000, itemCount: 1, unresolvedItemCount: 0 });
+    expect(totals.ผ).toMatchObject({ confirmedSatang: 8_000, itemCount: 1, unresolvedItemCount: 0 });
+    expect(totals.ป).toMatchObject({ confirmedSatang: 5_000, itemCount: 1, unresolvedItemCount: 0 });
+    expect(totals.ห).toMatchObject({ confirmedSatang: 3_000, itemCount: 1, unresolvedItemCount: 0 });
+    expect(totals.พ).toMatchObject({ confirmedSatang: 4_000, itemCount: 1, unresolvedItemCount: 0 });
+    expect(totals.uncategorized).toMatchObject({ confirmedSatang: 2_400, itemCount: 1, unresolvedItemCount: 0 });
+  });
+
+  test("11. unresolved amount does not contribute to confirmed category money", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-14", [
+      ...valuedPair("กวางตุ้งไทย", 4, 20),
+      base({ product_name: "ผักบุ้งไทย", transaction_type: "เบิก", quantity: 5, price_per_unit: 10 }),
+      base({ product_name: "ผักบุ้งไทย", transaction_type: "เบิก", quantity: 5, price_per_unit: 20 }),
+      base({ product_name: "ผักบุ้งไทย", quantity: 3 }),
+    ]);
+    const veg = goodReturnCategoryTotals(report.products).find((row) => row.id === "ผ")!;
+    expect(veg.confirmedSatang).toBe(8_000);
+    expect(veg.unresolvedItemCount).toBe(1);
+    expect(veg.unresolvedProductNames).toContain("ผักบุ้งไทย");
+    expect(report.products.find((row) => row.productName === "ผักบุ้งไทย")?.valueSatang).toBe(0);
+    expect(confirmedGoodReturnTotalSatang(report.products)).toBe(8_000);
+  });
+
+  test("12. category subtotal sum equals confirmed grand total exactly", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-14", [
+      ...valuedPair("หมอนทองเก่า", 2, 171.4),
+      ...valuedPair("มะม่วงเขียวมรกต", 1, 40),
+      ...valuedPair("กะปิ", 1, 15),
+      ...valuedPair("สินค้าABC", 1, 12),
+      base({ product_name: "มะละกอ", transaction_type: "เบิก", quantity: 5, price_per_unit: 10 }),
+      base({ product_name: "มะละกอ", transaction_type: "เบิก", quantity: 5, price_per_unit: 30 }),
+      base({ product_name: "มะละกอ", quantity: 2 }),
+    ]);
+    const categorySum = goodReturnCategoryTotals(report.products).reduce((sum, row) => sum + row.confirmedSatang, 0);
+    const grand = confirmedGoodReturnTotalSatang(report.products);
+    expect(grand).toBe(report.products.reduce((sum, row) => sum + row.valueSatang, 0));
+    expect(categorySum).toBe(grand);
+    const text = buildDailyGoodReturnValueMessages(report).join("\n");
+    const totalLine = text.match(/รวมมูลค่าของดีที่ยืนยันได้ ([\d,]+\.\d{2}) บาท/);
+    expect(Math.round(Number(totalLine![1].replace(/,/g, "")) * 100)).toBe(grand);
+  });
+
+  test("13. multi-price unresolved behavior is unchanged", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-01", [
+      base({ market_name: "ตลาดกี้", product_name: "แตงโม", transaction_type: "เบิก", quantity: 20, price_per_unit: 40 }),
+      base({ market_name: "ตลาดกี้", product_name: "แตงโม", transaction_type: "เบิก", quantity: 20, price_per_unit: 50 }),
+      base({ market_name: "ตลาดกี้", product_name: "แตงโม", quantity: 14 }),
+    ]);
+    expect(report.anomalies).toEqual([
+      expect.objectContaining({ productName: "แตงโม", blockers: ["ราคาจากรายการเบิกขัดแย้งกัน"], priceEvidence: [4_000, 5_000] }),
+    ]);
+    expect(report.products[0]).toMatchObject({ valueSatang: 0, unvaluedQuantity: 14 });
+    const text = buildDailyGoodReturnValueMessages(report).join("\n");
+    expect(text).toContain("ราคาที่พบ: 40.00 บาท, 50.00 บาท");
+    expect(text).toContain("ยืนยันได้ 0.00 บาท");
+    expect(text).toContain("⚠️ รอตรวจมูลค่า 1 รายการ");
+    expect(text).toContain("• แตงโม");
+  });
+
+  test("14. pagination does not duplicate category money totals", () => {
+    const rows = Array.from({ length: 40 }, (_, i) => valuedPair(`P${i}`, 1, 10)).flat();
+    const messages = buildDailyGoodReturnValueMessages(buildDailyGoodReturnValueReport("2026-08-14", rows));
+    const headingHits = messages.filter((message) => message.includes("💰 สรุปมูลค่าของดีชั่งคืนแยกตามหมวด"));
+    expect(headingHits).toHaveLength(1);
+    expect(headingHits[0]).toContain("รวมมูลค่าของดีที่ยืนยันได้");
+    const itemPages = messages.filter((message) => /รายการ \d+–\d+ จากทั้งหมด/.test(message) && !message.includes("💰 สรุปมูลค่าของดีชั่งคืนแยกตามหมวด"));
+    expect(itemPages.length).toBeGreaterThan(0);
+    expect(itemPages.join("\n")).not.toContain("💰 สรุปมูลค่าของดีชั่งคืนแยกตามหมวด");
+  });
+
+  test("empty dictionary categories are omitted from the LINE summary", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-14", valuedPair("หมอนทอง", 1, 100));
+    const text = buildDailyGoodReturnValueMessages(report).join("\n");
+    expect(text).toContain("🥭 ทุเรียน — 100.00 บาท • 1 รายการ");
+    expect(text).not.toContain("🍄 เห็ด");
+    expect(text).not.toContain("0.00 บาท • 0 รายการ");
+  });
+
+  test("reviewed alias rows classify under the canonical dictionary category", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-14", valuedPair("อะโวคาโด้", 1, 80));
+    expect(report.products[0]?.productName).toBe("อะโวคาโด");
+    expect(dictionaryCategoryFor(report.products[0]!.productName)).toBe("ม");
+    const text = buildDailyGoodReturnValueMessages(report).join("\n");
+    expect(text).toContain("🍉 ผลไม้");
+    expect(text).toContain("อะโวคาโด");
+    expect(text).not.toContain("❓ ไม่จัดหมวด");
+  });
+
+  test("2026-08-14 fixture products leave ไม่จัดหมวด and keep the confirmed total", () => {
+    const names = [
+      "มะม่วงเขียวมรกต", "พุทราไทย", "หมอนทองเก่า", "ปลาลิ้นหมา", "ปลาซิว", "ปลาผีเสื้อ",
+      "ปลาหมึกกะตอย", "ปลาหวานแดง", "ปลาหวานไม่งา", "กะปิ", "ปลาทูหอม", "ปลาหมึกแผ่น",
+      "ปลากิมสั่ว", "ปลาทาโร่", "ปลาหวานงา", "ปลาจวด",
+    ];
+    const report = buildDailyGoodReturnValueReport("2026-08-14", names.flatMap((name, index) => valuedPair(name, 1, 10 + index)));
+    expect(report.products.every((row) => dictionaryCategoryFor(row.productName) !== "uncategorized")).toBe(true);
+    expect(report.products.filter((row) => dictionaryCategoryFor(row.productName) === "ม")).toHaveLength(2);
+    expect(report.products.filter((row) => dictionaryCategoryFor(row.productName) === "ท")).toHaveLength(1);
+    expect(report.products.filter((row) => dictionaryCategoryFor(row.productName) === "ป")).toHaveLength(13);
+    const grand = confirmedGoodReturnTotalSatang(report.products);
+    expect(goodReturnCategoryTotals(report.products).reduce((sum, row) => sum + row.confirmedSatang, 0)).toBe(grand);
+    expect(grand).toBe(names.reduce((sum, _, index) => sum + (10 + index) * 100, 0));
+    const text = buildDailyGoodReturnValueMessages(report).join("\n");
+    expect(text).toContain("🍉 ผลไม้");
+    expect(text).toContain("🥭 ทุเรียน");
+    expect(text).toContain("🐟 ปลา / อาหารแห้ง / ของแห้ง");
+    expect(text).not.toContain("❓ ไม่จัดหมวด");
+    expect(text.match(/💰 สรุปมูลค่าของดีชั่งคืนแยกตามหมวด/g)).toHaveLength(1);
+  });
+
+  test("uncategorized monitoring stays visible with money and names", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-14", [
+      ...valuedPair("หมอนทอง", 1, 100),
+      ...valuedPair("สินค้าABC", 2, 15),
+    ]);
+    const text = buildDailyGoodReturnValueMessages(report).join("\n");
+    expect(text).toContain("❓ ไม่จัดหมวด — 30.00 บาท • 1 รายการ");
+    expect(text).toContain("   • สินค้าABC");
+    expect(text).toContain("รวมมูลค่าของดีที่ยืนยันได้ 130.00 บาท");
   });
 });

@@ -5,7 +5,14 @@ import { quantityTimesSatang, roundHalfUp, satangToBahtText } from "@/lib/sales/
 import { isQaMarketLabel } from "@/lib/sales/qa-scopes";
 import { latestDataBlock, type LatestDataLookup } from "@/lib/summary/latest-data-hint";
 import { LINE_MESSAGE_MAX_CODE_POINTS, countCodePoints } from "@/lib/summary/line-chunking";
-import { STOCK_CATEGORY_EMOJI, STOCK_CATEGORY_ORDER, stockCategoryFor } from "@/lib/summary/stock-categories";
+import {
+  UNCATEGORIZED_CATEGORY_ID,
+  dictionaryCategoryFor,
+  reportCategoryHeading,
+  reportCategoryIndex,
+  REPORT_CATEGORY_ORDER,
+  type ReportCategoryId,
+} from "@/lib/produce/product-code/category";
 import { dedupeRemainingSourceRows, formatQuantity, normalizeProductName, type RemainingFruitSourceRow } from "@/lib/summary/remaining-fruit";
 import { transactionBucket } from "@/lib/summary/transactions";
 
@@ -27,6 +34,39 @@ export interface MarketAnomaly { marketName: string; productName: string; unit: 
 /** hasActivity: any non-QA, resolved-bucket produce transaction row existed for this date — distinguishes a genuine sold-out day (withdrawals, zero good returns) from a genuinely empty date (no relevant rows at all). */
 export interface GoodReturnValueReport { businessDate: string; products: GoodReturnValueProduct[]; anomalies: MarketAnomaly[]; hasActivity: boolean; }
 
+/** Confirmed money for one dictionary category. Unresolved rows do not add satang. */
+export interface GoodReturnCategoryTotal {
+  id: ReportCategoryId;
+  confirmedSatang: number;
+  itemCount: number;
+  unresolvedItemCount: number;
+  unresolvedProductNames: string[];
+}
+
+export function confirmedGoodReturnTotalSatang(products: readonly GoodReturnValueProduct[]): number {
+  return products.reduce((sum, row) => sum + row.valueSatang, 0);
+}
+
+/**
+ * Partition report rows by dictionary category. Every product belongs to exactly
+ * one bucket, so SUM(confirmedSatang) === confirmed grand total.
+ */
+export function goodReturnCategoryTotals(products: readonly GoodReturnValueProduct[]): GoodReturnCategoryTotal[] {
+  const buckets = new Map<ReportCategoryId, GoodReturnCategoryTotal>(
+    REPORT_CATEGORY_ORDER.map((id) => [id, { id, confirmedSatang: 0, itemCount: 0, unresolvedItemCount: 0, unresolvedProductNames: [] }]),
+  );
+  for (const row of products) {
+    const bucket = buckets.get(dictionaryCategoryFor(row.productName))!;
+    bucket.confirmedSatang += row.valueSatang;
+    bucket.itemCount += 1;
+    if (row.unvaluedQuantity > 0) {
+      bucket.unresolvedItemCount += 1;
+      bucket.unresolvedProductNames.push(row.productName);
+    }
+  }
+  return REPORT_CATEGORY_ORDER.map((id) => buckets.get(id)!).filter((bucket) => bucket.itemCount > 0);
+}
+
 /**
  * Canonical market/seller labels for the day's accountability rounds.
  *
@@ -45,7 +85,7 @@ interface Cell {
   prices: Set<number>; hasWithdrawal: boolean; invalidPrice: boolean;
 }
 interface RowEntry { block: string; shortened: boolean; }
-interface Entry extends RowEntry { category: string; }
+interface Entry extends RowEntry { category: ReportCategoryId; }
 
 function priceSatang(value: number | null | undefined): number | null {
   if (value === null || value === undefined || !Number.isFinite(value) || value < 0) return null;
@@ -67,10 +107,10 @@ function cellBlockers(cell: Cell): Blocker[] {
 }
 
 const productOrder = (a: GoodReturnValueProduct, b: GoodReturnValueProduct) =>
-  STOCK_CATEGORY_ORDER.indexOf(stockCategoryFor(a.productName)) - STOCK_CATEGORY_ORDER.indexOf(stockCategoryFor(b.productName)) ||
+  reportCategoryIndex(dictionaryCategoryFor(a.productName)) - reportCategoryIndex(dictionaryCategoryFor(b.productName)) ||
   b.quantity - a.quantity || a.productName.localeCompare(b.productName, "th") || a.unit.localeCompare(b.unit, "th");
 const anomalyOrder = (a: MarketAnomaly, b: MarketAnomaly) =>
-  STOCK_CATEGORY_ORDER.indexOf(stockCategoryFor(a.productName)) - STOCK_CATEGORY_ORDER.indexOf(stockCategoryFor(b.productName)) ||
+  reportCategoryIndex(dictionaryCategoryFor(a.productName)) - reportCategoryIndex(dictionaryCategoryFor(b.productName)) ||
   a.productName.localeCompare(b.productName, "th") || a.unit.localeCompare(b.unit, "th") || a.marketName.localeCompare(b.marketName, "th");
 
 /**
@@ -164,6 +204,50 @@ function header(report: GoodReturnValueReport, part: number, totalParts: number,
   const lines = part === 1 ? ["📦 สรุปของดีชั่งคืนประจำวัน", `ข้อมูลวันที่ ${formatThaiDate(report.businessDate)}`, "หมายเหตุ: รายงานนี้สรุปเฉพาะของดีที่ชั่งคืน ไม่ใช่สต๊อกตรวจนับจริง"] : [`📦 ของดีชั่งคืน — ต่อ ${part}/${totalParts}`];
   return [...lines, `รายการ ${first}–${last} จากทั้งหมด ${report.products.length} รายการ`];
 }
+const NAME_LIST_CAP = 15;
+/** Oversized LINE-fallback names must never be copied into the summary. */
+const NAME_LIST_MAX_CODE_POINTS = 60;
+
+function formatCategoryTotal(row: GoodReturnCategoryTotal): string {
+  const heading = reportCategoryHeading(row.id);
+  const money = satangToBahtText(row.confirmedSatang);
+  const items = `${row.itemCount} รายการ`;
+  if (row.unresolvedItemCount > 0) {
+    return `${heading} — ยืนยันได้ ${money} บาท • ${items}\n   ⚠️ รอตรวจ ${row.unresolvedItemCount} รายการ`;
+  }
+  return `${heading} — ${money} บาท • ${items}`;
+}
+
+function cappedNameList(names: readonly string[], indent: string): string[] {
+  const unique = [...new Set(names)]
+    .filter((name) => countCodePoints(name) <= NAME_LIST_MAX_CODE_POINTS)
+    .sort((a, b) => a.localeCompare(b, "th"));
+  if (!unique.length) return [];
+  const shown = unique.slice(0, NAME_LIST_CAP);
+  const lines = shown.map((name) => `${indent}• ${name}`);
+  if (unique.length > shown.length) lines.push(`${indent}• … และอีก ${unique.length - shown.length} รายการ`);
+  return lines;
+}
+
+function categorySummaryBlock(report: GoodReturnValueReport): string | null {
+  const totals = goodReturnCategoryTotals(report.products);
+  if (!totals.length) return null;
+  const lines = ["💰 สรุปมูลค่าของดีชั่งคืนแยกตามหมวด"];
+  for (const row of totals) {
+    lines.push(formatCategoryTotal(row));
+    if (row.id === UNCATEGORIZED_CATEGORY_ID) {
+      const names = report.products.filter((product) => dictionaryCategoryFor(product.productName) === UNCATEGORIZED_CATEGORY_ID).map((product) => product.productName);
+      lines.push(...cappedNameList(names, "   "));
+    }
+  }
+  const unresolved = report.products.filter((row) => row.unvaluedQuantity > 0);
+  if (unresolved.length) {
+    lines.push(`⚠️ รอตรวจมูลค่า ${unresolved.length} รายการ`);
+    lines.push(...cappedNameList(unresolved.map((row) => row.productName), ""));
+  }
+  return lines.join("\n");
+}
+
 function summaryBlock(report: GoodReturnValueReport, omittedProductCount: number, omittedAnomalyCount: number): string {
   // A product is only "fully calculated" when nothing about it is flagged —
   // anomalyMarketCount > 0 means some market's evidence is still untrustworthy,
@@ -173,13 +257,14 @@ function summaryBlock(report: GoodReturnValueReport, omittedProductCount: number
   return [
     omittedProductCount ? `⚠️ ไม่ได้แสดงสินค้าบางส่วน ${omittedProductCount} รายการ เนื่องจากขีดจำกัด LINE` : null,
     omittedAnomalyCount ? `⚠️ ไม่ได้แสดงรายละเอียดผิดปกติ ${omittedAnomalyCount} รายการ เนื่องจากขีดจำกัด LINE` : null,
-    `รวมมูลค่าของดีที่ยืนยันได้ ${satangToBahtText(report.products.reduce((sum, row) => sum + row.valueSatang, 0))} บาท`,
+    categorySummaryBlock(report),
+    `รวมมูลค่าของดีที่ยืนยันได้ ${satangToBahtText(confirmedGoodReturnTotalSatang(report.products))} บาท`,
     `✅ สินค้าที่คำนวณมูลค่าได้ครบ ${complete} รายการ`,
     report.anomalies.length ? `⚠️ พบข้อมูลผิดปกติ ${report.anomalies.length} รายการ จาก ${anomalyMarketCount} ตลาด` : null,
   ].filter((line): line is string => Boolean(line)).join("\n\n");
 }
 function lines(entries: readonly Entry[]): string {
-  return entries.flatMap((item, index) => [index === 0 || item.category !== entries[index - 1]!.category ? `${STOCK_CATEGORY_EMOJI[item.category as keyof typeof STOCK_CATEGORY_EMOJI]} ${item.category}` : null, item.block]).filter(Boolean).join("\n");
+  return entries.flatMap((item, index) => [index === 0 || item.category !== entries[index - 1]!.category ? reportCategoryHeading(item.category) : null, item.block]).filter(Boolean).join("\n");
 }
 type DeliveredGroup = { kind: "product"; entries: Entry[]; text: string } | { kind: "anomaly"; entries: RowEntry[]; text: string };
 
@@ -271,7 +356,7 @@ export function buildDailyGoodReturnValueMessages(
   // depends on the final part count, which packing itself determines).
   const initialProductParts: Entry[][] = []; let currentProduct: Entry[] = [];
   for (const [index, row] of report.products.entries()) {
-    const entry: Entry = { category: stockCategoryFor(row.productName), block: productBlock(row, index + 1), shortened: false };
+    const entry: Entry = { category: dictionaryCategoryFor(row.productName), block: productBlock(row, index + 1), shortened: false };
     if (currentProduct.length && countCodePoints(lines([...currentProduct, entry])) > GOOD_RETURN_READABLE_MAX_CODE_POINTS) { initialProductParts.push(currentProduct); currentProduct = []; }
     currentProduct.push(entry);
   }

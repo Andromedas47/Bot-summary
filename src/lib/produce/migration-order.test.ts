@@ -22,6 +22,12 @@ const MIGRATIONS = join(import.meta.dir, "..", "..", "..", "supabase", "migratio
 
 const COMPATIBILITY = "produce_fingerprint_compatibility";
 const MARKET_IDENTITY = "produce_market_identity_guard";
+/**
+ * Shipped with PR #51 and still unapplied in Production at preflight, so it is
+ * a release prerequisite rather than history. It only has to land before the
+ * compatibility migration; nothing in either PR A migration touches it.
+ */
+const PREREQUISITE = "cancel_duplicate_plain_text_round";
 
 /** Exactly how the CLI orders them: lexicographic on filename. */
 function sortedMigrations(): string[] {
@@ -38,6 +44,12 @@ function indexOfMigration(slug: string): number {
 describe("PR A migration ordering", () => {
   it("applies fingerprint compatibility BEFORE market identity activation", () => {
     expect(indexOfMigration(COMPATIBILITY)).toBeLessThan(indexOfMigration(MARKET_IDENTITY));
+  });
+
+  it("keeps the outstanding PR #51 prerequisite ahead of both", () => {
+    const prerequisite = indexOfMigration(PREREQUISITE);
+    expect(prerequisite).toBeLessThan(indexOfMigration(COMPATIBILITY));
+    expect(prerequisite).toBeLessThan(indexOfMigration(MARKET_IDENTITY));
   });
 
   it("puts both after every migration Production has already applied", () => {

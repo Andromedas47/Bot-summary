@@ -41,7 +41,8 @@ wrong end of the round.
 The read-only Production audit of 2026-08-15 found nine distinct finalized
 withdrawal names outside the approved vocabulary — `มะม่วงเขียวรกต`,
 `เขียวมรกต`, `สับปรด`, `ไซมัส`, `อินทผรัม`, `อินมผรัม`, `อะโวคาโด้`,
-`ปลาอินทรีย์`, `หมึกกระตอย` — across 19 rows and five sellers. 2026-08-14 held
+`ปลาอินทรีย์`, `หมึกกระตอย` — across 19 rows and six sellers (ขวัญ, ดำ, ต้อม,
+แทน, มิ้น, เมย์). 2026-08-14 held
 33 such names, almost all of them misspellings of a product that already has a
 code.
 

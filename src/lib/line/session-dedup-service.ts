@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { WeighSession, WeighSessionItem } from "@/lib/parsers/weigh-session/types";
-import { weighSessionBusinessFingerprint } from "@/lib/produce/business-fingerprint";
+import {
+  weighSessionBusinessFingerprint,
+  weighSessionCompatibilityFingerprints,
+} from "@/lib/produce/business-fingerprint";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyClient = SupabaseClient<any>;
@@ -58,9 +61,36 @@ export function computeSessionHash(parsed: WeighSession): string {
   return weighSessionBusinessFingerprint(parsed);
 }
 
-/** Both identities of one document — new first, then the legacy fallback. */
+/**
+ * The hashes this attempt RESERVES: the V2 identity first, then the V1
+ * fingerprints of the same document under the market's other reviewed
+ * spellings.
+ *
+ * Reserving the V1 class — not merely reading it — is what makes the rollout
+ * safe. During a rolling deploy the previous build is still writing V1 hashes;
+ * if the new build only read them, two concurrent submissions of one document
+ * could each find nothing and both persist. Reserving puts both builds on the
+ * same UNIQUE index, so exactly one wins. See business-fingerprint.ts for the
+ * V0/V1/V2 definitions.
+ *
+ * V0 is deliberately absent: it is never written any more, and deleting a
+ * historical V0 row on a failed attempt would erase another session's proof.
+ */
+export function sessionHashReservations(parsed: WeighSession): string[] {
+  return [
+    ...new Set([
+      computeSessionHash(parsed),
+      ...weighSessionCompatibilityFingerprints(parsed),
+    ]),
+  ];
+}
+
+/**
+ * Every identity this document could already be recorded under — the
+ * reservations plus the pre-PR #51 legacy hash. Read-only; never written.
+ */
 export function sessionHashCandidates(parsed: WeighSession): string[] {
-  return [...new Set([computeSessionHash(parsed), computeLegacySessionHash(parsed)])];
+  return [...new Set([...sessionHashReservations(parsed), computeLegacySessionHash(parsed)])];
 }
 
 export function computeItemHash(
@@ -85,17 +115,18 @@ export function computeItemHash(
 export class SessionDedupService {
   constructor(private readonly supabase: AnyClient) {}
 
+  /** One ledger row per reserved hash. Same evidence on each — see reservations. */
   private payload(parsed: WeighSession, rawText?: string) {
     const sortedTxTypes = [...new Set(parsed.items.map((i) => i.transaction_type))].sort().join(",");
 
-    return {
-      session_hash:     computeSessionHash(parsed),
+    return sessionHashReservations(parsed).map((hash) => ({
+      session_hash:     hash,
       transaction_date: parsed.date ?? null,
       staff_name:       parsed.staff_name,
       market_name:      parsed.session_title ?? "",
       transaction_type: sortedTxTypes,
       raw_text:         rawText ?? null,
-    };
+    }));
   }
 
   async isDuplicate(parsed: WeighSession): Promise<boolean> {
@@ -126,11 +157,18 @@ export class SessionDedupService {
     return (data ?? []).length > 0;
   }
 
+  /**
+   * Give back what THIS attempt reserved, and only that.
+   *
+   * Never the V0 legacy hash: this code has never written one, so a row under
+   * it belongs to a session imported before PR #51 and deleting it would make
+   * that session look like it never landed.
+   */
   async release(parsed: WeighSession): Promise<void> {
     const { error } = await this.supabase
       .from("imported_sessions")
       .delete()
-      .in("session_hash", sessionHashCandidates(parsed));
+      .in("session_hash", sessionHashReservations(parsed));
 
     if (error) throw new Error(`imported_sessions release failed: ${error.message}`);
   }

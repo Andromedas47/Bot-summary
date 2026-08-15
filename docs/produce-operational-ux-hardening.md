@@ -50,8 +50,62 @@ Separately, the shop's shorthand `ปุก` for `กระปุก` is blocked
   group/date/seller does **not** create a second round. It fails closed and
   names the existing market so the operator can retype it.
 
+* **Duplicate-fingerprint compatibility.** Folding aliases changes the market
+  component of the business fingerprint, which means the duplicate blocker would
+  stop recognising rows the previous release wrote. See below.
+
 **Not in PR A.** No product auto-aliasing, no confirmation *state*. The
 near-match guard is a refusal with a suggestion, which is the safe first version.
+
+### Fingerprint generations
+
+Three algorithms have written `imported_sessions.session_hash`:
+
+| | shipped | market component |
+|---|---|---|
+| **V0** | pre-PR #51 | raw parsed strings, ordered by item number — a different algorithm entirely |
+| **V1** | PR #51 | canonical business content, market = **normalized raw label** |
+| **V2** | PR A | canonical business content, market = **reviewed canonical identity** |
+
+A session's own identity is always V2. V0 and V1 stay *readable*, and no
+historical row is ever rewritten or backfilled.
+
+V1 is the one that bites: Production holds V1 rows written between the two
+releases — seller ต้อม / `พาซีโอ้` on 2026-08-14 and 2026-08-15, plus
+`ราชพฤก`, `ตลาด72` and `เลียบทางด่วน` rows for other sellers. Under V2 those
+labels fold to their canonical markets and hash differently, so a resend would
+not recognise its own recent history.
+
+`try_finalize_pending_generation` therefore takes a `p_compatibility_hashes`
+array: the V1 fingerprints of the same document under the market's *other
+reviewed spellings*. It **reserves** them on the UNIQUE
+`imported_sessions.session_hash` index before reserving V2, and a main session
+that cannot take all of them is a duplicate. Reserving rather than reading is
+what makes a rolling deploy safe — the previous build writes V1 directly, so
+both builds have to meet on the same index.
+
+The compatibility set is the reviewed equivalence class and nothing wider. An
+unreviewed near-miss such as `พาชิโอ้` is its own market in the fingerprint
+exactly as it is everywhere else.
+
+### Rollout order for PR A
+
+**Application first, migration second.** The two are independent — the
+TypeScript alias registry is static, not read from the catalog — but the order
+still matters:
+
+* *Migration first* would give the database alias-aware round binding while the
+  running build still fingerprints `พาซีโอ้` and `พาซิโอ้` apart. One round,
+  two accepted identities: the exact double-persist this phase exists to stop.
+* *Application first* is the safe direction. The new build folds the aliases in
+  the fingerprint immediately, so duplicate protection is *stricter* than round
+  binding during the window. Rounds stay split until the catalog rows land,
+  which is the status quo, not a regression.
+
+Within the application rollout itself, old and new instances coexist for the
+length of one deploy. The compatibility reservation covers that window in both
+directions, proven by the two `rolling deploy` cases and the two concurrency
+cases in `migration-fingerprint-compatibility.pg.test.ts`.
 
 ## PR B — cross-user pending takeover
 
@@ -115,8 +169,9 @@ Historical cleanup of the ต้อม 2026-08-14 pair happens here, after preve
 
 ## Rollout order
 
-A → B → C → D, in that order and separately deployed. A is prevention and must
-land first so cleanup in D is not immediately re-polluted. B unblocks the
+A → B → C → D, in that order and separately deployed; within A, application
+before migration (see above). A is prevention and must land first so cleanup in
+D is not immediately re-polluted. B unblocks the
 operational dead-end that most often *causes* the retry garbage D cleans up. C
 is additive UX on top of both. Nothing in this phase mutates historical
 Production business data.

@@ -557,6 +557,13 @@ export class PendingSessionService {
     rawText:            string,
     sessionPayload:     Record<string, unknown>,
     items:              Array<Record<string, unknown>>,
+    /**
+     * Previous-generation identities of the SAME business document. The RPC
+     * reserves these before it reserves `sessionHash`, which is what keeps two
+     * application builds from each persisting one document during a rolling
+     * deploy. See business-fingerprint.ts for V0/V1/V2.
+     */
+    compatibilityHashes: string[] = [],
   ): Promise<TryFinalizeResult> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data, error } = await (this.supabase as any).rpc("try_finalize_pending_generation", {
@@ -568,6 +575,7 @@ export class PendingSessionService {
       p_raw_text:            rawText,
       p_session:             sessionPayload,
       p_items:               items,
+      p_compatibility_hashes: compatibilityHashes,
     });
     if (error) throw new Error(`pending session finalize failed: ${error.message}`);
     return data as TryFinalizeResult;

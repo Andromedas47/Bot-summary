@@ -20,6 +20,7 @@ import {
   computeItemHash,
   computeSessionHash,
 } from "@/lib/line/session-dedup-service";
+import { weighSessionCompatibilityFingerprints } from "@/lib/produce/business-fingerprint";
 import { buildSeedFromStructuredMetadata } from "@/lib/parsers/weigh-session/seed";
 import {
   produceIngestIdempotencyKey,
@@ -429,7 +430,13 @@ export async function finalizePendingGeneration(
     item_hash: computeItemHash(parsed, item),
   }));
 
+  // The document's own identity is the current-generation hash. The
+  // compatibility set is what the SAME document was hashed as by the previous
+  // generation, under the market's other reviewed spellings; the RPC reserves
+  // it atomically so neither a historical row nor a concurrent old-build
+  // submission can be missed. See business-fingerprint.ts for V0/V1/V2.
   const businessFingerprint = computeSessionHash(parsed);
+  const compatibilityFingerprints = weighSessionCompatibilityFingerprints(parsed);
   const result = await service.tryFinalizeGeneration(
     snapshot.session_key,
     snapshot.session_generation,
@@ -439,6 +446,7 @@ export async function finalizePendingGeneration(
     finalText,
     sessionPayload,
     itemPayload,
+    compatibilityFingerprints,
   );
 
   if (result.status === "duplicate") {

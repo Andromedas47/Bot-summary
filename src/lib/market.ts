@@ -193,3 +193,28 @@ export function canonicalMarketLabel(marketName: string | null | undefined): str
   if (!normalized) return "";
   return REVIEWED_MARKET_ALIASES[normalized] ?? normalized;
 }
+
+const SPELLINGS_BY_CANONICAL: ReadonlyMap<string, readonly string[]> = (() => {
+  const byCanonical = new Map<string, string[]>();
+  for (const [alias, canonical] of Object.entries(REVIEWED_MARKET_ALIASES)) {
+    const spellings = byCanonical.get(canonical) ?? [canonical];
+    spellings.push(alias);
+    byCanonical.set(canonical, spellings);
+  }
+  return byCanonical;
+})();
+
+/**
+ * Every reviewed spelling of one market — the canonical label first, then its
+ * aliases, sorted so callers get a stable order.
+ *
+ * This is the equivalence class a previous fingerprint generation could have
+ * written the same business document under, back when the market component of
+ * the hash was the raw label rather than the canonical identity. A label with
+ * no reviewed aliases answers with just itself.
+ */
+export function reviewedMarketSpellings(canonicalLabel: string): readonly string[] {
+  const spellings = SPELLINGS_BY_CANONICAL.get(canonicalLabel);
+  if (!spellings) return canonicalLabel ? [canonicalLabel] : [];
+  return [spellings[0], ...spellings.slice(1).sort()];
+}

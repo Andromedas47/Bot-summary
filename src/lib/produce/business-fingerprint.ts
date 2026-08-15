@@ -42,7 +42,11 @@
  */
 
 import { createHash } from "node:crypto";
-import { normalizedMarketLabel } from "@/lib/market";
+import {
+  canonicalMarketLabel,
+  normalizedMarketLabel,
+  reviewedMarketSpellings,
+} from "@/lib/market";
 import { normalizeUnitAlias } from "@/lib/parsers/weigh-session/units";
 import type { WeighSession, WeighSessionItem } from "@/lib/parsers/weigh-session/types";
 import { normalizeProductName } from "@/lib/summary/remaining-fruit";
@@ -85,18 +89,35 @@ export function normalizeSellerLabel(value: string | null | undefined): string {
 }
 
 /**
- * The market identity, falling back to the raw label when it cannot be resolved.
+ * The fingerprint's market component, per generation. See the V0/V1/V2 note at
+ * the bottom of this module.
  *
- * `normalizedMarketLabel` answers "" for a title the market boundary does not
- * recognise, and two DIFFERENT unrecognised markets would then share one
- * identity — a false duplicate, which refuses legitimate business data. Falling
- * back to the trimmed raw label keeps them apart. It errs toward persisting,
- * which is the correct direction for a blocker.
+ * Both resolvers fall back to the trimmed raw label when the market boundary
+ * does not recognise the title. Answering "" there would make two DIFFERENT
+ * unrecognised markets share one identity — a false duplicate, which refuses
+ * legitimate business data. The fallback errs toward persisting, which is the
+ * correct direction for a blocker.
  */
-function marketIdentity(value: string | null | undefined): string {
-  const normalized = normalizedMarketLabel(value);
-  return normalized || (value ?? "").normalize("NFC").replace(/\s+/g, " ").trim();
+type MarketResolver = (value: string | null | undefined) => string;
+
+function rawLabel(value: string | null | undefined): string {
+  return (value ?? "").normalize("NFC").replace(/\s+/g, " ").trim();
 }
+
+/** V1 — the PR #51 generation: the normalized raw label, aliases NOT folded. */
+const v1MarketIdentity: MarketResolver = (value) =>
+  normalizedMarketLabel(value) || rawLabel(value);
+
+/**
+ * V2 — current: the reviewed canonical market identity.
+ *
+ * Reviewed aliases resolve here for the same reason they resolve in
+ * `accountability_round_same_market`: a spelling variant of one market is one
+ * business identity, and it must not be able to buy itself a second
+ * fingerprint. `พาซีโอ้` and `พาซิโอ้` are the same withdrawal.
+ */
+const marketIdentity: MarketResolver = (value) =>
+  canonicalMarketLabel(value) || rawLabel(value);
 
 /**
  * The accounting identity of a transaction type. เบิกเพิ่ม folds onto เบิก
@@ -139,7 +160,10 @@ export function canonicalItemLines(items: readonly BusinessItemInput[]): string[
 }
 
 /** The canonical document, before hashing. Exported for test diagnostics. */
-export function canonicalBusinessContent(input: BusinessContentInput): string {
+export function canonicalBusinessContent(
+  input: BusinessContentInput,
+  resolveMarket: MarketResolver = marketIdentity,
+): string {
   const transactionTypes = [
     ...new Set(input.items.map((item) => canonicalTransactionType(item.transactionType))),
   ].sort().join(",");
@@ -147,15 +171,18 @@ export function canonicalBusinessContent(input: BusinessContentInput): string {
   return [
     input.businessDate ?? "",
     normalizeSellerLabel(input.sellerLabel),
-    marketIdentity(input.marketLabel),
+    resolveMarket(input.marketLabel),
     transactionTypes,
     canonicalItemLines(input.items).join("\n"),
   ].join("||");
 }
 
-export function businessContentFingerprint(input: BusinessContentInput): string {
+export function businessContentFingerprint(
+  input: BusinessContentInput,
+  resolveMarket: MarketResolver = marketIdentity,
+): string {
   return createHash("sha256")
-    .update(canonicalBusinessContent(input), "utf8")
+    .update(canonicalBusinessContent(input, resolveMarket), "utf8")
     .digest("hex");
 }
 
@@ -172,14 +199,84 @@ function fromWeighItem(item: WeighSessionItem): BusinessItemInput {
   };
 }
 
-/** Write-path adapter: the fingerprint of a freshly parsed document. */
-export function weighSessionBusinessFingerprint(parsed: WeighSession): string {
-  return businessContentFingerprint({
+function businessContentOf(parsed: WeighSession): BusinessContentInput {
+  return {
     businessDate: parsed.date,
     sellerLabel: parsed.staff_name,
     marketLabel: parsed.session_title,
     items: parsed.items.map(fromWeighItem),
-  });
+  };
+}
+
+/** Write-path adapter: the V2 fingerprint of a freshly parsed document. */
+export function weighSessionBusinessFingerprint(parsed: WeighSession): string {
+  return businessContentFingerprint(businessContentOf(parsed));
+}
+
+/**
+ * The V1 fingerprints of the SAME business document — one per reviewed spelling
+ * of its market other than the canonical one.
+ *
+ * Why this exists
+ * ---------------
+ * Three fingerprint generations have written `imported_sessions.session_hash`:
+ *
+ *   V0  pre-PR #51. The raw parsed strings, ordered by item number.
+ *       `computeLegacySessionHash` in session-dedup-service.ts.
+ *   V1  PR #51. Canonical business content — canonical product, canonical unit,
+ *       the item multiset, base transaction types — but the market component is
+ *       the NORMALIZED RAW LABEL, with no reviewed alias folding.
+ *   V2  PR #53, current. The same business content with the REVIEWED CANONICAL
+ *       market identity.
+ *
+ * Only V2 is ever written as a session's identity. But Production already holds
+ * V1 rows — seller ต้อม, market พาซีโอ้, 2026-08-15 among them — and after V2
+ * ships, a resend of that document canonicalizes to พาซิโอ้ and hashes
+ * differently. Without this set the duplicate blocker would not recognise its
+ * own recent history, and the document would persist twice.
+ *
+ * The set is the reviewed equivalence class and nothing wider: for canonical
+ * `พาซิโอ้` it covers exactly `พาซีโอ้` and `พาสิโอ้`. An unreviewed near-miss
+ * such as `พาชิโอ้` is its own market here, exactly as it is everywhere else,
+ * so unrelated markets can never share a hash. A market with no reviewed
+ * aliases, or a title the market boundary cannot read at all, produces an empty
+ * set — its V1 and V2 hashes are already identical.
+ */
+export function weighSessionCompatibilityFingerprints(parsed: WeighSession): string[] {
+  const canonical = canonicalMarketLabel(parsed.session_title);
+  if (!canonical) return [];
+
+  const seen = new Set<string>([weighSessionBusinessFingerprint(parsed)]);
+  const compatibility: string[] = [];
+  for (const spelling of reviewedMarketSpellings(canonical)) {
+    const hash = weighSessionLegacyMarketFingerprint(parsed, spelling);
+    if (seen.has(hash)) continue;
+    seen.add(hash);
+    compatibility.push(hash);
+  }
+  return compatibility;
+}
+
+/**
+ * The V1 fingerprint of this document — the PR #51 generation, whose market
+ * component is the raw normalized label.
+ *
+ * `spelling` reproduces the hash the PR #51 code WOULD have written had the
+ * header carried that market label instead. That is faithful because V1's
+ * market component was `normalizedMarketLabel(session_title)`, which for a
+ * header naming `spelling` is `spelling` itself.
+ *
+ * Exported so the regression tests can seed `imported_sessions` with genuine
+ * previous-generation hashes rather than with hand-copied constants.
+ */
+export function weighSessionLegacyMarketFingerprint(
+  parsed: WeighSession,
+  spelling?: string,
+): string {
+  return businessContentFingerprint(
+    businessContentOf(parsed),
+    spelling === undefined ? v1MarketIdentity : () => spelling,
+  );
 }
 
 export function weighSessionBusinessContent(parsed: WeighSession): string {

@@ -7,7 +7,9 @@ fail closed, and none of that changes here.
 What is not yet safe is the *operator experience around* those refusals. Real
 shops type imperfectly. A one-character difference in a market name currently
 produces a second business identity; a misspelled product name creates a second
-product; a shorthand unit produces a block with no route forward.
+product; a shorthand unit produces a block with no route forward; a pending
+document belongs to whoever opened it, so a second operator in the same group
+cannot finish it.
 
 ## The invariant every change in this phase preserves
 
@@ -24,12 +26,18 @@ Concretely:
 * Suggestions are computed from evidence that already exists (the reviewed
   market catalog, the approved product dictionary, this round's own withdrawal
   master), never invented.
+* Historical evidence is never destroyed to make a current attempt succeed.
 
-> **Note.** PR #53 (market / vocabulary identity guard) adds its own sections to
-> this file on its branch. Both are additive; the two versions merge by
-> concatenation.
+## Status
 
-## Product Vocabulary Guard
+| change | state |
+|---|---|
+| Product Vocabulary Guard (PR #54) | **merged, Production-active** |
+| 08:00 Good Return category classification (PR #55) | **merged, Production-active** |
+| PR A — market identity guard + fingerprint compatibility (PR #53) | in review |
+| PR B / C / D | not started |
+
+## Product Vocabulary Guard  *(PR #54 — shipped)*
 
 **Problem.** A withdrawal is where a product identity is *created*. Nothing
 checked the spelling at that moment, so `4มะม่วงเขียวรกต30บาท` finalized as a
@@ -42,9 +50,8 @@ The read-only Production audit of 2026-08-15 found nine distinct finalized
 withdrawal names outside the approved vocabulary — `มะม่วงเขียวรกต`,
 `เขียวมรกต`, `สับปรด`, `ไซมัส`, `อินทผรัม`, `อินมผรัม`, `อะโวคาโด้`,
 `ปลาอินทรีย์`, `หมึกกระตอย` — across 19 rows and six sellers (ขวัญ, ดำ, ต้อม,
-แทน, มิ้น, เมย์). 2026-08-14 held
-33 such names, almost all of them misspellings of a product that already has a
-code.
+แทน, มิ้น, เมย์). 2026-08-14 held 33 such names, almost all of them misspellings
+of a product that already has a code.
 
 ### The dictionary is still NOT a hard allowlist
 
@@ -89,7 +96,7 @@ they are the same item.
 ### The reviewed alias contract
 
 `PRODUCT_ALIASES` is *reporting* canonicalization. It is not promoted to
-withdrawal-intake authority here. The policy, stated once:
+withdrawal-intake authority. The policy, stated once:
 
 > At intake an alias spelling is **shown**, not **applied**.
 
@@ -125,19 +132,243 @@ No migration. `produce_entry_validation_reviews.exceptions` is `jsonb` with no
 constraint on the exception kind, and it already stores the exact set that was
 shown.
 
-### Interaction with the duplicate fingerprint
+## PR A — market identity guard + fingerprint compatibility  *(PR #53, in review)*
 
-None, by construction. The fingerprint is computed from the parsed item names,
-and no name is ever rewritten — a suggestion the operator never accepted cannot
-reach it. A corrected document is different content, so it is a different
-fingerprint and a different digest; a confirmed new product is fingerprinted
-under the raw name that was actually confirmed.
+**Problem.** `พาซิโอ้`, `พาซีโอ้` and `พาสิโอ้` are one real market. Production
+2026-08-14 holds two accountability rounds for seller ต้อม because of it.
+Separately, the shop's shorthand `ปุก` for `กระปุก` is blocked by P4A.
 
-### Deferred finalization
+**Change.**
 
-`runProduceFinalizeGate` re-checks the review from live data and never presents
-or confirms anything of its own, exactly as it does for price. A document whose
-vocabulary review was never acknowledged fails closed at the deferred finalizer
-instead of persisting — which is the correct outcome, and is what the two
-existing finalizer regression suites now assert explicitly by seeding the
-confirmation the close gate would have written.
+* One authoritative market identity, used by round creation, round lookup,
+  continuation, return/damage binding and the duplicate fingerprint alike: the
+  reviewed catalog (`line_guided_menu_markets` + `line_guided_menu_market_aliases`),
+  mirrored into TypeScript as `canonicalMarketLabel()` for the offline
+  fingerprint path.
+* Reviewed aliases added: `พาซีโอ้` → `พาซิโอ้`, `พาสิโอ้` → `พาซิโอ้`
+  (canonical market `พาซิโอ้` registered; the existing `ทุ่งลานนา` →
+  `วัดทุ่งลานนา` and every other 0055 alias is preserved unchanged).
+* Reviewed unit alias: `ปุก` → `กระปุก`, factor 1. Quantity untouched.
+* New **near-match guard**: a withdrawal whose market is not a reviewed alias
+  but is one character away from an existing open withdrawal round for the same
+  group/date/seller does **not** create a second round. It fails closed and
+  names the existing market so the operator can retype it.
+* **Duplicate-fingerprint compatibility.** Folding aliases changes the market
+  component of the business fingerprint, which means the duplicate blocker would
+  stop recognising rows the previous release wrote. See below.
+* **Ghost-reservation provenance.** Widening duplicate lookup across three
+  fingerprint generations made the existing ghost-recovery delete dangerous. See
+  below.
+
+**Product names are not in scope here.** Withdrawal spelling is governed by the
+Product Vocabulary Guard above (PR #54, already in Production): a suspicious
+withdrawal name is `review_required` with suggestions, and a confirmed new
+product persists exactly as typed. A *return* that does not match the round's
+withdrawal master remains fail-closed under P4A as `product_not_withdrawn`. PR A
+adds no second product guard and changes neither behaviour.
+
+### Fingerprint generations
+
+Three algorithms have written `imported_sessions.session_hash`:
+
+| | shipped | market component |
+|---|---|---|
+| **V0** | pre-PR #51 | raw parsed strings, ordered by item number — a different algorithm entirely |
+| **V1** | PR #51 | canonical business content, market = **normalized raw label** |
+| **V2** | PR A | canonical business content, market = **reviewed canonical identity** |
+
+A session's own identity is always V2. V0 and V1 stay *readable*, and no
+historical row is ever rewritten or backfilled.
+
+V1 is the one that bites: Production holds V1 rows written between the two
+releases — seller ต้อม / `พาซีโอ้` on 2026-08-14 and 2026-08-15, plus
+`ราชพฤก`, `ตลาด72` and `เลียบทางด่วน` rows for other sellers. Under V2 those
+labels fold to their canonical markets and hash differently, so a resend would
+not recognise its own recent history.
+
+`try_finalize_pending_generation` therefore takes a `p_compatibility_hashes`
+array: the V1 fingerprints of the same document under the market's *other
+reviewed spellings*. It **reserves** them on the UNIQUE
+`imported_sessions.session_hash` index before reserving V2, and a main session
+that cannot take all of them is a duplicate. Reserving rather than reading is
+what makes a rolling deploy safe — the previous build writes V1 directly, so
+both builds have to meet on the same index.
+
+The compatibility set is the reviewed equivalence class and nothing wider. An
+unreviewed near-miss such as `พาชิโอ้` is its own market in the fingerprint
+exactly as it is everywhere else.
+
+### Ghost-reservation provenance
+
+Widening duplicate lookup across V0/V1/V2 turned an existing recovery path into
+a way to destroy real evidence.
+
+The old shape was:
+
+```ts
+let isDuplicate = await dedup.isDuplicate(ws);
+if (isDuplicate && !(await dedup.hasPersistedItems(ws))) {
+  await dedup.release(ws);   // delete the reservation
+  isDuplicate = false;
+}
+```
+
+`computeItemHash` includes `parsed.session_title` — the market label. So for a
+historical session persisted under `พาซีโอ้`, a resend under the canonical
+`พาซิโอ้` matches the V1 reservation but can never match the historical item
+hashes. The old code would read that as "duplicate exists, but nothing
+persisted", delete the genuine historical reservation, and let the duplicate
+withdrawal persist a second time.
+
+The fix is ownership, not heuristics. `imported_sessions` gains one nullable
+column, `reserved_by_generation uuid`, stamped only by the code path that
+created the reservation. Release is then scoped to what the current attempt
+provably owns:
+
+* a reservation with **NULL** provenance predates the mechanism, or belongs to
+  another attempt. It is historical evidence and is **never** deleted.
+* a reservation stamped with the **current** generation is this attempt's own
+  and may be released when it proves to be a ghost.
+
+Read-only Production measurement behind this choice: of 1,934 reservations, only
+4 have no corresponding produce rows at all, and three of those are parse
+artefacts (empty `staff_name`, the whole header line stored as the market) plus
+one test row. Refusing to release unstamped reservations strands nothing real.
+
+Duplicate detection now returns the matched hash and its generation rather than
+a bare boolean, so the caller can tell historical evidence from its own
+reservation instead of guessing from item hashes.
+
+### Rolling deploy — the state machine
+
+The application calls the RPC with `p_compatibility_hashes`. Production's
+current function has **eight arguments and no defaults**, so that call does not
+resolve there at all. The schema must move first.
+
+```
+STATE 0   old app + old schema            current Production baseline
+   ↓        apply fingerprint compatibility migration
+STATE 1   old app + compatibility schema  SUPPORTED
+   ↓        deploy the application
+STATE 2   new app + compatibility schema  SUPPORTED  (old/new coexist here)
+   ↓        verify
+STATE 3   new app + compatibility + market identity   SUPPORTED, final
+
+FORBIDDEN new app + old schema — the RPC signature does not exist
+```
+
+STATE 1 is what makes this safe: the new parameter is
+`p_compatibility_hashes text[] DEFAULT NULL`, so the still-running old build,
+which sends the eight existing **named** parameters and omits the new one, keeps
+resolving to the same function and behaving exactly as before.
+
+Inside STATE 2 old and new instances coexist for the length of one deploy. The
+compatibility reservation covers that window in both directions: the old build
+writes V1 directly, the new build reserves the V1 class, and both meet on the
+same UNIQUE index, so exactly one submission wins.
+
+Market identity activation is deliberately **last**. Landing the catalog rows
+earlier would give the database alias-aware round binding while some instances
+still fingerprint `พาซีโอ้` and `พาซิโอ้` apart — one round, two accepted
+identities, which is the exact double-persist this phase exists to stop.
+
+Migration filenames encode that dependency: the compatibility migration sorts
+before the market identity migration, so no ordering is left to a runbook.
+
+### Release prerequisite and how migrations are applied
+
+Two things about Production's migration history have to be respected, both
+established by read-only inspection at preflight.
+
+**A prerequisite is outstanding.** `20260815090000_cancel_duplicate_plain_text_round.sql`
+shipped with PR #51 and was never applied — `cancel_duplicate_plain_text_round`
+does not exist in Production. The deployed finalizer already calls it inside a
+`try/catch` that only logs, so duplicate classification is unaffected, but the
+empty round a duplicate mints is never cancelled. It must be applied **before**
+the compatibility migration. It is a single `CREATE OR REPLACE FUNCTION` with no
+DML and no historical rewrite, and it touches nothing the other two migrations
+touch.
+
+**`supabase db push` must not be used.** Production's history was not built from
+these filenames: 23 local migration versions are absent from
+`supabase_migrations.schema_migrations`, 22 of them because the same migration
+was recorded under a different, apply-time version string (repo
+`20260815081954_produce_out_of_order_admission.sql` is tracked as
+`20260815094931`, and so on back to `0051`). A version-based tool therefore
+reads almost the whole recent history as pending, and those migrations are not
+idempotent — `CREATE TABLE` and `CREATE INDEX` without `IF NOT EXISTS` — so a
+push aborts on the first one rather than reaching the intended migration.
+
+Apply each migration individually and deliberately, by the same mechanism that
+built the existing history. Reconciling the version drift is worth doing, but it
+is a separate, auditable exercise and not a precondition for this release: the
+per-migration path is unaffected by it.
+
+## PR B — cross-user pending takeover
+
+**Problem.** One LINE user opens a pending Produce document, hits a validation
+block, and disappears. `pending_sessions` is keyed by `session_key`, which
+embeds the LINE user, and `bind_plain_text_accountability_round` refuses on
+`identity_mismatch` when a different actor touches the generation. A second
+operator or admin in the same group cannot finish the document, and cannot
+discard it either.
+
+**Direction.** Explicit, audited takeover of a *pending* generation inside the
+same source, never an implicit one:
+
+* an explicit operator command claims the pending document;
+* the claim is recorded (original actor kept as provenance, claimant recorded as
+  the acting user), and only inside the same `source_id` and business date;
+* the accountability round it is bound to does not change owner — PR #50's
+  business-identity rule already lets a different actor continue the round;
+* stream locks, deferred-event ordering and finalization barriers from PR #52
+  are untouched: takeover changes *who may act*, never *what order events
+  applied in*;
+* a takeover of an already-finalizing generation is refused, not queued.
+
+Needs a migration (a claim RPC + provenance columns) and a LINE command.
+
+## PR C — correction UX
+
+**Problem.** A validation failure today tells the operator what is wrong but
+forces them to know the session lifecycle to fix it: which message to resend,
+whether to re-send the header, whether the round is still open.
+
+**Direction.** Turn each blocking exception into a route forward:
+
+* the corrected line can be sent on its own and replaces the offending line in
+  the pending document, rather than requiring a full resend;
+* `product_not_withdrawn` shows the exact withdrawal spelling (already
+  implemented — PR A adds regression coverage) in a copy-paste-ready form;
+* `unknown_unit` offers its nearest known unit the same way;
+* an explicit "what is still blocking" query for a pending document.
+
+No new silent normalization: every correction is an operator action.
+
+## PR D — operational recovery / admin controls
+
+**Problem.** Cleanup is currently a developer with SQL access. Production
+already carries the artefacts: empty open rounds from blocked-then-retried
+withdrawals, and the 2026-08-14 duplicate-identity pair for ต้อม.
+
+**Direction.** Admin-scoped, audited operations:
+
+* list open rounds and pending documents for a group/date;
+* cancel an *empty* round (the guard `cancel_duplicate_plain_text_round` already
+  encodes: no produce session, no transaction, no other pending generation);
+* propose a market-alias registration from an observed variant, for human review
+  — a reviewed alias is a catalog write, never an inference;
+* merge two accountability rounds only as an explicit, logged, reversible
+  admin action, with a preview of what moves.
+
+Historical cleanup of the ต้อม 2026-08-14 pair happens here, after prevention
+(PR A) is deployed — never before.
+
+## Rollout order
+
+A → B → C → D, in that order and separately deployed. Within A the order is
+schema-then-application, per the state machine above — never the reverse. A is
+prevention and must land first so cleanup in D is not immediately re-polluted. B
+unblocks the operational dead-end that most often *causes* the retry garbage D
+cleans up. C is additive UX on top of both. Nothing in this phase mutates
+historical Production business data.

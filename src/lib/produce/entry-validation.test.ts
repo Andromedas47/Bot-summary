@@ -423,3 +423,61 @@ describe("replies", () => {
     expect([...reply].length).toBeLessThan(2000);
   });
 });
+
+// ── Operational UX hardening (PR A) ───────────────────────────────────────────
+//
+// The reviewed unit alias is accepted; product spelling variants are NOT
+// aliased, they are refused with the withdrawal's own spelling attached.
+
+describe("reviewed unit alias ปุก", () => {
+  it("accepts a 3 ปุก return against a กระปุก withdrawal", () => {
+    const result = bound(
+      session([
+        item({ product_name: "น้ำพริก", unit: "ปุก", quantity: 3, price_per_unit: 50, transaction_type: "คืน" }),
+      ]),
+      master([{ product_name: "น้ำพริก", unit: "กระปุก", quantity: 10, price_per_unit: 50 }]),
+    );
+    expect(result.status).toBe("clean");
+    expect(result.blocking).toEqual([]);
+  });
+
+  it("still blocks an unreviewed shorthand", () => {
+    const result = bound(
+      session([
+        item({ product_name: "น้ำพริก", unit: "ปุ๊ก", quantity: 3, price_per_unit: 50, transaction_type: "คืน" }),
+      ]),
+      master([{ product_name: "น้ำพริก", unit: "กระปุก", quantity: 10, price_per_unit: 50 }]),
+    );
+    expect(result.status).toBe("blocked");
+    expect(kinds(result.blocking)).toEqual(["unknown_unit"]);
+  });
+});
+
+describe("product spelling variants are refused, never merged", () => {
+  // The three real Production pairs behind this phase. PR A deliberately does
+  // NOT alias them: only the operator knows whether a variant is a typo or a
+  // different good, so the reply hands them the withdrawal's exact spelling.
+  const pairs: Array<[sent: string, withdrawn: string]> = [
+    ["หัวไชเท้า", "หัวไชยเท้า"],
+    ["ฝักกระเจี๊ยบ", "ฝักกระเจียบ"],
+    ["ฟักอ่อน", "ฟักออ่น"],
+  ];
+
+  for (const [sent, withdrawn] of pairs) {
+    it(`blocks ${sent} and surfaces ${withdrawn} to copy`, () => {
+      const result = bound(
+        session([
+          item({ product_name: sent, unit: "โล", quantity: 2, price_per_unit: 30, transaction_type: "คืน" }),
+        ]),
+        master([{ product_name: withdrawn, unit: "โล", quantity: 10, price_per_unit: 30 }]),
+      );
+
+      expect(result.status).toBe("blocked");
+      const [exception] = result.blocking;
+      expect(exception.kind).toBe("product_not_withdrawn");
+      expect(exception.kind === "product_not_withdrawn" && exception.suggestions)
+        .toContain(withdrawn);
+      expect(buildBlockingValidationReply(result)).toContain(withdrawn);
+    });
+  }
+});

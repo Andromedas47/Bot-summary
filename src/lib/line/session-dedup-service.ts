@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { WeighSession, WeighSessionItem } from "@/lib/parsers/weigh-session/types";
-import { weighSessionBusinessFingerprint } from "@/lib/produce/business-fingerprint";
+import {
+  weighSessionBusinessFingerprint,
+  weighSessionCompatibilityFingerprints,
+} from "@/lib/produce/business-fingerprint";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyClient = SupabaseClient<any>;
@@ -58,9 +61,71 @@ export function computeSessionHash(parsed: WeighSession): string {
   return weighSessionBusinessFingerprint(parsed);
 }
 
-/** Both identities of one document — new first, then the legacy fallback. */
+/**
+ * The hashes this attempt RESERVES: the V2 identity first, then the V1
+ * fingerprints of the same document under the market's other reviewed
+ * spellings.
+ *
+ * Reserving the V1 class — not merely reading it — is what makes the rollout
+ * safe. During a rolling deploy the previous build is still writing V1 hashes;
+ * if the new build only read them, two concurrent submissions of one document
+ * could each find nothing and both persist. Reserving puts both builds on the
+ * same UNIQUE index, so exactly one wins. See business-fingerprint.ts for the
+ * V0/V1/V2 definitions.
+ *
+ * V0 is deliberately absent: it is never written any more, and deleting a
+ * historical V0 row on a failed attempt would erase another session's proof.
+ */
+export function sessionHashReservations(parsed: WeighSession): string[] {
+  return [
+    ...new Set([
+      computeSessionHash(parsed),
+      ...weighSessionCompatibilityFingerprints(parsed),
+    ]),
+  ];
+}
+
+/**
+ * Every identity this document could already be recorded under — the
+ * reservations plus the pre-PR #51 legacy hash. Read-only; never written.
+ */
 export function sessionHashCandidates(parsed: WeighSession): string[] {
-  return [...new Set([computeSessionHash(parsed), computeLegacySessionHash(parsed)])];
+  return [...new Set([...sessionHashReservations(parsed), computeLegacySessionHash(parsed)])];
+}
+
+/** Which algorithm wrote a hash. See business-fingerprint.ts. */
+export type FingerprintGeneration = "V0" | "V1" | "V2";
+
+/**
+ * Which generation a matched hash belongs to, for this document.
+ *
+ * V2 is the document's own identity, V0 the pre-PR #51 legacy hash, and
+ * anything else in the reserved set is a V1 compatibility fingerprint.
+ */
+export function fingerprintGenerationOf(
+  parsed: WeighSession,
+  hash: string,
+): FingerprintGeneration {
+  if (hash === computeSessionHash(parsed)) return "V2";
+  if (hash === computeLegacySessionHash(parsed)) return "V0";
+  return "V1";
+}
+
+/**
+ * A reservation this document collided with, and whether the current attempt
+ * is allowed to take it back.
+ */
+export interface DuplicateMatch {
+  matchedHash: string;
+  fingerprintGeneration: FingerprintGeneration;
+  /** The pending generation that reserved it; null for historical rows. */
+  reservedByGeneration: string | null;
+  /**
+   * True only when the reservation is provably this attempt's own. A NULL
+   * provenance is historical evidence — never releasable, whatever the
+   * generation of the hash that matched.
+   */
+  releasableByCurrentAttempt: boolean;
 }
 
 export function computeItemHash(
@@ -85,31 +150,61 @@ export function computeItemHash(
 export class SessionDedupService {
   constructor(private readonly supabase: AnyClient) {}
 
+  /** One ledger row per reserved hash. Same evidence on each — see reservations. */
   private payload(parsed: WeighSession, rawText?: string) {
     const sortedTxTypes = [...new Set(parsed.items.map((i) => i.transaction_type))].sort().join(",");
 
-    return {
-      session_hash:     computeSessionHash(parsed),
+    return sessionHashReservations(parsed).map((hash) => ({
+      session_hash:     hash,
       transaction_date: parsed.date ?? null,
       staff_name:       parsed.staff_name,
       market_name:      parsed.session_title ?? "",
       transaction_type: sortedTxTypes,
       raw_text:         rawText ?? null,
-    };
+    }));
   }
 
-  async isDuplicate(parsed: WeighSession): Promise<boolean> {
-    // Both identities: a session imported before the canonical fingerprint
-    // shipped is still a duplicate of the same document resent today.
+  /**
+   * The reservation this document collides with, with enough provenance for
+   * the caller to know whether it may be taken back.
+   *
+   * All three generations are searched — a session imported before the
+   * canonical fingerprint shipped is still a duplicate of the same document
+   * resent today — but a match is evidence, not permission. Ownership is
+   * decided by `reserved_by_generation`, never by re-deriving item hashes:
+   * `computeItemHash` folds the market label in, so a historical session
+   * persisted under an alias spelling can never be recognised from a resend
+   * under the canonical one.
+   */
+  async findDuplicate(
+    parsed: WeighSession,
+    currentGeneration?: string | null,
+  ): Promise<DuplicateMatch | null> {
     const { data, error } = await this.supabase
       .from("imported_sessions")
-      .select("id")
+      .select("session_hash, reserved_by_generation")
       .in("session_hash", sessionHashCandidates(parsed))
       .limit(1)
       .maybeSingle();
 
     if (error) throw new Error(`imported_sessions lookup failed: ${error.message}`);
-    return !!data;
+    if (!data) return null;
+
+    const row = data as { session_hash: string; reserved_by_generation?: string | null };
+    const reservedByGeneration = row.reserved_by_generation ?? null;
+    return {
+      matchedHash: row.session_hash,
+      fingerprintGeneration: fingerprintGenerationOf(parsed, row.session_hash),
+      reservedByGeneration,
+      releasableByCurrentAttempt:
+        reservedByGeneration !== null
+        && !!currentGeneration
+        && reservedByGeneration === currentGeneration,
+    };
+  }
+
+  async isDuplicate(parsed: WeighSession): Promise<boolean> {
+    return (await this.findDuplicate(parsed)) !== null;
   }
 
   async hasPersistedItems(parsed: WeighSession): Promise<boolean> {
@@ -126,13 +221,31 @@ export class SessionDedupService {
     return (data ?? []).length > 0;
   }
 
-  async release(parsed: WeighSession): Promise<void> {
-    const { error } = await this.supabase
+  /**
+   * Give back what THIS attempt provably reserved, and only that.
+   *
+   * Ownership is required, not assumed. Without a generation to match, nothing
+   * is deleted at all: a hash collision proves a document was seen before, it
+   * does not prove the row belongs to the caller. Historical reservations —
+   * every row written before provenance existed, and every row belonging to
+   * another attempt — carry NULL and are unreachable from here by construction.
+   *
+   * Never the V0 legacy hash either: this code has never written one, so a row
+   * under it belongs to a session imported before PR #51 and deleting it would
+   * make that session look like it never landed.
+   */
+  async release(parsed: WeighSession, generation: string | null | undefined): Promise<number> {
+    if (!generation) return 0;
+
+    const { data, error } = await this.supabase
       .from("imported_sessions")
       .delete()
-      .in("session_hash", sessionHashCandidates(parsed));
+      .in("session_hash", sessionHashReservations(parsed))
+      .eq("reserved_by_generation", generation)
+      .select("id");
 
     if (error) throw new Error(`imported_sessions release failed: ${error.message}`);
+    return (data ?? []).length;
   }
 
   async record(parsed: WeighSession, rawText?: string): Promise<boolean> {

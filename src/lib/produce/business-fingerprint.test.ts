@@ -105,6 +105,36 @@ describe("business-content fingerprint", () => {
       .not.toBe(fingerprint(tanWithdrawal({ market: "ตลาด72" })));
   });
 
+  it("CASE J — a reviewed market alias is the same business identity", () => {
+    // Production 2026-08-14/15, ต้อม: พาซิโอ้ / พาซีโอ้ / พาสิโอ้ are one
+    // market. A spelling variant must not buy a second fingerprint, and so must
+    // not bypass duplicate protection.
+    const tom = (market: string) => fingerprint(tanWithdrawal({ seller: "ต้อม", market }));
+    expect(tom("พาซีโอ้")).toBe(tom("พาซิโอ้"));
+    expect(tom("พาสิโอ้")).toBe(tom("พาซิโอ้"));
+    // The 0055 aliases resolve here too, by the same registry.
+    expect(tom("ราชพฤก")).toBe(tom("ราชพฤกษ์"));
+  });
+
+  it("CASE K — an UNREVIEWED near-miss market is still its own identity", () => {
+    const tom = (market: string) => fingerprint(tanWithdrawal({ seller: "ต้อม", market }));
+    // The fingerprint never guesses. Only the reviewed catalog collapses labels.
+    expect(tom("พาซีโX")).not.toBe(tom("พาซิโอ้"));
+    // Reviewed markets the catalog keeps apart stay apart.
+    expect(tom("พาซิโอ้ผัก")).not.toBe(tom("พาซิโอ้ผลไม้"));
+    expect(tom("พาซิโอ้")).not.toBe(tom("พาซิโอ้ผัก"));
+  });
+
+  it("CASE L — a reviewed unit alias is the same business identity", () => {
+    const jar = (unit: string) => fingerprint(document([
+      `ต้อม-พาซิโอ้ เบิก ${DATE}`,
+      "น้ำพริก 50 บาท",
+      `3 ${unit}`,
+      "จบรายการเบิก",
+    ]));
+    expect(jar("ปุก")).toBe(jar("กระปุก"));
+  });
+
   it("CASE I — repeated identical rows are kept, not self-deduplicated", () => {
     // ต้อม legitimately withdraws the same line twice. The multiset keeps both,
     // so a one-row document is NOT a duplicate of the two-row one.

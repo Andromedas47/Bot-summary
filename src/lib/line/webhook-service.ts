@@ -2905,12 +2905,26 @@ export class WebhookService {
         // produce_items were inserted; release those ghost reservations.
         const rawText   = (msgEvent.message as import("@/lib/line/types").LineTextMessage).text;
         const dedup     = new SessionDedupService(this.supabase);
-        let isDuplicate = await dedup.isDuplicate(ws);
-        if (isDuplicate && !(await dedup.hasPersistedItems(ws))) {
-          await dedup.release(ws);
+        // This path has no pending generation of its own, so it can never own a
+        // reservation and can never release one. That is the point: duplicate
+        // lookup spans V0/V1/V2, and a V1 match here is typically a historical
+        // session recorded under an alias spelling of the same market whose item
+        // hashes cannot be re-derived from the canonical resend. Deleting it
+        // would destroy the only proof that produce already landed.
+        const match = await dedup.findDuplicate(ws, null);
+        let isDuplicate = match !== null;
+        if (
+          match?.releasableByCurrentAttempt
+          && !(await dedup.hasPersistedItems(ws))
+        ) {
+          await dedup.release(ws, match.reservedByGeneration);
           isDuplicate = false;
         }
         if (isDuplicate) {
+          log.info("duplicate reservation matched", {
+            fingerprintGeneration: match?.fingerprintGeneration,
+            historical: match?.reservedByGeneration === null,
+          });
           log.info("duplicate session — skipping insert");
           // The produce IS recorded, under the message that first carried it.
           // Marking this one processed keeps "unprocessed complete produce

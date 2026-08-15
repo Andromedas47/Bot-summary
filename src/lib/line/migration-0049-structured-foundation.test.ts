@@ -567,7 +567,7 @@ describe("0049 — legacy text flow", () => {
   it("refuses a text header on a structured row before append/admit/ingest", async () => {
     const source = await Bun.file(webhookPath).text();
     const guard = source.indexOf("text header refused for structured produce session");
-    const replace = source.indexOf("pendingService.replaceGeneration({");
+    const replace = source.indexOf("pendingService.openPlainTextGeneration({");
     const append = source.indexOf("pendingService.append(");
     expect(guard).toBeGreaterThan(-1);
     expect(guard).toBeLessThan(replace);
@@ -575,10 +575,11 @@ describe("0049 — legacy text flow", () => {
     expect(source).toContain("entry_origin != null");
   });
 
-  it("keeps the legacy rotation and append branches unchanged", async () => {
+  it("keeps structured guards while plain-text open becomes one atomic RPC", async () => {
     const source = await Bun.file(webhookPath).text();
     expect(source).toContain("requiresFreshPendingGeneration(pending.accumulated_text, incomingHeader)");
-    expect(source).toContain("await pendingService.admit(sessionKey, eventId, event.timestamp);");
-    expect(source).toContain("await pendingService.registerIngest(sessionKey, eventId, event.timestamp, text);");
+    expect(source).toContain("pendingService.openPlainTextGeneration({");
+    expect(source).not.toContain("await pendingService.admit(sessionKey, eventId, event.timestamp);");
+    expect(source).not.toContain("await pendingService.registerIngest(sessionKey, eventId, event.timestamp, text);");
   });
 });

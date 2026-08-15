@@ -135,6 +135,65 @@ export interface Database {
         Relationships: [];
       };
 
+      pending_produce_deferred_events: {
+        Row: {
+          line_event_id: string;
+          raw_message_id: string;
+          session_key: string;
+          source_id: string;
+          line_user_id: string;
+          line_timestamp_ms: number;
+          raw_text: string;
+          reply_token: string | null;
+          runtime_environment: "production" | "preview" | "development";
+          status: "waiting" | "admitted" | "rejected_orphan"
+            | "rejected_before_opener" | "rejected_after_close";
+          defer_reason: string;
+          session_generation: string | null;
+          opener_line_event_id: string | null;
+          opener_line_timestamp_ms: number | null;
+          close_line_event_id: string | null;
+          close_line_timestamp_ms: number | null;
+          received_at: string;
+          expires_at: string;
+          resolved_at: string | null;
+        };
+        Insert: {
+          line_event_id: string;
+          raw_message_id: string;
+          session_key: string;
+          source_id: string;
+          line_user_id: string;
+          line_timestamp_ms: number;
+          raw_text: string;
+          reply_token?: string | null;
+          runtime_environment: "production" | "preview" | "development";
+          status?: "waiting" | "admitted" | "rejected_orphan"
+            | "rejected_before_opener" | "rejected_after_close";
+          defer_reason?: string;
+          session_generation?: string | null;
+          opener_line_event_id?: string | null;
+          opener_line_timestamp_ms?: number | null;
+          close_line_event_id?: string | null;
+          close_line_timestamp_ms?: number | null;
+          received_at?: string;
+          expires_at?: string;
+          resolved_at?: string | null;
+        };
+        Update: {
+          status?: "waiting" | "admitted" | "rejected_orphan"
+            | "rejected_before_opener" | "rejected_after_close";
+          defer_reason?: string;
+          session_generation?: string | null;
+          opener_line_event_id?: string | null;
+          opener_line_timestamp_ms?: number | null;
+          close_line_event_id?: string | null;
+          close_line_timestamp_ms?: number | null;
+          resolved_at?: string | null;
+        };
+        Relationships: [];
+      };
+
       parse_errors: {
         Row: {
           id:               string;

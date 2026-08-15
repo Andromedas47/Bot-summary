@@ -405,6 +405,7 @@ jobs:
       # against real PostgreSQL or not at all — an unreachable database is a
       # HARD FAILURE of this job, never a green skip.
       REQUIRE_P4A_POSTGRES: "1"
+      REQUIRE_PRODUCE_REORDER_POSTGRES: "1"
       PGHOST: localhost
       PGUSER: postgres
       PGPASSWORD: postgres
@@ -427,6 +428,8 @@ jobs:
       # reproduce the 2026-08-10 Production failures without a database.
       - name: Round market identity and missing-return regression suites
         run: bunx bun test src/lib/produce/round-return-status.test.ts src/lib/summary/round-market-identity.test.ts src/lib/sales/round-return-sold-out.test.ts
+      - name: Produce out-of-order admission real-PostgreSQL suite
+        run: bun test src/lib/line/migration-produce-out-of-order-admission.pg.test.ts
       - name: Typecheck
         run: npm run type-check
       - name: git diff --check against the PR base

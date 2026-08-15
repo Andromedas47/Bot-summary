@@ -20,6 +20,7 @@ interface Fixture {
   produceItems?: Record<string, unknown>[];
   centralPrices?: Record<string, unknown>[];
   accountabilityRounds?: Record<string, unknown>[];
+  deferredProduce?: Record<string, unknown>[];
   errors?: Partial<Record<string, string>>;
 }
 
@@ -45,6 +46,7 @@ function fakeSupabase(fixture: Fixture): SupabaseClient<Database> {
       case "produce_items": return fixture.produceItems ?? [];
       case "central_selling_prices": return fixture.centralPrices ?? [];
       case "accountability_rounds": return fixture.accountabilityRounds ?? [];
+      case "pending_produce_deferred_events": return fixture.deferredProduce ?? [];
       default: throw new Error(`Unexpected table: ${table}`);
     }
   };
@@ -1222,6 +1224,37 @@ describe("P1 durable evidence for a rejected produce message", () => {
     expect(report.blocked.some((row) => row.reasons.includes("produce_message_never_landed"))).toBe(true);
     expect(report.markets[0].marketLabel).toBe("ตลาดกี้");
     expect(report.allMarkets.quantityAuthoritative).toBe(false);
+  });
+
+  test("a rejected deferred item remains visible as possible lost Produce", async () => {
+    const report = await loadSalesReport(fakeSupabase(fixture([], {
+      deferredProduce: [{
+        raw_message_id: "raw-deferred-orphan",
+        source_id: SOURCE_A,
+        raw_text: "1อะโวคาโด้50บาท\n26.7.โล",
+        line_timestamp_ms: Date.parse("2026-07-25T06:00:00.000Z"),
+        status: "rejected_orphan",
+      }],
+    })), DATE);
+
+    expect(report.scopeBlockers).toEqual([{ kind: "unattributable_session", count: 1 }]);
+    expect(report.allMarkets.quantityAuthoritative).toBe(false);
+  });
+
+  test("an admitted deferred item is excluded from lost Produce evidence", async () => {
+    const report = await loadSalesReport(fakeSupabase(fixture([], {
+      deferredProduce: [{
+        raw_message_id: "raw-deferred-admitted",
+        source_id: SOURCE_A,
+        raw_text: "1อะโวคาโด้50บาท\n26.7.โล",
+        line_timestamp_ms: Date.parse("2026-07-25T06:00:00.000Z"),
+        status: "admitted",
+      }],
+    })), DATE);
+
+    expect(report.blocked.some((row) =>
+      row.reasons.includes("produce_message_never_landed"))).toBe(false);
+    expect(report.scopeBlockers).toEqual([]);
   });
 
   /**

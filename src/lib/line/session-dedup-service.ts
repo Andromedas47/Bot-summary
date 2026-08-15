@@ -105,10 +105,11 @@ export class SessionDedupService {
       .from("imported_sessions")
       .select("id")
       .in("session_hash", sessionHashCandidates(parsed))
-      .limit(1);
+      .limit(1)
+      .maybeSingle();
 
     if (error) throw new Error(`imported_sessions lookup failed: ${error.message}`);
-    return (data ?? []).length > 0;
+    return !!data;
   }
 
   async hasPersistedItems(parsed: WeighSession): Promise<boolean> {

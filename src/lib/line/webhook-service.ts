@@ -1182,6 +1182,28 @@ export class WebhookService {
 
       if (!markClose) {
         if (closeGateRefusal) {
+          // P1-B: a VALID close was received and refused. The session stays in
+          // capture on purpose — that is the correction window — but the refusal
+          // must be durable, or this generation waits forever with
+          // close_requested_at NULL and nothing scheduled, which is exactly the
+          // state Production pending 313eaa61 has been sitting in.
+          //
+          // Best-effort: the refusal reply below is what the operator acts on,
+          // and a failed stamp must not swallow it.
+          try {
+            await this.supabase.rpc("mark_plain_text_close_refused", {
+              p_session_key: sessionKey,
+              p_session_generation: pending.session_generation,
+              p_close_line_event_id: eventId,
+              p_reason: "entry_gate_refusal",
+            });
+          } catch (markError) {
+            log.error("plain-text close refusal stamp failed", {
+              sessionKey,
+              sessionGeneration: pending.session_generation,
+              error: markError instanceof Error ? markError.message : String(markError),
+            });
+          }
           if (replyToken) {
             try {
               await this.replyMessage(replyToken, closeGateRefusal);

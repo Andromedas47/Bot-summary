@@ -279,6 +279,58 @@ export function weighSessionLegacyMarketFingerprint(
   );
 }
 
+/**
+ * The canonical item multiset of a PLAIN base withdrawal, or null.
+ *
+ * This is the containment guard's comparison key (migration
+ * 20260817090100). It is deliberately the SAME per-item canonicalization the
+ * fingerprint hashes — `canonicalItemLine` — so a document that is a strict
+ * superset of an already-recorded one is recognised by exactly the identity
+ * that decided the two were not equal.
+ *
+ * Null for anything that is not a plain base withdrawal:
+ *
+ *   an additional batch (`เบิกเพิ่ม`) is an INTENTIONAL append, and a seller
+ *   who genuinely withdraws a second identical batch says so with that
+ *   contract. Guarding it would refuse real business data.
+ *
+ *   a return or damaged return is not a withdrawal at all.
+ *
+ *   a mixed document does not describe one withdrawal, so containment against
+ *   another document's withdrawal rows would not be a like-for-like comparison.
+ *
+ * Null means "not comparable" on both sides of the guard: such a session is
+ * neither checked nor stored as a candidate.
+ */
+export function canonicalWithdrawalItemLines(parsed: WeighSession): string[] | null {
+  if (parsed.session_kind !== "main") return null;
+  if (parsed.items.length === 0) return null;
+  const allWithdrawals = parsed.items.every(
+    (item) => baseTransactionType(item.transaction_type) === "เบิก",
+  );
+  if (!allWithdrawals) return null;
+  return canonicalItemLines(parsed.items.map(fromWeighItem));
+}
+
+/**
+ * True when every canonical line of `subset` occurs in `superset` at least as
+ * many times. Order-insensitive, multiplicity-preserving, exact — the mirror of
+ * `produce_item_multiset_contains` in SQL.
+ */
+export function canonicalItemMultisetContains(
+  superset: readonly string[],
+  subset: readonly string[],
+): boolean {
+  const counts = new Map<string, number>();
+  for (const line of superset) counts.set(line, (counts.get(line) ?? 0) + 1);
+  for (const line of subset) {
+    const remaining = counts.get(line) ?? 0;
+    if (remaining === 0) return false;
+    counts.set(line, remaining - 1);
+  }
+  return true;
+}
+
 export function weighSessionBusinessContent(parsed: WeighSession): string {
   return canonicalBusinessContent({
     businessDate: parsed.date,

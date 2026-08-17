@@ -26,6 +26,12 @@ interface Review {
 
 class PlainTextGateDatabase {
   reviews: Review[] = [];
+  closeRefusals: Array<{
+    session_key: string;
+    session_generation: string;
+    close_line_event_id: string;
+    reason: string;
+  }> = [];
   tables: Record<string, Row[]> = {
     pending_sessions: [],
     produce_transactions: [],
@@ -120,6 +126,17 @@ class PlainTextGateDatabase {
     }
     if (name === "admit_pending_session_event" || name === "register_pending_session_ingest") {
       return { data: null, error: null };
+    }
+    // P1-B: a refused close must leave durable, generation-scoped state behind,
+    // or the generation waits forever with nothing scheduled.
+    if (name === "mark_plain_text_close_refused") {
+      this.closeRefusals.push({
+        session_key: args.p_session_key as string,
+        session_generation: args.p_session_generation as string,
+        close_line_event_id: args.p_close_line_event_id as string,
+        reason: args.p_reason as string,
+      });
+      return { data: { marked: true }, error: null };
     }
     if (name === "append_pending_session") {
       const pending = this.pending;
@@ -332,5 +349,48 @@ describe("P4A on the plain-text close", () => {
 
     expect(replies).toEqual([PRODUCE_CLOSE_PENDING_REPLY]);
     expect(db.pending.close_line_event_id).toBe("close-8");
+    // P1-B: a close that DID schedule is never stamped as refused.
+    expect(db.closeRefusals).toEqual([]);
+  });
+});
+
+/**
+ * P1-B. Production pending 313eaa61 sat non-terminal for hours with the exact
+ * close `จบรายการชั่งคืน` in accumulated_text, an unconfirmed review, and
+ * close_requested_at / close_deadline_at / next_attempt_at all NULL. Leaving the
+ * session in capture is the intended correction window; leaving NO record that a
+ * valid close arrived is what made it permanent.
+ */
+describe("a refused close cannot strand its generation", () => {
+  it("stamps the refusal, generation-scoped, without writing a close boundary", async () => {
+    const db = new PlainTextGateDatabase(
+      pendingRow([RETURN_HEADER, "1.มังคุด45บาท", "4โลก"].join("\n")),
+      master([{}]),
+    );
+    const replies: string[] = [];
+    await build(db, replies).processEvents([textEvent("จบรายการชั่งคืน", "close-9")], "dest");
+
+    expect(replies[0]).toContain("⛔");
+    expect(db.pending.close_event_timestamp_ms).toBeNull();
+    expect(db.closeRefusals).toEqual([{
+      session_key: db.pending.session_key as string,
+      session_generation: db.pending.session_generation as string,
+      close_line_event_id: "close-9",
+      reason: "entry_gate_refusal",
+    }]);
+  });
+
+  it("stamps an ambiguous-round refusal too — the จิ้ว shape", async () => {
+    const db = new PlainTextGateDatabase(
+      pendingRow([RETURN_HEADER, "1.มังคุด45บาท", "4โล"].join("\n")),
+      [],
+    );
+    db.bindOutcome = { outcome: "ambiguous" };
+    const replies: string[] = [];
+    await build(db, replies).processEvents([textEvent("จบรายการชั่งคืน", "close-10")], "dest");
+
+    expect(replies[0]).toContain("มากกว่า 1 รอบ");
+    expect(db.closeRefusals).toHaveLength(1);
+    expect(db.closeRefusals[0].close_line_event_id).toBe("close-10");
   });
 });

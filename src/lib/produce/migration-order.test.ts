@@ -67,11 +67,40 @@ describe("PR A migration ordering", () => {
     expect(new Set(versions).size).toBe(versions.length);
   });
 
-  it("keeps the two as the last two migrations in the repository", () => {
-    // If something later is ever added, it must consciously decide where it
-    // sits relative to the rollout, rather than silently landing in between.
+  it("keeps the two adjacent, with nothing landing between them", () => {
+    // The original guard asserted these were the last two files. Session
+    // integrity hardening consciously lands AFTER both — it reissues the very
+    // functions they install — so the guarantee that survives is adjacency:
+    // nothing may ever sort between compatibility and market identity.
+    expect(indexOfMigration(MARKET_IDENTITY)).toBe(indexOfMigration(COMPATIBILITY) + 1);
+  });
+});
+
+/**
+ * Session integrity hardening (P0-A / P0-B / P1-A / P1-B).
+ *
+ * All three sort after PR A, because each one reissues a function PR A installs:
+ * round reuse rebuilds `bind_plain_text_accountability_round` on top of the
+ * market identity guard, and the containment guard rebuilds
+ * `try_finalize_pending_generation` on top of fingerprint compatibility.
+ * Applying them in the other order would silently revert PR A.
+ */
+describe("session integrity migration ordering", () => {
+  const ROUND_REUSE = "produce_same_day_round_reuse";
+  const CONTAINMENT = "produce_withdrawal_containment_guard";
+  const SUPERSESSION = "produce_pending_supersession_and_close_recovery";
+
+  it("applies all three after both PR A migrations", () => {
+    const prA = Math.max(indexOfMigration(COMPATIBILITY), indexOfMigration(MARKET_IDENTITY));
+    for (const slug of [ROUND_REUSE, CONTAINMENT, SUPERSESSION]) {
+      expect(indexOfMigration(slug)).toBeGreaterThan(prA);
+    }
+  });
+
+  it("keeps the three as the last three migrations, in rollout order", () => {
     const files = sortedMigrations();
-    expect(files[files.length - 2]).toContain(COMPATIBILITY);
-    expect(files[files.length - 1]).toContain(MARKET_IDENTITY);
+    expect(files[files.length - 3]).toContain(ROUND_REUSE);
+    expect(files[files.length - 2]).toContain(CONTAINMENT);
+    expect(files[files.length - 1]).toContain(SUPERSESSION);
   });
 });

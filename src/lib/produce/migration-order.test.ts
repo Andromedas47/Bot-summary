@@ -89,18 +89,33 @@ describe("session integrity migration ordering", () => {
   const ROUND_REUSE = "produce_same_day_round_reuse";
   const CONTAINMENT = "produce_withdrawal_containment_guard";
   const SUPERSESSION = "produce_pending_supersession_and_close_recovery";
+  const ENVIRONMENT = "produce_supersession_runtime_environment";
+  const HISTORICAL = "produce_historical_withdrawal_containment";
 
-  it("applies all three after both PR A migrations", () => {
+  it("applies all five after both PR A migrations", () => {
     const prA = Math.max(indexOfMigration(COMPATIBILITY), indexOfMigration(MARKET_IDENTITY));
-    for (const slug of [ROUND_REUSE, CONTAINMENT, SUPERSESSION]) {
+    for (const slug of [ROUND_REUSE, CONTAINMENT, SUPERSESSION, ENVIRONMENT, HISTORICAL]) {
       expect(indexOfMigration(slug)).toBeGreaterThan(prA);
     }
   });
 
-  it("keeps the three as the last three migrations, in rollout order", () => {
+  it("keeps the five as the last five migrations, in rollout order", () => {
     const files = sortedMigrations();
-    expect(files[files.length - 3]).toContain(ROUND_REUSE);
-    expect(files[files.length - 2]).toContain(CONTAINMENT);
-    expect(files[files.length - 1]).toContain(SUPERSESSION);
+    expect(files[files.length - 5]).toContain(ROUND_REUSE);
+    expect(files[files.length - 4]).toContain(CONTAINMENT);
+    expect(files[files.length - 3]).toContain(SUPERSESSION);
+    expect(files[files.length - 2]).toContain(ENVIRONMENT);
+    expect(files[files.length - 1]).toContain(HISTORICAL);
+  });
+
+  it("orders both release fixes strictly after the three Production already applied", () => {
+    // 090000/090100/090200 are Production history: recorded there as
+    // 20260817080247 / 080346 / 080439. The release-safety fixes must be NEW
+    // migrations after them, never edits to them.
+    for (const applied of [ROUND_REUSE, CONTAINMENT, SUPERSESSION]) {
+      for (const fix of [ENVIRONMENT, HISTORICAL]) {
+        expect(indexOfMigration(fix)).toBeGreaterThan(indexOfMigration(applied));
+      }
+    }
   });
 });

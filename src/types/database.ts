@@ -252,6 +252,7 @@ export interface Database {
           void_reason:             string | null;
           replacement_session_id:  string | null;
           accountability_round_id: string | null;
+          canonical_withdrawal_item_lines: string[] | null;
         };
         Insert: {
           id?:                      string;
@@ -276,6 +277,7 @@ export interface Database {
           void_reason?:             string | null;
           replacement_session_id?:  string | null;
           accountability_round_id?: string | null;
+          canonical_withdrawal_item_lines?: string[] | null;
         };
         Update: {
           id?:                      string;
@@ -300,6 +302,7 @@ export interface Database {
           void_reason?:             string | null;
           replacement_session_id?:  string | null;
           accountability_round_id?: string | null;
+          canonical_withdrawal_item_lines?: string[] | null;
         };
         Relationships: [];
       };
@@ -2014,6 +2017,12 @@ export interface Database {
           p_superseded_by: string;
           p_evidence?: Json;
           p_expected_updated_at?: string;
+          /**
+           * Required by the live 6-argument form (20260817090300). Omitting it
+           * dispatches to the retained 5-argument form, which is inert and
+           * always answers `runtime_environment_required`.
+           */
+          p_runtime_environment?: string;
         };
         Returns: Json;
       };

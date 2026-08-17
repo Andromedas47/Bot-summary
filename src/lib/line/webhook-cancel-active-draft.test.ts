@@ -1,0 +1,504 @@
+/**
+ * "ยกเลิกรายการ" — abandoning the draft, end to end through the webhook.
+ *
+ * The routing is the whole point. The command is intercepted as the FIRST thing
+ * inside the pending branch, so it can never be appended, never become an item,
+ * never become a header and never be read as a close. Everything it is allowed
+ * to do is decided by the database; this layer only routes and reports.
+ */
+import { describe, expect, it } from "bun:test";
+import { WebhookService } from "./webhook-service";
+import type { LineMessageEvent } from "./types";
+import {
+  CANCEL_ACTIVE_DRAFT_COMMAND,
+  CANCEL_ACTIVE_DRAFT_HINT,
+  CANCEL_ACTIVE_DRAFT_NONE_REPLY,
+  CANCEL_ACTIVE_DRAFT_REFUSED_REPLY,
+  CANCEL_ACTIVE_DRAFT_SUCCESS_REPLY,
+  isExactCancelActiveDraftCommand,
+  isUserCancelledPendingRow,
+  withCancelActiveDraftHint,
+} from "@/lib/produce/cancel-active-draft";
+
+type Row = Record<string, unknown>;
+
+const SESSION_KEY = "group:group-1:user:user-1";
+const GENERATION = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const ROUND = "11111111-1111-4111-8111-111111111111";
+const PRODUCE_CLOSE_PENDING_REPLY =
+  "รับจบรายการแล้ว กำลังตรวจสอบรายการที่ยังส่งมาไม่ถึง กรุณารอสักครู่";
+const RETURN_HEADER = "ดำ-ราชพฤกษ์ ชั่งคืน 11/8/2569";
+
+interface Review {
+  digest: string;
+  presented_line_event_id: string;
+  confirmed_at: string | null;
+}
+
+class CancelDatabase {
+  reviews: Review[] = [];
+  /** Every RPC name this run reached, in order. */
+  rpcCalls: string[] = [];
+  cancelArgs: Row[] = [];
+  /** Scripted answer for the cancellation RPC. */
+  cancelOutcome: Row = { cancelled: true, reason: "cancelled", round_outcome: "cancelled" };
+  cancelError: string | null = null;
+  bindOutcome: Row = { outcome: "bound", accountability_round_id: ROUND };
+  tables: Record<string, Row[]> = {
+    pending_sessions: [],
+    produce_transactions: [],
+    raw_messages: [],
+  };
+
+  constructor(pending: Row | null, master: Row[] = []) {
+    this.tables.pending_sessions = pending ? [pending] : [];
+    this.tables.produce_transactions = master;
+  }
+
+  get pending(): Row | undefined {
+    return this.tables.pending_sessions[0];
+  }
+
+  rows(table: string): Row[] {
+    return this.tables[table] ?? [];
+  }
+
+  from(table: string) {
+    const filters: Array<(row: Row) => boolean> = [];
+    const source = () =>
+      table === "produce_entry_validation_reviews"
+        ? (this.reviews as unknown as Row[])
+        : this.rows(table);
+    const builder = {
+      select: () => builder,
+      eq: (column: string, value: unknown) => {
+        filters.push((row) => row[column] === value);
+        return builder;
+      },
+      limit: () => builder,
+      order: () => builder,
+      maybeSingle: async () => ({
+        data: source().filter((row) => filters.every((f) => f(row)))[0] ?? null,
+        error: null,
+      }),
+      single: async () => ({
+        data: source().filter((row) => filters.every((f) => f(row)))[0] ?? null,
+        error: null,
+      }),
+      then: (resolve: (value: { data: Row[]; error: null }) => unknown) =>
+        Promise.resolve({
+          data: source().filter((row) => filters.every((f) => f(row))),
+          error: null,
+        }).then(resolve),
+      insert: (payload: Row) => ({
+        select: () => ({
+          single: async () => {
+            // raw_messages carries UNIQUE(line_event_id) since 0001. This is the
+            // PRIMARY defence against a redelivered LINE event: the duplicate
+            // never reaches a handler at all.
+            if (
+              table === "raw_messages"
+              && this.rows(table).some(
+                (row) => row.line_event_id === payload.line_event_id,
+              )
+            ) {
+              return { data: null, error: { code: "23505", message: "duplicate key" } };
+            }
+            const row = { id: `raw-${this.rows(table).length + 1}`, ...payload };
+            this.tables[table] = [...this.rows(table), row];
+            return { data: row, error: null };
+          },
+        }),
+      }),
+      update: () => ({ eq: () => Promise.resolve({ data: null, error: null }) }),
+    };
+    return builder;
+  }
+
+  rpc = async (name: string, args: Row) => {
+    this.rpcCalls.push(name);
+    if (name === "cancel_active_pending_produce_draft") {
+      this.cancelArgs.push(args);
+      if (this.cancelError) return { data: null, error: { message: this.cancelError } };
+      if (this.cancelOutcome.cancelled === true && this.pending) {
+        // What the real RPC does, in the only respects this layer can observe.
+        this.pending.terminalized = true;
+        this.pending.finalization_status = "failed_closed";
+        this.pending.finalization_error = {
+          reason: "user_cancelled",
+          cancel_line_event_id: args.p_line_event_id,
+        };
+      }
+      return { data: this.cancelOutcome, error: null };
+    }
+    if (name === "bind_plain_text_accountability_round") {
+      return { data: this.bindOutcome, error: null };
+    }
+    if (name === "record_produce_validation_review") {
+      const digest = args.p_validation_digest as string;
+      let review = this.reviews.find((r) => r.digest === digest);
+      if (!review) {
+        review = {
+          digest,
+          presented_line_event_id: args.p_line_event_id as string,
+          confirmed_at: null,
+        };
+        this.reviews.push(review);
+      }
+      return {
+        data: {
+          confirmed: review.confirmed_at !== null,
+          presented_line_event_id: review.presented_line_event_id,
+        },
+        error: null,
+      };
+    }
+    if (name === "confirm_produce_validation_review") {
+      const review = this.reviews.find((r) => r.digest === args.p_validation_digest);
+      if (!review) return { data: { status: "not_found" }, error: null };
+      if (review.confirmed_at) return { data: { status: "already_confirmed" }, error: null };
+      review.confirmed_at = new Date().toISOString();
+      return { data: { status: "confirmed" }, error: null };
+    }
+    if (
+      name === "admit_pending_session_event"
+      || name === "register_pending_session_ingest"
+      || name === "mark_plain_text_close_refused"
+    ) {
+      return { data: { marked: true }, error: null };
+    }
+    if (name === "append_pending_session") {
+      const pending = this.pending!;
+      if (args.p_mark_close) {
+        pending.close_event_timestamp_ms = args.p_line_timestamp_ms;
+        pending.close_line_event_id = args.p_line_event_id;
+        pending.close_session_generation = pending.session_generation;
+      }
+      pending.accumulated_text = `${pending.accumulated_text}\n${args.p_new_text}`;
+      return { data: { accepted: true, reason: "appended", session: pending }, error: null };
+    }
+    throw new Error(`Unexpected RPC: ${name}`);
+  };
+}
+
+function pendingRow(accumulatedText: string, overrides: Row = {}): Row {
+  const now = new Date().toISOString();
+  return {
+    id: "pending-1",
+    session_key: SESSION_KEY,
+    source_id: "group-1",
+    session_generation: GENERATION,
+    accumulated_text: accumulatedText,
+    latest_reply_token: null,
+    line_user_id: "user-1",
+    created_at: now,
+    updated_at: now,
+    close_event_timestamp_ms: null,
+    close_requested_at: null,
+    close_line_event_id: null,
+    close_finalize_started_at: null,
+    terminalized: false,
+    next_attempt_at: null,
+    close_deadline_at: null,
+    close_session_generation: null,
+    expected_item_count: null,
+    ingest_revision: 0,
+    accountability_round_id: null,
+    entry_origin: null,
+    ...overrides,
+  };
+}
+
+function master(rows: Array<Partial<Row>>): Row[] {
+  return rows.map((row) => ({
+    accountability_round_id: ROUND,
+    product_name: "มังคุด",
+    unit: "โล",
+    quantity: 10,
+    price_per_unit: 45,
+    transaction_type: "เบิก",
+    ...row,
+  }));
+}
+
+function textEvent(text: string, eventId: string): LineMessageEvent {
+  return {
+    type: "message",
+    timestamp: Date.now(),
+    source: { type: "group", groupId: "group-1", userId: "user-1" },
+    replyToken: `reply-${eventId}`,
+    webhookEventId: eventId,
+    message: { id: `msg-${eventId}`, type: "text", text },
+  } as unknown as LineMessageEvent;
+}
+
+function build(db: CancelDatabase, replies: string[]) {
+  return new WebhookService(db as never, {
+    replyMessage: async (_token, text) => { replies.push(text); },
+  });
+}
+
+const WITHDRAWAL = ["ดำ-ราชพฤกษ์ เบิก 11/8/2569", "1.มังคุด45บาท", "10โล"].join("\n");
+
+describe("the exact cancel command", () => {
+  it("matches only the exact command, trimmed", () => {
+    expect(isExactCancelActiveDraftCommand("ยกเลิกรายการ")).toBe(true);
+    expect(isExactCancelActiveDraftCommand("  ยกเลิกรายการ \n")).toBe(true);
+    // Each of these already means something else and must stay untouched.
+    expect(isExactCancelActiveDraftCommand("ยกเลิก")).toBe(false);
+    expect(isExactCancelActiveDraftCommand("ออกจากเมนู")).toBe(false);
+    expect(isExactCancelActiveDraftCommand("ยกเลิกซื้อ")).toBe(false);
+    expect(isExactCancelActiveDraftCommand("ยกเลิกใบขาวมือ")).toBe(false);
+    // No fuzzy match, no prefix match, no embedding in a longer message.
+    expect(isExactCancelActiveDraftCommand("ยกเลิกรายการนี้")).toBe(false);
+    expect(isExactCancelActiveDraftCommand("ขอยกเลิกรายการ")).toBe(false);
+    expect(isExactCancelActiveDraftCommand("ยกเลิกรายการ ครับ")).toBe(false);
+    expect(isExactCancelActiveDraftCommand("")).toBe(false);
+  });
+});
+
+describe("cancelling the active draft", () => {
+  it("cancels the draft the same event would otherwise have been appended to", async () => {
+    const row = pendingRow(WITHDRAWAL);
+    const db = new CancelDatabase(row);
+    const replies: string[] = [];
+    await build(db, replies).processEvents(
+      [textEvent(CANCEL_ACTIVE_DRAFT_COMMAND, "cancel-1")],
+      "dest",
+    );
+
+    expect(replies).toEqual([CANCEL_ACTIVE_DRAFT_SUCCESS_REPLY]);
+    expect(db.cancelArgs).toHaveLength(1);
+    // The snapshot and generation come from the ALREADY-RESOLVED row; the row
+    // is never re-read to obtain them.
+    expect(db.cancelArgs[0]!.p_session_key).toBe(SESSION_KEY);
+    expect(db.cancelArgs[0]!.p_session_generation).toBe(GENERATION);
+    expect(db.cancelArgs[0]!.p_expected_updated_at).toBe(row.updated_at);
+    expect(db.cancelArgs[0]!.p_source_id).toBe("group-1");
+    expect(db.cancelArgs[0]!.p_line_event_id).toBe("cancel-1");
+    expect(db.cancelArgs[0]!.p_runtime_environment).toBe("development");
+  });
+
+  it("never lets the command reach the text — not appended, not an item, not a header", async () => {
+    const db = new CancelDatabase(pendingRow(WITHDRAWAL));
+    await build(db, []).processEvents(
+      [textEvent(CANCEL_ACTIVE_DRAFT_COMMAND, "cancel-2")],
+      "dest",
+    );
+
+    expect(db.pending!.accumulated_text).toBe(WITHDRAWAL);
+    expect(String(db.pending!.accumulated_text)).not.toContain(CANCEL_ACTIVE_DRAFT_COMMAND);
+    // No append, no reorder admission, no generation rotation, no close.
+    expect(db.rpcCalls).toEqual(["cancel_active_pending_produce_draft"]);
+    expect(db.pending!.close_event_timestamp_ms).toBeNull();
+    expect(db.pending!.close_line_event_id).toBeNull();
+    expect(db.pending!.session_generation).toBe(GENERATION);
+  });
+
+  it("cancels a structured (guided) draft through the same one primitive", async () => {
+    const db = new CancelDatabase(
+      pendingRow(WITHDRAWAL, { entry_origin: "structured_menu" }),
+    );
+    const replies: string[] = [];
+    await build(db, replies).processEvents(
+      [textEvent(CANCEL_ACTIVE_DRAFT_COMMAND, "cancel-3")],
+      "dest",
+    );
+
+    expect(replies).toEqual([CANCEL_ACTIVE_DRAFT_SUCCESS_REPLY]);
+    expect(db.rpcCalls).toEqual(["cancel_active_pending_produce_draft"]);
+    expect(db.pending!.accumulated_text).toBe(WITHDRAWAL);
+  });
+
+  it("reports a database refusal honestly and mutates nothing", async () => {
+    for (const reason of ["close_in_progress", "generation_conflict", "draft_changed"]) {
+      const db = new CancelDatabase(pendingRow(WITHDRAWAL));
+      db.cancelOutcome = { cancelled: false, reason };
+      const replies: string[] = [];
+      await build(db, replies).processEvents(
+        [textEvent(CANCEL_ACTIVE_DRAFT_COMMAND, `refuse-${reason}`)],
+        "dest",
+      );
+
+      expect(replies).toEqual([CANCEL_ACTIVE_DRAFT_REFUSED_REPLY]);
+      expect(replies[0]).not.toContain("✅");
+      expect(db.pending!.terminalized).toBe(false);
+      expect(db.pending!.accumulated_text).toBe(WITHDRAWAL);
+      expect(db.rpcCalls).toEqual(["cancel_active_pending_produce_draft"]);
+    }
+  });
+
+  it("never reports success when the RPC itself failed", async () => {
+    const db = new CancelDatabase(pendingRow(WITHDRAWAL));
+    db.cancelError = "permission denied for function cancel_active_pending_produce_draft";
+    const replies: string[] = [];
+    await build(db, replies).processEvents(
+      [textEvent(CANCEL_ACTIVE_DRAFT_COMMAND, "cancel-err")],
+      "dest",
+    );
+
+    expect(replies).toEqual([CANCEL_ACTIVE_DRAFT_REFUSED_REPLY]);
+    expect(db.pending!.terminalized).toBe(false);
+  });
+
+  it("treats an already_cancelled replay as the success it is", async () => {
+    const db = new CancelDatabase(pendingRow(WITHDRAWAL));
+    db.cancelOutcome = { cancelled: true, reason: "already_cancelled" };
+    const replies: string[] = [];
+    await build(db, replies).processEvents(
+      [textEvent(CANCEL_ACTIVE_DRAFT_COMMAND, "cancel-replay")],
+      "dest",
+    );
+
+    expect(replies).toEqual([CANCEL_ACTIVE_DRAFT_SUCCESS_REPLY]);
+  });
+
+  it("lets an expired-but-present draft reach the database rather than special-casing it", async () => {
+    const stale = new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString();
+    const db = new CancelDatabase(
+      pendingRow(WITHDRAWAL, { created_at: stale, updated_at: stale }),
+    );
+    const replies: string[] = [];
+    await build(db, replies).processEvents(
+      [textEvent(CANCEL_ACTIVE_DRAFT_COMMAND, "cancel-expired")],
+      "dest",
+    );
+
+    expect(db.cancelArgs).toHaveLength(1);
+    expect(db.cancelArgs[0]!.p_expected_updated_at).toBe(stale);
+    expect(replies).toEqual([CANCEL_ACTIVE_DRAFT_SUCCESS_REPLY]);
+  });
+});
+
+describe("cancelling with nothing to cancel", () => {
+  it("answers plainly and writes nothing at all", async () => {
+    const db = new CancelDatabase(null);
+    const replies: string[] = [];
+    await build(db, replies).processEvents(
+      [textEvent(CANCEL_ACTIVE_DRAFT_COMMAND, "cancel-none")],
+      "dest",
+    );
+
+    expect(replies).toEqual([CANCEL_ACTIVE_DRAFT_NONE_REPLY]);
+    // ZERO mutation: no pending row created, no RPC of any kind, and the
+    // command never fell through to the legacy parse-and-persist path.
+    expect(db.tables.pending_sessions).toHaveLength(0);
+    expect(db.rpcCalls).toEqual([]);
+    expect(db.tables.produce_transactions).toHaveLength(0);
+  });
+});
+
+describe("a redelivered cancel", () => {
+  it("short-circuits on the raw_messages unique constraint before any handler runs", async () => {
+    const db = new CancelDatabase(pendingRow(WITHDRAWAL));
+    const replies: string[] = [];
+    const service = build(db, replies);
+
+    const first = await service.processEvents(
+      [textEvent(CANCEL_ACTIVE_DRAFT_COMMAND, "cancel-dup")],
+      "dest",
+    );
+    expect(first[0]!.status).toBe("saved");
+    expect(db.cancelArgs).toHaveLength(1);
+
+    // LINE redelivers the identical webhook event id.
+    const second = await service.processEvents(
+      [textEvent(CANCEL_ACTIVE_DRAFT_COMMAND, "cancel-dup")],
+      "dest",
+    );
+    expect(second[0]!.status).toBe("duplicate");
+    // processOne was never invoked: no second RPC, no second reply.
+    expect(db.cancelArgs).toHaveLength(1);
+    expect(replies).toEqual([CANCEL_ACTIVE_DRAFT_SUCCESS_REPLY]);
+    expect(db.rows("raw_messages")).toHaveLength(1);
+  });
+});
+
+describe("the cancel hint", () => {
+  it("is appended to a blocked validation reply, where the draft provably stays open", async () => {
+    const db = new CancelDatabase(
+      pendingRow([RETURN_HEADER, "1.มังคุด45บาท", "4โลก"].join("\n")),
+      master([{}]),
+    );
+    const replies: string[] = [];
+    await build(db, replies).processEvents([textEvent("จบรายการชั่งคืน", "hint-1")], "dest");
+
+    expect(replies[0]).toContain("⛔");
+    expect(replies[0]).toContain(CANCEL_ACTIVE_DRAFT_HINT);
+    expect(replies[0]!.endsWith(CANCEL_ACTIVE_DRAFT_HINT)).toBe(true);
+    // Still no close boundary: the hint does not change the gate's behaviour.
+    expect(db.pending!.close_event_timestamp_ms).toBeNull();
+  });
+
+  it("is appended to a presented price review", async () => {
+    const db = new CancelDatabase(
+      pendingRow([RETURN_HEADER, "1.มังคุด120บาท", "2โล"].join("\n")),
+      master([{ price_per_unit: 100, quantity: 5 }]),
+    );
+    const replies: string[] = [];
+    await build(db, replies).processEvents([textEvent("จบรายการชั่งคืน", "hint-2")], "dest");
+
+    expect(replies[0]).toContain("⚠️");
+    expect(replies[0]).toContain(CANCEL_ACTIVE_DRAFT_HINT);
+  });
+
+  it("is NEVER appended to an accepted close", async () => {
+    const db = new CancelDatabase(pendingRow(WITHDRAWAL));
+    const replies: string[] = [];
+    await build(db, replies).processEvents([textEvent("จบรายการเบิก", "hint-3")], "dest");
+
+    expect(replies).toEqual([PRODUCE_CLOSE_PENDING_REPLY]);
+    expect(replies[0]).not.toContain(CANCEL_ACTIVE_DRAFT_HINT);
+    expect(replies[0]).not.toContain(CANCEL_ACTIVE_DRAFT_COMMAND);
+  });
+
+  it("is NEVER appended to the cancellation replies themselves", () => {
+    for (const reply of [
+      CANCEL_ACTIVE_DRAFT_SUCCESS_REPLY,
+      CANCEL_ACTIVE_DRAFT_NONE_REPLY,
+      CANCEL_ACTIVE_DRAFT_REFUSED_REPLY,
+    ]) {
+      expect(reply).not.toContain(CANCEL_ACTIVE_DRAFT_HINT);
+    }
+  });
+
+  it("sits after a blank line and is composed from the one shared constant", () => {
+    expect(withCancelActiveDraftHint("เนื้อความ"))
+      .toBe(`เนื้อความ\n\n${CANCEL_ACTIVE_DRAFT_HINT}`);
+    expect(CANCEL_ACTIVE_DRAFT_HINT).toContain(CANCEL_ACTIVE_DRAFT_COMMAND);
+  });
+});
+
+describe("the user-cancelled predicate", () => {
+  it("is true only for a row this feature terminalized", () => {
+    expect(isUserCancelledPendingRow({
+      finalization_status: "failed_closed",
+      finalization_error: { reason: "user_cancelled", cancel_line_event_id: "e" },
+    })).toBe(true);
+  });
+
+  it("stays fail-closed for every other terminal shape", () => {
+    const cases: Array<{ finalization_status?: string | null; finalization_error?: unknown }> = [
+      // Genuinely lost produce, and the two other structured failed_closed reasons.
+      { finalization_status: "failed_closed", finalization_error: null },
+      { finalization_status: "failed_closed", finalization_error: { reason: "superseded" } },
+      {
+        finalization_status: "failed_closed",
+        finalization_error: { reason: "close_refused_unresolved" },
+      },
+      // Still in flight.
+      { finalization_status: "pending", finalization_error: null },
+      { finalization_status: "processing", finalization_error: null },
+      // The reason on a non-terminal status must not resolve anything either.
+      { finalization_status: "pending", finalization_error: { reason: "user_cancelled" } },
+      // Defensive: jsonb can be a scalar, an array or absent.
+      { finalization_status: "failed_closed", finalization_error: "user_cancelled" },
+      { finalization_status: "failed_closed", finalization_error: ["user_cancelled"] },
+      { finalization_status: "failed_closed", finalization_error: 7 },
+      { finalization_status: "failed_closed" },
+      { finalization_status: null, finalization_error: { reason: "user_cancelled" } },
+      {},
+    ];
+    for (const row of cases) expect(isUserCancelledPendingRow(row)).toBe(false);
+  });
+});

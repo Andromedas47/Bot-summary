@@ -23,6 +23,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { RE } from "@/lib/parsers/weigh-session/regex";
 import { baseTransactionType, transactionBucket } from "@/lib/summary/transactions";
 import { transactionKindFromText } from "./failure-lifecycle-source";
+import { isUserCancelledPendingRow } from "./cancel-active-draft";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyClient = SupabaseClient<any>;
@@ -130,6 +131,7 @@ interface RoundRow {
 interface PendingRow {
   accountability_round_id: string | null;
   finalization_status: string | null;
+  finalization_error: unknown;
   declared_transaction_type: string | null;
   accumulated_text: string | null;
   close_requested_at: string | null;
@@ -217,7 +219,7 @@ export async function loadRoundReturnStatuses(
     const { data, error } = await supabase
       .from("pending_sessions")
       .select(
-        "accountability_round_id, finalization_status, declared_transaction_type, accumulated_text, close_requested_at",
+        "accountability_round_id, finalization_status, finalization_error, declared_transaction_type, accumulated_text, close_requested_at",
       )
       .in("accountability_round_id", chunk);
     if (error) throw new Error(`pending session round lookup failed: ${error.message}`);
@@ -226,6 +228,12 @@ export async function loadRoundReturnStatuses(
       // Client-side authority, exactly as the Sales loader does: a status the
       // server filter did not anticipate must count as unresolved, not vanish.
       if (RESOLVED_PENDING_STATUSES.has(row.finalization_status ?? "pending")) continue;
+      // A draft the operator explicitly cancelled is not an unfinished return.
+      // Counting it would mark the round's return incomplete for a document the
+      // operator deliberately abandoned — the preserved-เบิก / cancelled-ชั่งคืน
+      // case. Only this ONE structured reason resolves; every other unknown
+      // status stays fail-closed.
+      if (isUserCancelledPendingRow(row)) continue;
       if (!pendingRowCanBeReturn(row.declared_transaction_type, row.accumulated_text)) continue;
       evidence.push({
         accountabilityRoundId: row.accountability_round_id,

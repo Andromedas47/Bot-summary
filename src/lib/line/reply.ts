@@ -2,6 +2,9 @@ import { logger } from "@/lib/logger";
 import { formatThaiDate } from "@/lib/date";
 import type { WeighSession, WeighSessionItem } from "@/lib/parsers/weigh-session/types";
 import { ADDITIONAL_TYPE_LABEL } from "@/lib/parsers/weigh-session/parser";
+import { produceCategoryTotals, resolveProduceCategory } from "@/lib/summary/produce-category-totals";
+import { LINE_MESSAGE_MAX_CODE_POINTS, countCodePoints } from "@/lib/summary/line-chunking";
+import type { TransactionBucket } from "@/lib/summary/transactions";
 
 export function measureLineText(text: string): { codePoints: number; utf8Bytes: number } {
   return {
@@ -261,10 +264,83 @@ export function buildWeighSessionSummary(session: WeighSession): string {
     return `${i + 1}. ${item.product_name} ${fmt(qty)}${unit} × ${fmt(price)} = ${fmt(total)}`;
   };
 
-  const buildSection = (label: string, subtotalLabel: string, items: Item[], total: number): string[] => {
+  // Category is presentation only, derived at output time from the approved
+  // Product Code Dictionary (see product-code/category.ts) — it never changes
+  // what the operator typed, never changes an item's own line text or the
+  // section subtotal, and never reorders items across a shared category
+  // (Array.prototype.sort is stable, so same-category items keep their
+  // original relative order and therefore their original numbering).
+  /**
+   * Category is presentation only, derived at output time from the approved
+   * Product Code Dictionary (product-code/category.ts). It never changes what
+   * the operator typed and never enters any business identity.
+   *
+   * Two deliberate properties:
+   *
+   * Every printed number in a section — each item line, each category subtotal
+   * and the section subtotal — comes from ONE integer-satang sum of the same
+   * per-item totals. Leaving the section subtotal on the older float reduce
+   * let a section print item lines of 0.13 + 0.13 + 0.13, a category subtotal
+   * of 0.39, and a section subtotal of 0.38 in the same receipt.
+   *
+   * An item's category depends only on that item's own name. `knownNames` is
+   * deliberately NOT passed: it authorizes normalizeProductName's `เพิ่ม`
+   * prefix strip, which would make a literal `เพิ่มหมอนทอง` classify as
+   * ทุเรียน or ไม่จัดหมวด depending on whether some OTHER line in the same
+   * message happens to be `หมอนทอง`. The day-wide 08:00 report has genuine
+   * day-wide context and may resolve such a name further; an instant reply
+   * has only this message, so it stays pure rather than guessing from
+   * whatever else was typed alongside.
+   */
+  const buildSection = (
+    label: string,
+    subtotalLabel: string,
+    items: Item[],
+    bucket: TransactionBucket,
+  ): string[] => {
     if (items.length === 0) return [];
-    return [label, ...items.map(itemLine), `${subtotalLabel}: ${fmt(total)} บาท`];
+
+    const breakdown = produceCategoryTotals(items.map((it) => ({
+      product_name: it.product_name,
+      transaction_type: it.transaction_type,
+      total_amount: weighItemTotal(it),
+    })));
+
+    const body: string[] = [];
+    // Numbering follows PRINT order, so the receipt always reads 1, 2, 3 top to
+    // bottom. Numbering by the item's original position instead would print
+    // "2." above "1." whenever a section spans categories, and "แก้ item 2"
+    // would point at a line above item 1. Within one category the items keep
+    // their typed order, so the sequence still tracks what the operator sent.
+    let printed = 0;
+    for (const entry of breakdown[bucket].categories) {
+      body.push(entry.heading);
+      for (const item of items) {
+        // Same pure, single-argument call the totals used — see the coupling
+        // note on produceCategoryTotals. Diverging here once made an item
+        // count toward a subtotal while printing under no category at all.
+        if (resolveProduceCategory(item.product_name) !== entry.id) continue;
+        body.push(itemLine(item, printed));
+        printed += 1;
+      }
+      body.push(`รวม${entry.label} ${fmt(entry.totalSatang / 100)} บาท`);
+    }
+
+    return [
+      label,
+      ...body,
+      `${subtotalLabel}: ${fmt(breakdown[bucket].totalSatang / 100)} บาท`,
+    ];
   };
+
+  /** The pre-category rendering, kept as the fallback for an oversized message. */
+  const buildFlatSection = (
+    label: string,
+    subtotalLabel: string,
+    items: Item[],
+    total: number,
+  ): string[] =>
+    items.length === 0 ? [] : [label, ...items.map(itemLine), `${subtotalLabel}: ${fmt(total)} บาท`];
 
   const dateLabel = session.date ? formatThaiDate(session.date) : "";
   const lines: string[] = [
@@ -273,17 +349,33 @@ export function buildWeighSessionSummary(session: WeighSession): string {
     `${session.staff_name}${dateLabel ? ` — ${dateLabel}` : ""}`,
   ];
 
-  const sections = [
-    buildSection("เบิก",    "รวมเบิก", borrowItems,    borrowTotal),
-    buildSection("ชั่งคืน", "รวมคืน",  returnItems,    returnTotal),
-    buildSection("คืนเสีย", "รวมเสีย", badReturnItems, badReturnTotal),
-  ].filter(s => s.length > 0);
+  const assemble = (sections: string[][]): string => {
+    const out = [...lines];
+    for (const section of sections.filter((s) => s.length > 0)) out.push("", ...section);
+    return out.join("\n");
+  };
 
-  for (const s of sections) {
-    lines.push("", ...s);
-  }
+  const grouped = assemble([
+    buildSection("เบิก",    "รวมเบิก", borrowItems,    "เบิก"),
+    buildSection("ชั่งคืน", "รวมคืน",  returnItems,    "คืน"),
+    buildSection("คืนเสีย", "รวมเสีย", badReturnItems, "คืนเสีย"),
+  ]);
+  // Grouping adds a heading and a subtotal line per category, and this reply is
+  // delivered as ONE unsplit LINE message, so grouping must never be the reason
+  // a receipt stops fitting. Past the cap it drops back to the exact pre-feature
+  // rendering — readability is the optional part, the receipt is not.
+  //
+  // This buys back only what grouping costs. A document large enough to overflow
+  // the FLAT rendering too (~90+ items) still fails delivery, exactly as it did
+  // before this feature; nothing here splits the message. That ceiling is
+  // pre-existing and deliberately left alone.
+  if (countCodePoints(grouped) <= LINE_MESSAGE_MAX_CODE_POINTS) return grouped;
 
-  return lines.join("\n");
+  return assemble([
+    buildFlatSection("เบิก",    "รวมเบิก", borrowItems,    borrowTotal),
+    buildFlatSection("ชั่งคืน", "รวมคืน",  returnItems,    returnTotal),
+    buildFlatSection("คืนเสีย", "รวมเสีย", badReturnItems, badReturnTotal),
+  ]);
 }
 
 export interface AdditionalSessionDayContext {

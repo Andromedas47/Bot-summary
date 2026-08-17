@@ -2018,11 +2018,13 @@ export interface Database {
           p_evidence?: Json;
           p_expected_updated_at?: string;
           /**
-           * Required by the live 6-argument form (20260817090300). Omitting it
-           * dispatches to the retained 5-argument form, which is inert and
-           * always answers `runtime_environment_required`.
+           * REQUIRED here even though SQL would accept the call without it.
+           * Omitting it dispatches to the retained 5-argument form, which is
+           * inert — so a caller that forgot would silently supersede nothing
+           * rather than fail. Typing it as required turns that into a compile
+           * error instead of a quiet no-op.
            */
-          p_runtime_environment?: string;
+          p_runtime_environment: string;
         };
         Returns: Json;
       };

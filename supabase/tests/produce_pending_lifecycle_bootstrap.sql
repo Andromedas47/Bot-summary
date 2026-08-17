@@ -16,12 +16,20 @@ ALTER TABLE public.pending_sessions
   ADD COLUMN IF NOT EXISTS updated_at            timestamptz NOT NULL DEFAULT now(),
   ADD COLUMN IF NOT EXISTS close_event_timestamp_ms bigint,
   ADD COLUMN IF NOT EXISTS close_requested_at    timestamptz,
+  ADD COLUMN IF NOT EXISTS close_finalize_started_at timestamptz,
   ADD COLUMN IF NOT EXISTS close_deadline_at     timestamptz,
   ADD COLUMN IF NOT EXISTS next_attempt_at       timestamptz,
   ADD COLUMN IF NOT EXISTS finalized_at          timestamptz,
   ADD COLUMN IF NOT EXISTS finalization_status   text NOT NULL DEFAULT 'pending',
   ADD COLUMN IF NOT EXISTS finalization_error    jsonb,
   ADD COLUMN IF NOT EXISTS runtime_environment   text;
+
+-- Production truth: migration 0031 added source_id as NULLABLE with no backfill,
+-- so pre-rollout rows legitimately carry NULL. The base fixture declares it NOT
+-- NULL, which would make a legacy row unrepresentable and quietly hide every
+-- guard that has to cope with one.
+ALTER TABLE public.pending_sessions
+  ALTER COLUMN source_id DROP NOT NULL;
 
 ALTER TABLE public.produce_sessions
   ADD COLUMN IF NOT EXISTS voided_at timestamptz;

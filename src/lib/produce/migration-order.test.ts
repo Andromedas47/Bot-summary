@@ -99,13 +99,28 @@ describe("session integrity migration ordering", () => {
     }
   });
 
-  it("keeps the five as the last five migrations, in rollout order", () => {
+  it("keeps the five contiguous, in rollout order, with nothing landing between them", () => {
+    // The original guard asserted these were the last five files, exactly as the
+    // PR A guard above once asserted its two were the last two. A later
+    // migration that touches none of these functions may legitimately land
+    // after them (the first is the draft-cancellation RPC, which installs a new
+    // function and reissues nothing), so the guarantee that survives is the
+    // real one: the block stays contiguous and in rollout order, because each
+    // of these five reissues a function an earlier one installs.
     const files = sortedMigrations();
-    expect(files[files.length - 5]).toContain(ROUND_REUSE);
-    expect(files[files.length - 4]).toContain(CONTAINMENT);
-    expect(files[files.length - 3]).toContain(SUPERSESSION);
-    expect(files[files.length - 2]).toContain(ENVIRONMENT);
-    expect(files[files.length - 1]).toContain(HISTORICAL);
+    const order = [ROUND_REUSE, CONTAINMENT, SUPERSESSION, ENVIRONMENT, HISTORICAL];
+    const first = indexOfMigration(ROUND_REUSE);
+    order.forEach((slug, offset) => {
+      expect(files[first + offset], `${slug} is out of rollout order`).toContain(slug);
+    });
+  });
+
+  it("lands draft cancellation after the whole block, reissuing none of it", () => {
+    // Forward-only and additive: it installs cancel_active_pending_produce_draft
+    // and only CALLS retire_empty_round_of_generation, so it can never revert a
+    // function an earlier migration installed.
+    expect(indexOfMigration("produce_cancel_active_pending_draft"))
+      .toBeGreaterThan(indexOfMigration(HISTORICAL));
   });
 
   it("orders both release fixes strictly after the three Production already applied", () => {

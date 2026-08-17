@@ -231,6 +231,8 @@ interface SupersedeOptions {
   /** Override the snapshot the caller claims to have proven. */
   expected?: string | null;
   evidence?: string;
+  /** The calling worker's environment. Fixtures are stamped 'production'. */
+  environment?: string | null;
 }
 
 /**
@@ -243,10 +245,12 @@ function supersedeSql(
   successorSql: string,
   expected: string | null,
   evidence = "'{}'::jsonb",
+  environment: string | null = "production",
 ): string {
   return `SELECT public.supersede_pending_generation(
     ${q(key)}, ${generation}, ${successorSql}, ${evidence},
-    ${expected === null ? "NULL" : `${q(expected)}::timestamptz`})`;
+    ${expected === null ? "NULL" : `${q(expected)}::timestamptz`},
+    ${environment === null ? "NULL" : q(environment)})`;
 }
 
 interface SupersedeResult {
@@ -265,9 +269,14 @@ async function supersede(
   const expected = options.expected === undefined
     ? await pendingUpdatedAt(key)
     : options.expected;
-  return JSON.parse(await scalar(
-    supersedeSql(key, generation, successorSql, expected, options.evidence),
-  ));
+  return JSON.parse(await scalar(supersedeSql(
+    key,
+    generation,
+    successorSql,
+    expected,
+    options.evidence,
+    options.environment === undefined ? "production" : options.environment,
+  )));
 }
 
 async function seedProduceSession(roundId: string | null): Promise<string> {
@@ -300,6 +309,10 @@ describe.skipIf(!pgAvailable)("pending lifecycle recovery on PostgreSQL 17", () 
       ROOT, "supabase", "migrations",
       "20260817090200_produce_pending_supersession_and_close_recovery.sql",
     ));
+    await apply(join(
+      ROOT, "supabase", "migrations",
+      "20260817090300_produce_supersession_runtime_environment.sql",
+    ));
   }, 120_000);
 
   afterAll(async () => {
@@ -307,10 +320,18 @@ describe.skipIf(!pgAvailable)("pending lifecycle recovery on PostgreSQL 17", () 
     await psql(["-d", "postgres", "-c", `DROP DATABASE IF EXISTS ${DATABASE}`], "postgres");
   }, 60_000);
 
-  test("the migration is idempotent", async () => {
+  test("the migrations are idempotent", async () => {
+    // Re-applied in rollout order. 090200 reinstates the pre-environment
+    // 5-argument function, so 090300 MUST follow it here exactly as it does in
+    // a real rollout — otherwise this test would leave the database one
+    // migration behind and silently disarm every isolation test after it.
     await apply(join(
       ROOT, "supabase", "migrations",
       "20260817090200_produce_pending_supersession_and_close_recovery.sql",
+    ));
+    await apply(join(
+      ROOT, "supabase", "migrations",
+      "20260817090300_produce_supersession_runtime_environment.sql",
     ));
     expect(await scalar(`
       SELECT count(*)::text FROM information_schema.columns
@@ -569,6 +590,112 @@ describe.skipIf(!pgAvailable)("pending lifecycle recovery on PostgreSQL 17", () 
       expected: null,
     })).reason).toBe("expected_updated_at_required");
     expect(await pendingField(key, "terminalized")).toBe("false");
+  });
+
+  // ── P1-A cross-environment isolation ──────────────────────────────────────
+  // Preview, Production and development share one Supabase project. Every case
+  // here is a row one worker must NOT be able to terminalize.
+
+  test("A — a Production successor never supersedes a Preview pending", async () => {
+    const { key, generation } = await seedPending({ environment: "preview" });
+    const successor = await seedProduceSession(null);
+    expect((await supersede(key, `${q(generation)}::uuid`, `${q(successor)}::uuid`, {
+      environment: "production",
+    })).reason).toBe("environment_mismatch");
+    expect(await pendingField(key, "terminalized")).toBe("false");
+    expect(await pendingField(key, "finalization_status")).toBe("pending");
+  });
+
+  test("B — a Preview successor never supersedes a Production pending", async () => {
+    const { key, generation } = await seedPending({ environment: "production" });
+    const successor = await seedProduceSession(null);
+    expect((await supersede(key, `${q(generation)}::uuid`, `${q(successor)}::uuid`, {
+      environment: "preview",
+    })).reason).toBe("environment_mismatch");
+    expect(await pendingField(key, "terminalized")).toBe("false");
+  });
+
+  test("C — a legacy NULL-environment pending belongs to Production", async () => {
+    const round = await seedRound();
+    const { key, generation } = await seedPending({ roundId: round, environment: null });
+    const successor = await seedProduceSession(null);
+    const result = await supersede(key, `${q(generation)}::uuid`, `${q(successor)}::uuid`, {
+      environment: "production",
+    });
+    expect(result.superseded).toBe(true);
+    expect(await pendingField(key, "terminalized")).toBe("true");
+    expect(await roundStatus(round)).toBe("cancelled");
+  });
+
+  test("a legacy NULL pending is NOT claimable by Preview or development", async () => {
+    for (const environment of ["preview", "development"]) {
+      const { key, generation } = await seedPending({ environment: null });
+      const successor = await seedProduceSession(null);
+      expect((await supersede(key, `${q(generation)}::uuid`, `${q(successor)}::uuid`, {
+        environment,
+      })).reason).toBe("environment_mismatch");
+      expect(await pendingField(key, "terminalized")).toBe("false");
+    }
+  });
+
+  test("D — Production supersedes its own pending", async () => {
+    const { key, generation } = await seedPending({ environment: "production" });
+    const successor = await seedProduceSession(null);
+    expect((await supersede(key, `${q(generation)}::uuid`, `${q(successor)}::uuid`, {
+      environment: "production",
+    })).superseded).toBe(true);
+    expect(await pendingField(key, "terminalized")).toBe("true");
+  });
+
+  test("E — Preview supersedes its own pending", async () => {
+    const { key, generation } = await seedPending({ environment: "preview" });
+    const successor = await seedProduceSession(null);
+    expect((await supersede(key, `${q(generation)}::uuid`, `${q(successor)}::uuid`, {
+      environment: "preview",
+    })).superseded).toBe(true);
+    expect(await pendingField(key, "terminalized")).toBe("true");
+  });
+
+  test("F — an unrecognised or missing environment fails closed", async () => {
+    for (const environment of ["staging", "PRODUCTION", "", null]) {
+      const { key, generation } = await seedPending({ environment: "production" });
+      const successor = await seedProduceSession(null);
+      expect((await supersede(key, `${q(generation)}::uuid`, `${q(successor)}::uuid`, {
+        environment,
+      })).reason).toBe("invalid_runtime_environment");
+      expect(await pendingField(key, "terminalized")).toBe("false");
+    }
+  });
+
+  test("G — the retained 5-argument signature supersedes nothing", async () => {
+    // A build deployed before this migration still resolves that overload. It
+    // cannot name an environment, so it must not be able to write.
+    const { key, generation } = await seedPending({ environment: "production" });
+    const successor = await seedProduceSession(null);
+    const expected = await pendingUpdatedAt(key);
+    const result = JSON.parse(await scalar(`
+      SELECT public.supersede_pending_generation(
+        ${q(key)}, ${q(generation)}::uuid, ${q(successor)}::uuid,
+        '{}'::jsonb, ${q(expected)}::timestamptz)`));
+    expect(result.superseded).toBe(false);
+    expect(result.reason).toBe("runtime_environment_required");
+    expect(await pendingField(key, "terminalized")).toBe("false");
+    expect(await pendingField(key, "finalization_error")).toBe("<null>");
+  });
+
+  test("both signatures exist and dispatch unambiguously", async () => {
+    expect(await scalar(`
+      SELECT count(*)::text FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'public' AND p.proname = 'supersede_pending_generation'`))
+      .toBe("2");
+    // The 6-argument form has no default on its last parameter, so a 5-argument
+    // call can only ever mean the inert one.
+    expect(await scalar(`
+      SELECT pronargdefaults::text FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'public' AND p.proname = 'supersede_pending_generation'
+        AND pronargs = 6`)).toBe("0");
   });
 
   test("a stale snapshot is refused even with no concurrent writer", async () => {

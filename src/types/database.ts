@@ -252,6 +252,7 @@ export interface Database {
           void_reason:             string | null;
           replacement_session_id:  string | null;
           accountability_round_id: string | null;
+          canonical_withdrawal_item_lines: string[] | null;
         };
         Insert: {
           id?:                      string;
@@ -276,6 +277,7 @@ export interface Database {
           void_reason?:             string | null;
           replacement_session_id?:  string | null;
           accountability_round_id?: string | null;
+          canonical_withdrawal_item_lines?: string[] | null;
         };
         Update: {
           id?:                      string;
@@ -300,6 +302,7 @@ export interface Database {
           void_reason?:             string | null;
           replacement_session_id?:  string | null;
           accountability_round_id?: string | null;
+          canonical_withdrawal_item_lines?: string[] | null;
         };
         Relationships: [];
       };
@@ -2014,6 +2017,14 @@ export interface Database {
           p_superseded_by: string;
           p_evidence?: Json;
           p_expected_updated_at?: string;
+          /**
+           * REQUIRED here even though SQL would accept the call without it.
+           * Omitting it dispatches to the retained 5-argument form, which is
+           * inert — so a caller that forgot would silently supersede nothing
+           * rather than fail. Typing it as required turns that into a compile
+           * error instead of a quiet no-op.
+           */
+          p_runtime_environment: string;
         };
         Returns: Json;
       };

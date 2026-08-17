@@ -25,6 +25,7 @@ import {
   weighSessionCompatibilityFingerprints,
 } from "@/lib/produce/business-fingerprint";
 import { supersedeReplacedPendingGenerations } from "@/lib/produce/pending-supersession";
+import { loadHistoricalWithdrawalCandidates } from "@/lib/produce/historical-withdrawal-candidates";
 import { buildSeedFromStructuredMetadata } from "@/lib/parsers/weigh-session/seed";
 import {
   produceIngestIdempotencyKey,
@@ -448,6 +449,17 @@ export async function finalizePendingGeneration(
     // stored as candidates. Riding inside the existing payload keeps the RPC
     // signature unchanged, so neither deploy order can break.
     canonical_withdrawal_item_lines: canonicalWithdrawalItemLines(parsed),
+    // Sessions recorded before that column existed carry NULL forever, so the
+    // guard cannot see them from SQL alone. Their canonical lines are computed
+    // here with the SAME canonicalizer and re-validated by the RPC under the
+    // containment lock — proposals, not verdicts. See
+    // historical-withdrawal-candidates.ts.
+    historical_withdrawal_candidates: await loadHistoricalWithdrawalCandidates(supabase, {
+      sessionDate: parsed.date,
+      staffName: parsed.staff_name,
+      marketLabel: parsed.session_title,
+      canonicalLines: canonicalWithdrawalItemLines(parsed),
+    }),
   };
   const itemPayload = parsed.items.map((item) => ({
     ...item,

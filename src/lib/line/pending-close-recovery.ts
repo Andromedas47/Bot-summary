@@ -42,6 +42,15 @@ export interface PendingCloseRecoveryRun {
  */
 export const CLOSE_RECOVERY_GRACE = "30 minutes";
 
+/**
+ * True only for "this function is not installed". Matched on the error CODE,
+ * not on message text: a message match would eventually swallow an unrelated
+ * failure whose wording happened to contain the same words.
+ */
+function isMissingFunctionError(error: { code?: string | null }): boolean {
+  return error.code === "42883" || error.code === "PGRST202";
+}
+
 export async function recoverStrandedPendingCloses(
   supabase: Supabase,
   limit = 25,
@@ -52,7 +61,25 @@ export async function recoverStrandedPendingCloses(
     p_grace: CLOSE_RECOVERY_GRACE,
   });
 
-  if (error) throw new Error(`stranded close recovery failed: ${error.message}`);
+  if (error) {
+    // A deployment that reaches a database without 20260817090200 is app-first,
+    // not broken: nothing has been stranded by this build yet, and the sweep is
+    // the last step of a cron whose other work already succeeded. Turning that
+    // into a 500 would hide those successes behind a red cron.
+    //
+    // Narrow on purpose — PostgreSQL 42883 is "function does not exist", and
+    // PostgREST answers PGRST202 when no function matches the posted arguments.
+    // Every other RPC error still fails loudly, because a real recovery failure
+    // means valid closes are sitting unrecovered.
+    if (isMissingFunctionError(error)) {
+      logger.warn("produce.close.recovery_unavailable", {
+        code: error.code ?? null,
+        message: error.message,
+      });
+      return { recovered: 0, roundsCancelled: 0 };
+    }
+    throw new Error(`stranded close recovery failed: ${error.message}`);
+  }
 
   const rows = (data ?? []) as Array<{
     session_key: string;

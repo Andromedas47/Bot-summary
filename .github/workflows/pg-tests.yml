@@ -550,10 +550,13 @@ jobs:
           bunx bun test
           src/lib/produce/pending-supersession.test.ts
           src/lib/produce/withdrawal-containment.test.ts
+          src/lib/produce/historical-withdrawal-candidates.test.ts
           src/lib/produce/plain-text-round-binding.test.ts
           src/lib/produce/migration-order.test.ts
           src/lib/line/webhook-plain-text-entry-gate.test.ts
+          src/lib/line/pending-close-recovery.test.ts
           src/lib/line/pending-session-finalizer.test.ts
+          src/lib/line/pending-session-runtime-environment.test.ts
       - name: Typecheck
         run: npm run type-check
       - name: git diff --check against the PR base

@@ -10,6 +10,7 @@ import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 import {
   isContentSuperseded,
+  ownsCandidateEnvironment,
   provesSupersession,
   supersedeReplacedPendingGenerations,
   type SupersessionSuccessor,
@@ -251,15 +252,25 @@ function fakeDb(
   rpcResult: Record<string, unknown> = { superseded: true, round_outcome: "cancelled" },
 ) {
   const calls: Array<Record<string, unknown>> = [];
+  const environmentFilters: string[] = [];
   return {
     calls,
+    environmentFilters,
     from(table: string) {
       const payload = table === "produce_sessions"
         ? [{ finalized_at: finalizedAt }]
         : rows;
       const builder = {
         select: () => builder,
-        eq: () => builder,
+        eq: (column: string, value: unknown) => {
+          if (column === "runtime_environment") environmentFilters.push(String(value));
+          return builder;
+        },
+        or: (expression: string) => {
+          environmentFilters.push(expression);
+          return builder;
+        },
+        order: () => builder,
         limit: () => Promise.resolve({ data: payload, error: null }),
       };
       return builder;
@@ -280,6 +291,10 @@ function pendingRow(text: string, overrides: Record<string, unknown> = {}) {
     accumulated_text: text,
     updated_at: new Date(1_000).toISOString(),
     accountability_round_id: null,
+    // bun test leaves VERCEL_ENV unset, so the worker is "development" and only
+    // development-stamped rows are its own. Deliberate: a fixture that relied on
+    // NULL being claimable would not be testing genuine isolation.
+    runtime_environment: "development",
     ...overrides,
   };
 }
@@ -357,6 +372,56 @@ describe("sweep", () => {
     const db = fakeDb([pendingRow("ข้อความที่อ่านไม่ออก")]);
     expect(await supersedeReplacedPendingGenerations(db, successor(doc()))).toEqual([]);
     expect(db.calls).toHaveLength(0);
+  });
+});
+
+/**
+ * Preview, Production and development share one Supabase project, so a sweep
+ * with no environment boundary could terminalize another environment's live
+ * document. The 0061 contract is the same one the finalizer enforces.
+ */
+describe("environment ownership", () => {
+  it("production owns its own rows and legacy NULL rows", () => {
+    expect(ownsCandidateEnvironment("production", "production")).toBe(true);
+    expect(ownsCandidateEnvironment("production", null)).toBe(true);
+    expect(ownsCandidateEnvironment("production", "preview")).toBe(false);
+    expect(ownsCandidateEnvironment("production", "development")).toBe(false);
+  });
+
+  it("preview owns only preview — NULL is never a wildcard for it", () => {
+    expect(ownsCandidateEnvironment("preview", "preview")).toBe(true);
+    expect(ownsCandidateEnvironment("preview", null)).toBe(false);
+    expect(ownsCandidateEnvironment("preview", "production")).toBe(false);
+  });
+
+  it("development owns only development", () => {
+    expect(ownsCandidateEnvironment("development", "development")).toBe(true);
+    expect(ownsCandidateEnvironment("development", null)).toBe(false);
+    expect(ownsCandidateEnvironment("development", "production")).toBe(false);
+  });
+
+  it("scopes the candidate query by environment before the limit", async () => {
+    const db = fakeDb([pendingRow(documentText())]);
+    await supersedeReplacedPendingGenerations(db, successor(doc()));
+    // bun test runs as development, so the filter must be an exact match and
+    // must NOT be the production legacy-NULL disjunction.
+    expect(db.environmentFilters).toEqual(["development"]);
+  });
+
+  it("sends the worker environment to the RPC", async () => {
+    const db = fakeDb([pendingRow(documentText())]);
+    await supersedeReplacedPendingGenerations(db, successor(doc()));
+    expect(db.calls[0]?.p_runtime_environment).toBe("development");
+  });
+
+  it("skips a row stamped for another environment even if the query returned it", async () => {
+    // The query filter is a narrowing, not the boundary. This is the middle of
+    // the three layers; the RPC re-checks under the row lock.
+    for (const foreign of ["production", "preview", null]) {
+      const db = fakeDb([pendingRow(documentText(), { runtime_environment: foreign })]);
+      expect(await supersedeReplacedPendingGenerations(db, successor(doc()))).toEqual([]);
+      expect(db.calls).toHaveLength(0);
+    }
   });
 });
 

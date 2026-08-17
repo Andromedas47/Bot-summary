@@ -193,6 +193,28 @@ interface SubmitOptions {
   withoutContainmentKey?: boolean;
   /** The LINE group the document arrived in. Containment is scoped by it. */
   sourceId?: string;
+  /**
+   * Pre-migration sessions the application derived canonical lines for. The
+   * database re-validates each one; only the content comes from here.
+   */
+  historical?: HistoricalCandidate[];
+}
+
+interface HistoricalCandidate {
+  produce_session_id: string;
+  lines: string[];
+  item_count: number;
+}
+
+/**
+ * What `loadHistoricalWithdrawalCandidates` produces for a session that was
+ * persisted before the stored column existed. The lines come from the same
+ * canonicalizer; in the application they are derived from the persisted
+ * `produce_items` of that session, which are the rows this document wrote.
+ */
+function historicalOf(produceSessionId: string, parsed: WeighSession): HistoricalCandidate {
+  const lines = canonicalWithdrawalItemLines(parsed) ?? [];
+  return { produce_session_id: produceSessionId, lines, item_count: lines.length };
 }
 
 function finalizeSql(
@@ -232,6 +254,7 @@ function finalizeSql(
   };
   if (!options.withoutContainmentKey) {
     sessionPayload.canonical_withdrawal_item_lines = containment;
+    sessionPayload.historical_withdrawal_candidates = options.historical ?? [];
   }
 
   return `SELECT public.try_finalize_pending_generation(
@@ -280,6 +303,7 @@ describe.skipIf(!pgAvailable)("plain-withdrawal containment guard on PostgreSQL 
     await apply(join(ROOT, "supabase", "migrations", "20260815160000_produce_market_identity_guard.sql"));
     await apply(join(ROOT, "supabase", "migrations", "20260815150000_produce_fingerprint_compatibility.sql"));
     await apply(join(ROOT, "supabase", "migrations", "20260817090100_produce_withdrawal_containment_guard.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260817090400_produce_historical_withdrawal_containment.sql"));
   }, 120_000);
 
   afterAll(async () => {
@@ -547,4 +571,200 @@ describe.skipIf(!pgAvailable)("plain-withdrawal containment guard on PostgreSQL 
     expect(resultB.stdout).toContain("withdrawal_containment");
     expect(await produceSessionCount()).toBe(before + 1);
   }, 30_000);
+
+  // ── Sessions persisted BEFORE the stored column existed ───────────────────
+  // Production carried 91 of these and 0 with the column. `withoutContainmentKey`
+  // reproduces exactly that: the session persists with a NULL array, so only the
+  // caller-supplied arm can see it.
+
+  /**
+   * A seller nobody else in this suite uses. Two scenarios that shared one
+   * would collide on the PR #51 whole-document fingerprint and answer
+   * `duplicate` before containment was ever consulted, which would prove
+   * nothing about containment.
+   */
+  // Thai only: the header parser reads the seller up to the `-`, and a digit in
+  // that position makes the whole document fail validation before the guard.
+  // `โด้` is excluded: it is the suite-wide SELLER, and reusing it here would
+  // collide with the earlier tests' documents on the whole-document fingerprint.
+  const SCENARIO_SELLERS = [
+    "มิ้น", "จิ้ว", "ขวัญ", "เมย์", "ต้อม", "แทน", "ป้าลี", "น้อย", "หนึ่ง",
+    "สอง", "สาม", "สี่",
+  ];
+  let scenario = -1;
+  const nextSeller = () => {
+    scenario += 1;
+    const name = SCENARIO_SELLERS[scenario];
+    if (!name) throw new Error("add another scenario seller");
+    return name;
+  };
+
+  /** Persist a pre-migration session and return what the app would supply for it. */
+  async function seedHistorical(parsed: WeighSession, sourceId = SOURCE) {
+    const result = await submit("historical", parsed, {
+      withoutContainmentKey: true,
+      sourceId,
+    });
+    expect(result.status, JSON.stringify(result)).toBe("finalized");
+    const id = result.session_id!;
+    expect(await scalar(`
+      SELECT coalesce(canonical_withdrawal_item_lines::text, '<null>')
+      FROM public.produce_sessions WHERE id = ${q(id)}::uuid`)).toBe("<null>");
+    return { id, candidate: historicalOf(id, parsed) };
+  }
+
+  const MORE_GOODS: Row[] = [
+    { product: "ขิง", price: 30, quantity: 2, unit: "โล" },
+    { product: "ข่า", price: 25, quantity: 1.5, unit: "โล" },
+    { product: "ใบมะกรูด", price: 10, quantity: 5, unit: "แพค" },
+  ];
+
+  test("a superset of a pre-migration withdrawal is blocked", async () => {
+    const seller = nextSeller();
+    const historical = document({ rows: DURIAN, seller });
+    const { candidate } = await seedHistorical(historical);
+    const before = await produceSessionCount();
+
+    const resend = document({ rows: [...DURIAN, ...DRY_GOODS, ...MORE_GOODS], seller });
+    const result = await submit("superset", resend, { historical: [candidate] });
+    expect(result.status).toBe("failed_closed");
+    expect(result.reason).toBe("withdrawal_containment");
+    expect(await produceSessionCount()).toBe(before);
+  });
+
+  test("a fragment of a pre-migration withdrawal is blocked", async () => {
+    const seller = nextSeller();
+    const historical = document({ rows: [...DURIAN, ...DRY_GOODS, ...MORE_GOODS], seller });
+    const { candidate } = await seedHistorical(historical);
+    const before = await produceSessionCount();
+
+    const fragment = document({ rows: DURIAN, seller });
+    const result = await submit("fragment", fragment, { historical: [candidate] });
+    expect(result.status).toBe("failed_closed");
+    expect(result.reason).toBe("withdrawal_containment");
+    expect(await produceSessionCount()).toBe(before);
+  });
+
+  test("a pre-migration withdrawal in ANOTHER LINE source never blocks", async () => {
+    const seller = nextSeller();
+    const historical = document({ rows: DURIAN, seller });
+    const { candidate } = await seedHistorical(historical, OTHER_SOURCE);
+    const before = await produceSessionCount();
+
+    const resend = document({ rows: [...DURIAN, ...DRY_GOODS], seller });
+    // The caller offers it; the database refuses it, because the session's raw
+    // message carries a different source. Cross-source isolation is unchanged.
+    const result = await submit("cross-source", resend, {
+      historical: [candidate],
+      sourceId: SOURCE,
+    });
+    expect(result.status).toBe("finalized");
+    expect(await produceSessionCount()).toBe(before + 1);
+  });
+
+  test("a different quantity or price is a different withdrawal", async () => {
+    for (const rows of [
+      [{ ...DURIAN[0]!, quantity: 3.95 }, ...DURIAN.slice(1)],
+      [{ ...DURIAN[0]!, price: 110 }, ...DURIAN.slice(1)],
+    ]) {
+      // A fresh seller per case: re-seeding the same historical document under
+      // one seller would answer `duplicate` before containment was consulted.
+      const seller = nextSeller();
+      const { candidate } = await seedHistorical(document({ rows: DURIAN, seller }));
+      const before = await produceSessionCount();
+      const result = await submit("different", document({ rows: [...rows, ...DRY_GOODS], seller }), {
+        historical: [candidate],
+      });
+      expect(result.status).toBe("finalized");
+      expect(await produceSessionCount()).toBe(before + 1);
+    }
+  });
+
+  test("multiplicity is preserved against a pre-migration session", async () => {
+    const seller = nextSeller();
+    // Historical holds กระชาย twice; a resend carrying it once plus new rows is
+    // NOT a superset, so it is a genuinely different document.
+    const twice = [DRY_GOODS[0]!, DRY_GOODS[0]!, ...DURIAN];
+    const { candidate } = await seedHistorical(document({ rows: twice, seller }));
+    const before = await produceSessionCount();
+
+    const once = document({ rows: [DRY_GOODS[0]!, ...DURIAN, ...MORE_GOODS], seller });
+    expect((await submit("multiplicity", once, { historical: [candidate] })).status)
+      .toBe("finalized");
+    expect(await produceSessionCount()).toBe(before + 1);
+  });
+
+  test("เบิกเพิ่ม is still exempt from the historical arm", async () => {
+    const seller = nextSeller();
+    const { candidate } = await seedHistorical(document({ rows: DURIAN, seller }));
+    const before = await produceSessionCount();
+    // A superset of the historical document, declared as an intentional append.
+    // Containment must stay out of it; the rows differ from the main document
+    // so the whole-document fingerprint cannot answer first.
+    const append = document({ rows: [...DURIAN, ...DRY_GOODS], kind: "additional", seller });
+    expect((await submit("append", append, { historical: [candidate] })).status)
+      .toBe("finalized");
+    expect(await produceSessionCount()).toBe(before + 1);
+  });
+
+  test("a voided pre-migration session is not a candidate", async () => {
+    const seller = nextSeller();
+    const { id, candidate } = await seedHistorical(document({ rows: DURIAN, seller }));
+    await scalar(`UPDATE public.produce_sessions SET voided_at = now()
+                  WHERE id = ${q(id)}::uuid RETURNING 1`);
+    const before = await produceSessionCount();
+    const resend = document({ rows: [...DURIAN, ...DRY_GOODS], seller });
+    expect((await submit("voided", resend, { historical: [candidate] })).status)
+      .toBe("finalized");
+    expect(await produceSessionCount()).toBe(before + 1);
+  });
+
+  test("a supply whose item count no longer matches the row is dropped", async () => {
+    const seller = nextSeller();
+    // The one way a caller's content could be stale. The database compares the
+    // claimed count against the persisted produce_items and refuses to trust it.
+    const { candidate } = await seedHistorical(document({ rows: DURIAN, seller }));
+    const before = await produceSessionCount();
+    const resend = document({ rows: [...DURIAN, ...DRY_GOODS], seller });
+    expect((await submit("stale-count", resend, {
+      historical: [{ ...candidate, item_count: candidate.item_count + 1 }],
+    })).status).toBe("finalized");
+    expect(await produceSessionCount()).toBe(before + 1);
+  });
+
+  test("a session that already carries the stored column ignores a supplied array", async () => {
+    const seller = nextSeller();
+    // Only column-less sessions enter the supplied arm, so one session can
+    // never be counted through both and a caller cannot override stored content.
+    const stored = document({ rows: DURIAN, seller });
+    const first = await submit("stored", stored);
+    expect(first.status).toBe("finalized");
+    const before = await produceSessionCount();
+
+    const resend = document({ rows: [...DURIAN, ...DRY_GOODS], seller });
+    const result = await submit("stored-resend", resend, {
+      historical: [{
+        produce_session_id: first.session_id!,
+        lines: ["totally|unrelated|line"],
+        item_count: 1,
+      }],
+    });
+    // Still blocked — by the stored arm, on the real content.
+    expect(result.status).toBe("failed_closed");
+    expect(result.reason).toBe("withdrawal_containment");
+    expect(result.session_id).toBe(first.session_id!);
+    expect(await produceSessionCount()).toBe(before);
+  });
+
+  test("an older application build supplies nothing and nothing breaks", async () => {
+    const seller = nextSeller();
+    const { candidate } = await seedHistorical(document({ rows: DURIAN, seller }));
+    expect(candidate.lines).toHaveLength(4);
+    const before = await produceSessionCount();
+    const resend = document({ rows: [...DURIAN, ...DRY_GOODS], seller });
+    // No historical key at all: the guard is exactly as strong as before.
+    expect((await submit("no-key", resend, { withoutContainmentKey: true })).status)
+      .toBe("finalized");
+    expect(await produceSessionCount()).toBe(before + 1);
+  });
 });

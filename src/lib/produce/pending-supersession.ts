@@ -62,6 +62,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 import { bangkokBusinessDateNow } from "@/lib/business-date";
 import { canonicalMarketLabel } from "@/lib/market";
+import { getRuntimeEnvironment, type RuntimeEnvironment } from "@/lib/runtime-environment";
 import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
 import {
   canonicalItemLines,
@@ -77,6 +78,13 @@ import { logger } from "@/lib/logger";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyClient = SupabaseClient<any>;
+
+/**
+ * One sweep reads at most this many candidates. Liveness, not correctness: a
+ * predecessor missed on this page is still non-terminal and still a candidate
+ * for the next successful document in the same stream.
+ */
+const SWEEP_PAGE_SIZE = 50;
 
 /** The document that just landed, as the successor half of the proof. */
 export interface SupersessionSuccessor {
@@ -120,6 +128,27 @@ export interface SupersessionCandidate {
    */
   updatedAtMs: number;
   accountabilityRoundId: string | null;
+  /** `pending_sessions.runtime_environment`; NULL is a legacy Production row. */
+  runtimeEnvironment: string | null;
+}
+
+/**
+ * The 0061 ownership contract, applied to a supersession candidate.
+ *
+ * Preview, Production and development share one Supabase project, so without
+ * this a Preview success could terminalize a Production operator's pending
+ * document. Production alone inherits legacy NULL rows, which predate the
+ * stamp. NULL is never "mine" for preview or development, and no environment is
+ * ever a wildcard for another — the same rule `ownsSnapshotEnvironment` applies
+ * on the finalization path.
+ */
+export function ownsCandidateEnvironment(
+  current: RuntimeEnvironment,
+  owner: string | null | undefined,
+): boolean {
+  const stamped = owner ?? null;
+  if (current === "production") return stamped === "production" || stamped === null;
+  return stamped === current;
 }
 
 export interface SupersessionOutcome {
@@ -336,16 +365,33 @@ export async function supersedeReplacedPendingGenerations(
   }
   const proven: SupersessionSuccessor = { ...successor, finalizedAtMs };
 
+  // The worker's own environment — the same value `ownsSnapshotEnvironment`
+  // already gated this finalization on. Never derived from a candidate row, and
+  // deliberately not a parameter: a caller cannot pass the wrong one.
+  const environment = getRuntimeEnvironment();
+
   // Scoped to the same LINE source: a document from another group is a
-  // different business stream and can never be this one's predecessor.
-  const { data, error } = await supabase
+  // different business stream and can never be this one's predecessor. Scoped
+  // to this environment too, BEFORE the limit, so a shared project cannot let
+  // one environment's success consume the other's page of candidates.
+  let query = supabase
     .from("pending_sessions")
     .select(
-      "session_key, session_generation, source_id, accumulated_text, updated_at, accountability_round_id",
+      "session_key, session_generation, source_id, accumulated_text, updated_at, accountability_round_id, runtime_environment",
     )
     .eq("source_id", successor.sourceId)
-    .eq("terminalized", false)
-    .limit(50);
+    .eq("terminalized", false);
+  query = environment === "production"
+    ? query.or("runtime_environment.eq.production,runtime_environment.is.null")
+    : query.eq("runtime_environment", environment);
+
+  // Deterministic order so the page is the same page on every run: an unordered
+  // limit could hide the one provable predecessor behind 50 arbitrary rows and
+  // never surface it again. Oldest first — a stale attempt outlives a fresh one.
+  const { data, error } = await query
+    .order("updated_at", { ascending: true })
+    .order("session_key", { ascending: true })
+    .limit(SWEEP_PAGE_SIZE);
 
   if (error) throw new Error(`pending supersession lookup failed: ${error.message}`);
 
@@ -363,9 +409,13 @@ export async function supersedeReplacedPendingGenerations(
       updatedAt: typeof row.updated_at === "string" ? row.updated_at : "",
       updatedAtMs: timestampMs(row.updated_at),
       accountabilityRoundId: (row.accountability_round_id as string | null) ?? null,
+      runtimeEnvironment: (row.runtime_environment as string | null) ?? null,
     };
     // No usable boundary for this row: unprovable, so it stays active.
     if (!Number.isFinite(candidate.updatedAtMs)) continue;
+    // Re-checked here as well as in the query and again in the RPC. A row from
+    // another environment is not this worker's to terminalize at any layer.
+    if (!ownsCandidateEnvironment(environment, candidate.runtimeEnvironment)) continue;
 
     let parsed: WeighSession;
     try {
@@ -388,6 +438,9 @@ export async function supersedeReplacedPendingGenerations(
         // generation, so without this the RPC would terminalize content nothing
         // ever proved. Verbatim from the SELECT: see SupersessionCandidate.
         p_expected_updated_at: candidate.updatedAt,
+        // Required, never defaulted: the RPC re-checks ownership under the row
+        // lock, so the pre-query filter above is a narrowing, not the boundary.
+        p_runtime_environment: environment,
         p_evidence: {
           superseded_by_session_key: successor.sessionKey,
           superseded_by_session_generation: successor.sessionGeneration,

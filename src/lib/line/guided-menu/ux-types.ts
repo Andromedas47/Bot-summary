@@ -5,6 +5,7 @@ import type {
   MenuSourceType,
   MenuTransactionTypeCode,
 } from "./menu-state-types";
+import { CANCEL_ACTIVE_DRAFT_HINT } from "@/lib/produce/cancel-active-draft";
 
 export const TX_CODE_TO_LABEL: Record<MenuTransactionTypeCode, string> = {
   withdraw: "เบิก",
@@ -81,14 +82,16 @@ export const GUIDED_MENU_COPY = {
     "ระบบจะใช้ค่าล่าสุดของสินค้านั้น",
   ].join("\n"),
   /**
-   * 3B: dismissing the menu does NOT void an open round. There is no
-   * authoritative cancel-open-session contract to call, so the copy must not
-   * imply one — see §2.3.
+   * 3B: dismissing the menu does NOT void an open round — it only closes the
+   * controls, and the draft keeps capturing. Abandoning the draft is now a
+   * separate, explicit contract the operator can invoke by typing the exact
+   * command (see src/lib/produce/cancel-active-draft.ts), so the copy names it
+   * instead of sending them to an administrator.
    */
   menuDismissedSessionOpen: [
     "ปิดเมนูแล้ว",
     "รายการที่เปิดไว้ยังอยู่ ส่งรายการสินค้าต่อได้",
-    "หากต้องการยกเลิกรายการ กรุณาแจ้งผู้ดูแล",
+    CANCEL_ACTIVE_DRAFT_HINT,
   ].join("\n"),
   /** 3B: close accepted, waiting for the operator's final confirmation. */
   closeRequested: [

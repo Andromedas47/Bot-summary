@@ -32,6 +32,7 @@ import {
   buildBlockingValidationReply,
   buildReviewValidationReply,
 } from "@/lib/produce/entry-validation-message";
+import { withCancelActiveDraftHint } from "@/lib/produce/cancel-active-draft";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 import { bangkokBusinessDateNow } from "@/lib/business-date";
 import { produceCommandSourceFromIdentity } from "./session-opener";
@@ -369,18 +370,22 @@ export class GuidedSessionCaptureService {
       };
     }
 
+    // Both refusals leave the structured draft in capture, so the cancel hint
+    // is true here. It is attached at the call site rather than inside the
+    // shared builders, which the deferred finalizer also uses on an already
+    // terminal generation.
     if (gate.decision === "blocked") {
       return {
         status: "validation_failed",
         errors: gate.result.blocking.map((exception) => exception.kind),
-        detail: buildBlockingValidationReply(gate.result),
+        detail: withCancelActiveDraftHint(buildBlockingValidationReply(gate.result)),
         ...snapshot,
       };
     }
     if (gate.decision === "review_presented") {
       return {
         status: "review_required",
-        detail: buildReviewValidationReply(gate.result),
+        detail: withCancelActiveDraftHint(buildReviewValidationReply(gate.result)),
         ...snapshot,
       };
     }

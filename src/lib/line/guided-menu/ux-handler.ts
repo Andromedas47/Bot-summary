@@ -716,8 +716,13 @@ export class GuidedMenuUxHandler {
         });
       }
       buttons.push({
-        // Never "ยกเลิกรายการ": this dismisses the guided controls and leaves
-        // the produce session open. There is no cancel-open-session contract.
+        // Never labelled "ยกเลิกรายการ": this button dismisses the guided
+        // controls and leaves the produce session open, which is a different
+        // thing from abandoning the draft. Abandoning it IS possible now — the
+        // operator types the exact command "ยกเลิกรายการ" (see
+        // src/lib/produce/cancel-active-draft.ts) — but it stays a typed
+        // command deliberately, so a stray button press can never discard a
+        // document in progress.
         label: "ออกจากเมนู",
         actionType: "menu_root",
         payload: { intent: "cancel" },

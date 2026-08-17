@@ -46,10 +46,22 @@
 -- against. A seller who genuinely withdraws a second identical batch expresses
 -- that with the explicit append contract, which is exactly what it is for.
 --
--- Business identity is source-independent and market-reviewed: same business
--- date, same normalized seller, same reviewed market identity
--- (`accountability_round_same_market`). A different seller, date or genuinely
--- different market is never compared.
+-- Business identity is the SAME four-part identity the accountability round
+-- contract uses: LINE source, business date, normalized seller, reviewed market
+-- identity (`accountability_round_same_market`). A different seller, date,
+-- genuinely different market or different source is never compared.
+--
+-- The source belongs in the key. Containment is a much more aggressive verdict
+-- than the PR #51 whole-document fingerprint — it refuses a document that is
+-- merely a superset of another, not an identical one — and two LINE groups are
+-- two independent business streams that may legitimately record overlapping
+-- withdrawals. Exact cross-source duplicates remain blocked by the fingerprint,
+-- which is deliberately source-independent; this guard is not.
+--
+-- `produce_sessions` carries no source, so the source is recovered the only way
+-- it can be proven: through the session's own `raw_message_id` into
+-- `raw_messages.source_id`. A session with no resolvable source is not a
+-- candidate, because an unprovable source is "cannot compare", never "matches".
 --
 -- Compatibility
 -- -------------
@@ -71,6 +83,21 @@ BEGIN
   END IF;
   IF to_regprocedure('public.accountability_round_same_market(text,text)') IS NULL THEN
     RAISE EXCEPTION 'reviewed market identity functions are missing';
+  END IF;
+  -- The guard scopes containment by LINE source, and the only proof of a
+  -- persisted session's source is its raw message. Fail the migration rather
+  -- than silently widening the comparison across sources.
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'raw_messages' AND column_name = 'source_id'
+  ) THEN
+    RAISE EXCEPTION 'raw_messages.source_id is missing; containment cannot be source-scoped';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'pending_sessions' AND column_name = 'source_id'
+  ) THEN
+    RAISE EXCEPTION 'pending_sessions.source_id is missing; containment cannot be source-scoped';
   END IF;
 END;
 $preflight$;
@@ -463,13 +490,16 @@ BEGIN
     FROM jsonb_array_elements_text(p_session->'canonical_withdrawal_item_lines') AS line;
   END IF;
 
-  -- A document with no business date has no identity to compare within, so it
-  -- is never a containment candidate. NULL is "cannot prove", never a wildcard.
+  -- A document with no business date, or a generation with no authoritative
+  -- source, has no identity to compare within and is never a containment
+  -- candidate. NULL is "cannot prove", never a wildcard.
   IF COALESCE(array_length(v_withdrawal_lines, 1), 0) > 0
-     AND NULLIF(btrim(p_session->>'session_date'), '') IS NOT NULL THEN
+     AND NULLIF(btrim(p_session->>'session_date'), '') IS NOT NULL
+     AND NULLIF(btrim(v_row.source_id), '') IS NOT NULL THEN
     PERFORM pg_advisory_xact_lock(hashtextextended(
       'produce_withdrawal_containment:'
-        || COALESCE(NULLIF(btrim(p_session->>'session_date'), ''), '')
+        || btrim(v_row.source_id)
+        || ':' || COALESCE(NULLIF(btrim(p_session->>'session_date'), ''), '')
         || ':' || public.accountability_round_normalize(p_session->>'staff_name')
         || ':' || COALESCE(
              public.accountability_round_market_code(p_session->>'session_title'),
@@ -487,6 +517,15 @@ BEGIN
       AND public.accountability_round_normalize(s.staff_name)
           = public.accountability_round_normalize(p_session->>'staff_name')
       AND public.accountability_round_same_market(s.session_title, p_session->>'session_title')
+      -- Same LINE source, proven through the session's own raw message. A
+      -- session whose raw message is gone or carries no source cannot be
+      -- compared at all.
+      AND EXISTS (
+        SELECT 1
+        FROM public.raw_messages rm
+        WHERE rm.id = s.raw_message_id
+          AND rm.source_id = btrim(v_row.source_id)
+      )
       AND (
         -- existing ⊂ candidate: the resend carries everything already recorded
         (cardinality(s.canonical_withdrawal_item_lines) < cardinality(v_withdrawal_lines)

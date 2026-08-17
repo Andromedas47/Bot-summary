@@ -24,8 +24,10 @@
  * prove", never "matches anything":
  *
  *   1. the same business identity — source, business date, seller, market and
- *      base transaction type — decided by `isSuccessorOf` (PR #49), the same
- *      rule the report layer already uses to classify a failed attempt;
+ *      base transaction type — on the PR #49 dimensions, with the market
+ *      compared as the PR #53 REVIEWED canonical identity rather than as a raw
+ *      string, so `พาซีโอ้` and `พาซิโอ้` are one market here exactly as they
+ *      are everywhere else;
  *   2. strict ordering: the successor landed AFTER the attempt;
  *   3. content containment: every canonical item line of the pending document
  *      occurs in the successful one with at least the same multiplicity, or the
@@ -49,6 +51,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 import { bangkokBusinessDateNow } from "@/lib/business-date";
+import { canonicalMarketLabel } from "@/lib/market";
 import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
 import {
   canonicalItemLines,
@@ -91,6 +94,31 @@ export interface SupersessionOutcome {
   superseded: boolean;
   reason: string;
   roundOutcome?: string;
+}
+
+/** Identity comparison boundary: NFC + trimmed + inner whitespace collapsed. */
+function identityText(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const normalized = value.normalize("NFC").replace(/\s+/g, " ").trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+/**
+ * The market comparison boundary: the PR #53 REVIEWED canonical identity, the
+ * same resolver the V2 business fingerprint uses.
+ *
+ * Comparing normalized raw labels made a real attempt unprovable for no good
+ * reason: an operator who typed `พาซีโอ้` and then corrected to `พาซิโอ้` is
+ * naming ONE reviewed market, and every other layer already knows that. A label
+ * the reviewed catalog does not recognise falls back to its normalized raw form,
+ * so two genuinely different unknown markets stay distinct.
+ *
+ * Reviewed aliases only. Nothing here is fuzzy, and an unreviewed near-miss is
+ * its own market exactly as it is everywhere else.
+ */
+function marketIdentity(value: string | null | undefined): string | null {
+  const canonical = canonicalMarketLabel(value);
+  return canonical ? identityText(canonical) : identityText(value);
 }
 
 /**
@@ -197,26 +225,23 @@ export function provesSupersession(
   if (attempt.attemptedAtMs === null || outcome.finalizedAtMs === null) return false;
   if (outcome.finalizedAtMs <= attempt.attemptedAtMs) return false;
 
-  const identity = (value: string | null) =>
-    value ? value.normalize("NFC").replace(/\s+/g, " ").trim() || null : null;
-
-  const source = identity(attempt.sourceId);
-  const date = identity(attempt.businessDate);
-  const market = identity(attempt.marketLabel);
-  const staff = identity(attempt.staffLabel);
+  const source = identityText(attempt.sourceId);
+  const date = identityText(attempt.businessDate);
+  const market = marketIdentity(attempt.marketLabel);
+  const staff = identityText(attempt.staffLabel);
   if (!source || !date || !market || !staff) return false;
   if (
-    identity(outcome.sourceId) !== source
-    || identity(outcome.businessDate) !== date
-    || identity(outcome.marketLabel) !== market
-    || identity(outcome.staffLabel) !== staff
+    identityText(outcome.sourceId) !== source
+    || identityText(outcome.businessDate) !== date
+    || marketIdentity(outcome.marketLabel) !== market
+    || identityText(outcome.staffLabel) !== staff
   ) return false;
 
   // A bound attempt's round is authoritative and must match exactly. An unbound
   // attempt has no round dimension, and null is not a wildcard over partial
   // identity — it is reached only once every dimension above is proven equal.
-  const attemptRound = identity(attempt.accountabilityRoundId);
-  if (attemptRound !== null && identity(outcome.accountabilityRoundId) !== attemptRound) {
+  const attemptRound = identityText(attempt.accountabilityRoundId);
+  if (attemptRound !== null && identityText(outcome.accountabilityRoundId) !== attemptRound) {
     return false;
   }
 

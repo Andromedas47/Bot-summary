@@ -32,6 +32,8 @@ class PlainTextGateDatabase {
     close_line_event_id: string;
     reason: string;
   }> = [];
+  /** Non-null makes the stamp RPC resolve with a PostgREST error. */
+  closeRefusalError: string | null = null;
   tables: Record<string, Row[]> = {
     pending_sessions: [],
     produce_transactions: [],
@@ -130,6 +132,11 @@ class PlainTextGateDatabase {
     // P1-B: a refused close must leave durable, generation-scoped state behind,
     // or the generation waits forever with nothing scheduled.
     if (name === "mark_plain_text_close_refused") {
+      // A Supabase RPC RESOLVES with { data, error }; it does not throw on a
+      // PostgREST error. Model that shape exactly.
+      if (this.closeRefusalError) {
+        return { data: null, error: { message: this.closeRefusalError } };
+      }
       this.closeRefusals.push({
         session_key: args.p_session_key as string,
         session_generation: args.p_session_generation as string,
@@ -378,6 +385,25 @@ describe("a refused close cannot strand its generation", () => {
       close_line_event_id: "close-9",
       reason: "entry_gate_refusal",
     }]);
+  });
+
+  it("a rejected stamp is logged, and the operator still gets the refusal", async () => {
+    // Supabase resolves RPC failures as { data: null, error } rather than
+    // throwing, so a try/catch alone would report this as a successful stamp.
+    const db = new PlainTextGateDatabase(
+      pendingRow([RETURN_HEADER, "1.มังคุด45บาท", "4โลก"].join("\n")),
+      master([{}]),
+    );
+    db.closeRefusalError = "permission denied for function mark_plain_text_close_refused";
+    const replies: string[] = [];
+    await build(db, replies).processEvents([textEvent("จบรายการชั่งคืน", "close-11")], "dest");
+
+    expect(db.closeRefusals).toEqual([]);
+    // The operator-facing outcome is unchanged: still refused, still no close
+    // boundary, still told what to fix.
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("⛔");
+    expect(db.pending.close_event_timestamp_ms).toBeNull();
   });
 
   it("stamps an ambiguous-round refusal too — the จิ้ว shape", async () => {

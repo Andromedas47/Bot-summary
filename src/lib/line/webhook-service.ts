@@ -1190,13 +1190,41 @@ export class WebhookService {
           //
           // Best-effort: the refusal reply below is what the operator acts on,
           // and a failed stamp must not swallow it.
+          //
+          // Both failure shapes are handled deliberately. A Supabase RPC
+          // RESOLVES with `{ data, error }` — it does not throw on a PostgREST
+          // error — so try/catch alone would report a failed stamp as a
+          // success and leave the generation strandable with nothing in the
+          // log to say so. The catch remains for transport-level throws.
           try {
-            await this.supabase.rpc("mark_plain_text_close_refused", {
-              p_session_key: sessionKey,
-              p_session_generation: pending.session_generation,
-              p_close_line_event_id: eventId,
-              p_reason: "entry_gate_refusal",
-            });
+            const { data, error } = await this.supabase.rpc(
+              "mark_plain_text_close_refused",
+              {
+                p_session_key: sessionKey,
+                p_session_generation: pending.session_generation,
+                p_close_line_event_id: eventId,
+                p_reason: "entry_gate_refusal",
+              },
+            );
+            if (error) {
+              log.error("plain-text close refusal stamp rejected", {
+                sessionKey,
+                sessionGeneration: pending.session_generation,
+                error: error.message,
+              });
+            } else {
+              const marked = (data as { marked?: boolean; reason?: string } | null) ?? null;
+              if (marked?.marked !== true) {
+                // A refusal the database declined to record — for example a
+                // generation that rotated underneath us. Not an error, but it
+                // must be visible, because the recovery sweep will not see it.
+                log.warn("plain-text close refusal not stamped", {
+                  sessionKey,
+                  sessionGeneration: pending.session_generation,
+                  reason: marked?.reason ?? "unknown",
+                });
+              }
+            }
           } catch (markError) {
             log.error("plain-text close refusal stamp failed", {
               sessionKey,

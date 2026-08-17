@@ -136,6 +136,40 @@ describe("supersession proof", () => {
     )).toBe(false);
   });
 
+  it("a reviewed market alias is the same market — พาซีโอ้ then พาซิโอ้", () => {
+    // The attempt was typed under the alias spelling and the correction under
+    // the canonical one. Comparing raw normalized labels made this unprovable
+    // and left a resolved attempt sitting active forever.
+    const attemptDoc = doc({ market: "พาซีโอ้" });
+    const successorDoc = doc({ market: "พาซิโอ้" });
+    expect(provesSupersession(
+      attempt(attemptDoc),
+      attemptDoc,
+      successor(successorDoc),
+    )).toBe(true);
+  });
+
+  it("the other reviewed spelling พาสิโอ้ resolves too", () => {
+    const attemptDoc = doc({ market: "พาสิโอ้" });
+    const successorDoc = doc({ market: "พาซิโอ้" });
+    expect(provesSupersession(attempt(attemptDoc), attemptDoc, successor(successorDoc)))
+      .toBe(true);
+  });
+
+  it("an UNREVIEWED near-miss is still its own market — no fuzzy matching", () => {
+    const attemptDoc = doc({ market: "พาชิโอ้" });
+    const successorDoc = doc({ market: "พาซิโอ้" });
+    expect(provesSupersession(attempt(attemptDoc), attemptDoc, successor(successorDoc)))
+      .toBe(false);
+  });
+
+  it("reviewed markets the catalog keeps apart never supersede each other", () => {
+    const vegetables = doc({ market: "พาซิโอ้ผัก" });
+    const fruit = doc({ market: "พาซิโอ้ผลไม้" });
+    expect(provesSupersession(attempt(vegetables), vegetables, successor(fruit)))
+      .toBe(false);
+  });
+
   it("CASE 7 — a cross-user replacement with proof may supersede", () => {
     // The attempt and the successor come from different LINE accounts in the
     // same group. The sender is not an identity dimension; the source is.

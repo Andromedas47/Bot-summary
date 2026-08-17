@@ -41,6 +41,9 @@ const OTHER_DATE = "15/8/2569";
 const SELLER = "โด้";
 const MARKET = "ตลาด72";
 const ACTOR = "U3f04f748584d997819dec0fc71a9b084";
+/** Containment is scoped to one LINE source. Two groups are two streams. */
+const SOURCE = "C8405e382aafefa28a6bf0b0b15bb2971";
+const OTHER_SOURCE = "C14f5c6d51f7b8ef458e18aa44461b5bd";
 /** Reviewed catalog: one market, three spellings. */
 const CANONICAL = "พาซิโอ้";
 const ALIAS_SI = "พาซีโอ้";
@@ -161,17 +164,18 @@ function document(options: DocumentOptions): WeighSession {
   return parseWeighSession(lines.join("\n"), ISO_DATE);
 }
 
-async function seedPending(sessionKey: string) {
+async function seedPending(sessionKey: string, sourceId = SOURCE) {
   const generation = randomUUID();
   const rawMessageId = randomUUID();
   await scalar(`
-    INSERT INTO public.raw_messages (id) VALUES (${q(rawMessageId)}::uuid);
+    INSERT INTO public.raw_messages (id, source_id)
+    VALUES (${q(rawMessageId)}::uuid, ${q(sourceId)});
     INSERT INTO public.pending_sessions (
-      session_key, session_generation, line_user_id, ingest_revision,
+      session_key, session_generation, line_user_id, source_id, ingest_revision,
       close_event_timestamp_ms, close_requested_at, close_deadline_at,
       close_session_generation, next_attempt_at
     ) VALUES (
-      ${q(sessionKey)}, ${q(generation)}::uuid, ${q(ACTOR)}, 1,
+      ${q(sessionKey)}, ${q(generation)}::uuid, ${q(ACTOR)}, ${q(sourceId)}, 1,
       1000, now(), now() + interval '30 seconds',
       ${q(generation)}::uuid, now() - interval '1 second'
     );
@@ -187,6 +191,8 @@ interface SubmitOptions {
   kind?: "main" | "additional";
   /** Force the payload key off, to model an older application build. */
   withoutContainmentKey?: boolean;
+  /** The LINE group the document arrived in. Containment is scoped by it. */
+  sourceId?: string;
 }
 
 function finalizeSql(
@@ -245,7 +251,7 @@ async function submit(
   options: SubmitOptions = {},
 ): Promise<FinalizeResult> {
   const sessionKey = `group:G:${label}:${randomBytes(3).toString("hex")}`;
-  const { generation, rawMessageId } = await seedPending(sessionKey);
+  const { generation, rawMessageId } = await seedPending(sessionKey, options.sourceId ?? SOURCE);
   return JSON.parse(await scalar(
     finalizeSql(sessionKey, generation, rawMessageId, parsed, options),
   ));
@@ -400,6 +406,56 @@ describe.skipIf(!pgAvailable)("plain-withdrawal containment guard on PostgreSQL 
     expect((await submit("mkt-b", document({
       rows: [...DURIAN, ...DRY_GOODS], seller, market: "วัดตะกล่ำ",
     }))).status).toBe("finalized");
+  });
+
+  test("a DIFFERENT LINE source is allowed, even under strict containment", async () => {
+    // Containment refuses a mere superset, which is a far more aggressive
+    // verdict than the fingerprint's exact-duplicate refusal. Two LINE groups
+    // are two independent business streams and must not block each other.
+    const seller = "โด้คนละกลุ่ม";
+    expect((await submit("src-a", document({ rows: DURIAN, seller }),
+      { sourceId: SOURCE })).status).toBe("finalized");
+
+    const before = await produceSessionCount();
+    const other = await submit(
+      "src-b",
+      document({ rows: [...DURIAN, ...DRY_GOODS], seller }),
+      { sourceId: OTHER_SOURCE },
+    );
+    expect(other.status).toBe("finalized");
+    expect(await produceSessionCount()).toBe(before + 1);
+  });
+
+  test("the SAME source is still blocked, with everything else identical", async () => {
+    const seller = "โด้กลุ่มเดียว";
+    expect((await submit("same-src-a", document({ rows: DURIAN, seller }),
+      { sourceId: OTHER_SOURCE })).status).toBe("finalized");
+
+    const before = await produceSessionCount();
+    const resend = await submit(
+      "same-src-b",
+      document({ rows: [...DURIAN, ...DRY_GOODS], seller }),
+      { sourceId: OTHER_SOURCE },
+    );
+    expect(resend.reason).toBe("withdrawal_containment");
+    expect(await produceSessionCount()).toBe(before);
+  });
+
+  test("a session whose raw message carries no source is not a candidate", async () => {
+    const seller = "โด้ไร้ต้นทาง";
+    await submit("nosrc-a", document({ rows: DURIAN, seller }), { sourceId: SOURCE });
+    await scalar(`
+      UPDATE public.raw_messages SET source_id = NULL
+      WHERE id IN (SELECT raw_message_id FROM public.produce_sessions
+                   WHERE staff_name = ${q(seller)})
+      RETURNING 1`);
+
+    const resend = await submit(
+      "nosrc-b",
+      document({ rows: [...DURIAN, ...DRY_GOODS], seller }),
+      { sourceId: SOURCE },
+    );
+    expect(resend.status).toBe("finalized");
   });
 
   test("CASE 12 — reviewed market aliases share one containment identity", async () => {

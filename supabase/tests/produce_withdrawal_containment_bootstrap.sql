@@ -64,7 +64,15 @@ CREATE TABLE public.produce_transactions (
 
 ALTER TABLE public.pending_sessions
   ADD COLUMN IF NOT EXISTS accountability_round_id uuid
-    REFERENCES public.accountability_rounds(id);
+    REFERENCES public.accountability_rounds(id),
+  -- The authoritative LINE source of the generation being finalized. Containment
+  -- is scoped by it, so the fixture must carry it exactly as Production does.
+  ADD COLUMN IF NOT EXISTS source_id text;
+
+-- The only proof of a PERSISTED session's source: produce_sessions has no
+-- source column, so the guard joins back through raw_message_id.
+ALTER TABLE public.raw_messages
+  ADD COLUMN IF NOT EXISTS source_id text;
 
 ALTER TABLE public.produce_sessions
   ADD COLUMN IF NOT EXISTS accountability_round_id uuid

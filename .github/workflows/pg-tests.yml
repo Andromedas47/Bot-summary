@@ -494,3 +494,67 @@ jobs:
         run: npm run type-check
       - name: git diff --check against the PR base
         run: git diff --check "origin/${{ github.base_ref }}...HEAD"
+
+  produce-session-integrity:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ALLOW_DISPOSABLE_POSTGRES_TESTS: "1"
+      # How many accountability rounds a business day has, how many times one
+      # withdrawal may persist, and whether a valid close can be lost are all
+      # decided in SQL — including two advisory-lock concurrency proofs that
+      # only a real server can run. An unreachable database is a HARD FAILURE
+      # of this job, never a green skip.
+      REQUIRE_ROUND_REUSE_POSTGRES: "1"
+      REQUIRE_CONTAINMENT_POSTGRES: "1"
+      REQUIRE_PENDING_LIFECYCLE_POSTGRES: "1"
+      REQUIRE_MARKET_IDENTITY_GUARD_POSTGRES: "1"
+      REQUIRE_FINGERPRINT_COMPATIBILITY_POSTGRES: "1"
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGPORT: "5432"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - name: P0-A same-day round reuse real-PostgreSQL suite
+        run: bun run test:pg:round-reuse
+      - name: P0-B withdrawal containment real-PostgreSQL suite
+        run: bun run test:pg:withdrawal-containment
+      - name: P1-A/P1-B pending lifecycle recovery real-PostgreSQL suite
+        run: bun run test:pg:pending-lifecycle
+      # Both migrations reissue a function PR A installs, so PR A's own proofs
+      # are the regression guard that the reissue did not revert it.
+      - name: PR A market identity guard regression suite
+        run: bun run test:pg:market-identity-guard
+      - name: PR A fingerprint compatibility regression suite
+        run: bun run test:pg:fingerprint-compatibility
+      - name: Supersession, containment scope and close-refusal unit suites
+        run: >-
+          bunx bun test
+          src/lib/produce/pending-supersession.test.ts
+          src/lib/produce/withdrawal-containment.test.ts
+          src/lib/produce/plain-text-round-binding.test.ts
+          src/lib/produce/migration-order.test.ts
+          src/lib/line/webhook-plain-text-entry-gate.test.ts
+          src/lib/line/pending-session-finalizer.test.ts
+      - name: Typecheck
+        run: npm run type-check
+      - name: git diff --check against the PR base
+        run: git diff --check "origin/${{ github.base_ref }}...HEAD"

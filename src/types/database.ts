@@ -1998,6 +1998,40 @@ export interface Database {
         };
         Returns: Json;
       };
+      mark_plain_text_close_refused: {
+        Args: {
+          p_session_key: string;
+          p_session_generation: string;
+          p_close_line_event_id: string | null;
+          p_reason: string;
+        };
+        Returns: Json;
+      };
+      supersede_pending_generation: {
+        Args: {
+          p_session_key: string;
+          p_session_generation: string;
+          p_superseded_by: string;
+          p_evidence?: Json;
+          p_expected_updated_at?: string;
+        };
+        Returns: Json;
+      };
+      recover_stranded_plain_text_closes: {
+        Args: {
+          p_limit: number;
+          p_runtime_environment: string;
+          p_grace?: string;
+        };
+        Returns: Array<{
+          session_key: string;
+          session_generation: string;
+          source_id: string;
+          accountability_round_id: string | null;
+          round_outcome: string;
+          close_refused_at: string;
+        }>;
+      };
       close_accountability_round: {
         Args: {
           p_accountability_round_id: string;

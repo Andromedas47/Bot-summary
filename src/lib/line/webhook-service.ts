@@ -1182,6 +1182,56 @@ export class WebhookService {
 
       if (!markClose) {
         if (closeGateRefusal) {
+          // P1-B: a VALID close was received and refused. The session stays in
+          // capture on purpose — that is the correction window — but the refusal
+          // must be durable, or this generation waits forever with
+          // close_requested_at NULL and nothing scheduled, which is exactly the
+          // state Production pending 313eaa61 has been sitting in.
+          //
+          // Best-effort: the refusal reply below is what the operator acts on,
+          // and a failed stamp must not swallow it.
+          //
+          // Both failure shapes are handled deliberately. A Supabase RPC
+          // RESOLVES with `{ data, error }` — it does not throw on a PostgREST
+          // error — so try/catch alone would report a failed stamp as a
+          // success and leave the generation strandable with nothing in the
+          // log to say so. The catch remains for transport-level throws.
+          try {
+            const { data, error } = await this.supabase.rpc(
+              "mark_plain_text_close_refused",
+              {
+                p_session_key: sessionKey,
+                p_session_generation: pending.session_generation,
+                p_close_line_event_id: eventId,
+                p_reason: "entry_gate_refusal",
+              },
+            );
+            if (error) {
+              log.error("plain-text close refusal stamp rejected", {
+                sessionKey,
+                sessionGeneration: pending.session_generation,
+                error: error.message,
+              });
+            } else {
+              const marked = (data as { marked?: boolean; reason?: string } | null) ?? null;
+              if (marked?.marked !== true) {
+                // A refusal the database declined to record — for example a
+                // generation that rotated underneath us. Not an error, but it
+                // must be visible, because the recovery sweep will not see it.
+                log.warn("plain-text close refusal not stamped", {
+                  sessionKey,
+                  sessionGeneration: pending.session_generation,
+                  reason: marked?.reason ?? "unknown",
+                });
+              }
+            }
+          } catch (markError) {
+            log.error("plain-text close refusal stamp failed", {
+              sessionKey,
+              sessionGeneration: pending.session_generation,
+              error: markError instanceof Error ? markError.message : String(markError),
+            });
+          }
           if (replyToken) {
             try {
               await this.replyMessage(replyToken, closeGateRefusal);

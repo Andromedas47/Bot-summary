@@ -36,6 +36,12 @@ export type PlainTextRoundBinding =
       accountabilityRoundId: string;
       /** The ROUND's own market label — canonical for everything downstream. */
       marketLabel: string | null;
+      /**
+       * True when a plain `เบิก` joined a round that already held this
+       * seller/market/day rather than minting one. Observability only — nothing
+       * downstream branches on it.
+       */
+      reusedExistingRound: boolean;
     }
   /** Legacy-compatible: no round, so only P4A's unit-vocabulary tier applies. */
   | { status: "unbound" }
@@ -198,6 +204,7 @@ export async function bindPlainTextRound(
     outcome?: string;
     accountability_round_id?: string | null;
     market_label?: string | null;
+    reused?: boolean | null;
   };
 
   switch (result.outcome) {
@@ -208,6 +215,8 @@ export async function bindPlainTextRound(
             status: "bound",
             accountabilityRoundId: result.accountability_round_id,
             marketLabel: result.market_label ?? null,
+            // Absent on a database that predates the same-day reuse contract.
+            reusedExistingRound: result.reused === true,
           }
         : { status: "refused", reason: "bind_failed", detail: BIND_FAILED_REPLY };
     case "market_mismatch":

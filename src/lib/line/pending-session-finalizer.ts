@@ -20,7 +20,11 @@ import {
   computeItemHash,
   computeSessionHash,
 } from "@/lib/line/session-dedup-service";
-import { weighSessionCompatibilityFingerprints } from "@/lib/produce/business-fingerprint";
+import {
+  canonicalWithdrawalItemLines,
+  weighSessionCompatibilityFingerprints,
+} from "@/lib/produce/business-fingerprint";
+import { supersedeReplacedPendingGenerations } from "@/lib/produce/pending-supersession";
 import { buildSeedFromStructuredMetadata } from "@/lib/parsers/weigh-session/seed";
 import {
   produceIngestIdempotencyKey,
@@ -366,11 +370,26 @@ export async function finalizePendingGeneration(
       parsed,
     );
     if (binding.status === "refused") {
+      if (binding.reason === "ambiguous") {
+        log.warn("produce.round.ambiguous_plain_withdrawal", {
+          businessDate: parsed.date,
+          sellerLabel: parsed.staff_name,
+          marketLabel: parsed.session_title,
+        });
+      }
       validationErrors.push(`accountability round not resolved: ${binding.reason}`);
       entryGateDetail = binding.detail;
     } else {
       accountabilityRoundId =
         binding.status === "bound" ? binding.accountabilityRoundId : null;
+      if (binding.status === "bound" && binding.reusedExistingRound) {
+        log.info("produce.round.reused_for_plain_withdrawal", {
+          accountabilityRoundId: binding.accountabilityRoundId,
+          businessDate: parsed.date,
+          sellerLabel: parsed.staff_name,
+          marketLabel: parsed.session_title,
+        });
+      }
     }
   }
 
@@ -424,6 +443,11 @@ export async function finalizePendingGeneration(
     ingest_idempotency_key: correlationId,
     ingest_source: "line_webhook",
     accountability_round_id: accountabilityRoundId,
+    // The containment guard's comparison key. Non-null only for a plain base
+    // withdrawal, so `เบิกเพิ่ม` and every return are neither guarded nor
+    // stored as candidates. Riding inside the existing payload keeps the RPC
+    // signature unchanged, so neither deploy order can break.
+    canonical_withdrawal_item_lines: canonicalWithdrawalItemLines(parsed),
   };
   const itemPayload = parsed.items.map((item) => ({
     ...item,
@@ -461,6 +485,15 @@ export async function finalizePendingGeneration(
     });
   }
 
+  if (result.status === "failed_closed" && result.reason === "withdrawal_containment") {
+    log.warn("produce.duplicate.containment_blocked", {
+      businessDate: parsed.date,
+      sellerLabel: parsed.staff_name,
+      marketLabel: parsed.session_title,
+      candidateItemCount: parsed.items.length,
+      existingProduceSessionId: result.session_id ?? null,
+    });
+  }
 
   log.info("produce finalization completed", {
     status: result.status,
@@ -478,9 +511,11 @@ export async function finalizePendingGeneration(
         ? buildReviewNotConfirmedMessage()
         : result.reason === "unconfirmed_structured_close"
           ? buildUnconfirmedStructuredCloseMessage()
-          // P4A supplies its own operator-facing text when the gate is what
-          // refused; anything else keeps the parse-level reply.
-          : (entryGateDetail ?? buildWeighSessionValidationReply(parsed));
+          : result.reason === "withdrawal_containment"
+            ? buildWithdrawalContainmentMessage()
+            // P4A supplies its own operator-facing text when the gate is what
+            // refused; anything else keeps the parse-level reply.
+            : (entryGateDetail ?? buildWeighSessionValidationReply(parsed));
   } else if (result.status === "finalized" && !result.notification_id) {
     // Rolling-deploy fallback: the pre-0034 RPC cannot create an outbox row.
     // Once 0034 is installed, notification_id is always returned and success
@@ -521,6 +556,27 @@ export async function finalizePendingGeneration(
       });
     }
 
+    // P1-A: an attempt this document provably replaced stops being an open
+    // question. Best-effort like the two calls around it — the produce write has
+    // already committed and nothing here may turn a good finalization into an
+    // error. Proof lives in pending-supersession.ts; this call never decides.
+    try {
+      if (result.session_id) {
+        await supersedeReplacedPendingGenerations(supabase, {
+          produceSessionId: result.session_id,
+          sessionKey: snapshot.session_key,
+          sessionGeneration: snapshot.session_generation,
+          sourceId: snapshot.source_id,
+          parsed,
+          accountabilityRoundId,
+        });
+      }
+    } catch (error) {
+      log.error("pending supersession sweep failed after produce finalization", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
     try {
       await new DailySummaryService(supabase).recalculate(
         parsed.date ?? bangkokBusinessDateNow(),
@@ -546,6 +602,23 @@ export async function finalizePendingGeneration(
  */
 export function buildBusinessDuplicateMessage(): string {
   return ["⚠️ พบรายการนี้ถูกบันทึกไว้แล้ว", "ระบบไม่บันทึกซ้ำ"].join("\n");
+}
+
+/**
+ * What the operator sees when a resent withdrawal overlaps one already recorded.
+ *
+ * Unlike an exact duplicate this one DOES ask for an action, because part of the
+ * document may be genuinely new. It names the only safe way to send that part —
+ * the explicit append contract — and never guesses the delta on their behalf.
+ * No UUID and no fingerprint is exposed.
+ */
+export function buildWithdrawalContainmentMessage(): string {
+  return [
+    "⛔ รายการเบิกชุดนี้มีรายการซ้ำกับชุดที่บันทึกไว้แล้ว",
+    "ระบบยังไม่ได้บันทึกรายการนี้",
+    "หากมีของเพิ่ม กรุณาส่งเฉพาะรายการที่เพิ่มใหม่ด้วย \"เบิกเพิ่ม\"",
+    "หากรายการเดิมผิด กรุณาแจ้งผู้ดูแลให้แก้ไขก่อน",
+  ].join("\n");
 }
 
 /**

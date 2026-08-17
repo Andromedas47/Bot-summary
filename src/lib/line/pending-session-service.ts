@@ -71,6 +71,13 @@ export interface PendingSession {
   /** Hotfix: authoritative opener boundary for a plain-text generation. */
   plain_text_opened_line_event_id?: string | null;
   plain_text_opened_line_timestamp_ms?: number | null;
+  /**
+   * P1-B: a VALID close arrived and the entry gate refused it without
+   * scheduling finalization. Bounds the correction window; the stamp is
+   * generation-scoped so a rotation retires it with no cleanup write.
+   */
+  close_refused_at?:                  string | null;
+  close_refused_session_generation?:  string | null;
 }
 
 export interface OpenPlainTextGenerationInput {

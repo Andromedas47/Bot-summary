@@ -8,6 +8,7 @@ import {
   resendProduceNotification,
 } from "@/lib/line/produce-notification-delivery";
 import { processExpiredPendingProduceEvents } from "@/lib/line/pending-produce-reorder";
+import { recoverStrandedPendingCloses } from "@/lib/line/pending-close-recovery";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -37,16 +38,22 @@ export async function GET(req: NextRequest) {
     const deferredProduceEvents = await processExpiredPendingProduceEvents(supabase);
     const result = await finalizeDuePendingGenerations(supabase);
     const notifications = await processDueProduceNotifications(supabase);
+    // P1-B: after the scheduled work, retire the generations whose valid close
+    // was refused and never resolved. Deliberately last — it only ever touches
+    // rows with NO close scheduled, which the finalizer above never looks at.
+    const closeRecovery = await recoverStrandedPendingCloses(supabase);
     logger.info("pending produce finalizer completed", {
       ...result,
       deferredProduceEvents,
       notifications,
+      closeRecovery,
     });
     return NextResponse.json({
       ok: true,
       ...result,
       deferredProduceEvents,
       notifications,
+      closeRecovery,
       triggeredAt: new Date().toISOString(),
     });
   } catch (error) {

@@ -249,12 +249,19 @@ function supersedeSql(
     ${expected === null ? "NULL" : `${q(expected)}::timestamptz`})`;
 }
 
+interface SupersedeResult {
+  superseded?: boolean;
+  reason?: string;
+  round_outcome?: string;
+  accountability_round_id?: string | null;
+}
+
 async function supersede(
   key: string,
   generation: string,
   successorSql: string,
   options: SupersedeOptions = {},
-): Promise<Record<string, string>> {
+): Promise<SupersedeResult> {
   const expected = options.expected === undefined
     ? await pendingUpdatedAt(key)
     : options.expected;

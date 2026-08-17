@@ -10,6 +10,7 @@ import {
   replyLineMessages,
 } from "./reply";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
+import { LINE_MESSAGE_MAX_CODE_POINTS, countCodePoints } from "@/lib/summary/line-chunking";
 
 const originalFetch = globalThis.fetch;
 
@@ -161,6 +162,168 @@ describe("buildWeighSessionSummary — section subtotals", () => {
     // both items appear under one เบิก section — numbered 1 and 2
     expect(result).toContain("1. ทุเรียน");
     expect(result).toContain("2. หมอนทอง");
+  });
+});
+
+describe("buildWeighSessionSummary — category grouping (presentation only)", () => {
+  const MUSHROOM_ITEM = {
+    item_number: 3,
+    product_name: "เห็ดนางฟ้า",
+    price_per_unit: 60,
+    quantity: 4,
+    unit: "โล" as const,
+    section: "",
+    transaction_type: "เบิก" as const,
+    pricing_mode: "unit" as const,
+    basis_quantity: null,
+    basis_unit: null,
+    basis_price: null,
+  };
+
+  it("inserts a category heading for a single-category section without changing the subtotal", () => {
+    const result = buildWeighSessionSummary(makeSession({ items: [BORROW_ITEM] }));
+    expect(result).toContain("🥭 ทุเรียน");
+    expect(result).toContain("1. ทุเรียน");
+    expect(result).toContain("รวมเบิก: 1,000.00 บาท");
+  });
+
+  it("groups a mixed-category section under separate headings, ordered by the dictionary category order, with an unchanged section total", () => {
+    // ทุเรียน (ท) and หมอนทอง (ท) are the same category as BORROW_ITEM;
+    // เห็ดนางฟ้า is a different category (ห) and must get its own heading.
+    const result = buildWeighSessionSummary(makeSession({ items: [MUSHROOM_ITEM, BORROW_ITEM] }));
+    const durianHeadingIndex = result.indexOf("🥭 ทุเรียน");
+    const mushroomHeadingIndex = result.indexOf("🍄 เห็ด");
+    expect(durianHeadingIndex).toBeGreaterThan(-1);
+    expect(mushroomHeadingIndex).toBeGreaterThan(-1);
+    // ท (ทุเรียน) sorts before ห (เห็ด) in REPORT_CATEGORY_ORDER, so its
+    // heading appears first even though the mushroom item was listed first.
+    expect(durianHeadingIndex).toBeLessThan(mushroomHeadingIndex);
+    // Section subtotal is untouched: 1,000 (ทุเรียน) + 240 (เห็ดนางฟ้า 4 × 60).
+    expect(result).toContain("รวมเบิก: 1,240.00 บาท");
+  });
+
+  it("keeps same-category items in original relative order and numbering (stable sort)", () => {
+    // ทุเรียน then หมอนทอง are both category ท — grouping must not reorder them.
+    const result = buildWeighSessionSummary(makeSession({ items: [BORROW_ITEM, BORROW_EXTRA_ITEM] }));
+    const durianLineIndex = result.indexOf("1. ทุเรียน");
+    const homThongLineIndex = result.indexOf("2. หมอนทอง");
+    expect(durianLineIndex).toBeGreaterThan(-1);
+    expect(homThongLineIndex).toBeGreaterThan(durianLineIndex);
+    // Only one category heading should appear for this all-ท section.
+    expect(result.match(/🥭 ทุเรียน/g)?.length).toBe(1);
+  });
+
+  it("an unrecognized product still renders under ❓ ไม่จัดหมวด and still counts toward the subtotal", () => {
+    const unknownItem = { ...BORROW_ITEM, product_name: "มะม่วงต่างดาว" };
+    const result = buildWeighSessionSummary(makeSession({ items: [unknownItem] }));
+    expect(result).toContain("❓ ไม่จัดหมวด");
+    expect(result).toContain("รวมเบิก: 1,000.00 บาท");
+  });
+
+  it("a sub-satang item total cannot print one number in the lines and another in the section total", () => {
+    // 0.5 โล × 0.25 บาท = 0.125 per line. Each line rounds to 0.13, so the
+    // honest section total of three of them is 0.39. Summing the raw floats
+    // instead gives 0.375 → 0.38, and the receipt would contradict itself:
+    // three 0.13 lines under a 0.38 total.
+    const items = Array.from({ length: 3 }, () => ({
+      ...BORROW_ITEM,
+      product_name: "หมอนทอง",
+      quantity: 0.5,
+      price_per_unit: 0.25,
+    }));
+    const result = buildWeighSessionSummary(makeSession({ items }));
+    expect(result).toContain("รวมทุเรียน 0.39 บาท");
+    expect(result).toContain("รวมเบิก: 0.39 บาท");
+    expect(result).not.toContain("0.38");
+  });
+
+  it("an item's category does not depend on which other items share the message", () => {
+    // `เพิ่ม` is a real prefix the alias layer can strip, but only when
+    // authorized by a set of known names. Authorizing it from the message's
+    // own items would make this item's category flip based on a sibling line.
+    const prefixed = { ...BORROW_ITEM, product_name: "เพิ่มหมอนทอง" };
+    const solo = buildWeighSessionSummary(makeSession({ items: [prefixed] }));
+    const withSibling = buildWeighSessionSummary(makeSession({
+      items: [prefixed, { ...BORROW_ITEM, product_name: "หมอนทอง" }],
+    }));
+    expect(solo).toContain("❓ ไม่จัดหมวด");
+    expect(withSibling).toContain("❓ ไม่จัดหมวด");
+    expect(withSibling).toContain("🥭 ทุเรียน");
+    // And no row may be totalled under one category but printed under none:
+    // both items appear, and the two subtotals add up to the section total.
+    // ทุเรียน sorts first, so the sibling leads and the prefixed name follows.
+    expect(withSibling).toContain("1. หมอนทอง");
+    expect(withSibling).toContain("2. เพิ่มหมอนทอง");
+    expect(withSibling).toContain("รวมทุเรียน 1,000.00 บาท");
+    expect(withSibling).toContain("รวมไม่จัดหมวด 1,000.00 บาท");
+    expect(withSibling).toContain("รวมเบิก: 2,000.00 บาท");
+  });
+
+  it("falls back to the ungrouped rendering rather than losing an oversized receipt", () => {
+    // This reply is delivered as one unsplit LINE message. Grouping must never
+    // be the reason an operator gets no confirmation at all.
+    const items = Array.from({ length: 400 }, (_, index) => ({
+      ...BORROW_ITEM,
+      product_name: index % 2 === 0 ? "ทุเรียน" : "เห็ดนางฟ้า",
+    }));
+    const result = buildWeighSessionSummary(makeSession({ items }));
+    // The flat rendering of a document this size is itself over the limit —
+    // that is pre-existing and out of scope here. What must hold is that
+    // grouping is dropped rather than added on top of an already-large message,
+    // and that the receipt still carries its totals.
+    expect(result).not.toContain("🥭 ทุเรียน");
+    expect(result).not.toContain("รวมทุเรียน");
+    expect(result).toContain("รวมเบิก:");
+    expect(countCodePoints(result))
+      .toBeLessThan(countCodePoints(buildWeighSessionSummary(makeSession({ items: items.slice(0, 40) }))) * 10);
+  });
+
+  it("numbers a mixed-category section 1, 2, 3 reading downward", () => {
+    // Numbering by the item's original position would print "2." above "1."
+    // here, since เห็ด was typed first but sorts after ทุเรียน.
+    const result = buildWeighSessionSummary(
+      makeSession({ items: [MUSHROOM_ITEM, BORROW_ITEM, BORROW_EXTRA_ITEM] }),
+    );
+    const numbers = [...result.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]));
+    expect(numbers).toEqual([1, 2, 3]);
+    // …and the durian pair, typed second and third, is what leads the section.
+    expect(result.indexOf("1. ทุเรียน")).toBeLessThan(result.indexOf("3. เห็ดนางฟ้า"));
+  });
+
+  it("keeps grouping for a document that still fits", () => {
+    const items = Array.from({ length: 20 }, (_, index) => ({
+      ...BORROW_ITEM,
+      product_name: index % 2 === 0 ? "ทุเรียน" : "เห็ดนางฟ้า",
+    }));
+    const result = buildWeighSessionSummary(makeSession({ items }));
+    expect(countCodePoints(result)).toBeLessThanOrEqual(LINE_MESSAGE_MAX_CODE_POINTS);
+    expect(result).toContain("🥭 ทุเรียน");
+    expect(result).toContain("🍄 เห็ด");
+  });
+
+  it("the printed category subtotals add up to the printed section subtotal", () => {
+    // The invariant, asserted on the rendered message rather than on the
+    // helper: not one satang may appear or disappear because of grouping. A
+    // decimal quantity and an uncategorized row are both in the mix, and the
+    // uncategorized money must be part of the total, never dropped.
+    const items = [
+      BORROW_ITEM,                                                    // ท  1,000.00
+      MUSHROOM_ITEM,                                                  //  ห    240.00
+      { ...BORROW_ITEM, product_name: "แก้วมังกร", quantity: 14.5, price_per_unit: 50 },
+      { ...BORROW_ITEM, product_name: "สินค้าไม่มีในพจนานุกรม", quantity: 2.5, price_per_unit: 35 },
+    ];
+    const result = buildWeighSessionSummary(makeSession({ items }));
+
+    const subtotals = [...result.matchAll(/^รวม(?!เบิก:|คืน:|เสีย:).*?([\d,]+\.\d{2}) บาท$/gm)]
+      .map((match) => Math.round(Number(match[1]!.replace(/,/g, "")) * 100));
+    const section = /^รวมเบิก: ([\d,]+\.\d{2}) บาท$/m.exec(result)![1]!;
+
+    expect(subtotals).toHaveLength(4);
+    expect(subtotals.reduce((a, b) => a + b, 0))
+      .toBe(Math.round(Number(section.replace(/,/g, "")) * 100));
+    // 14.5 × 50 and 2.5 × 35 are exact to the satang, not merely close.
+    expect(result).toContain("รวมผลไม้ 725.00 บาท");
+    expect(result).toContain("รวมไม่จัดหมวด 87.50 บาท");
   });
 });
 

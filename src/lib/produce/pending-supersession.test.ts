@@ -248,6 +248,7 @@ describe("supersession proof", () => {
 function fakeDb(
   rows: Array<Record<string, unknown>>,
   finalizedAt: string | null = new Date(2_000).toISOString(),
+  rpcResult: Record<string, unknown> = { superseded: true, round_outcome: "cancelled" },
 ) {
   const calls: Array<Record<string, unknown>> = [];
   return {
@@ -265,10 +266,7 @@ function fakeDb(
     },
     rpc(name: string, args: Record<string, unknown>) {
       calls.push({ name, ...args });
-      return Promise.resolve({
-        data: { superseded: true, round_outcome: "cancelled" },
-        error: null,
-      });
+      return Promise.resolve({ data: rpcResult, error: null });
     },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any;
@@ -313,6 +311,34 @@ describe("sweep", () => {
       p_session_generation: "gen-a",
       p_superseded_by: "produce-1",
     });
+  });
+
+  it("sends the exact updated_at the proof was made against", async () => {
+    // Verbatim from the row, not re-serialized: timestamptz carries
+    // microseconds that a Date round trip would drop, and the RPC compares for
+    // equality under the row lock.
+    const stamp = "2026-08-16T02:58:42.145814+00:00";
+    const db = fakeDb(
+      [pendingRow(documentText(), { updated_at: stamp })],
+      "2026-08-16T03:10:00.000000+00:00",
+    );
+    await supersedeReplacedPendingGenerations(db, successor(doc()));
+    expect(db.calls[0]?.p_expected_updated_at).toBe(stamp);
+  });
+
+  it("reports candidate_changed without claiming a supersession", async () => {
+    const db = fakeDb([pendingRow(documentText())], undefined, {
+      superseded: false,
+      reason: "candidate_changed",
+    });
+    const outcomes = await supersedeReplacedPendingGenerations(db, successor(doc()));
+    expect(outcomes).toEqual([{
+      sessionKey: "group:C:user:A",
+      sessionGeneration: "gen-a",
+      superseded: false,
+      reason: "candidate_changed",
+      roundOutcome: undefined,
+    }]);
   });
 
   it("never touches the successor's own generation", async () => {

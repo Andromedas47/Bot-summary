@@ -45,6 +45,14 @@
  * — an unparseable one, a corrected resend whose items genuinely differ — stays
  * ACTIVE and review-required. That is the intended boundary, not a gap.
  *
+ * The proof is a snapshot, so it is spent against a snapshot. Each candidate's
+ * `updated_at` travels with the RPC call as `p_expected_updated_at`, and the RPC
+ * re-checks it under the row lock. An operator appending a correction between
+ * the read here and the write there does NOT rotate the generation — it only
+ * advances `updated_at` — so without that check a proof made against one
+ * document could terminalize a different one. A changed candidate answers
+ * `candidate_changed`, writes nothing, and is never retried on the old proof.
+ *
  * Nothing here deletes. `supersede_pending_generation` preserves
  * accumulated_text, generation identity, timestamps and every review artefact,
  * and only retires an accountability round that is provably empty.
@@ -99,10 +107,16 @@ export interface SupersessionCandidate {
   sourceId: string;
   accumulatedText: string;
   /**
-   * `pending_sessions.updated_at` — the last moment the content being judged
-   * changed, which is the only conservative boundary. `created_at` would let a
-   * row opened long ago but edited a second ago count as older than the
-   * successor.
+   * `pending_sessions.updated_at` exactly as the database returned it. Passed
+   * back to the RPC as the snapshot the proof was made against, so it must not
+   * be reformatted: timestamptz is microsecond-precision and a round trip
+   * through `Date` silently truncates to milliseconds, which would make every
+   * comparison a mismatch.
+   */
+  updatedAt: string;
+  /**
+   * The same value as epoch ms, for ordering only. `created_at` would let a row
+   * opened long ago but edited a second ago count as older than the successor.
    */
   updatedAtMs: number;
   accountabilityRoundId: string | null;
@@ -346,6 +360,7 @@ export async function supersedeReplacedPendingGenerations(
       sessionGeneration: String(row.session_generation),
       sourceId: String(row.source_id),
       accumulatedText: String(row.accumulated_text ?? ""),
+      updatedAt: typeof row.updated_at === "string" ? row.updated_at : "",
       updatedAtMs: timestampMs(row.updated_at),
       accountabilityRoundId: (row.accountability_round_id as string | null) ?? null,
     };
@@ -368,6 +383,11 @@ export async function supersedeReplacedPendingGenerations(
         p_session_key: candidate.sessionKey,
         p_session_generation: candidate.sessionGeneration,
         p_superseded_by: successor.produceSessionId,
+        // The snapshot this proof was made against. An operator appending a
+        // correction between the read above and this call does not rotate the
+        // generation, so without this the RPC would terminalize content nothing
+        // ever proved. Verbatim from the SELECT: see SupersessionCandidate.
+        p_expected_updated_at: candidate.updatedAt,
         p_evidence: {
           superseded_by_session_key: successor.sessionKey,
           superseded_by_session_generation: successor.sessionGeneration,

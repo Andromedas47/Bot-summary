@@ -2013,6 +2013,7 @@ export interface Database {
           p_session_generation: string;
           p_superseded_by: string;
           p_evidence?: Json;
+          p_expected_updated_at?: string;
         };
         Returns: Json;
       };

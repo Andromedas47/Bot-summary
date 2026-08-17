@@ -331,11 +331,18 @@ COMMENT ON FUNCTION public.retire_empty_round_of_generation(text, uuid, text) IS
 
 -- ── P1-A supersession ───────────────────────────────────────────────────────
 
+-- An older 4-argument form would become an ambiguous overload of the 5-argument
+-- one below, because every added parameter carries a default. This migration has
+-- never been applied anywhere, so this only matters for a scratch database that
+-- ran an earlier draft of it.
+DROP FUNCTION IF EXISTS public.supersede_pending_generation(text, uuid, uuid, jsonb);
+
 CREATE OR REPLACE FUNCTION public.supersede_pending_generation(
   p_session_key         text,
   p_session_generation  uuid,
   p_superseded_by       uuid,
-  p_evidence            jsonb DEFAULT '{}'::jsonb
+  p_evidence            jsonb DEFAULT '{}'::jsonb,
+  p_expected_updated_at timestamptz DEFAULT NULL
 ) RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -381,6 +388,28 @@ BEGIN
   IF v_row.close_requested_at IS NOT NULL AND v_row.finalization_status = 'processing' THEN
     RETURN jsonb_build_object('superseded', false, 'reason', 'finalization_in_progress');
   END IF;
+  -- Optimistic concurrency, checked HERE and nowhere earlier: the row lock is
+  -- held, so from this point to the UPDATE nothing else can move the row.
+  --
+  -- The generation check above is not sufficient. An operator appending a
+  -- correction does NOT rotate the generation — it advances updated_at and
+  -- changes accumulated_text in place. Between the caller's read and this call
+  -- the proven document C1 can therefore have become an unproven C2 under the
+  -- same generation, and terminalizing it would destroy input the caller never
+  -- examined.
+  --
+  -- A NULL expectation is refused rather than waved through: a caller that
+  -- cannot name the snapshot it proved has not proven this row. That also makes
+  -- the migration safe ahead of the application — an older build calling the
+  -- 4-argument form supersedes nothing instead of superseding blindly.
+  IF p_expected_updated_at IS NULL THEN
+    RETURN jsonb_build_object('superseded', false, 'reason', 'expected_updated_at_required');
+  END IF;
+  IF v_row.updated_at IS DISTINCT FROM p_expected_updated_at THEN
+    -- No automatic retry: the old proof is void, and a fresh sweep must read
+    -- and prove the new content on its own terms.
+    RETURN jsonb_build_object('superseded', false, 'reason', 'candidate_changed');
+  END IF;
 
   UPDATE public.pending_sessions
   SET terminalized = true,
@@ -409,11 +438,14 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.supersede_pending_generation(text, uuid, uuid, jsonb) IS
+COMMENT ON FUNCTION public.supersede_pending_generation(text, uuid, uuid, jsonb, timestamptz) IS
   'Terminalizes ONE pending generation the caller has already proven replaced by a '
-  'live produce session. Preserves accumulated_text, generation identity, timestamps '
-  'and review artefacts; deletes nothing. Retires the generation''s accountability '
-  'round only when it is provably empty.';
+  'live produce session. p_expected_updated_at is the pending_sessions.updated_at the '
+  'proof was made against and is required: under the row lock a different value '
+  'answers candidate_changed and writes nothing, so a correction that arrived after '
+  'the proof is never destroyed. Preserves accumulated_text, generation identity, '
+  'timestamps and review artefacts; deletes nothing. Retires the generation''s '
+  'accountability round only when it is provably empty.';
 
 REVOKE ALL ON FUNCTION public.mark_plain_text_close_refused(text, uuid, text, text)
   FROM PUBLIC, anon, authenticated;
@@ -430,9 +462,9 @@ REVOKE ALL ON FUNCTION public.retire_empty_round_of_generation(text, uuid, text)
 GRANT EXECUTE ON FUNCTION public.retire_empty_round_of_generation(text, uuid, text)
   TO service_role;
 
-REVOKE ALL ON FUNCTION public.supersede_pending_generation(text, uuid, uuid, jsonb)
+REVOKE ALL ON FUNCTION public.supersede_pending_generation(text, uuid, uuid, jsonb, timestamptz)
   FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.supersede_pending_generation(text, uuid, uuid, jsonb)
+GRANT EXECUTE ON FUNCTION public.supersede_pending_generation(text, uuid, uuid, jsonb, timestamptz)
   TO service_role;
 
 COMMIT;

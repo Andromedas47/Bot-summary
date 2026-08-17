@@ -48,8 +48,8 @@ function assertSafe(): void {
 
 type PsqlResult = { code: number; stdout: string; stderr: string };
 
-async function psql(args: string[], database = DATABASE, stdin?: string): Promise<PsqlResult> {
-  const proc = Bun.spawn([PSQL, "-X", ...args], {
+function spawnPsql(args: string[], database = DATABASE, stdin?: string) {
+  return Bun.spawn([PSQL, "-X", ...args], {
     cwd: ROOT,
     stdin: stdin === undefined ? undefined : new TextEncoder().encode(stdin),
     env: {
@@ -64,12 +64,19 @@ async function psql(args: string[], database = DATABASE, stdin?: string): Promis
     stdout: "pipe",
     stderr: "pipe",
   });
+}
+
+async function collect(proc: ReturnType<typeof spawnPsql>): Promise<PsqlResult> {
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
     proc.exited,
   ]);
   return { code, stdout, stderr };
+}
+
+function psql(args: string[], database = DATABASE, stdin?: string): Promise<PsqlResult> {
+  return collect(spawnPsql(args, database, stdin));
 }
 
 function run(sql: string): Promise<PsqlResult> {
@@ -211,6 +218,49 @@ async function pendingField(key: string, column: string): Promise<string> {
 
 async function roundStatus(id: string): Promise<string> {
   return await scalar(`SELECT status FROM public.accountability_rounds WHERE id = ${q(id)}::uuid`);
+}
+
+/** The row's authoritative `updated_at`, as text so no precision is lost. */
+async function pendingUpdatedAt(key: string): Promise<string> {
+  return await scalar(
+    `SELECT updated_at::text FROM public.pending_sessions WHERE session_key = ${q(key)}`,
+  );
+}
+
+interface SupersedeOptions {
+  /** Override the snapshot the caller claims to have proven. */
+  expected?: string | null;
+  evidence?: string;
+}
+
+/**
+ * `p_expected_updated_at` defaults to whatever the row says right now, which is
+ * what an honest caller that just read the row would send.
+ */
+function supersedeSql(
+  key: string,
+  generation: string,
+  successorSql: string,
+  expected: string | null,
+  evidence = "'{}'::jsonb",
+): string {
+  return `SELECT public.supersede_pending_generation(
+    ${q(key)}, ${generation}, ${successorSql}, ${evidence},
+    ${expected === null ? "NULL" : `${q(expected)}::timestamptz`})`;
+}
+
+async function supersede(
+  key: string,
+  generation: string,
+  successorSql: string,
+  options: SupersedeOptions = {},
+): Promise<Record<string, string>> {
+  const expected = options.expected === undefined
+    ? await pendingUpdatedAt(key)
+    : options.expected;
+  return JSON.parse(await scalar(
+    supersedeSql(key, generation, successorSql, expected, options.evidence),
+  ));
 }
 
 async function seedProduceSession(roundId: string | null): Promise<string> {
@@ -374,10 +424,9 @@ describe.skipIf(!pgAvailable)("pending lifecycle recovery on PostgreSQL 17", () 
     const { key, generation } = await seedPending({ roundId: round });
     const successor = await seedProduceSession(null);
 
-    const result = JSON.parse(await scalar(`
-      SELECT public.supersede_pending_generation(
-        ${q(key)}, ${q(generation)}::uuid, ${q(successor)}::uuid,
-        '{"business_date": "2026-08-16"}'::jsonb)`));
+    const result = await supersede(key, `${q(generation)}::uuid`, `${q(successor)}::uuid`, {
+      evidence: `'{"business_date": "2026-08-16"}'::jsonb`,
+    });
     expect(result.superseded).toBe(true);
     expect(result.round_outcome).toBe("cancelled");
 
@@ -395,9 +444,7 @@ describe.skipIf(!pgAvailable)("pending lifecycle recovery on PostgreSQL 17", () 
     const round = await seedRound({ withdrawal: true });
     const { key, generation } = await seedPending({ roundId: round });
     const successor = await seedProduceSession(null);
-    const result = JSON.parse(await scalar(`
-      SELECT public.supersede_pending_generation(
-        ${q(key)}, ${q(generation)}::uuid, ${q(successor)}::uuid)`));
+    const result = await supersede(key, `${q(generation)}::uuid`, `${q(successor)}::uuid`);
     expect(result.superseded).toBe(true);
     expect(result.round_outcome).toBe("has_transactions");
     expect(await roundStatus(round)).toBe("open");
@@ -408,26 +455,20 @@ describe.skipIf(!pgAvailable)("pending lifecycle recovery on PostgreSQL 17", () 
     const { key, generation } = await seedPending({ roundId: round });
     await seedProduceSession(round);
     const successor = await seedProduceSession(null);
-    const result = JSON.parse(await scalar(`
-      SELECT public.supersede_pending_generation(
-        ${q(key)}, ${q(generation)}::uuid, ${q(successor)}::uuid)`));
+    const result = await supersede(key, `${q(generation)}::uuid`, `${q(successor)}::uuid`);
     expect(result.round_outcome).toBe("has_produce_sessions");
     expect(await roundStatus(round)).toBe("open");
   });
 
   test("a missing or voided successor is no proof at all", async () => {
     const { key, generation } = await seedPending();
-    expect(JSON.parse(await scalar(`
-      SELECT public.supersede_pending_generation(
-        ${q(key)}, ${q(generation)}::uuid, gen_random_uuid())`)).reason)
+    expect((await supersede(key, `${q(generation)}::uuid`, "gen_random_uuid()")).reason)
       .toBe("successor_not_found");
 
     const voided = await seedProduceSession(null);
     await scalar(`UPDATE public.produce_sessions SET voided_at = now()
                   WHERE id = ${q(voided)}::uuid RETURNING 1`);
-    expect(JSON.parse(await scalar(`
-      SELECT public.supersede_pending_generation(
-        ${q(key)}, ${q(generation)}::uuid, ${q(voided)}::uuid)`)).reason)
+    expect((await supersede(key, `${q(generation)}::uuid`, `${q(voided)}::uuid`)).reason)
       .toBe("successor_not_found");
     expect(await pendingField(key, "terminalized")).toBe("false");
   });
@@ -435,15 +476,103 @@ describe.skipIf(!pgAvailable)("pending lifecycle recovery on PostgreSQL 17", () 
   test("supersession is idempotent and refuses a stale generation", async () => {
     const { key, generation } = await seedPending();
     const successor = await seedProduceSession(null);
-    const call = `SELECT public.supersede_pending_generation(
-      ${q(key)}, ${q(generation)}::uuid, ${q(successor)}::uuid)`;
-    expect(JSON.parse(await scalar(call)).superseded).toBe(true);
-    expect(JSON.parse(await scalar(call)).reason).toBe("already_terminal");
+    const expected = await pendingUpdatedAt(key);
+    expect((await supersede(key, `${q(generation)}::uuid`, `${q(successor)}::uuid`, { expected }))
+      .superseded).toBe(true);
+    // The retry replays the SAME proof, and the row is terminal. Terminal is
+    // reported before the snapshot check, so a retry never reads as a conflict.
+    expect((await supersede(key, `${q(generation)}::uuid`, `${q(successor)}::uuid`, { expected }))
+      .reason).toBe("already_terminal");
 
     const other = await seedPending();
-    expect(JSON.parse(await scalar(`
-      SELECT public.supersede_pending_generation(
-        ${q(other.key)}, gen_random_uuid(), ${q(successor)}::uuid)`)).reason)
+    expect((await supersede(other.key, "gen_random_uuid()", `${q(successor)}::uuid`)).reason)
       .toBe("generation_conflict");
+  });
+
+  // ── P1-A concurrency: the proof is spent against the snapshot it proved ────
+
+  test("a correction arriving between proof and write is never destroyed", async () => {
+    // The TOCTOU window this closes: an operator appending a row does NOT
+    // rotate the generation, so generation + terminal checks alone would let a
+    // proof made against C1 terminalize the unexamined C2.
+    const round = await seedRound();
+    const { key, generation } = await seedPending({ roundId: round });
+    const successor = await seedProduceSession(null);
+    const provenAt = await pendingUpdatedAt(key);
+
+    // Connection A holds the row lock across a deliberate pause while it writes
+    // the correction. B must block on the lock and only then read updated_at —
+    // if the check ran before the lock it would still see the proven snapshot.
+    const correction = spawnPsql(
+      ["-v", "ON_ERROR_STOP=1", "-tA", "-f", "-"],
+      DATABASE,
+      `BEGIN;
+       UPDATE public.pending_sessions
+       SET accumulated_text = accumulated_text || E'\\n5.ทุเรียน100บาท\\n7โล',
+           updated_at = clock_timestamp()
+       WHERE session_key = ${q(key)};
+       SELECT pg_sleep(2);
+       COMMIT;`,
+    );
+    await Bun.sleep(500);
+    const sweep = spawnPsql(
+      ["-v", "ON_ERROR_STOP=1", "-tA", "-f", "-"],
+      DATABASE,
+      supersedeSql(key, `${q(generation)}::uuid`, `${q(successor)}::uuid`, provenAt) + ";",
+    );
+
+    const [wrote, swept] = await Promise.all([collect(correction), collect(sweep)]);
+    expect(wrote.code, wrote.stderr).toBe(0);
+    expect(swept.code, swept.stderr).toBe(0);
+
+    const result = JSON.parse(swept.stdout.split("\n").map((l) => l.trim()).find(Boolean)!);
+    expect(result.superseded).toBe(false);
+    expect(result.reason).toBe("candidate_changed");
+
+    // The generation stays live and the correction survives intact.
+    expect(await pendingField(key, "terminalized")).toBe("false");
+    expect(await pendingField(key, "finalization_status")).toBe("pending");
+    expect(await pendingField(key, "finalization_error")).toBe("<null>");
+    expect(await pendingField(key, "(accumulated_text LIKE '%ทุเรียน%')")).toBe("true");
+    expect(await roundStatus(round)).toBe("open");
+  });
+
+  test("an unchanged candidate at the proven snapshot still supersedes", async () => {
+    const round = await seedRound();
+    const { key, generation } = await seedPending({ roundId: round });
+    const successor = await seedProduceSession(null);
+
+    const result = await supersede(
+      key,
+      `${q(generation)}::uuid`,
+      `${q(successor)}::uuid`,
+      { expected: await pendingUpdatedAt(key) },
+    );
+    expect(result.superseded).toBe(true);
+    expect(await pendingField(key, "terminalized")).toBe("true");
+    expect(await roundStatus(round)).toBe("cancelled");
+  });
+
+  test("a caller that cannot name the snapshot supersedes nothing", async () => {
+    // Also the deploy-order guard: an older application build calling the
+    // 4-argument form lands here and writes nothing.
+    const { key, generation } = await seedPending();
+    const successor = await seedProduceSession(null);
+    expect((await supersede(key, `${q(generation)}::uuid`, `${q(successor)}::uuid`, {
+      expected: null,
+    })).reason).toBe("expected_updated_at_required");
+    expect(await pendingField(key, "terminalized")).toBe("false");
+  });
+
+  test("a stale snapshot is refused even with no concurrent writer", async () => {
+    const { key, generation } = await seedPending();
+    const successor = await seedProduceSession(null);
+    const stale = await pendingUpdatedAt(key);
+    await scalar(`UPDATE public.pending_sessions SET updated_at = clock_timestamp()
+                  WHERE session_key = ${q(key)} RETURNING 1`);
+    expect((await supersede(key, `${q(generation)}::uuid`, `${q(successor)}::uuid`, {
+      expected: stale,
+    })).reason).toBe("candidate_changed");
+    expect(await pendingField(key, "terminalized")).toBe("false");
   });
 });

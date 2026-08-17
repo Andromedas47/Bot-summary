@@ -28,7 +28,9 @@
  *      compared as the PR #53 REVIEWED canonical identity rather than as a raw
  *      string, so `พาซีโอ้` and `พาซิโอ้` are one market here exactly as they
  *      are everywhere else;
- *   2. strict ordering: the successor landed AFTER the attempt;
+ *   2. strict ordering, on AUTHORITATIVE database timestamps only: the
+ *      successor's own `produce_sessions.finalized_at` is strictly greater than
+ *      the candidate's `pending_sessions.updated_at`;
  *   3. content containment: every canonical item line of the pending document
  *      occurs in the successful one with at least the same multiplicity, or the
  *      two documents have the identical canonical fingerprint.
@@ -75,16 +77,34 @@ export interface SupersessionSuccessor {
   sessionGeneration: string;
   sourceId: string;
   parsed: WeighSession;
+  /**
+   * `produce_sessions.finalized_at` for `produceSessionId`, read back from the
+   * database. Never a wall-clock reading: the sweep runs after the produce
+   * write, so `Date.now()` here is always LATER than the real finalization and
+   * would let a pending row that is genuinely newer look older than it is.
+   */
   finalizedAtMs: number;
   accountabilityRoundId: string | null;
 }
+
+/**
+ * What a caller supplies. `finalizedAtMs` is deliberately absent: the sweep
+ * loads it itself, so no call site can supply an approximation.
+ */
+export type SupersessionSuccessorInput = Omit<SupersessionSuccessor, "finalizedAtMs">;
 
 export interface SupersessionCandidate {
   sessionKey: string;
   sessionGeneration: string;
   sourceId: string;
   accumulatedText: string;
-  createdAtMs: number;
+  /**
+   * `pending_sessions.updated_at` — the last moment the content being judged
+   * changed, which is the only conservative boundary. `created_at` would let a
+   * row opened long ago but edited a second ago count as older than the
+   * successor.
+   */
+  updatedAtMs: number;
   accountabilityRoundId: string | null;
 }
 
@@ -147,7 +167,7 @@ function attemptOf(
     marketLabel: parsed.session_title,
     transactionKind: soleTransactionKind(parsed),
     accountabilityRoundId: candidate.accountabilityRoundId,
-    attemptedAtMs: candidate.createdAtMs,
+    attemptedAtMs: candidate.updatedAtMs,
   };
 }
 
@@ -248,6 +268,32 @@ export function provesSupersession(
   return isContentSuperseded(attemptParsed, successor.parsed);
 }
 
+/** A database timestamp as epoch ms, or NaN when it is absent or unparseable. */
+function timestampMs(value: unknown): number {
+  if (typeof value !== "string" || value.trim().length === 0) return Number.NaN;
+  return new Date(value).getTime();
+}
+
+/**
+ * The successor's authoritative `finalized_at`, or null when it cannot be
+ * established — a missing row, a NULL column, an unparseable value or a failed
+ * read all mean the same thing here, and all of them stop the sweep.
+ */
+async function loadFinalizedAtMs(
+  supabase: AnyClient,
+  produceSessionId: string,
+): Promise<number | null> {
+  const { data, error } = await supabase
+    .from("produce_sessions")
+    .select("finalized_at")
+    .eq("id", produceSessionId)
+    .limit(1);
+  if (error) return null;
+  const row = ((data ?? []) as Array<Record<string, unknown>>)[0];
+  const ms = timestampMs(row?.finalized_at);
+  return Number.isFinite(ms) ? ms : null;
+}
+
 /**
  * Terminalize every pending generation this successful document provably
  * replaced. Best-effort by contract: the produce write has already committed,
@@ -255,19 +301,33 @@ export function provesSupersession(
  */
 export async function supersedeReplacedPendingGenerations(
   supabase: AnyClient,
-  successor: SupersessionSuccessor,
+  successor: SupersessionSuccessorInput,
 ): Promise<SupersessionOutcome[]> {
   const log = logger.child({
     sessionKey: successor.sessionKey,
     sessionGeneration: successor.sessionGeneration,
   });
 
+  // The ordering half of the proof, read from the row that was just written.
+  // Without it there is no boundary to compare against, so the sweep does
+  // nothing at all — an unproven supersession costs a stale pending row, a
+  // wrongly proven one costs an operator's document.
+  const finalizedAtMs = await loadFinalizedAtMs(supabase, successor.produceSessionId);
+  if (finalizedAtMs === null) {
+    log.warn("produce.pending.supersession_skipped", {
+      produceSessionId: successor.produceSessionId,
+      reason: "missing_finalized_at",
+    });
+    return [];
+  }
+  const proven: SupersessionSuccessor = { ...successor, finalizedAtMs };
+
   // Scoped to the same LINE source: a document from another group is a
   // different business stream and can never be this one's predecessor.
   const { data, error } = await supabase
     .from("pending_sessions")
     .select(
-      "session_key, session_generation, source_id, accumulated_text, created_at, accountability_round_id",
+      "session_key, session_generation, source_id, accumulated_text, updated_at, accountability_round_id",
     )
     .eq("source_id", successor.sourceId)
     .eq("terminalized", false)
@@ -286,10 +346,11 @@ export async function supersedeReplacedPendingGenerations(
       sessionGeneration: String(row.session_generation),
       sourceId: String(row.source_id),
       accumulatedText: String(row.accumulated_text ?? ""),
-      createdAtMs: new Date(String(row.created_at)).getTime(),
+      updatedAtMs: timestampMs(row.updated_at),
       accountabilityRoundId: (row.accountability_round_id as string | null) ?? null,
     };
-    if (!Number.isFinite(candidate.createdAtMs)) continue;
+    // No usable boundary for this row: unprovable, so it stays active.
+    if (!Number.isFinite(candidate.updatedAtMs)) continue;
 
     let parsed: WeighSession;
     try {
@@ -299,7 +360,7 @@ export async function supersedeReplacedPendingGenerations(
       continue;
     }
 
-    if (!provesSupersession(attemptOf(candidate, parsed), parsed, successor)) continue;
+    if (!provesSupersession(attemptOf(candidate, parsed), parsed, proven)) continue;
 
     const { data: result, error: rpcError } = await supabase.rpc(
       "supersede_pending_generation",

@@ -568,7 +568,6 @@ export async function finalizePendingGeneration(
           sessionGeneration: snapshot.session_generation,
           sourceId: snapshot.source_id,
           parsed,
-          finalizedAtMs: Date.now(),
           accountabilityRoundId,
         });
       }

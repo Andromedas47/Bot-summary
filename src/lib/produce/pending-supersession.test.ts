@@ -240,16 +240,26 @@ describe("supersession proof", () => {
   });
 });
 
-/** Minimal client: enough for the one SELECT and the one RPC. */
-function fakeDb(rows: Array<Record<string, unknown>>) {
+/**
+ * Minimal client: the successor's `finalized_at` read-back, the candidate
+ * SELECT, and the RPC. `finalizedAt` is what the database says, which is the
+ * only thing the sweep is allowed to order by.
+ */
+function fakeDb(
+  rows: Array<Record<string, unknown>>,
+  finalizedAt: string | null = new Date(2_000).toISOString(),
+) {
   const calls: Array<Record<string, unknown>> = [];
   return {
     calls,
-    from() {
+    from(table: string) {
+      const payload = table === "produce_sessions"
+        ? [{ finalized_at: finalizedAt }]
+        : rows;
       const builder = {
         select: () => builder,
         eq: () => builder,
-        limit: () => Promise.resolve({ data: rows, error: null }),
+        limit: () => Promise.resolve({ data: payload, error: null }),
       };
       return builder;
     },
@@ -270,7 +280,7 @@ function pendingRow(text: string, overrides: Record<string, unknown> = {}) {
     session_generation: "gen-a",
     source_id: SOURCE,
     accumulated_text: text,
-    created_at: new Date(1_000).toISOString(),
+    updated_at: new Date(1_000).toISOString(),
     accountability_round_id: null,
     ...overrides,
   };
@@ -321,5 +331,91 @@ describe("sweep", () => {
     const db = fakeDb([pendingRow("ข้อความที่อ่านไม่ออก")]);
     expect(await supersedeReplacedPendingGenerations(db, successor(doc()))).toEqual([]);
     expect(db.calls).toHaveLength(0);
+  });
+});
+
+/**
+ * Ordering comes from the database, never from the clock.
+ *
+ * The sweep runs AFTER the produce write commits, so a wall-clock reading taken
+ * inside the sweep is always later than the real finalization. Every case here
+ * is one that a `Date.now()` boundary would get wrong, and each wrong answer
+ * costs an operator a document they are still working on.
+ */
+describe("ordering boundary", () => {
+  const FINALIZED_AT = new Date(2_000).toISOString();
+
+  it("A — a candidate updated AFTER the successor finalized is NOT superseded", async () => {
+    // Opened before the successor, edited after it. created_at would say
+    // "older", which is exactly the false proof this guards against.
+    const db = fakeDb(
+      [pendingRow(documentText(), { updated_at: new Date(3_000).toISOString() })],
+      FINALIZED_AT,
+    );
+    expect(await supersedeReplacedPendingGenerations(db, successor(doc()))).toEqual([]);
+    expect(db.calls).toHaveLength(0);
+  });
+
+  it("B — a candidate created and updated BEFORE the successor may be superseded", async () => {
+    const db = fakeDb(
+      [pendingRow(documentText(), { updated_at: new Date(1_500).toISOString() })],
+      FINALIZED_AT,
+    );
+    const outcomes = await supersedeReplacedPendingGenerations(db, successor(doc()));
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]?.superseded).toBe(true);
+  });
+
+  it("C — a pending opened AFTER the successor persisted is NOT superseded", async () => {
+    // The race the sweep itself creates: the document lands, an operator starts
+    // the identical entry, and only then does the sweep run.
+    const db = fakeDb(
+      [pendingRow(documentText(), {
+        session_key: "group:C:user:NEW",
+        session_generation: "gen-new",
+        updated_at: new Date(2_500).toISOString(),
+      })],
+      FINALIZED_AT,
+    );
+    expect(await supersedeReplacedPendingGenerations(db, successor(doc()))).toEqual([]);
+    expect(db.calls).toHaveLength(0);
+  });
+
+  it("D — equal timestamps prove nothing", async () => {
+    const db = fakeDb([pendingRow(documentText(), { updated_at: FINALIZED_AT })], FINALIZED_AT);
+    expect(await supersedeReplacedPendingGenerations(db, successor(doc()))).toEqual([]);
+    expect(db.calls).toHaveLength(0);
+  });
+
+  it("E — no authoritative finalized_at means the sweep does nothing", async () => {
+    for (const missing of [null, "", "not-a-timestamp"]) {
+      const db = fakeDb([pendingRow(documentText())], missing);
+      expect(await supersedeReplacedPendingGenerations(db, successor(doc()))).toEqual([]);
+      expect(db.calls).toHaveLength(0);
+    }
+  });
+
+  it("a caller-supplied timestamp is ignored — only the database decides", async () => {
+    // The successor object still carries a `finalizedAtMs` field because the
+    // pure predicate takes one. If the sweep read it instead of the database,
+    // this wall-clock-shaped value would prove the supersession.
+    const db = fakeDb(
+      [pendingRow(documentText(), { updated_at: new Date(3_000).toISOString() })],
+      FINALIZED_AT,
+    );
+    const outcomes = await supersedeReplacedPendingGenerations(
+      db,
+      successor(doc(), { finalizedAtMs: 9_999_999 }),
+    );
+    expect(outcomes).toEqual([]);
+    expect(db.calls).toHaveLength(0);
+  });
+
+  it("a candidate with no usable updated_at stays active", async () => {
+    for (const missing of [null, "", "not-a-timestamp"]) {
+      const db = fakeDb([pendingRow(documentText(), { updated_at: missing })], FINALIZED_AT);
+      expect(await supersedeReplacedPendingGenerations(db, successor(doc()))).toEqual([]);
+      expect(db.calls).toHaveLength(0);
+    }
   });
 });

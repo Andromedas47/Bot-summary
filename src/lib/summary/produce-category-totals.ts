@@ -155,9 +155,88 @@ function finalizeBucket(byId: ReadonlyMap<ReportCategoryId, MutableCategoryEntry
  * SUM(all buckets' totals) === SUM(satangOf(row) for every classified row),
  * exactly, for any grouping or row order.
  */
+/** One category's confirmed money across all three transaction buckets — the
+ *  seller/market/day ledger view (as opposed to CategoryBreakdown's one-row-
+ *  per-bucket view). */
+export interface CategoryLedgerEntry {
+  id: ReportCategoryId;
+  /** REPORT_CATEGORY_LABEL[id] verbatim — never a second label. */
+  label: string;
+  /** reportCategoryHeading(id) verbatim (emoji + label). */
+  heading: string;
+  withdrawnSatang: number;
+  goodReturnSatang: number;
+  badReturnSatang: number;
+  /** withdrawn − goodReturn − badReturn, in satang. */
+  netSatang: number;
+}
+
+/**
+ * Transpose a CategoryBreakdown (one row per transaction bucket, each bucket
+ * holding categories) into a per-category ledger (one row per category,
+ * holding all three buckets) — the view a seller/market/day summary needs.
+ *
+ * A category appears exactly once if it has money or items in ANY of the
+ * three buckets, ordered by REPORT_CATEGORY_ORDER. Every field here is an
+ * integer sum of the same already-final satang subtotals produceCategoryTotals
+ * computed — this function reconciles nothing and re-derives no money, it
+ * only regroups final totals — so SUM(entries[*].withdrawnSatang) ===
+ * breakdown.เบิก.totalSatang exactly (and likewise for the return / bad-return
+ * columns), and therefore SUM(entries[*].netSatang) === breakdown.netSatang
+ * exactly, for any breakdown.
+ */
+export function categoryLedger(breakdown: CategoryBreakdown): CategoryLedgerEntry[] {
+  const byId = new Map<ReportCategoryId, { withdrawnSatang: number; goodReturnSatang: number; badReturnSatang: number }>();
+
+  const merge = (
+    bucket: ProduceCategoryBucket,
+    field: "withdrawnSatang" | "goodReturnSatang" | "badReturnSatang",
+  ): void => {
+    for (const category of bucket.categories) {
+      const entry = byId.get(category.id) ?? { withdrawnSatang: 0, goodReturnSatang: 0, badReturnSatang: 0 };
+      entry[field] += category.totalSatang;
+      byId.set(category.id, entry);
+    }
+  };
+
+  merge(breakdown.เบิก, "withdrawnSatang");
+  merge(breakdown.คืน, "goodReturnSatang");
+  merge(breakdown.คืนเสีย, "badReturnSatang");
+
+  const entries: CategoryLedgerEntry[] = [];
+  for (const id of REPORT_CATEGORY_ORDER) {
+    const totals = byId.get(id);
+    if (!totals) continue;
+    entries.push({
+      id,
+      label: REPORT_CATEGORY_LABEL[id],
+      heading: reportCategoryHeading(id),
+      withdrawnSatang: totals.withdrawnSatang,
+      goodReturnSatang: totals.goodReturnSatang,
+      badReturnSatang: totals.badReturnSatang,
+      netSatang: totals.withdrawnSatang - totals.goodReturnSatang - totals.badReturnSatang,
+    });
+  }
+  return entries;
+}
+
 export function produceCategoryTotals(
   rows: readonly ProduceCategoryRow[],
   knownNames?: ReadonlySet<string>,
+  /**
+   * How a raw transaction_type maps to a bucket. Defaults to
+   * `baseTransactionType`, which also folds the legacy ชั่งคืนเพิ่ม /
+   * คืนเสียเพิ่ม marker rows.
+   *
+   * A caller whose category subtotals must reconcile against an EXISTING
+   * grand total has to pass the same predicate that total uses. The daily
+   * summary passes `transactionBucket`, because the grand totals it sits
+   * beside recognize only เบิก/เบิกเพิ่ม/คืน/คืนเสีย/เสีย — counting a legacy
+   * marker row here would put money in the categories that is absent from the
+   * total printed directly underneath them. transactions.ts says as much:
+   * baseTransactionType is "not for existing report buckets".
+   */
+  bucketOf: (transactionType: string) => TransactionBucket | null = baseTransactionType,
 ): CategoryBreakdown {
   const byBucket: Record<TransactionBucket, Map<ReportCategoryId, MutableCategoryEntry>> = {
     เบิก: new Map(),
@@ -168,7 +247,7 @@ export function produceCategoryTotals(
   let skipped = 0;
 
   for (const row of rows) {
-    const bucket = baseTransactionType(row.transaction_type);
+    const bucket = bucketOf(row.transaction_type);
     if (!bucket) {
       skipped += 1;
       continue;

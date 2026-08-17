@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { UNCATEGORIZED_CATEGORY_ID } from "@/lib/produce/product-code/category";
 import {
+  categoryLedger,
   produceCategoryTotals,
   resolveProduceCategory,
   satangOf,
@@ -215,6 +216,104 @@ describe("produceCategoryTotals", () => {
       expect(result.เบิก.categories[0]!.id).toBe("ท");
       // Reclassifying must never move money.
       expect(result.เบิก.totalSatang).toBe(10_000);
+    });
+  });
+});
+
+describe("categoryLedger", () => {
+  test("transposes a bucket-shaped breakdown into a category-shaped ledger", () => {
+    const breakdown = produceCategoryTotals([
+      row({ product_name: "หมอนทอง", transaction_type: "เบิก", total_amount: 1000 }),
+      row({ product_name: "หมอนทอง", transaction_type: "คืน", total_amount: 200 }),
+      row({ product_name: "หมอนทอง", transaction_type: "คืนเสีย", total_amount: 50 }),
+      row({ product_name: "เห็ดนางฟ้า", transaction_type: "เบิก", total_amount: 300 }),
+    ]);
+    const ledger = categoryLedger(breakdown);
+
+    expect(ledger.map((e) => e.id)).toEqual(["ท", "ห"]); // REPORT_CATEGORY_ORDER, not insertion order
+
+    const ทุเรียน = ledger.find((e) => e.id === "ท")!;
+    expect(ทุเรียน).toEqual({
+      id: "ท",
+      label: "ทุเรียน",
+      heading: "🥭 ทุเรียน",
+      withdrawnSatang: 100_000,
+      goodReturnSatang: 20_000,
+      badReturnSatang: 5_000,
+      netSatang: 100_000 - 20_000 - 5_000,
+    });
+
+    const เห็ด = ledger.find((e) => e.id === "ห")!;
+    expect(เห็ด).toEqual({
+      id: "ห",
+      label: "เห็ด",
+      heading: "🍄 เห็ด",
+      withdrawnSatang: 30_000,
+      goodReturnSatang: 0,
+      badReturnSatang: 0,
+      netSatang: 30_000,
+    });
+  });
+
+  test("a category with money in only one bucket (e.g. a return with no matching withdrawal in this breakdown) still appears", () => {
+    const breakdown = produceCategoryTotals([
+      row({ product_name: "หมอนทอง", transaction_type: "คืน", total_amount: 150 }),
+    ]);
+    const ledger = categoryLedger(breakdown);
+    expect(ledger).toEqual([
+      {
+        id: "ท",
+        label: "ทุเรียน",
+        heading: "🥭 ทุเรียน",
+        withdrawnSatang: 0,
+        goodReturnSatang: 15_000,
+        badReturnSatang: 0,
+        netSatang: -15_000,
+      },
+    ]);
+  });
+
+  test("an empty breakdown produces an empty ledger", () => {
+    expect(categoryLedger(produceCategoryTotals([]))).toEqual([]);
+  });
+
+  test("SUM(entries netSatang) === breakdown.netSatang, exactly", () => {
+    const rows = [
+      row({ product_name: "หมอนทอง", transaction_type: "เบิก", total_amount: 14.5 * 50 }),
+      row({ product_name: "เห็ดนางฟ้า", transaction_type: "เบิก", total_amount: 250 }),
+      row({ product_name: "หมอนทอง", transaction_type: "คืน", total_amount: 2.5 * 35 }),
+      row({ product_name: "มะม่วงต่างดาว", transaction_type: "คืนเสีย", total_amount: 42.5 }),
+      row({ product_name: "กระชาย", transaction_type: "เบิกเพิ่ม", total_amount: 87.5 }),
+    ];
+    const breakdown = produceCategoryTotals(rows);
+    const ledger = categoryLedger(breakdown);
+
+    const netSum = ledger.reduce((sum, e) => sum + e.netSatang, 0);
+    expect(netSum).toBe(breakdown.netSatang);
+
+    const withdrawnSum = ledger.reduce((sum, e) => sum + e.withdrawnSatang, 0);
+    expect(withdrawnSum).toBe(breakdown.เบิก.totalSatang);
+    const goodReturnSum = ledger.reduce((sum, e) => sum + e.goodReturnSatang, 0);
+    expect(goodReturnSum).toBe(breakdown.คืน.totalSatang);
+    const badReturnSum = ledger.reduce((sum, e) => sum + e.badReturnSatang, 0);
+    expect(badReturnSum).toBe(breakdown.คืนเสีย.totalSatang);
+  });
+
+  test("uncategorized stays visible in the ledger and its money is real", () => {
+    const breakdown = produceCategoryTotals([
+      row({ product_name: "หมอนทอง", transaction_type: "เบิก", total_amount: 1000 }),
+      row({ product_name: "มะม่วงต่างดาว", transaction_type: "เบิก", total_amount: 500 }),
+    ]);
+    const ledger = categoryLedger(breakdown);
+    const uncategorized = ledger.find((e) => e.id === UNCATEGORIZED_CATEGORY_ID);
+    expect(uncategorized).toEqual({
+      id: UNCATEGORIZED_CATEGORY_ID,
+      label: "ไม่จัดหมวด",
+      heading: "❓ ไม่จัดหมวด",
+      withdrawnSatang: 50_000,
+      goodReturnSatang: 0,
+      badReturnSatang: 0,
+      netSatang: 50_000,
     });
   });
 });

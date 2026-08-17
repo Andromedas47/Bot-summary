@@ -4,6 +4,7 @@ import { logger } from "@/lib/logger";
 import { pushLineMessage } from "@/lib/line/reply";
 import { buildDailySummaryMessage } from "@/lib/line/daily-summary-message";
 import {
+  dailySummaryCategoryLedgers,
   dailySummaryRetryKey,
   groupDailySummariesBySource,
   resolveDailySummaryDate,
@@ -40,7 +41,7 @@ export async function GET(req: NextRequest) {
   const supabase = createServiceClient();
   const { data: txData, error: txError } = await supabase
     .from("produce_transactions")
-    .select("raw_message_id,staff_name,market_name,transaction_type,total_amount")
+    .select("raw_message_id,staff_name,market_name,transaction_type,total_amount,product_name")
     .eq("transaction_date", summaryDate)
     .order("staff_name", { ascending: true })
     .order("market_name", { ascending: true });
@@ -75,6 +76,10 @@ export async function GET(req: NextRequest) {
 
   const sources = (sourceData ?? []) as DailySummarySourceRow[];
   const summariesBySource = groupDailySummariesBySource(transactions, sources, summaryDate);
+  // Same in-memory transactions array, no second query — see
+  // dailySummaryCategoryLedgers for why the key is staff_name+market_name
+  // (not source_id) and why knownNames is derived from the whole date.
+  const categoryLedgers = dailySummaryCategoryLedgers(transactions, sources);
   const validSourceIds = new Set(
     sources
       .map((row) => row.source_id)
@@ -117,7 +122,7 @@ export async function GET(req: NextRequest) {
   let sentCount = 0;
   const failedSourceIds: string[] = [];
   for (const [sourceId, rows] of summariesBySource) {
-    const message = buildDailySummaryMessage(summaryDate, rows);
+    const message = buildDailySummaryMessage(summaryDate, rows, categoryLedgers.get(sourceId));
     logger.info("daily summary cron pushing LINE message", {
       summaryDate,
       sourceId,

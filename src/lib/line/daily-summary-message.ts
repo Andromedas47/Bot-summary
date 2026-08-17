@@ -51,7 +51,12 @@ function shortThaiDate(dateStr: string): string {
  * normalized seller label.
  */
 export function dailySummaryCategoryLedgerKey(staffName: string, marketName: string): string {
-  return `${staffName}||${marketName}`;
+  // A JSON tuple rather than a joined string: these are operator-typed names,
+  // and this key decides which seller/market a ledger belongs to. Any literal
+  // separator could itself appear inside a name and let two identities collide
+  // onto one key, swapping each other's money. JSON escapes its own quoting,
+  // so the encoding is unambiguous for every input.
+  return JSON.stringify([staffName, marketName]);
 }
 
 function rowTitle(row: DailySummaryMessageRow): string {

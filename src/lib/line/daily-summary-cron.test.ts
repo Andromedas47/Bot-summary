@@ -395,6 +395,31 @@ describe("dailySummaryCategoryLedgers", () => {
       .toBe(Math.round(expected.netSales * 100));
   });
 
+  it("a seller or market name containing the old key separator cannot collide", () => {
+    const rows = [
+      tx({ staff_name: "ก||ข", market_name: "ตลาด A", transaction_type: "เบิก", total_amount: 100 }),
+      tx({ staff_name: "ก", market_name: "ข||ตลาด A", transaction_type: "เบิก", total_amount: 700 }),
+    ];
+    const ledgers = ledgersFor(rows);
+    expect(ledgers.get(key("ก||ข", "ตลาด A"))![0]!.withdrawnSatang).toBe(10_000);
+    expect(ledgers.get(key("ก", "ข||ตลาด A"))![0]!.withdrawnSatang).toBe(70_000);
+  });
+
+  it("sub-satang rows do not inflate a category above the grand total beside them", () => {
+    // quantity is numeric(10,3) and price numeric(10,2), so a row worth
+    // 10.005 บาท is ordinary data. Two of them are 20.01, not 20.02 — rounding
+    // each row first would print a category total a satang above the
+    // "รวมทั้งหมด" line six rows below it, in the same message.
+    const rows = [
+      tx({ transaction_type: "เบิก", total_amount: 10.005, product_name: "หมอนทอง" }),
+      tx({ transaction_type: "เบิก", total_amount: 10.005, product_name: "หมอนทอง" }),
+    ];
+    const entries = ledgersFor(rows).get(key("กี้", "ตลาด A"))!;
+    expect(entries[0]!.withdrawnSatang).toBe(2_001);
+    expect(entries.reduce((sum, e) => sum + e.withdrawnSatang, 0))
+      .toBe(Math.round(replicateRecalculate(rows).borrowTotal * 100));
+  });
+
   it("a legacy เสีย row IS counted, because the grand totals count it", () => {
     const rows = [
       tx({ transaction_type: "เบิก", total_amount: 1000, product_name: "หมอนทอง" }),

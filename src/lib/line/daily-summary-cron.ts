@@ -193,7 +193,7 @@ export function dailySummaryCategoryLedgers(
   for (const [sourceId, byIdentity] of rowsBySource) {
     const ledgers = new Map<string, CategoryLedgerEntry[]>();
     for (const [key, rows] of byIdentity) {
-      const breakdown = produceCategoryTotals(rows, knownNames, transactionBucket);
+      const breakdown = produceCategoryTotals(rows, knownNames, transactionBucket, false);
       skipped += breakdown.skipped;
       ledgers.set(key, categoryLedger(breakdown));
     }

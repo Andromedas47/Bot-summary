@@ -75,6 +75,16 @@ export const PRODUCT_ALIASES: Record<string, string> = {
   // every downstream comparison that keys on normalizeProductName. Exact-match
   // only, never fuzzy \u2014 \u0E44\u0E0A\u0E21\u0E31\u0E2A maps here because it is confirmed byte-for-byte,
   // not because it looks similar to \u0E44\u0E0B\u0E21\u0E31\u0E2A.
+  //
+  // Known limit, and NOT specific to this entry: normalizeProductName feeds
+  // businessContentFingerprint, so a document recorded BEFORE an alias lands
+  // hashes differently once it does. If such a document is re-sent afterwards,
+  // sessionHashCandidates will not recognise its stored session_hash and the
+  // duplicate blocker misses it. Market aliases have a compatibility layer for
+  // exactly this (weighSessionCompatibilityFingerprints, V1/V2 generations);
+  // product aliases have no equivalent, and never have \u2014 every entry above
+  // carries the same gap. Closing it belongs in its own change, covering the
+  // whole map rather than one word.
   \u0E44\u0E0A\u0E21\u0E31\u0E2A: "\u0E44\u0E0B\u0E21\u0E31\u0E2A",
 };
 

@@ -86,6 +86,25 @@ export const PRODUCT_ALIASES: Record<string, string> = {
   // carries the same gap. Closing it belongs in its own change, covering the
   // whole map rather than one word.
   \u0E44\u0E0A\u0E21\u0E31\u0E2A: "\u0E44\u0E0B\u0E21\u0E31\u0E2A",
+
+  // \u2500\u2500 \u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15 \u2192 \u0E21\u0E30\u0E21\u0E48\u0E27\u0E07\u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15 (\u0E2131 shop-floor short form) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // Business-confirmed same product: \u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15 is the shop-floor short form of
+  // the existing dictionary canonical name \u0E21\u0E30\u0E21\u0E48\u0E27\u0E07\u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15 (\u0E2131), not a second
+  // product and not a new dictionary code \u2014 20260818100000's header comment
+  // documents this same decision at the migration level. Production usage:
+  // 733 uses of the short form against 31 of the full name, including one
+  // session (2026-08-07) where both spellings appear together, same unit \u0E42\u0E25,
+  // at prices 35.00 and 20.00 \u2014 buildWithdrawalMaster keeps multiple prices
+  // per cell as a list, so that co-occurrence is a normal same-session shape,
+  // not a parsing anomaly, and is itself part of the evidence these are one
+  // product weighed and sold at two prices in one session, not two products.
+  //
+  // Exact-match only, never fuzzy. In particular, these are REAL, distinct
+  // operational names attested in Production and must NOT fold into this
+  // entry: \u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15\u0E40\u0E01\u0E48\u0E32 (7 uses), \u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15\u0E43\u0E2B\u0E21\u0E48 (1 use), and \u0E21\u0E23\u0E01\u0E15 (5 uses) are
+  // all genuinely different spellings/products on the floor, not near-miss
+  // typos of \u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15. (\u0E21\u0E30\u0E21\u0E48\u0E27\u0E07\u0E21\u0E23\u0E01\u0E15 does not occur in Production at all.)
+  \u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15: "\u0E21\u0E30\u0E21\u0E48\u0E27\u0E07\u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15",
 };
 
 const KNOWN_PREFIX = "\u0E40\u0E1E\u0E34\u0E48\u0E21";

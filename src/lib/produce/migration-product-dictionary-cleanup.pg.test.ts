@@ -1,0 +1,254 @@
+/**
+ * Real PostgreSQL 17 proof for the Produce Product Dictionary Cleanup
+ * migration (20260818100000): the ม54 spelling correction (ไชมัส → ไซมัส) and
+ * the six new ม63-ม68 codes, applied on top of the base dictionary seed
+ * (20260813090000).
+ *
+ * Four things need proving before this runs against Production:
+ *
+ *  1. the composed state is exactly right — 259 rows, 259 enabled, ม=68,
+ *     ม54 corrected, ม63-ม68 resolving to their exact approved names;
+ *  2. the identity guard the base migration installs is STILL ARMED
+ *     afterwards — this migration's own narrow, temporary DISABLE/ENABLE of
+ *     that trigger must never leave it disabled in committed state, and this
+ *     is the regression test that proves it;
+ *  3. the migration is not silently destructive — no OTHER row's
+ *     canonical_name moved;
+ *  4. applying it a second time never corrupts state, whatever it decides to
+ *     do (this migration RAISEs a clear "already applied" notice rather than
+ *     silently no-opping — see its own header comment for why).
+ */
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { randomBytes } from "node:crypto";
+import { PRODUCT_CODE_ENTRIES } from "./product-code/dictionary";
+
+const ROOT = join(import.meta.dir, "..", "..", "..");
+const WIN_PSQL = "C:\\Program Files\\PostgreSQL\\17\\bin\\psql.exe";
+const PSQL = existsSync(WIN_PSQL) ? WIN_PSQL : "psql";
+const PGHOST = process.env.PGHOST ?? "localhost";
+const PGUSER = process.env.PGUSER ?? "postgres";
+const PGPASSWORD = process.env.PGPASSWORD ?? "postgres";
+const PGPORT = process.env.PGPORT ?? "5432";
+const DATABASE = `pdcl_${randomBytes(4).toString("hex")}`;
+const DB_NAME_PATTERN = /^pdcl_[a-f0-9]+$/;
+const ALLOWED_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+
+const BASE_MIGRATION = join(
+  ROOT, "supabase", "migrations", "20260813090000_produce_product_code_dictionary.sql",
+);
+const CLEANUP_MIGRATION = join(
+  ROOT, "supabase", "migrations", "20260818100000_produce_product_dictionary_cleanup.sql",
+);
+
+function assertSafe(): void {
+  if (process.env.ALLOW_DISPOSABLE_POSTGRES_TESTS !== "1") {
+    throw new Error("migration-product-dictionary-cleanup.pg.test.ts requires ALLOW_DISPOSABLE_POSTGRES_TESTS=1");
+  }
+  if (!ALLOWED_HOSTS.has(PGHOST)) throw new Error(`refusing PGHOST=${PGHOST}`);
+  if (!DB_NAME_PATTERN.test(DATABASE)) throw new Error(`refusing database=${DATABASE}`);
+}
+
+type PsqlResult = { code: number; stdout: string; stderr: string };
+
+async function psql(args: string[], database = DATABASE, stdin?: string): Promise<PsqlResult> {
+  const proc = Bun.spawn([PSQL, "-X", ...args], {
+    cwd: ROOT,
+    stdin: stdin === undefined ? undefined : new TextEncoder().encode(stdin),
+    // Thai canonical names are the whole point of this table; without an
+    // explicit UTF-8 client encoding a Windows psql returns question marks.
+    env: { ...process.env, PGHOST, PGUSER, PGPASSWORD, PGPORT, PGDATABASE: database, PGCLIENTENCODING: "UTF8" },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { code, stdout, stderr };
+}
+
+function run(sql: string): Promise<PsqlResult> {
+  return psql(["-v", "ON_ERROR_STOP=1", "-tA", "-f", "-"], DATABASE, sql);
+}
+
+async function scalar(sql: string): Promise<string> {
+  const result = await run(sql);
+  if (result.code !== 0) throw new Error(`${result.stderr || result.stdout}\nSQL: ${sql}`);
+  return result.stdout.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+}
+
+async function expectFailure(sql: string): Promise<string> {
+  const result = await run(sql);
+  expect(result.code, `expected failure but succeeded:\n${sql}`).not.toBe(0);
+  return `${result.stderr}${result.stdout}`;
+}
+
+async function apply(file: string): Promise<void> {
+  const result = await psql(["-v", "ON_ERROR_STOP=1", "-f", file]);
+  expect(result.code, `${file}\n${result.stderr}\n${result.stdout}`).toBe(0);
+}
+
+async function applyExpectFailure(file: string): Promise<string> {
+  const result = await psql(["-v", "ON_ERROR_STOP=1", "-f", file]);
+  expect(result.code, `expected ${file} to fail but it succeeded`).not.toBe(0);
+  return `${result.stderr}${result.stdout}`;
+}
+
+async function probe(): Promise<boolean> {
+  if (process.env.ALLOW_DISPOSABLE_POSTGRES_TESTS !== "1" || !ALLOWED_HOSTS.has(PGHOST)) return false;
+  try {
+    const result = await psql(["-tAc", "SHOW server_version_num"], "postgres");
+    return result.code === 0 && Number(result.stdout.trim()) >= 170000;
+  } catch {
+    return false;
+  }
+}
+
+const pgAvailable = await probe();
+let databaseCreated = false;
+if (!pgAvailable && process.env.REQUIRE_PRODUCT_CODE_POSTGRES === "1") {
+  throw new Error("REQUIRE_PRODUCT_CODE_POSTGRES=1 but the PostgreSQL 17 harness is unavailable");
+}
+
+/** The other 252 base rows' canonical names, captured before the cleanup migration runs. */
+let otherRowsBefore: Record<string, string> = {};
+
+describe.skipIf(!pgAvailable)("Produce Product Dictionary Cleanup on PostgreSQL 17", () => {
+  beforeAll(async () => {
+    assertSafe();
+    const created = await psql(["-d", "postgres", "-c", `CREATE DATABASE ${DATABASE}`], "postgres");
+    expect(created.code, created.stderr).toBe(0);
+    databaseCreated = true;
+
+    await apply(BASE_MIGRATION);
+
+    otherRowsBefore = JSON.parse(
+      await scalar(`
+        SELECT jsonb_object_agg(product_code, canonical_name)::text
+        FROM public.produce_product_codes
+        WHERE product_code <> 'ม54'`),
+    ) as Record<string, string>;
+    expect(Object.keys(otherRowsBefore)).toHaveLength(252);
+
+    await apply(CLEANUP_MIGRATION);
+  });
+
+  afterAll(async () => {
+    if (!databaseCreated) return;
+    await psql(["-d", "postgres", "-c", `DROP DATABASE IF EXISTS ${DATABASE} WITH (FORCE)`], "postgres");
+  });
+
+  // ── 1. The composed state is exactly right ────────────────────────────────
+
+  test("composes to exactly 259 rows, 259 enabled, ม=68", async () => {
+    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("259");
+    expect(await scalar(
+      "SELECT count(*)::text FROM public.produce_product_codes WHERE code_enabled",
+    )).toBe("259");
+    expect(await scalar(
+      "SELECT count(*)::text FROM public.produce_product_codes WHERE category_code = 'ม'",
+    )).toBe("68");
+  });
+
+  test("ม54 is corrected to ไซมัส", async () => {
+    expect(await scalar(
+      "SELECT canonical_name FROM public.produce_product_codes WHERE product_code = 'ม54'",
+    )).toBe("ไซมัส");
+  });
+
+  test("ม63-ม68 resolve to their exact expected name and category ผลไม้", async () => {
+    const expected: Array<[string, string]> = [
+      ["ม63", "มะม่วงจิ้ว"],
+      ["ม64", "ลูกพีชเล็ก"],
+      ["ม65", "ลูกพีชใหญ่"],
+      ["ม66", "ลูกไหนเขียว"],
+      ["ม67", "ลูกไหนดำ"],
+      ["ม68", "องุ่นคิมสัน"],
+    ];
+    for (const [code, name] of expected) {
+      expect(await scalar(
+        `SELECT canonical_name || '|' || category_name || '|' || category_code::text || '|' || code_enabled::text
+         FROM public.produce_product_codes WHERE product_code = '${code}'`,
+      )).toBe(`${name}|ผลไม้|ม|true`);
+    }
+  });
+
+  test("matches PRODUCT_CODE_ENTRIES exactly, the whole table", async () => {
+    const actual = JSON.parse(await scalar(
+      "SELECT jsonb_object_agg(product_code, canonical_name)::text FROM public.produce_product_codes",
+    )) as Record<string, string>;
+    const expected = Object.fromEntries(PRODUCT_CODE_ENTRIES.map((e) => [e.code, e.canonicalName]));
+    expect(actual).toEqual(expected);
+  });
+
+  // ── 2. The identity guard is still armed afterwards ───────────────────────
+
+  test("the identity guard trigger is enabled (tgenabled = 'O') after the migration", async () => {
+    expect(await scalar(`
+      SELECT tgenabled::text FROM pg_trigger
+      WHERE tgrelid = 'public.produce_product_codes'::regclass
+        AND tgname = 'produce_product_codes_identity_guard'`)).toBe("O");
+  });
+
+  test("still refuses to repoint an UNRELATED row's canonical_name", async () => {
+    const error = await expectFailure(
+      "UPDATE public.produce_product_codes SET canonical_name = 'ทุเรียน' WHERE product_code = 'ม02'",
+    );
+    expect(error).toContain("identity is immutable");
+    expect(await scalar(
+      "SELECT canonical_name FROM public.produce_product_codes WHERE product_code = 'ม02'",
+    )).toBe("กล้วยน้ำว้า");
+  });
+
+  test("still refuses to repoint ม54 itself a second time, outside a migration", async () => {
+    const error = await expectFailure(
+      "UPDATE public.produce_product_codes SET canonical_name = 'ทุเรียน' WHERE product_code = 'ม54'",
+    );
+    expect(error).toContain("identity is immutable");
+    expect(await scalar(
+      "SELECT canonical_name FROM public.produce_product_codes WHERE product_code = 'ม54'",
+    )).toBe("ไซมัส");
+  });
+
+  test("still refuses to delete a released code, including a freshly issued one", async () => {
+    const error = await expectFailure(
+      "DELETE FROM public.produce_product_codes WHERE product_code = 'ม63'",
+    );
+    expect(error).toContain("must not be deleted");
+    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("259");
+  });
+
+  // ── 3. Not silently destructive ───────────────────────────────────────────
+
+  test("no OTHER row's canonical_name moved", async () => {
+    const otherRowsAfter = JSON.parse(
+      await scalar(`
+        SELECT jsonb_object_agg(product_code, canonical_name)::text
+        FROM public.produce_product_codes
+        WHERE product_code <> 'ม54'
+          AND product_code NOT IN ('ม63', 'ม64', 'ม65', 'ม66', 'ม67', 'ม68')`),
+    ) as Record<string, string>;
+    expect(Object.keys(otherRowsAfter)).toHaveLength(252);
+    expect(otherRowsAfter).toEqual(otherRowsBefore);
+  });
+
+  // ── 4. Reapplication never corrupts state ─────────────────────────────────
+
+  test("applying the cleanup migration a second time RAISEs rather than silently no-opping", async () => {
+    const error = await applyExpectFailure(CLEANUP_MIGRATION);
+    expect(error).toContain("already applied");
+
+    // And state is exactly where the first application left it.
+    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("259");
+    expect(await scalar(
+      "SELECT canonical_name FROM public.produce_product_codes WHERE product_code = 'ม54'",
+    )).toBe("ไซมัส");
+    expect(await scalar(`
+      SELECT tgenabled::text FROM pg_trigger
+      WHERE tgrelid = 'public.produce_product_codes'::regclass
+        AND tgname = 'produce_product_codes_identity_guard'`)).toBe("O");
+  });
+});

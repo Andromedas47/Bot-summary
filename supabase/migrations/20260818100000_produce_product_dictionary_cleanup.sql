@@ -1,4 +1,4 @@
--- Produce Product Code Dictionary — a spelling correction and six new codes.
+-- Produce Product Code Dictionary — a spelling correction and nine new codes.
 --
 -- Forward-only, catalog-only. No historical produce_transactions / produce_items
 -- / produce_sessions row is read, rewritten or backfilled by this migration.
@@ -20,9 +20,24 @@
 -- row to the spelling that is actually correct Thai for the product and is
 -- already the majority spelling on the floor.
 --
--- Six previously-unissued codes (ม63–ม68) are also seeded here, one migration
+-- Nine previously-unissued codes (ม63–ม71) are also seeded here, one migration
 -- past the last released ม-code (ม62 = แอปเปิ้ล). They are ordinary new
 -- dictionary rows — no identity question, no guard bypass, just an INSERT.
+--
+-- ─────────────────────────────────────────────────────────────────────────────
+-- เขียวมรกต — an application-level alias, not a tenth code
+-- ─────────────────────────────────────────────────────────────────────────────
+-- เขียวมรกต is the shop-floor short form of the existing ม31 canonical name
+-- มะม่วงเขียวมรกต — 733 uses of the short form against 31 of the full name in
+-- Production, including one session (2026-08-07) where both spellings appear
+-- together at the identical unit (โล) and prices 35.00 / 20.00. This migration
+-- does NOT create a new product_code row for it: no ม-row is issued, no
+-- canonical_name changes, nothing here repoints ม31. The fold is handled
+-- entirely at the application layer, in src/lib/summary/remaining-fruit.ts
+-- (PRODUCT_ALIASES), the same mechanism already used for ไชมัส → ไซมัส above
+-- and อะโวคาโด้ → อะโวคาโด. That file's own comments document the exact-match
+-- scope and the near-miss names (เขียวมรกตเก่า, เขียวมรกตใหม่, มรกต) that must
+-- never fold into it.
 --
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Why the identity guard is bypassed for exactly ONE row, narrowly
@@ -89,10 +104,10 @@ BEGIN
 
   IF v_current_name = 'ไซมัส' AND EXISTS (
     SELECT 1 FROM public.produce_product_codes WHERE product_code IN
-      ('ม63', 'ม64', 'ม65', 'ม66', 'ม67', 'ม68')
+      ('ม63', 'ม64', 'ม65', 'ม66', 'ม67', 'ม68', 'ม69', 'ม70', 'ม71')
   ) THEN
     RAISE EXCEPTION
-      'produce_product_dictionary_cleanup already applied: ม54 is already ไซมัส and ม63-ม68 already exist';
+      'produce_product_dictionary_cleanup already applied: ม54 is already ไซมัส and ม63-ม71 already exist';
   END IF;
 
   IF v_current_name <> 'ไชมัส' THEN
@@ -106,21 +121,22 @@ BEGIN
 
   IF EXISTS (
     SELECT 1 FROM public.produce_product_codes
-    WHERE product_code IN ('ม63', 'ม64', 'ม65', 'ม66', 'ม67', 'ม68')
+    WHERE product_code IN ('ม63', 'ม64', 'ม65', 'ม66', 'ม67', 'ม68', 'ม69', 'ม70', 'ม71')
   ) THEN
-    RAISE EXCEPTION 'one or more of ม63-ม68 already exist — refusing to reissue a code';
+    RAISE EXCEPTION 'one or more of ม63-ม71 already exist — refusing to reissue a code';
   END IF;
 
   -- Prevents creating a duplicate product identity under a second code: none
-  -- of the six new canonical names may already exist under ANY product_code.
+  -- of the nine new canonical names may already exist under ANY product_code.
   IF EXISTS (
     SELECT 1 FROM public.produce_product_codes
     WHERE canonical_name IN (
-      'มะม่วงจิ้ว', 'ลูกพีชเล็ก', 'ลูกพีชใหญ่', 'ลูกไหนเขียว', 'ลูกไหนดำ', 'องุ่นคิมสัน'
+      'มะม่วงจิ้ว', 'ลูกพีชเล็ก', 'ลูกพีชใหญ่', 'ลูกไหนเขียว', 'ลูกไหนดำ', 'องุ่นคิมสัน',
+      'ส้มแมนดาริน', 'องุ่นเคียวโฮ', 'ลิ้นจี่'
     )
   ) THEN
     RAISE EXCEPTION
-      'one of the six new canonical names already exists under a different product_code';
+      'one of the nine new canonical names already exists under a different product_code';
   END IF;
 END;
 $preflight$;
@@ -151,7 +167,7 @@ $rename$;
 
 ALTER TABLE public.produce_product_codes ENABLE TRIGGER produce_product_codes_identity_guard;
 
--- ── Six new codes, ordinary rows, no guard involvement ───────────────────────
+-- ── Nine new codes, ordinary rows, no guard involvement ──────────────────────
 -- ON CONFLICT DO NOTHING makes a redeploy a no-op rather than an UPDATE (which
 -- the identity guard would refuse anyway now that it is re-armed above).
 INSERT INTO public.produce_product_codes
@@ -162,7 +178,10 @@ VALUES
   ('ม65', 'ม', 'ผลไม้', 'ลูกพีชใหญ่', true),
   ('ม66', 'ม', 'ผลไม้', 'ลูกไหนเขียว', true),
   ('ม67', 'ม', 'ผลไม้', 'ลูกไหนดำ', true),
-  ('ม68', 'ม', 'ผลไม้', 'องุ่นคิมสัน', true)
+  ('ม68', 'ม', 'ผลไม้', 'องุ่นคิมสัน', true),
+  ('ม69', 'ม', 'ผลไม้', 'ส้มแมนดาริน', true),
+  ('ม70', 'ม', 'ผลไม้', 'องุ่นเคียวโฮ', true),
+  ('ม71', 'ม', 'ผลไม้', 'ลิ้นจี่', true)
 ON CONFLICT (product_code) DO NOTHING;
 
 -- ── Postflight: prove the end state before committing ────────────────────────
@@ -178,16 +197,16 @@ BEGIN
     INTO v_total, v_enabled
     FROM public.produce_product_codes;
 
-  IF v_total <> 259 OR v_enabled <> 259 THEN
+  IF v_total <> 262 OR v_enabled <> 262 THEN
     RAISE EXCEPTION
-      'produce_product_codes postflight mismatch: % rows / % enabled, expected 259 / 259',
+      'produce_product_codes postflight mismatch: % rows / % enabled, expected 262 / 262',
       v_total, v_enabled;
   END IF;
 
   SELECT count(*) INTO v_mcount
     FROM public.produce_product_codes WHERE category_code = 'ม';
-  IF v_mcount <> 68 THEN
-    RAISE EXCEPTION 'ม-category count is %, expected 68', v_mcount;
+  IF v_mcount <> 71 THEN
+    RAISE EXCEPTION 'ม-category count is %, expected 71', v_mcount;
   END IF;
 
   SELECT canonical_name INTO v_m54_name
@@ -203,14 +222,17 @@ BEGIN
       ('ม65', 'ลูกพีชใหญ่'),
       ('ม66', 'ลูกไหนเขียว'),
       ('ม67', 'ลูกไหนดำ'),
-      ('ม68', 'องุ่นคิมสัน')
+      ('ม68', 'องุ่นคิมสัน'),
+      ('ม69', 'ส้มแมนดาริน'),
+      ('ม70', 'องุ่นเคียวโฮ'),
+      ('ม71', 'ลิ้นจี่')
     ) AS expected(code, name)
     WHERE NOT EXISTS (
       SELECT 1 FROM public.produce_product_codes p
       WHERE p.product_code = expected.code AND p.canonical_name = expected.name
     )
   ) THEN
-    RAISE EXCEPTION 'one or more of ม63-ม68 do not resolve to their expected canonical name';
+    RAISE EXCEPTION 'one or more of ม63-ม71 do not resolve to their expected canonical name';
   END IF;
 
   -- The guard must be re-armed. Query pg_trigger directly rather than trusting

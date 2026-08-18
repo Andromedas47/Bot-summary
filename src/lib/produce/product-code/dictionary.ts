@@ -92,6 +92,9 @@ const RAW: ReadonlyArray<readonly [string, string, string, string, boolean]> = [
   ["ม66","ม","ผลไม้","ลูกไหนเขียว",true],
   ["ม67","ม","ผลไม้","ลูกไหนดำ",true],
   ["ม68","ม","ผลไม้","องุ่นคิมสัน",true],
+  ["ม69","ม","ผลไม้","ส้มแมนดาริน",true],
+  ["ม70","ม","ผลไม้","องุ่นเคียวโฮ",true],
+  ["ม71","ม","ผลไม้","ลิ้นจี่",true],
   ["ผ01","ผ","ผัก / สมุนไพร / เครื่องประกอบอาหาร","ฝักกระเจี๊ยบ",true],
   ["ผ02","ผ","ผัก / สมุนไพร / เครื่องประกอบอาหาร","กระชาย",true],
   ["ผ03","ผ","ผัก / สมุนไพร / เครื่องประกอบอาหาร","กระชายซอย",true],
@@ -291,7 +294,7 @@ export const PRODUCT_CODE_ENTRIES: ReadonlyArray<ProductCodeEntry> = RAW.map(
 );
 
 /** Every row in the approved dictionary, retired ones included. */
-export const PRODUCT_CODE_COUNT = 259;
+export const PRODUCT_CODE_COUNT = 262;
 
 /** Rows that currently resolve. Equal to PRODUCT_CODE_COUNT until one retires. */
-export const PRODUCT_CODE_ENABLED_COUNT = 259;
+export const PRODUCT_CODE_ENABLED_COUNT = 262;

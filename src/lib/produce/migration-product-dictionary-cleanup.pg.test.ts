@@ -252,3 +252,123 @@ describe.skipIf(!pgAvailable)("Produce Product Dictionary Cleanup on PostgreSQL 
         AND tgname = 'produce_product_codes_identity_guard'`)).toBe("O");
   });
 });
+
+// ── 5. The guard is proven healthy BEFORE it is bypassed ─────────────────────
+//
+// The cleanup migration steps around a business-identity invariant for one
+// reviewed spelling correction. It may only do that from a proven-healthy
+// start: a missing guard, or one already disabled, is drift it must neither
+// silently inherit nor quietly repair by re-enabling something it did not
+// disable. Proving refusal needs a database whose guard is unhealthy BEFORE
+// the cleanup runs, so this gets its own scratch database.
+describe.skipIf(!pgAvailable)("cleanup migration refuses an unhealthy identity guard", () => {
+  const SCRATCH = `pdcl_${randomBytes(4).toString("hex")}`;
+  let scratchCreated = false;
+
+  const GUARD_STATE = `
+    SELECT coalesce((
+      SELECT tgenabled::text FROM pg_trigger
+      WHERE tgrelid = 'public.produce_product_codes'::regclass
+        AND tgname = 'produce_product_codes_identity_guard'), 'MISSING')`;
+
+  function scratchPsql(args: string[]): Promise<PsqlResult> {
+    return psql(args, SCRATCH);
+  }
+  // SQL goes in over stdin, never as a -c argument: Thai canonical names do not
+  // survive a Windows psql command line, exactly as `run`/`scalar` above.
+  async function scratchScalar(sql: string): Promise<string> {
+    const result = await psql(["-v", "ON_ERROR_STOP=1", "-tA", "-f", "-"], SCRATCH, sql);
+    expect(result.code, result.stderr).toBe(0);
+    return result.stdout.trim();
+  }
+  async function scratchExec(sql: string): Promise<void> {
+    const result = await psql(["-v", "ON_ERROR_STOP=1", "-f", "-"], SCRATCH, sql);
+    expect(result.code, result.stderr).toBe(0);
+  }
+  function applyCleanup(): Promise<PsqlResult> {
+    return scratchPsql(["-v", "ON_ERROR_STOP=1", "-f", CLEANUP_MIGRATION]);
+  }
+
+  /** The dictionary as the base migration left it — nothing the cleanup would touch. */
+  async function expectUntouched(): Promise<void> {
+    expect(await scratchScalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("253");
+    expect(await scratchScalar(
+      "SELECT canonical_name FROM public.produce_product_codes WHERE product_code = 'ม54'",
+    )).toBe("ไชมัส");
+    expect(await scratchScalar(`
+      SELECT count(*)::text FROM public.produce_product_codes
+      WHERE product_code IN ('ม63','ม64','ม65','ม66','ม67','ม68')`)).toBe("0");
+  }
+
+  beforeAll(async () => {
+    assertSafe();
+    if (!DB_NAME_PATTERN.test(SCRATCH)) throw new Error(`refusing database=${SCRATCH}`);
+    const created = await psql(["-d", "postgres", "-c", `CREATE DATABASE ${SCRATCH}`], "postgres");
+    expect(created.code, created.stderr).toBe(0);
+    scratchCreated = true;
+
+    const base = await scratchPsql(["-v", "ON_ERROR_STOP=1", "-f", BASE_MIGRATION]);
+    expect(base.code, `${base.stderr}${base.stdout}`).toBe(0);
+  });
+
+  afterAll(async () => {
+    if (!scratchCreated) return;
+    await psql(["-d", "postgres", "-c", `DROP DATABASE IF EXISTS ${SCRATCH} WITH (FORCE)`], "postgres");
+  });
+
+  test("the base migration leaves the guard normally enabled ('O')", async () => {
+    expect(await scratchScalar(GUARD_STATE)).toBe("O");
+  });
+
+  test("refuses, mutating nothing, when the identity guard is ALREADY DISABLED", async () => {
+    await scratchExec(
+      "ALTER TABLE public.produce_product_codes DISABLE TRIGGER produce_product_codes_identity_guard",
+    );
+    expect(await scratchScalar(GUARD_STATE)).toBe("D");
+
+    const result = await applyCleanup();
+    expect(result.code, "cleanup migration must refuse a disabled guard").not.toBe(0);
+    expect(`${result.stderr}${result.stdout}`).toContain("unexpected state");
+
+    // The refusal is total: no rename, no inserts, and it did not "repair" the
+    // guard it never disabled.
+    await expectUntouched();
+    expect(await scratchScalar(GUARD_STATE)).toBe("D");
+  });
+
+  test("refuses, mutating nothing, when the identity guard is MISSING entirely", async () => {
+    await scratchExec(
+      "DROP TRIGGER produce_product_codes_identity_guard ON public.produce_product_codes",
+    );
+    expect(await scratchScalar(GUARD_STATE)).toBe("MISSING");
+
+    const result = await applyCleanup();
+    expect(result.code, "cleanup migration must refuse a missing guard").not.toBe(0);
+    expect(`${result.stderr}${result.stdout}`).toContain("missing");
+
+    await expectUntouched();
+    expect(await scratchScalar(GUARD_STATE)).toBe("MISSING");
+  });
+
+  test("applies cleanly once the guard is healthy again: 'O' before, 'O' after", async () => {
+    await scratchExec(`
+      CREATE TRIGGER produce_product_codes_identity_guard
+        BEFORE UPDATE OR DELETE ON public.produce_product_codes
+        FOR EACH ROW EXECUTE FUNCTION public.produce_product_codes_forbid_identity_mutation()`);
+    expect(await scratchScalar(GUARD_STATE)).toBe("O");
+
+    const result = await applyCleanup();
+    expect(result.code, `${result.stderr}${result.stdout}`).toBe(0);
+
+    expect(await scratchScalar(GUARD_STATE)).toBe("O");
+    expect(await scratchScalar(
+      "SELECT canonical_name FROM public.produce_product_codes WHERE product_code = 'ม54'",
+    )).toBe("ไซมัส");
+    expect(await scratchScalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("259");
+    expect(await scratchScalar(`
+      SELECT string_agg(canonical_name, ',' ORDER BY product_code)
+      FROM public.produce_product_codes
+      WHERE product_code IN ('ม63','ม64','ม65','ม66','ม67','ม68')`))
+      .toBe("มะม่วงจิ้ว,ลูกพีชเล็ก,ลูกพีชใหญ่,ลูกไหนเขียว,ลูกไหนดำ,องุ่นคิมสัน");
+  });
+});

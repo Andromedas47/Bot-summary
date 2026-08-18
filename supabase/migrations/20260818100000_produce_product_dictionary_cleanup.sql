@@ -53,7 +53,31 @@ DO $preflight$
 DECLARE
   v_current_name text;
   v_current_category text;
+  v_tgenabled "char";
 BEGIN
+  -- The guard must be present and normally enabled BEFORE anything touches it.
+  -- This migration deliberately steps around a business-identity invariant for
+  -- one reviewed correction, so it may only do so from a proven-healthy start.
+  -- A missing trigger, an already-disabled one, or a replica/always variant
+  -- ('D', 'R', 'A') is drift: this migration must neither silently inherit it
+  -- nor quietly repair it by re-enabling something it did not disable. Refuse
+  -- and leave the dictionary untouched instead.
+  SELECT tgenabled INTO v_tgenabled
+    FROM pg_trigger
+    WHERE tgrelid = 'public.produce_product_codes'::regclass
+      AND tgname = 'produce_product_codes_identity_guard';
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION
+      'produce_product_codes_identity_guard is missing from public.produce_product_codes — refusing to correct ม54 with no identity guard in place';
+  END IF;
+
+  IF v_tgenabled <> 'O' THEN
+    RAISE EXCEPTION
+      'produce_product_codes_identity_guard is in an unexpected state (tgenabled=%), expected O — refusing to bypass a guard that is not normally enabled',
+      v_tgenabled;
+  END IF;
+
   SELECT canonical_name, category_code
     INTO v_current_name, v_current_category
     FROM public.produce_product_codes

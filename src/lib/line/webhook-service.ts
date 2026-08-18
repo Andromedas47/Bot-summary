@@ -128,6 +128,17 @@ import {
   buildBlockingValidationReply,
   buildPlainTextReviewValidationReply,
 } from "@/lib/produce/entry-validation-message";
+import {
+  CANCEL_ACTIVE_DRAFT_NONE_REPLY,
+  CANCEL_ACTIVE_DRAFT_REFUSED_REPLY,
+  CANCEL_ACTIVE_DRAFT_SUCCESS_REPLY,
+  CANCEL_ACTIVE_DRAFT_UNAVAILABLE_REASON,
+  CANCEL_ACTIVE_DRAFT_UNAVAILABLE_REPLY,
+  cancelActiveProduceDraft,
+  isExactCancelActiveDraftCommand,
+  withCancelActiveDraftHint,
+} from "@/lib/produce/cancel-active-draft";
+import { getRuntimeEnvironment } from "@/lib/runtime-environment";
 
 type Supabase      = SupabaseClient<Database>;
 type ChildLogger   = ReturnType<typeof logger.child>;
@@ -915,6 +926,66 @@ export class WebhookService {
     }
 
     if (pending) {
+      // ── 4.0. Exact "ยกเลิกรายการ" — abandon the draft being filled in ───────
+      //
+      // FIRST statement inside the pending branch, deliberately. Nothing
+      // between the lookup above and here touches the text, so this is the
+      // earliest point that both reuses the authoritative draft this very
+      // event would otherwise be appended to, and precedes append, item parse,
+      // header parse, close detection and unknown-product classification. The
+      // command therefore can never enter accumulated_text, become an item or
+      // become a header.
+      //
+      // Matched against `text` (the marker-stripped raw), exactly as
+      // isExactGuidedCloseTrigger is at §3.0a — not the normalized form.
+      //
+      // The snapshot passed here is the one already resolved above; the row is
+      // never re-read first. Every ownership, lifecycle and concurrency
+      // question is answered by the RPC under its row lock. An expired-but-
+      // present row is still a row: the database decides, not this branch.
+      if (isExactCancelActiveDraftCommand(text)) {
+        const cancelled = await cancelActiveProduceDraft(this.supabase, {
+          sessionKey,
+          sessionGeneration: pending.session_generation,
+          expectedUpdatedAt: pending.updated_at,
+          lineTimestampMs: event.timestamp,
+          sourceId,
+          lineEventId: eventId,
+          runtimeEnvironment: getRuntimeEnvironment(),
+        });
+        log.info("produce draft cancellation requested", {
+          sessionKey,
+          sessionGeneration: pending.session_generation,
+          cancelled: cancelled.cancelled,
+          reason: cancelled.reason,
+          roundOutcome: cancelled.cancelled ? cancelled.roundOutcome ?? null : null,
+        });
+        if (replyToken) {
+          // Three outcomes, three replies. The unavailable case is separated
+          // out because "try again" is actively wrong advice when the RPC does
+          // not exist on this database yet (app deployed ahead of its
+          // migration) — the operator would retry forever. It is still a
+          // refusal: neither non-success branch ever claims the draft was
+          // cancelled.
+          let reply: string;
+          if (cancelled.cancelled) {
+            reply = CANCEL_ACTIVE_DRAFT_SUCCESS_REPLY;
+          } else if (cancelled.reason === CANCEL_ACTIVE_DRAFT_UNAVAILABLE_REASON) {
+            reply = CANCEL_ACTIVE_DRAFT_UNAVAILABLE_REPLY;
+          } else {
+            reply = CANCEL_ACTIVE_DRAFT_REFUSED_REPLY;
+          }
+          try {
+            await this.replyMessage(replyToken, reply);
+          } catch (replyError) {
+            log.error("produce draft cancellation reply failed", {
+              error: String(replyError),
+            });
+          }
+        }
+        return { eventId, eventType: event.type, status: "saved", parsed: true };
+      }
+
       let markClose = hasSessionEnd(normalizedText);
       const expectedItemCount = markClose
         ? parseExpectedItemCount(normalizedText)
@@ -1293,6 +1364,24 @@ export class WebhookService {
     }
 
     // ── 5. No active pending session ──────────────────────────────────────────
+
+    // 5.0. "ยกเลิกรายการ" with nothing to cancel. Handled on this same produce
+    // path — not behind a new early gate above the lookup — so it stays one
+    // interception point with one resolver. ZERO database mutation: there is
+    // no draft, so there is nothing to write, and the command must not fall
+    // through to the legacy parse path either.
+    if (isExactCancelActiveDraftCommand(text)) {
+      log.info("produce draft cancellation requested with no active draft", { sessionKey });
+      if (replyToken) {
+        try {
+          await this.replyMessage(replyToken, CANCEL_ACTIVE_DRAFT_NONE_REPLY);
+        } catch (replyError) {
+          log.error("produce draft cancellation reply failed", { error: String(replyError) });
+        }
+      }
+      return { eventId, eventType: event.type, status: "saved", parsed: true };
+    }
+
     // Uses the same strict header predicate as rotation (findProduceSessionHeader)
     // so creation and rotation always agree on what counts as a valid header.
     const incomingSessionHeader = findProduceSessionHeader(normalizedText);
@@ -1823,11 +1912,17 @@ export class WebhookService {
         parsed,
         eventId,
       );
+      // The hint is attached HERE and not inside the reply builders: those are
+      // shared with the deferred finalizer, where the generation is already
+      // terminal and telling the operator they can still cancel it would be a
+      // lie. Both of these refusals provably leave the draft in capture.
       if (decision.decision === "blocked") {
-        return buildBlockingValidationReply(decision.result);
+        return withCancelActiveDraftHint(buildBlockingValidationReply(decision.result));
       }
       if (decision.decision === "review_presented") {
-        return buildPlainTextReviewValidationReply(decision.result);
+        return withCancelActiveDraftHint(
+          buildPlainTextReviewValidationReply(decision.result),
+        );
       }
       return null;
     } catch (error) {

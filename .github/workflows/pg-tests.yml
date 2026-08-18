@@ -539,6 +539,12 @@ jobs:
         run: bun run test:pg:withdrawal-containment
       - name: P1-A/P1-B pending lifecycle recovery real-PostgreSQL suite
         run: bun run test:pg:pending-lifecycle
+      # Whether the operator's "ยกเลิกรายการ" can ever touch a round holding
+      # business data, race a close in flight, or cross a source or environment
+      # boundary is decided entirely in SQL. It shares the lifecycle fixture and
+      # reuses retire_empty_round_of_generation, so it runs beside them.
+      - name: Cancel active produce draft real-PostgreSQL suite
+        run: bun run test:pg:cancel-active-draft
       # Both migrations reissue a function PR A installs, so PR A's own proofs
       # are the regression guard that the reissue did not revert it.
       - name: PR A market identity guard regression suite
@@ -557,6 +563,7 @@ jobs:
           src/lib/line/pending-close-recovery.test.ts
           src/lib/line/pending-session-finalizer.test.ts
           src/lib/line/pending-session-runtime-environment.test.ts
+          src/lib/line/webhook-cancel-active-draft.test.ts
       - name: Typecheck
         run: npm run type-check
       - name: git diff --check against the PR base

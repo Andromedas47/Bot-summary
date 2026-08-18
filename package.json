@@ -20,7 +20,8 @@
     "test:pg:product-code": "bun test src/lib/produce/migration-product-code-dictionary.pg.test.ts",
     "test:pg:round-reuse": "bun test src/lib/produce/migration-same-day-round-reuse.pg.test.ts",
     "test:pg:withdrawal-containment": "bun test src/lib/produce/migration-withdrawal-containment.pg.test.ts",
-    "test:pg:pending-lifecycle": "bun test src/lib/produce/migration-pending-lifecycle-recovery.pg.test.ts"
+    "test:pg:pending-lifecycle": "bun test src/lib/produce/migration-pending-lifecycle-recovery.pg.test.ts",
+    "test:pg:cancel-active-draft": "bun test src/lib/produce/migration-cancel-active-draft.pg.test.ts"
   },
   "dependencies": {
     "@fontsource/sarabun": "^5.2.8",

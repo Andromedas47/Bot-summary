@@ -81,14 +81,23 @@ export const GUIDED_MENU_COPY = {
     "ระบบจะใช้ค่าล่าสุดของสินค้านั้น",
   ].join("\n"),
   /**
-   * 3B: dismissing the menu does NOT void an open round. There is no
-   * authoritative cancel-open-session contract to call, so the copy must not
-   * imply one — see §2.3.
+   * 3B: dismissing the menu does NOT void an open round — it only closes the
+   * controls, and the draft keeps capturing.
+   *
+   * A cancel contract now exists (`ยกเลิกรายการ`, see
+   * src/lib/produce/cancel-active-draft.ts), but this screen cannot prove the
+   * draft is still cancellable: it is rendered off a snapshot that refuses only
+   * on `terminalized`, so a session that has already requested close reaches it
+   * too — and there the RPC would refuse with `close_in_progress`. It therefore
+   * makes NO claim either way, in either direction. The old line
+   * ("กรุณาแจ้งผู้ดูแล") is gone because it is now false, and the hint is not
+   * here because it is not provably true. Two true sentences beat a third that
+   * is conditionally false; the hint is attached only where the caller can
+   * prove no close boundary has been written.
    */
   menuDismissedSessionOpen: [
     "ปิดเมนูแล้ว",
     "รายการที่เปิดไว้ยังอยู่ ส่งรายการสินค้าต่อได้",
-    "หากต้องการยกเลิกรายการ กรุณาแจ้งผู้ดูแล",
   ].join("\n"),
   /** 3B: close accepted, waiting for the operator's final confirmation. */
   closeRequested: [

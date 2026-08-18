@@ -15,7 +15,7 @@
  * so the guarantee lives in the sort order of `supabase/migrations`.
  */
 import { describe, expect, it } from "bun:test";
-import { readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 const MIGRATIONS = join(import.meta.dir, "..", "..", "..", "supabase", "migrations");
@@ -39,6 +39,21 @@ function indexOfMigration(slug: string): number {
   const index = files.findIndex((f) => f.includes(slug));
   expect(index, `${slug} is missing from supabase/migrations`).toBeGreaterThanOrEqual(0);
   return index;
+}
+
+/**
+ * Every function a migration DEFINES (bare name, schema qualifier dropped).
+ * Calls do not count — only `CREATE [OR REPLACE] FUNCTION`, which is the shape
+ * that can silently revert an earlier migration's definition.
+ */
+function definedFunctions(slug: string): string[] {
+  const file = sortedMigrations().find((f) => f.includes(slug));
+  expect(file, `${slug} is missing from supabase/migrations`).toBeTruthy();
+  const sql = readFileSync(join(MIGRATIONS, file!), "utf8");
+  const names = new Set<string>();
+  const re = /CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:[A-Za-z_][\w$]*\s*\.\s*)?([A-Za-z_][\w$]*)/gi;
+  for (const match of sql.matchAll(re)) names.add(match[1]);
+  return [...names];
 }
 
 describe("PR A migration ordering", () => {
@@ -99,13 +114,46 @@ describe("session integrity migration ordering", () => {
     }
   });
 
-  it("keeps the five as the last five migrations, in rollout order", () => {
+  it("keeps the five contiguous, in rollout order, with nothing landing between them", () => {
+    // The original guard asserted these were the last five files, exactly as the
+    // PR A guard above once asserted its two were the last two. A later
+    // migration that touches none of these functions may legitimately land
+    // after them (the first is the draft-cancellation RPC, which installs a new
+    // function and reissues nothing), so the guarantee that survives is the
+    // real one: the block stays contiguous and in rollout order, because each
+    // of these five reissues a function an earlier one installs.
     const files = sortedMigrations();
-    expect(files[files.length - 5]).toContain(ROUND_REUSE);
-    expect(files[files.length - 4]).toContain(CONTAINMENT);
-    expect(files[files.length - 3]).toContain(SUPERSESSION);
-    expect(files[files.length - 2]).toContain(ENVIRONMENT);
-    expect(files[files.length - 1]).toContain(HISTORICAL);
+    const order = [ROUND_REUSE, CONTAINMENT, SUPERSESSION, ENVIRONMENT, HISTORICAL];
+    const first = indexOfMigration(ROUND_REUSE);
+    order.forEach((slug, offset) => {
+      expect(files[first + offset], `${slug} is out of rollout order`).toContain(slug);
+    });
+  });
+
+  it("lands draft cancellation after the whole block, reissuing none of it", () => {
+    // Forward-only and additive: it installs cancel_active_pending_produce_draft
+    // and only CALLS retire_empty_round_of_generation, so it can never revert a
+    // function an earlier migration installed.
+    const CANCELLATION = "produce_cancel_active_pending_draft";
+    expect(indexOfMigration(CANCELLATION)).toBeGreaterThan(indexOfMigration(HISTORICAL));
+
+    // The ordering above is only half the claim. "Reissuing none of it" is the
+    // half that actually keeps the block safe, so it is asserted rather than
+    // asserted-by-comment: every function the five install must be ABSENT from
+    // the cancellation migration's own CREATE OR REPLACE set. If a future edit
+    // makes it redefine one of them, the ordering guarantee stops protecting
+    // anything and this fails.
+    const installed = new Set(
+      [ROUND_REUSE, CONTAINMENT, SUPERSESSION, ENVIRONMENT, HISTORICAL]
+        .flatMap((slug) => definedFunctions(slug)),
+    );
+    expect(installed.size, "the five-migration block defines no functions?").toBeGreaterThan(0);
+
+    const reissued = definedFunctions(CANCELLATION).filter((fn) => installed.has(fn));
+    expect(reissued, `draft cancellation reissues ${reissued.join(", ")}`).toEqual([]);
+
+    // And it does install the one new function it is for.
+    expect(definedFunctions(CANCELLATION)).toContain("cancel_active_pending_produce_draft");
   });
 
   it("orders both release fixes strictly after the three Production already applied", () => {

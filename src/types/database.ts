@@ -2028,6 +2028,29 @@ export interface Database {
         };
         Returns: Json;
       };
+      cancel_active_pending_produce_draft: {
+        Args: {
+          p_session_key: string;
+          p_session_generation: string;
+          /**
+           * The `updated_at` of the pending row the caller ALREADY resolved.
+           * A NULL is refused (expected_updated_at_required): an append
+           * advances updated_at without rotating the generation, so the
+           * generation alone cannot detect a concurrent correction.
+           */
+          p_expected_updated_at: string | null;
+          p_line_timestamp_ms: number;
+          p_source_id: string | null;
+          p_line_event_id: string;
+          /**
+           * REQUIRED. Re-checked under the row lock against the 0061 ownership
+           * contract, so no environment can cancel another environment's draft;
+           * legacy NULL belongs to production only.
+           */
+          p_runtime_environment: string;
+        };
+        Returns: Json;
+      };
       recover_stranded_plain_text_closes: {
         Args: {
           p_limit: number;

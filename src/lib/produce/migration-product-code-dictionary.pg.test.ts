@@ -31,6 +31,12 @@ const ALLOWED_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 const MIGRATION = join(
   ROOT, "supabase", "migrations", "20260813090000_produce_product_code_dictionary.sql",
 );
+// 20260818100000 corrects ม54's canonical_name (ไชมัส → ไซมัส) and seeds
+// ม63-ม68. It is applied right after the base seed, same as it would run in
+// Production, so every assertion below reflects the composed 259-row state.
+const CLEANUP_MIGRATION = join(
+  ROOT, "supabase", "migrations", "20260818100000_produce_product_dictionary_cleanup.sql",
+);
 const BOOTSTRAP = join(
   ROOT, "supabase", "tests", "produce_product_code_dictionary_bootstrap.sql",
 );
@@ -63,12 +69,12 @@ async function psql(args: string[], database = DATABASE, stdin?: string): Promis
   return { code, stdout, stderr };
 }
 
-function run(sql: string): Promise<PsqlResult> {
-  return psql(["-v", "ON_ERROR_STOP=1", "-tA", "-f", "-"], DATABASE, sql);
+function run(sql: string, database = DATABASE): Promise<PsqlResult> {
+  return psql(["-v", "ON_ERROR_STOP=1", "-tA", "-f", "-"], database, sql);
 }
 
-async function scalar(sql: string): Promise<string> {
-  const result = await run(sql);
+async function scalar(sql: string, database = DATABASE): Promise<string> {
+  const result = await run(sql, database);
   if (result.code !== 0) throw new Error(`${result.stderr || result.stdout}\nSQL: ${sql}`);
   return result.stdout.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
 }
@@ -79,8 +85,8 @@ async function expectFailure(sql: string): Promise<string> {
   return `${result.stderr}${result.stdout}`;
 }
 
-async function apply(file: string): Promise<void> {
-  const result = await psql(["-v", "ON_ERROR_STOP=1", "-f", file]);
+async function apply(file: string, database = DATABASE): Promise<void> {
+  const result = await psql(["-v", "ON_ERROR_STOP=1", "-f", file], database);
   expect(result.code, `${file}\n${result.stderr}\n${result.stdout}`).toBe(0);
 }
 
@@ -118,6 +124,7 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
       FROM public.produce_transactions`);
 
     await apply(MIGRATION);
+    await apply(CLEANUP_MIGRATION);
   });
 
   afterAll(async () => {
@@ -127,11 +134,11 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
 
   // ── The seed is the approved dictionary ───────────────────────────────────
 
-  test("seeds exactly the 253 approved codes, all enabled", async () => {
-    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("253");
+  test("seeds exactly the 259 approved codes (base + cleanup), all enabled", async () => {
+    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("259");
     expect(await scalar(
       "SELECT count(*)::text FROM public.produce_product_codes WHERE code_enabled",
-    )).toBe("253");
+    )).toBe("259");
   });
 
   test("keeps the approved namespace ranges", async () => {
@@ -141,7 +148,7 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
         SELECT category_code, count(*) AS n
         FROM public.produce_product_codes GROUP BY category_code
       ) t`);
-    expect(rows).toBe("ท=26,ป=36,ผ=118,พ=7,ม=62,ห=4");
+    expect(rows).toBe("ท=26,ป=36,ผ=118,พ=7,ม=68,ห=4");
   });
 
   test("stores the canonical name of every code exactly as approved", async () => {
@@ -179,7 +186,7 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
       "DELETE FROM public.produce_product_codes WHERE product_code = 'ม02'",
     );
     expect(error).toContain("must not be deleted");
-    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("253");
+    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("259");
   });
 
   test("refuses to repoint a code at a different product", async () => {
@@ -193,8 +200,10 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
   });
 
   test("refuses to renumber a code", async () => {
+    // ม63 is now issued (20260818100000), so ม99 — genuinely unissued — is the
+    // target here; either way the guard fires before any target is checked.
     const error = await expectFailure(
-      "UPDATE public.produce_product_codes SET product_code = 'ม63' WHERE product_code = 'ม02'",
+      "UPDATE public.produce_product_codes SET product_code = 'ม99' WHERE product_code = 'ม02'",
     );
     expect(error).toContain("identity is immutable");
   });
@@ -218,9 +227,11 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
       INSERT INTO public.produce_product_codes (product_code, category_code, category_name, canonical_name)
       VALUES ('ก01', 'ก', 'ผลไม้', 'ทดสอบ')`)).toContain("violates check constraint");
 
+    // ม99 (genuinely unissued past ม63-ม68) rather than ม63, which
+    // 20260818100000 now issues.
     expect(await expectFailure(`
       INSERT INTO public.produce_product_codes (product_code, category_code, category_name, canonical_name)
-      VALUES ('ม63', 'ผ', 'ผลไม้', 'ทดสอบ')`)).toContain("produce_product_codes_category_prefix");
+      VALUES ('ม99', 'ผ', 'ผลไม้', 'ทดสอบ')`)).toContain("produce_product_codes_category_prefix");
   });
 
   test("refuses a duplicate code", async () => {
@@ -231,12 +242,36 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
 
   // ── Deploy safety ─────────────────────────────────────────────────────────
 
-  test("is repeat-safe — applying it again is a no-op", async () => {
-    await apply(MIGRATION);
-    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("253");
-    expect(await scalar(
-      "SELECT canonical_name FROM public.produce_product_codes WHERE product_code = 'ม02'",
-    )).toBe("กล้วยน้ำว้า");
+  test("is repeat-safe — applying the base migration again is a no-op", async () => {
+    // Deliberately an ISOLATED database, not the shared DATABASE this describe
+    // block otherwise uses. The base migration's own baked-in postflight check
+    // asserts the table holds EXACTLY 253 rows — true only before any later
+    // migration has added to it. In real deployment 20260813090000 is never
+    // re-executed after 20260818100000 already ran (each migration file
+    // applies exactly once, tracked by the migration runner), so re-running it
+    // atop the shared DATABASE here — which by this point also has the
+    // cleanup migration's 259 rows — would fail that assertion for a scenario
+    // that cannot happen in Production. This isolated database proves the
+    // narrower, real property: the base migration alone is idempotent.
+    //
+    // The cleanup migration's own repeat-safety (it RAISEs a clear "already
+    // applied" notice rather than silently re-running) is proven in
+    // migration-product-dictionary-cleanup.pg.test.ts, not here.
+    const isolated = `pcd_repeat_${randomBytes(4).toString("hex")}`;
+    const created = await psql(["-d", "postgres", "-c", `CREATE DATABASE ${isolated}`], "postgres");
+    expect(created.code, created.stderr).toBe(0);
+    try {
+      await apply(MIGRATION, isolated);
+      await apply(MIGRATION, isolated);
+      expect(await scalar(
+        `SELECT count(*)::text FROM public.produce_product_codes`, isolated,
+      )).toBe("253");
+      expect(await scalar(
+        `SELECT canonical_name FROM public.produce_product_codes WHERE product_code = 'ม02'`, isolated,
+      )).toBe("กล้วยน้ำว้า");
+    } finally {
+      await psql(["-d", "postgres", "-c", `DROP DATABASE IF EXISTS ${isolated} WITH (FORCE)`], "postgres");
+    }
   });
 
   test("leaves the produce history exactly as it found it", async () => {

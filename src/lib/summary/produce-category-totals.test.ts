@@ -220,6 +220,66 @@ describe("produceCategoryTotals", () => {
   });
 });
 
+describe("20260818100000 dictionary cleanup — ม54 correction and ม63–ม68", () => {
+  const NEW_NAMES = [
+    "ไซมัส",
+    "มะม่วงจิ้ว",
+    "ลูกพีชเล็ก",
+    "ลูกพีชใหญ่",
+    "ลูกไหนเขียว",
+    "ลูกไหนดำ",
+    "องุ่นคิมสัน",
+  ];
+
+  test("all seven names classify to ม via the pipeline resolver", () => {
+    for (const name of NEW_NAMES) {
+      expect(resolveProduceCategory(name)).toBe("ม");
+    }
+  });
+
+  test("the seven names aggregate under the ผลไม้ bucket, not ❓ ไม่จัดหมวด", () => {
+    const result = produceCategoryTotals(
+      NEW_NAMES.map((product_name) =>
+        row({ product_name, transaction_type: "เบิก", total_amount: 100 }),
+      ),
+    );
+    expect(result.เบิก.categories.map((c) => c.id)).toEqual(["ม"]);
+    const ผลไม้ = result.เบิก.categories.find((c) => c.id === "ม")!;
+    expect(ผลไม้.itemCount).toBe(NEW_NAMES.length);
+    expect(ผลไม้.totalSatang).toBe(NEW_NAMES.length * 10_000);
+    expect(result.เบิก.categories.find((c) => c.id === UNCATEGORIZED_CATEGORY_ID)).toBeUndefined();
+  });
+
+  // Production replay, 2026-08-17: real distinct product names observed that
+  // day for the six new products plus ไซมัส, with their observed counts. Pure
+  // classification simulation over hardcoded names — no database dependency.
+  test("2026-08-17 production replay — real observed names classify to ม", () => {
+    const observed: Array<[string, number]> = [
+      ["ไซมัส", 6],
+      ["มะม่วงจิ้ว", 5],
+      ["องุ่นคิมสัน", 5],
+      ["ลูกไหนเขียว", 5],
+      ["ลูกพีชใหญ่", 4],
+      ["ลูกไหนดำ", 4],
+      ["ลูกพีชเล็ก", 3],
+    ];
+
+    for (const [name] of observed) {
+      expect(resolveProduceCategory(name)).toBe("ม");
+    }
+
+    const rows = observed.flatMap(([product_name, count]) =>
+      Array.from({ length: count }, () =>
+        row({ product_name, transaction_type: "เบิก", total_amount: 50 }),
+      ),
+    );
+    const result = produceCategoryTotals(rows);
+    expect(result.เบิก.categories.map((c) => c.id)).toEqual(["ม"]);
+    const totalCount = observed.reduce((sum, [, count]) => sum + count, 0);
+    expect(result.เบิก.categories[0]!.itemCount).toBe(totalCount);
+  });
+});
+
 describe("categoryLedger", () => {
   test("transposes a bucket-shaped breakdown into a category-shaped ledger", () => {
     const breakdown = produceCategoryTotals([

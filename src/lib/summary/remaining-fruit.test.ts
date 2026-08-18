@@ -589,3 +589,25 @@ describe("PRODUCT_ALIASES — อะโวคาโด spellings", () => {
     expect(normalizeProductName("อะโวคาโดเวียดนาม")).not.toBe("อะโวคาโด");
   });
 });
+
+describe("PRODUCT_ALIASES — ม54 dictionary spelling correction (20260818100000)", () => {
+  // Required by the alias map's own rule: every entry gets a regression test.
+  // ม54 was seeded with the misspelling ไชมัส; the dictionary row itself was
+  // corrected to ไซมัส in migration 20260818100000. This alias folds the
+  // pre-correction spelling into the corrected canonical identity for every
+  // downstream comparison that keys on normalizeProductName — same shape as
+  // the อะโวคาโด block above.
+  test("the legacy misspelling is the same product as the corrected spelling", () => {
+    expect(normalizeProductName("ไชมัส")).toBe("ไซมัส");
+  });
+
+  test("the corrected spelling is left unchanged (it is already canonical)", () => {
+    expect(normalizeProductName("ไซมัส")).toBe("ไซมัส");
+  });
+
+  test("a genuinely different near-miss spelling is not swept in", () => {
+    for (const name of ["ไชมัสเก่า", "ไซมัสส", "องุ่นไซมัส"]) {
+      expect(normalizeProductName(name)).not.toBe("ไซมัส");
+    }
+  });
+});

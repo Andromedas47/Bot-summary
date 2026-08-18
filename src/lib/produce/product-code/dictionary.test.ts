@@ -19,9 +19,13 @@ import {
 } from "./resolver";
 
 const HERE = import.meta.dir;
-const MIGRATION = join(
+const BASE_MIGRATION = join(
   HERE, "..", "..", "..", "..",
   "supabase", "migrations", "20260813090000_produce_product_code_dictionary.sql",
+);
+const CLEANUP_MIGRATION = join(
+  HERE, "..", "..", "..", "..",
+  "supabase", "migrations", "20260818100000_produce_product_dictionary_cleanup.sql",
 );
 
 interface Row {
@@ -44,9 +48,9 @@ function csvRows(): Row[] {
   });
 }
 
-/** The seed rows the Production migration actually inserts. */
-function migrationRows(): Row[] {
-  const sql = readFileSync(MIGRATION, "utf8");
+/** Rows inserted by a migration's own `INSERT ... VALUES` block, in file order. */
+function insertedRowsOf(migrationPath: string): Row[] {
+  const sql = readFileSync(migrationPath, "utf8");
   return [...sql.matchAll(/^ {2}\('(.+?)', '(.+?)', '(.+?)', '(.+?)', (true|false)\)/gmu)].map(
     (m) => ({
       code: m[1],
@@ -56,6 +60,68 @@ function migrationRows(): Row[] {
       enabled: m[5] === "true",
     }),
   );
+}
+
+/**
+ * The seed rows the base Production migration (20260813090000) actually
+ * inserts, verbatim.
+ */
+function baseMigrationRows(): Row[] {
+  return insertedRowsOf(BASE_MIGRATION);
+}
+
+/**
+ * A migration applied ON TOP of the base seed: either new rows inserted at a
+ * named position, or a canonical_name correction to an existing code (the
+ * ONLY identity mutation allowed, and only because 20260818100000 proves it is
+ * a spelling correction of the same product, not a repoint).
+ *
+ * Adding a future migration is: append one more entry here naming the file,
+ * where its new rows land (the code they follow), and any renames it makes.
+ */
+interface AppliedMigration {
+  file: string;
+  /** New rows this migration inserts, spliced in immediately after this code. */
+  insertAfterCode: string;
+  /** code -> corrected canonicalName, applied to rows from earlier migrations. */
+  renames?: Record<string, string>;
+}
+
+const APPLIED_MIGRATIONS: AppliedMigration[] = [
+  {
+    file: CLEANUP_MIGRATION,
+    insertAfterCode: "ม62",
+    renames: { "ม54": "ไซมัส" }, // ไซมัส
+  },
+];
+
+/**
+ * The dictionary state a Production database would actually have after every
+ * migration applies, in order: start from the base seed, then for each later
+ * migration apply its renames to the rows already accumulated and splice in
+ * its own new rows at the named anchor. This is deliberately independent of
+ * dictionary.csv / dictionary.ts — it reconstructs the DB's truth purely from
+ * the migration files, so a hand-edit to the CSV or the generated module that
+ * drifts from what the migrations actually do fails here.
+ */
+function migrationRows(): Row[] {
+  let rows = baseMigrationRows();
+
+  for (const migration of APPLIED_MIGRATIONS) {
+    if (migration.renames) {
+      const renames = migration.renames;
+      rows = rows.map((row) => (renames[row.code] ? { ...row, canonicalName: renames[row.code] } : row));
+    }
+
+    const inserted = insertedRowsOf(migration.file);
+    const anchor = rows.findIndex((row) => row.code === migration.insertAfterCode);
+    if (anchor === -1) {
+      throw new Error(`${migration.file}: insertAfterCode ${migration.insertAfterCode} not found`);
+    }
+    rows = [...rows.slice(0, anchor + 1), ...inserted, ...rows.slice(anchor + 1)];
+  }
+
+  return rows;
 }
 
 const moduleRows = (): Row[] =>
@@ -68,11 +134,11 @@ const moduleRows = (): Row[] =>
   }));
 
 describe("the approved dictionary is the source of truth", () => {
-  it("carries exactly the 253 approved codes", () => {
-    expect(PRODUCT_CODE_COUNT).toBe(253);
-    expect(PRODUCT_CODE_ENABLED_COUNT).toBe(253);
-    expect(PRODUCT_CODE_ENTRIES).toHaveLength(253);
-    expect(csvRows()).toHaveLength(253);
+  it("carries exactly the 259 approved codes", () => {
+    expect(PRODUCT_CODE_COUNT).toBe(259);
+    expect(PRODUCT_CODE_ENABLED_COUNT).toBe(259);
+    expect(PRODUCT_CODE_ENTRIES).toHaveLength(259);
+    expect(csvRows()).toHaveLength(259);
   });
 
   it("matches the CSV row for row, in the approved order and numbering", () => {
@@ -80,7 +146,12 @@ describe("the approved dictionary is the source of truth", () => {
     expect(moduleRows()).toEqual(csvRows());
   });
 
-  it("seeds the migration with the identical rows", () => {
+  it("composes to the identical rows once every migration is applied in order", () => {
+    // migrationRows() replays the base seed (20260813090000) plus every
+    // migration layered on top of it (20260818100000's ม54 correction and its
+    // six new rows) — the actual sequence a Production database runs. That
+    // composed result has to equal the approved CSV, or the migrations and the
+    // CSV have drifted apart.
     expect(migrationRows()).toEqual(csvRows());
   });
 
@@ -90,7 +161,7 @@ describe("the approved dictionary is the source of truth", () => {
       counts.set(entry.categoryCode, (counts.get(entry.categoryCode) ?? 0) + 1);
     }
     expect(Object.fromEntries(counts)).toEqual({
-      ม: 62, ผ: 118, ป: 36, ท: 26, ห: 4, พ: 7,
+      ม: 68, ผ: 118, ป: 36, ท: 26, ห: 4, พ: 7,
     });
   });
 
@@ -105,7 +176,9 @@ describe("real mappings from the approved CSV resolve", () => {
   const cases: Array<[string, string]> = [
     ["ม01", "กล้วยไข่"],
     ["ม02", "กล้วยน้ำว้า"],
+    ["ม54", "ไซมัส"],
     ["ม62", "แอปเปิ้ล"],
+    ["ม68", "องุ่นคิมสัน"],
     ["ผ01", "ฝักกระเจี๊ยบ"],
     ["ผ07", "กระเทียมหัว"],
     ["ผ99", "ใบตั้งโอ๋"],
@@ -134,7 +207,9 @@ describe("real mappings from the approved CSV resolve", () => {
 });
 
 describe("unregistered codes do not resolve", () => {
-  for (const code of ["ม99", "ม999", "ผ999", "ป99", "ท99", "ห99", "พ99", "ผ119", "ม63"]) {
+  // ม63-ม68 exist as of 20260818100000, so ม69 — the code right past the new
+  // boundary — is the genuinely unissued example, not ม63.
+  for (const code of ["ม99", "ม999", "ผ999", "ป99", "ท99", "ห99", "พ99", "ผ119", "ม69"]) {
     it(`${code} is unknown`, () => {
       expect(resolveProductCode(code)).toBeNull();
       expect(resolveItemLineProductCode(`${code} 50 บาท`)).toEqual({ kind: "unknown", code });
@@ -207,5 +282,49 @@ describe("code recognition is narrow", () => {
       kind: "resolved",
       content: "85ผักกาดขาว 3หัว20บาท",
     });
+  });
+});
+
+describe("20260818100000 dictionary cleanup — ม54 correction and ม63–ม68", () => {
+  it("ม54 resolves to the corrected spelling ไซมัส", () => {
+    expect(resolveProductCode("ม54")).toBe("ไซมัส");
+  });
+
+  const NEW_CODES: Array<[string, string]> = [
+    ["ม63", "มะม่วงจิ้ว"],
+    ["ม64", "ลูกพีชเล็ก"],
+    ["ม65", "ลูกพีชใหญ่"],
+    ["ม66", "ลูกไหนเขียว"],
+    ["ม67", "ลูกไหนดำ"],
+    ["ม68", "องุ่นคิมสัน"],
+  ];
+
+  for (const [code, canonicalName] of NEW_CODES) {
+    it(`${code} → ${canonicalName}`, () => {
+      expect(resolveProductCode(code)).toBe(canonicalName);
+    });
+  }
+
+  describe("independence — the new rows are not a merge of an existing code", () => {
+    it("the pre-existing ม42/ม43/ม44 codes still resolve to their own products", () => {
+      expect(resolveProductCode("ม42")).toBe("ลูกพีช");
+      expect(resolveProductCode("ม43")).toBe("ลูกไหน");
+      expect(resolveProductCode("ม44")).toBe("ลูกไหนแดง");
+    });
+
+    it("small/large/color variants resolve to codes distinct from their base product's code", () => {
+      expect(resolveProductCode("ม64")).not.toBe(resolveProductCode("ม42")); // ลูกพีชเล็ก !== ลูกพีช
+      expect(resolveProductCode("ม65")).not.toBe(resolveProductCode("ม42")); // ลูกพีชใหญ่ !== ลูกพีช
+      expect(resolveProductCode("ม66")).not.toBe(resolveProductCode("ม43")); // ลูกไหนเขียว !== ลูกไหน
+      expect(resolveProductCode("ม67")).not.toBe(resolveProductCode("ม43")); // ลูกไหนดำ !== ลูกไหน
+    });
+  });
+
+  it("no product code collision — the new codes each appear exactly once in the full set", () => {
+    const codes = PRODUCT_CODE_ENTRIES.map((e) => e.code);
+    expect(new Set(codes).size).toBe(codes.length); // full-set targeted re-check
+    for (const code of ["ม63", "ม64", "ม65", "ม66", "ม67", "ม68"]) {
+      expect(codes.filter((c) => c === code)).toHaveLength(1);
+    }
   });
 });

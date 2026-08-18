@@ -138,8 +138,12 @@ describe("Production 2026-08-15 withdrawal spellings", () => {
     expect(suggestedNames("สับปรด")[0]).toBe("สับปะรด");
   });
 
-  it("CASE D — ไซมัส suggests ไชมัส", () => {
-    expect(suggestedNames("ไซมัส")[0]).toBe("ไชมัส");
+  it("CASE D — ไชมัส suggests ไซมัส (reviewed alias, tier 0, after 20260818100000)", () => {
+    // ไซมัส is ม54's corrected canonical spelling as of 20260818100000, so the
+    // direction inverts: the legacy misspelling ไชมัส is the unapproved input,
+    // and it carries a reviewed PRODUCT_ALIASES entry to ไซมัส — the strongest
+    // evidence tier suggestDictionaryProducts has.
+    expect(suggestedNames("ไชมัส")[0]).toBe("ไซมัส");
   });
 
   it("CASE E — อินทผรัม suggests อินทผลัม", () => {
@@ -297,11 +301,19 @@ describe("guard scope", () => {
   });
 
   it("lists every suspicious name in one reply, ordered by item number", () => {
-    const result = withdraw("มะม่วงเขียวรกต", "มะม่วงเขียวมรกต", "ไซมัส", "สินค้าXYZ");
+    // ไซมัส is ม54's approved spelling as of 20260818100000 and no longer
+    // exercises the review path (CASE D above). "ฝรั่งสายพันธุ์ใหม่ของสวนลุงมี"
+    // replaces it — a name proven genuinely absent from the dictionary with no
+    // near match (see "does not force a candidate onto an unrelated name").
+    const result = withdraw(
+      "มะม่วงเขียวรกต", "มะม่วงเขียวมรกต", "ฝรั่งสายพันธุ์ใหม่ของสวนลุงมี", "สินค้าXYZ",
+    );
     expect(vocabulary(result)).toHaveLength(3);
     const reply = buildReviewValidationReply(result);
     expect(reply).toContain("⚠️ พบ 3 ชื่อสินค้าที่ไม่ตรงกับรายการมาตรฐาน");
-    expect(reply.indexOf("มะม่วงเขียวรกต")).toBeLessThan(reply.indexOf("ไซมัส"));
+    expect(reply.indexOf("มะม่วงเขียวรกต")).toBeLessThan(
+      reply.indexOf("ฝรั่งสายพันธุ์ใหม่ของสวนลุงมี"),
+    );
     expect(reply).toContain("ม31 — มะม่วงเขียวมรกต");
     expect(reply).toContain("ไม่พบชื่อใกล้เคียงในรายการมาตรฐาน");
     expect(reply).toContain("หากเป็นสินค้าใหม่จริง");
@@ -309,6 +321,60 @@ describe("guard scope", () => {
 });
 
 // ── Confirmation binding ─────────────────────────────────────────────────────
+
+// ── 20260818100000 dictionary cleanup ───────────────────────────────────────
+
+describe("20260818100000 dictionary cleanup — ม54 correction and ม63–ม68", () => {
+  it("accepts every new exact canonical name — ไซมัส plus the six new ม products", () => {
+    for (const name of [
+      "ไซมัส",
+      "มะม่วงจิ้ว",
+      "ลูกพีชเล็ก",
+      "ลูกพีชใหญ่",
+      "ลูกไหนเขียว",
+      "ลูกไหนดำ",
+      "องุ่นคิมสัน",
+    ]) {
+      expect(isApprovedProductName(name)).toBe(true);
+    }
+  });
+
+  it("still fails closed for a genuinely unknown product — review_required, not blocking", () => {
+    const invented = "ผลไม้ที่ไม่มีจริงเลย";
+    expect(isApprovedProductName(invented)).toBe(false);
+    const result = withdraw(invented);
+    expect(result.status).toBe("review_required");
+    expect(vocabulary(result)[0]).toMatchObject({
+      kind: "unknown_product_vocabulary",
+      severity: "review_required",
+      productName: invented,
+    });
+  });
+
+  it("the legacy alias spelling ไชมัส is NOT itself an approved dictionary spelling", () => {
+    // PRODUCT_ALIASES rewrites ไชมัส → ไซมัส for REPORTING identity only; the
+    // Vocabulary Guard does not consult PRODUCT_ALIASES, so the raw legacy
+    // spelling is still unapproved — same shape as อะโวคาโด้ above.
+    expect(isApprovedProductName("ไชมัส")).toBe(false);
+  });
+});
+
+describe("dictionary cleanup extension — ม69–ม71 and the เขียวมรกต alias", () => {
+  it("accepts every new exact canonical name — ส้มแมนดาริน, องุ่นเคียวโฮ, ลิ้นจี่", () => {
+    for (const name of ["ส้มแมนดาริน", "องุ่นเคียวโฮ", "ลิ้นจี่"]) {
+      expect(isApprovedProductName(name)).toBe(true);
+    }
+  });
+
+  it("เขียวมรกต is NOT itself an approved dictionary spelling", () => {
+    // PRODUCT_ALIASES rewrites เขียวมรกต → มะม่วงเขียวมรกต for REPORTING identity
+    // only; the Vocabulary Guard does not consult PRODUCT_ALIASES, so an alias
+    // source spelling is never itself an approved dictionary spelling — same
+    // shape as อะโวคาโด้ and ไชมัส above. This asserts the true current
+    // behavior of isApprovedProductName, not a desired change.
+    expect(isApprovedProductName("เขียวมรกต")).toBe(false);
+  });
+});
 
 describe("review digest", () => {
   it("changes when a suspicious spelling is corrected", () => {

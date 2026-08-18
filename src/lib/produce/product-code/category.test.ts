@@ -54,6 +54,16 @@ describe("dictionaryCategoryFor", () => {
     expect(dictionaryCategoryFor(normalizeProductName("สัปรด"))).toBe("ม");
     expect(normalizeProductName("หมอน")).toBe("หมอนทอง");
     expect(dictionaryCategoryFor(normalizeProductName("หมอน"))).toBe("ท");
+    // ม54's dictionary-corrected spelling (20260818100000). The legacy
+    // misspelling ไชมัส resolves through the reviewed alias to the corrected
+    // canonical name, exactly like อะโวคาโด้ above.
+    expect(normalizeProductName("ไชมัส")).toBe("ไซมัส");
+    expect(dictionaryCategoryFor(normalizeProductName("ไชมัส"))).toBe("ม");
+  });
+
+  test("7b. ไซมัส is now itself a dictionary canonical name (ม54, corrected 20260818100000)", () => {
+    expect(dictionaryCategoryFor("ไซมัส")).toBe("ม");
+    expect(dictionaryEntryFor("ไซมัส")?.code).toBe("ม54");
   });
 
   test("8. unknown product stays ไม่จัดหมวด", () => {
@@ -71,8 +81,12 @@ describe("dictionaryCategoryFor", () => {
     expect(dictionaryCategoryFor("ปลากระป๋องXYZ")).toBe(UNCATEGORIZED_CATEGORY_ID);
     expect(dictionaryCategoryFor("มะม่วง")).toBe(UNCATEGORIZED_CATEGORY_ID);
     // Production spelling variants with no reviewed alias stay uncategorized.
+    // ไซมัส itself moved out of this list in 20260818100000 — it is now ม54's
+    // own canonical spelling, not a fuzzy near-miss (see test 7b). ไซมัสส
+    // (one extra ส, still genuinely absent from the dictionary and with no
+    // reviewed alias) replaces it as the still-uncategorized example.
     expect(dictionaryCategoryFor("เห็ดแพครวม")).toBe(UNCATEGORIZED_CATEGORY_ID);
-    expect(dictionaryCategoryFor("ไซมัส")).toBe(UNCATEGORIZED_CATEGORY_ID);
+    expect(dictionaryCategoryFor("ไซมัสส")).toBe(UNCATEGORIZED_CATEGORY_ID);
     expect(dictionaryCategoryFor("ใบมะกรุด")).toBe(UNCATEGORIZED_CATEGORY_ID);
     expect(dictionaryCategoryFor("คน้าใหญ่")).toBe(UNCATEGORIZED_CATEGORY_ID);
     expect(dictionaryCategoryFor(normalizeProductName("สินค้าABC"))).toBe(UNCATEGORIZED_CATEGORY_ID);
@@ -131,13 +145,134 @@ describe("2026-08-14 production products no longer fall into ไม่จัด�
   test("reviewed aliases from that day classify through the canonical dictionary row", () => {
     expect(dictionaryCategoryFor(normalizeProductName("อะโวคาโด้"))).toBe("ม");
     expect(dictionaryCategoryFor(normalizeProductName("สัปรด"))).toBe("ม");
+    // ไชมัส is ม54's own pre-correction spelling (20260818100000), same shape
+    // as อะโวคาโด้ / สัปรด above.
+    expect(dictionaryCategoryFor(normalizeProductName("ไชมัส"))).toBe("ม");
   });
 
   test("unreviewed production spellings stay ไม่จัดหมวด rather than being invented", () => {
-    for (const name of ["ไซมัส", "ใบมะกรุด", "คน้าใหญ่", "เห็ดแพครวม", "หอยเชล", "กล่ำปี", "นำเต้า", "สับปรด", "อินทผรัม"]) {
+    // ไซมัส moved out of this list in 20260818100000: it is now ม54's own
+    // canonical spelling, not an unreviewed production spelling (see the
+    // "7b." test in category.test.ts's dictionaryCategoryFor describe block).
+    // ไซมัสส (one extra ส) stands in as a name genuinely absent from the
+    // dictionary with no reviewed alias.
+    for (const name of ["ไซมัสส", "ใบมะกรุด", "คน้าใหญ่", "เห็ดแพครวม", "หอยเชล", "กล่ำปี", "นำเต้า", "สับปรด", "อินทผรัม"]) {
       expect(dictionaryCategoryFor(name)).toBe(UNCATEGORIZED_CATEGORY_ID);
       expect(normalizeProductName(name)).toBe(name);
     }
+  });
+});
+
+describe("20260818100000 dictionary cleanup — ม54 correction and ม63–ม68", () => {
+  const NEW_NAMES = [
+    "ไซมัส",
+    "มะม่วงจิ้ว",
+    "ลูกพีชเล็ก",
+    "ลูกพีชใหญ่",
+    "ลูกไหนเขียว",
+    "ลูกไหนดำ",
+    "องุ่นคิมสัน",
+  ] as const;
+
+  test.each(NEW_NAMES.map((name) => [name] as const))(
+    "%s classifies to ม (ผลไม้)",
+    (name) => {
+      expect(dictionaryCategoryFor(name)).toBe("ม");
+    },
+  );
+
+  describe("independence — the pre-existing ม42/ม43/ม44 rows were not merged into the new rows", () => {
+    test("ลูกพีช / ลูกไหน / ลูกไหนแดง still classify to ม on their own dictionary entry", () => {
+      expect(dictionaryCategoryFor("ลูกพีช")).toBe("ม");
+      expect(dictionaryCategoryFor("ลูกไหน")).toBe("ม");
+      expect(dictionaryCategoryFor("ลูกไหนแดง")).toBe("ม");
+    });
+
+    test("none of the base or new variant names is swallowed by normalizeProductName", () => {
+      for (const name of [
+        "ลูกพีช", "ลูกไหน", "ลูกไหนแดง",
+        "ลูกพีชเล็ก", "ลูกพีชใหญ่", "ลูกไหนเขียว", "ลูกไหนดำ",
+      ]) {
+        expect(normalizeProductName(name)).toBe(name);
+      }
+      // Explicit distinctness: the new size/color variants are separate dictionary
+      // entries with different codes, never folded into their base product.
+      expect("ลูกพีชเล็ก").not.toBe("ลูกพีช");
+      expect("ลูกไหนเขียว").not.toBe("ลูกไหน");
+    });
+  });
+
+  test("no fuzzy folding — near-miss ไชมัส/ไซมัส spellings stay uncategorized and unchanged", () => {
+    for (const name of [
+      "ไชมัสเก่า",
+      "ไชมัสใหม่",
+      "ไซมัสเก่า",
+      "ไซมัสใหม่",
+      "ไซมัสคัส",
+      "องุ่นไชมัส",
+      "องุ่นไซมัส",
+    ]) {
+      expect(normalizeProductName(name)).toBe(name);
+      expect(dictionaryCategoryFor(name)).toBe(UNCATEGORIZED_CATEGORY_ID);
+    }
+  });
+});
+
+describe("dictionary cleanup extension — ม69–ม71 and the เขียวมรกต alias", () => {
+  const NEW_NAMES = ["ส้มแมนดาริน", "องุ่นเคียวโฮ", "ลิ้นจี่"] as const;
+
+  test.each(NEW_NAMES.map((name) => [name] as const))(
+    "%s classifies to ม (ผลไม้)",
+    (name) => {
+      expect(dictionaryCategoryFor(name)).toBe("ม");
+    },
+  );
+
+  test("เขียวมรกต resolves through the reviewed alias to ม31's canonical name", () => {
+    expect(normalizeProductName("เขียวมรกต")).toBe("มะม่วงเขียวมรกต");
+    expect(dictionaryCategoryFor(normalizeProductName("เขียวมรกต"))).toBe("ม");
+  });
+
+  test("EXACTNESS — near-miss เขียวมรกต spellings stay uncategorized and unchanged", () => {
+    // เขียวมรกตเก่า (7 uses), เขียวมรกตใหม่ (1 use) and มรกต (5 uses) are REAL,
+    // distinct operational names attested in Production — not typos of
+    // เขียวมรกต — and must never fold into it. มะม่วงมรกต does not occur in
+    // Production at all; it is included here as the adversarial near-miss of
+    // the full canonical name itself.
+    for (const name of ["เขียวมรกตเก่า", "เขียวมรกตใหม่", "มรกต", "มะม่วงมรกต"]) {
+      expect(normalizeProductName(name)).toBe(name);
+      expect(dictionaryCategoryFor(name)).toBe(UNCATEGORIZED_CATEGORY_ID);
+    }
+  });
+
+  describe("identity distinctness — new codes never alias into a pre-existing product", () => {
+    test("ส้มแมนดาริน is distinct from ส้มไต้หวัน (ม46) and ส้มเขียวหวาน (ม45)", () => {
+      expect(dictionaryEntryFor("ส้มแมนดาริน")?.code).toBe("ม69");
+      expect(dictionaryEntryFor("ส้มไต้หวัน")?.code).toBe("ม46");
+      expect(dictionaryEntryFor("ส้มเขียวหวาน")?.code).toBe("ม45");
+      const codes = new Set([
+        dictionaryEntryFor("ส้มแมนดาริน")?.code,
+        dictionaryEntryFor("ส้มไต้หวัน")?.code,
+        dictionaryEntryFor("ส้มเขียวหวาน")?.code,
+      ]);
+      expect(codes.size).toBe(3);
+      expect(normalizeProductName("ส้มแมนดาริน")).toBe("ส้มแมนดาริน");
+    });
+
+    test("องุ่นเคียวโฮ is distinct from องุ่นคิมสัน (ม68), องุ่นเขียว (ม52) and ไซมัส (ม54)", () => {
+      expect(dictionaryEntryFor("องุ่นเคียวโฮ")?.code).toBe("ม70");
+      expect(dictionaryEntryFor("องุ่นคิมสัน")?.code).toBe("ม68");
+      expect(dictionaryEntryFor("องุ่นเขียว")?.code).toBe("ม52");
+      expect(dictionaryEntryFor("ไซมัส")?.code).toBe("ม54");
+      const codes = new Set([
+        dictionaryEntryFor("องุ่นเคียวโฮ")?.code,
+        dictionaryEntryFor("องุ่นคิมสัน")?.code,
+        dictionaryEntryFor("องุ่นเขียว")?.code,
+        dictionaryEntryFor("ไซมัส")?.code,
+      ]);
+      expect(codes.size).toBe(4);
+      expect(normalizeProductName("องุ่นเคียวโฮ")).toBe("องุ่นเคียวโฮ");
+    });
   });
 });
 

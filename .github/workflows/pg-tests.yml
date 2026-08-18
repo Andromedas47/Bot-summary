@@ -470,6 +470,8 @@ jobs:
       - run: bun install
       - name: Product Code Dictionary real-PostgreSQL migration suite
         run: bun run test:pg:product-code
+      - name: Dictionary cleanup migration (ม54 correction, ม63–ม68, guard re-armed)
+        run: bun run test:pg:dictionary-cleanup
       - name: Dictionary source parity, resolver and parser integration
         run: >-
           bunx bun test

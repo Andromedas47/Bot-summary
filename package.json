@@ -18,6 +18,7 @@
     "test:pg:market-identity-guard": "bun test src/lib/produce/migration-market-identity-guard.pg.test.ts",
     "test:pg:fingerprint-compatibility": "bun test src/lib/produce/migration-fingerprint-compatibility.pg.test.ts",
     "test:pg:product-code": "bun test src/lib/produce/migration-product-code-dictionary.pg.test.ts",
+    "test:pg:dictionary-cleanup": "bun test src/lib/produce/migration-product-dictionary-cleanup.pg.test.ts",
     "test:pg:round-reuse": "bun test src/lib/produce/migration-same-day-round-reuse.pg.test.ts",
     "test:pg:withdrawal-containment": "bun test src/lib/produce/migration-withdrawal-containment.pg.test.ts",
     "test:pg:pending-lifecycle": "bun test src/lib/produce/migration-pending-lifecycle-recovery.pg.test.ts",

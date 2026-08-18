@@ -8,8 +8,11 @@ export const REMAINING_STOCK_REPORT_TITLE = "\u0E2A\u0E23\u0E38\u0E1B\u0E1C\u0E2
 export const UNIDENTIFIED_MARKET_SECTION = "\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E17\u0E35\u0E48\u0E22\u0E31\u0E07\u0E23\u0E30\u0E1A\u0E38\u0E15\u0E25\u0E32\u0E14\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49";
 
 /**
- * Reporting-only canonicalization of product names. Raw evidence in
- * produce_items / produce_transactions is never rewritten.
+ * Identity canonicalization of product names, used by reporting AND by
+ * business identity (src/lib/produce/business-fingerprint.ts canonicalItemLine,
+ * src/lib/produce/entry-validation.ts masterCellKey/return matching). Raw
+ * evidence in produce_items / produce_transactions is never rewritten — only
+ * the in-memory identity a downstream comparison keys on changes.
  *
  * Rules for adding an entry:
  *   - only explicit, human-confirmed spellings \u2014 never fuzzy similarity
@@ -61,6 +64,47 @@ export const PRODUCT_ALIASES: Record<string, string> = {
   // \u2500\u2500 \u0E2D\u0E34\u0E19\u0E17\u0E1C\u0E32\u0E25\u0E31\u0E21 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   \u0E2D\u0E34\u0E19\u0E17\u0E1C\u0E32\u0E23\u0E31\u0E21: "\u0E2D\u0E34\u0E19\u0E17\u0E1C\u0E32\u0E25\u0E31\u0E21",
   \u0E2D\u0E34\u0E19\u0E17\u0E1C\u0E25\u0E31\u0E21: "\u0E2D\u0E34\u0E19\u0E17\u0E1C\u0E32\u0E25\u0E31\u0E21",
+
+  // \u2500\u2500 \u0E2154: \u0E44\u0E0A\u0E21\u0E31\u0E2A \u2192 \u0E44\u0E0B\u0E21\u0E31\u0E2A (dictionary spelling correction, 20260818100000) \u2500\u2500
+  // Reviewed exact legacy spelling. \u0E2154 was seeded with the misspelling \u0E44\u0E0A\u0E21\u0E31\u0E2A;
+  // the dictionary row itself was corrected to \u0E44\u0E0B\u0E21\u0E31\u0E2A in migration
+  // 20260818100000. Same-session evidence, 2026-08-16: 184 uses of \u0E44\u0E0B\u0E21\u0E31\u0E2A and
+  // 109 of \u0E44\u0E0A\u0E21\u0E31\u0E2A, both at unit \u0E42\u0E25 and price 60.00 (3.600 + 6.000 quantities
+  // observed) \u2014 one product, two keyings, not two products. This entry folds
+  // the pre-correction spelling into the corrected dictionary identity for
+  // every downstream comparison that keys on normalizeProductName. Exact-match
+  // only, never fuzzy \u2014 \u0E44\u0E0A\u0E21\u0E31\u0E2A maps here because it is confirmed byte-for-byte,
+  // not because it looks similar to \u0E44\u0E0B\u0E21\u0E31\u0E2A.
+  //
+  // Known limit, and NOT specific to this entry: normalizeProductName feeds
+  // businessContentFingerprint, so a document recorded BEFORE an alias lands
+  // hashes differently once it does. If such a document is re-sent afterwards,
+  // sessionHashCandidates will not recognise its stored session_hash and the
+  // duplicate blocker misses it. Market aliases have a compatibility layer for
+  // exactly this (weighSessionCompatibilityFingerprints, V1/V2 generations);
+  // product aliases have no equivalent, and never have \u2014 every entry above
+  // carries the same gap. Closing it belongs in its own change, covering the
+  // whole map rather than one word.
+  \u0E44\u0E0A\u0E21\u0E31\u0E2A: "\u0E44\u0E0B\u0E21\u0E31\u0E2A",
+
+  // \u2500\u2500 \u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15 \u2192 \u0E21\u0E30\u0E21\u0E48\u0E27\u0E07\u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15 (\u0E2131 shop-floor short form) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // Business-confirmed same product: \u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15 is the shop-floor short form of
+  // the existing dictionary canonical name \u0E21\u0E30\u0E21\u0E48\u0E27\u0E07\u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15 (\u0E2131), not a second
+  // product and not a new dictionary code \u2014 20260818100000's header comment
+  // documents this same decision at the migration level. Production usage:
+  // 733 uses of the short form against 31 of the full name, including one
+  // session (2026-08-07) where both spellings appear together, same unit \u0E42\u0E25,
+  // at prices 35.00 and 20.00 \u2014 buildWithdrawalMaster keeps multiple prices
+  // per cell as a list, so that co-occurrence is a normal same-session shape,
+  // not a parsing anomaly, and is itself part of the evidence these are one
+  // product weighed and sold at two prices in one session, not two products.
+  //
+  // Exact-match only, never fuzzy. In particular, these are REAL, distinct
+  // operational names attested in Production and must NOT fold into this
+  // entry: \u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15\u0E40\u0E01\u0E48\u0E32 (7 uses), \u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15\u0E43\u0E2B\u0E21\u0E48 (1 use), and \u0E21\u0E23\u0E01\u0E15 (5 uses) are
+  // all genuinely different spellings/products on the floor, not near-miss
+  // typos of \u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15. (\u0E21\u0E30\u0E21\u0E48\u0E27\u0E07\u0E21\u0E23\u0E01\u0E15 does not occur in Production at all.)
+  \u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15: "\u0E21\u0E30\u0E21\u0E48\u0E27\u0E07\u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15",
 };
 
 const KNOWN_PREFIX = "\u0E40\u0E1E\u0E34\u0E48\u0E21";

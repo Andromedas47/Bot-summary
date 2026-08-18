@@ -611,3 +611,25 @@ describe("PRODUCT_ALIASES — ม54 dictionary spelling correction (202608181000
     }
   });
 });
+
+describe("PRODUCT_ALIASES — เขียวมรกต shop-floor short form (ม31)", () => {
+  // Required by the alias map's own rule: every entry gets a regression test.
+  // เขียวมรกต is the shop-floor short form of the existing ม31 canonical name
+  // มะม่วงเขียวมรกต — 733 uses of the short form against 31 of the full name in
+  // Production, same shape as the อะโวคาโด and ไซมัส blocks above.
+  test("the short form is the same product as the full canonical name", () => {
+    expect(normalizeProductName("เขียวมรกต")).toBe("มะม่วงเขียวมรกต");
+  });
+
+  test("the full canonical name is left unchanged (it is already canonical)", () => {
+    expect(normalizeProductName("มะม่วงเขียวมรกต")).toBe("มะม่วงเขียวมรกต");
+  });
+
+  test("real, distinct Production near-miss names are not swept in", () => {
+    // เขียวมรกตเก่า (7 uses), เขียวมรกตใหม่ (1 use) and มรกต (5 uses) are real
+    // operational names on the floor, not typos of เขียวมรกต.
+    for (const name of ["เขียวมรกตเก่า", "เขียวมรกตใหม่", "มรกต", "มะม่วงมรกต"]) {
+      expect(normalizeProductName(name)).not.toBe("มะม่วงเขียวมรกต");
+    }
+  });
+});

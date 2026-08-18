@@ -32,8 +32,8 @@ const MIGRATION = join(
   ROOT, "supabase", "migrations", "20260813090000_produce_product_code_dictionary.sql",
 );
 // 20260818100000 corrects ม54's canonical_name (ไชมัส → ไซมัส) and seeds
-// ม63-ม68. It is applied right after the base seed, same as it would run in
-// Production, so every assertion below reflects the composed 259-row state.
+// ม63-ม71. It is applied right after the base seed, same as it would run in
+// Production, so every assertion below reflects the composed 262-row state.
 const CLEANUP_MIGRATION = join(
   ROOT, "supabase", "migrations", "20260818100000_produce_product_dictionary_cleanup.sql",
 );
@@ -134,11 +134,11 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
 
   // ── The seed is the approved dictionary ───────────────────────────────────
 
-  test("seeds exactly the 259 approved codes (base + cleanup), all enabled", async () => {
-    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("259");
+  test("seeds exactly the 262 approved codes (base + cleanup), all enabled", async () => {
+    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("262");
     expect(await scalar(
       "SELECT count(*)::text FROM public.produce_product_codes WHERE code_enabled",
-    )).toBe("259");
+    )).toBe("262");
   });
 
   test("keeps the approved namespace ranges", async () => {
@@ -148,7 +148,7 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
         SELECT category_code, count(*) AS n
         FROM public.produce_product_codes GROUP BY category_code
       ) t`);
-    expect(rows).toBe("ท=26,ป=36,ผ=118,พ=7,ม=68,ห=4");
+    expect(rows).toBe("ท=26,ป=36,ผ=118,พ=7,ม=71,ห=4");
   });
 
   test("stores the canonical name of every code exactly as approved", async () => {
@@ -186,7 +186,7 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
       "DELETE FROM public.produce_product_codes WHERE product_code = 'ม02'",
     );
     expect(error).toContain("must not be deleted");
-    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("259");
+    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("262");
   });
 
   test("refuses to repoint a code at a different product", async () => {
@@ -200,8 +200,8 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
   });
 
   test("refuses to renumber a code", async () => {
-    // ม63 is now issued (20260818100000), so ม99 — genuinely unissued — is the
-    // target here; either way the guard fires before any target is checked.
+    // ม63-ม71 are now issued (20260818100000), so ม99 — genuinely unissued — is
+    // the target here; either way the guard fires before any target is checked.
     const error = await expectFailure(
       "UPDATE public.produce_product_codes SET product_code = 'ม99' WHERE product_code = 'ม02'",
     );
@@ -227,7 +227,7 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
       INSERT INTO public.produce_product_codes (product_code, category_code, category_name, canonical_name)
       VALUES ('ก01', 'ก', 'ผลไม้', 'ทดสอบ')`)).toContain("violates check constraint");
 
-    // ม99 (genuinely unissued past ม63-ม68) rather than ม63, which
+    // ม99 (genuinely unissued past ม63-ม71) rather than ม63, which
     // 20260818100000 now issues.
     expect(await expectFailure(`
       INSERT INTO public.produce_product_codes (product_code, category_code, category_name, canonical_name)
@@ -250,7 +250,7 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
     // re-executed after 20260818100000 already ran (each migration file
     // applies exactly once, tracked by the migration runner), so re-running it
     // atop the shared DATABASE here — which by this point also has the
-    // cleanup migration's 259 rows — would fail that assertion for a scenario
+    // cleanup migration's 262 rows — would fail that assertion for a scenario
     // that cannot happen in Production. This isolated database proves the
     // narrower, real property: the base migration alone is idempotent.
     //

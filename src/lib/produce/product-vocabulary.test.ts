@@ -359,6 +359,23 @@ describe("20260818100000 dictionary cleanup — ม54 correction and ม63–ม
   });
 });
 
+describe("dictionary cleanup extension — ม69–ม71 and the เขียวมรกต alias", () => {
+  it("accepts every new exact canonical name — ส้มแมนดาริน, องุ่นเคียวโฮ, ลิ้นจี่", () => {
+    for (const name of ["ส้มแมนดาริน", "องุ่นเคียวโฮ", "ลิ้นจี่"]) {
+      expect(isApprovedProductName(name)).toBe(true);
+    }
+  });
+
+  it("เขียวมรกต is NOT itself an approved dictionary spelling", () => {
+    // PRODUCT_ALIASES rewrites เขียวมรกต → มะม่วงเขียวมรกต for REPORTING identity
+    // only; the Vocabulary Guard does not consult PRODUCT_ALIASES, so an alias
+    // source spelling is never itself an approved dictionary spelling — same
+    // shape as อะโวคาโด้ and ไชมัส above. This asserts the true current
+    // behavior of isApprovedProductName, not a desired change.
+    expect(isApprovedProductName("เขียวมรกต")).toBe(false);
+  });
+});
+
 describe("review digest", () => {
   it("changes when a suspicious spelling is corrected", () => {
     const before = withdraw("มะม่วงเขียวรกต").digest;

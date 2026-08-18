@@ -134,11 +134,11 @@ const moduleRows = (): Row[] =>
   }));
 
 describe("the approved dictionary is the source of truth", () => {
-  it("carries exactly the 259 approved codes", () => {
-    expect(PRODUCT_CODE_COUNT).toBe(259);
-    expect(PRODUCT_CODE_ENABLED_COUNT).toBe(259);
-    expect(PRODUCT_CODE_ENTRIES).toHaveLength(259);
-    expect(csvRows()).toHaveLength(259);
+  it("carries exactly the 262 approved codes", () => {
+    expect(PRODUCT_CODE_COUNT).toBe(262);
+    expect(PRODUCT_CODE_ENABLED_COUNT).toBe(262);
+    expect(PRODUCT_CODE_ENTRIES).toHaveLength(262);
+    expect(csvRows()).toHaveLength(262);
   });
 
   it("matches the CSV row for row, in the approved order and numbering", () => {
@@ -149,7 +149,7 @@ describe("the approved dictionary is the source of truth", () => {
   it("composes to the identical rows once every migration is applied in order", () => {
     // migrationRows() replays the base seed (20260813090000) plus every
     // migration layered on top of it (20260818100000's ม54 correction and its
-    // six new rows) — the actual sequence a Production database runs. That
+    // nine new rows) — the actual sequence a Production database runs. That
     // composed result has to equal the approved CSV, or the migrations and the
     // CSV have drifted apart.
     expect(migrationRows()).toEqual(csvRows());
@@ -161,7 +161,7 @@ describe("the approved dictionary is the source of truth", () => {
       counts.set(entry.categoryCode, (counts.get(entry.categoryCode) ?? 0) + 1);
     }
     expect(Object.fromEntries(counts)).toEqual({
-      ม: 68, ผ: 118, ป: 36, ท: 26, ห: 4, พ: 7,
+      ม: 71, ผ: 118, ป: 36, ท: 26, ห: 4, พ: 7,
     });
   });
 
@@ -207,9 +207,9 @@ describe("real mappings from the approved CSV resolve", () => {
 });
 
 describe("unregistered codes do not resolve", () => {
-  // ม63-ม68 exist as of 20260818100000, so ม69 — the code right past the new
-  // boundary — is the genuinely unissued example, not ม63.
-  for (const code of ["ม99", "ม999", "ผ999", "ป99", "ท99", "ห99", "พ99", "ผ119", "ม69"]) {
+  // ม63-ม71 exist as of this extension, so ม72 — the code right past the new
+  // boundary — is the genuinely unissued example, not ม63 or ม69.
+  for (const code of ["ม99", "ม999", "ผ999", "ป99", "ท99", "ห99", "พ99", "ผ119", "ม72"]) {
     it(`${code} is unknown`, () => {
       expect(resolveProductCode(code)).toBeNull();
       expect(resolveItemLineProductCode(`${code} 50 บาท`)).toEqual({ kind: "unknown", code });
@@ -326,5 +326,41 @@ describe("20260818100000 dictionary cleanup — ม54 correction and ม63–ม
     for (const code of ["ม63", "ม64", "ม65", "ม66", "ม67", "ม68"]) {
       expect(codes.filter((c) => c === code)).toHaveLength(1);
     }
+  });
+});
+
+describe("dictionary cleanup extension — ม69–ม71 (ส้มแมนดาริน / องุ่นเคียวโฮ / ลิ้นจี่)", () => {
+  const NEW_CODES: Array<[string, string]> = [
+    ["ม69", "ส้มแมนดาริน"],
+    ["ม70", "องุ่นเคียวโฮ"],
+    ["ม71", "ลิ้นจี่"],
+  ];
+
+  for (const [code, canonicalName] of NEW_CODES) {
+    it(`${code} → ${canonicalName}`, () => {
+      expect(resolveProductCode(code)).toBe(canonicalName);
+    });
+  }
+
+  it("ม31 still resolves to its unchanged canonical name มะม่วงเขียวมรกต", () => {
+    // เขียวมรกต folds into this canonical name at the application layer
+    // (src/lib/summary/remaining-fruit.ts PRODUCT_ALIASES), not by changing
+    // the dictionary row itself — ม31 must be exactly as it was.
+    expect(resolveProductCode("ม31")).toBe("มะม่วงเขียวมรกต");
+  });
+
+  it("no product code collision — ม69–ม71 each appear exactly once in the full set", () => {
+    const codes = PRODUCT_CODE_ENTRIES.map((e) => e.code);
+    expect(new Set(codes).size).toBe(codes.length);
+    for (const code of ["ม69", "ม70", "ม71"]) {
+      expect(codes.filter((c) => c === code)).toHaveLength(1);
+    }
+  });
+
+  it("the composed migration-parity check still holds with the extended INSERT block", () => {
+    // Verified, not assumed: insertedRowsOf() re-parses the migration file's
+    // own VALUES block with the same regex the base suite relies on, so a
+    // formatting slip in the new ม69-ม71 rows would fail here.
+    expect(migrationRows()).toEqual(csvRows());
   });
 });

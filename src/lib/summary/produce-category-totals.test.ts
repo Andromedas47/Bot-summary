@@ -280,6 +280,63 @@ describe("20260818100000 dictionary cleanup — ม54 correction and ม63–ม
   });
 });
 
+describe("dictionary cleanup extension — ม69–ม71 and the เขียวมรกต alias", () => {
+  const APPROVED_SET = [
+    "ไซมัส",
+    "มะม่วงจิ้ว",
+    "ลูกพีชเล็ก",
+    "ลูกพีชใหญ่",
+    "ลูกไหนเขียว",
+    "ลูกไหนดำ",
+    "องุ่นคิมสัน",
+    "ส้มแมนดาริน",
+    "องุ่นเคียวโฮ",
+    "ลิ้นจี่",
+  ];
+
+  test("the full approved set classifies to ม (ผลไม้)", () => {
+    for (const name of APPROVED_SET) {
+      expect(resolveProduceCategory(name)).toBe("ม");
+    }
+  });
+
+  test("เขียวมรกต classifies to ม via the reviewed alias to ม31's canonical name", () => {
+    expect(resolveProduceCategory("เขียวมรกต")).toBe("ม");
+  });
+
+  test("the full set plus เขียวมรกต aggregates under ผลไม้, not ❓ ไม่จัดหมวด", () => {
+    const names = [...APPROVED_SET, "เขียวมรกต"];
+    const result = produceCategoryTotals(
+      names.map((product_name) => row({ product_name, transaction_type: "เบิก", total_amount: 100 })),
+    );
+    expect(result.เบิก.categories.map((c) => c.id)).toEqual(["ม"]);
+    const ผลไม้ = result.เบิก.categories.find((c) => c.id === "ม")!;
+    expect(ผลไม้.itemCount).toBe(names.length);
+    expect(result.เบิก.categories.find((c) => c.id === UNCATEGORIZED_CATEGORY_ID)).toBeUndefined();
+  });
+
+  // Production replay, 2026-08-17 (extended): these six names were previously
+  // uncategorized before this extension landed — ส้มแมนดาริน / องุ่นเคียวโฮ /
+  // ลิ้นจี่ are new ม69-ม71 codes, ลูกไหนเขียว / ลูกไหนดำ / องุ่นคิมสัน /
+  // มะม่วงจิ้ว were already ม63-ม68 codes from the prior extension. Pure
+  // hardcoded-name classification simulation — no database access.
+  test("previously-uncategorized names now land under ผลไม้", () => {
+    const names = [
+      "ส้มแมนดาริน", "ลูกไหนเขียว", "ลูกไหนดำ", "องุ่นคิมสัน", "องุ่นเคียวโฮ", "มะม่วงจิ้ว",
+    ];
+    for (const name of names) {
+      expect(resolveProduceCategory(name)).toBe("ม");
+    }
+
+    const result = produceCategoryTotals(
+      names.map((product_name) => row({ product_name, transaction_type: "เบิก", total_amount: 50 })),
+    );
+    expect(result.เบิก.categories.map((c) => c.id)).toEqual(["ม"]);
+    expect(result.เบิก.categories[0]!.itemCount).toBe(names.length);
+    expect(result.เบิก.categories.find((c) => c.id === UNCATEGORIZED_CATEGORY_ID)).toBeUndefined();
+  });
+});
+
 describe("categoryLedger", () => {
   test("transposes a bucket-shaped breakdown into a category-shaped ledger", () => {
     const breakdown = produceCategoryTotals([

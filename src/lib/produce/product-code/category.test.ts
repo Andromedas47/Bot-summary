@@ -218,4 +218,62 @@ describe("20260818100000 dictionary cleanup — ม54 correction and ม63–ม
   });
 });
 
+describe("dictionary cleanup extension — ม69–ม71 and the เขียวมรกต alias", () => {
+  const NEW_NAMES = ["ส้มแมนดาริน", "องุ่นเคียวโฮ", "ลิ้นจี่"] as const;
+
+  test.each(NEW_NAMES.map((name) => [name] as const))(
+    "%s classifies to ม (ผลไม้)",
+    (name) => {
+      expect(dictionaryCategoryFor(name)).toBe("ม");
+    },
+  );
+
+  test("เขียวมรกต resolves through the reviewed alias to ม31's canonical name", () => {
+    expect(normalizeProductName("เขียวมรกต")).toBe("มะม่วงเขียวมรกต");
+    expect(dictionaryCategoryFor(normalizeProductName("เขียวมรกต"))).toBe("ม");
+  });
+
+  test("EXACTNESS — near-miss เขียวมรกต spellings stay uncategorized and unchanged", () => {
+    // เขียวมรกตเก่า (7 uses), เขียวมรกตใหม่ (1 use) and มรกต (5 uses) are REAL,
+    // distinct operational names attested in Production — not typos of
+    // เขียวมรกต — and must never fold into it. มะม่วงมรกต does not occur in
+    // Production at all; it is included here as the adversarial near-miss of
+    // the full canonical name itself.
+    for (const name of ["เขียวมรกตเก่า", "เขียวมรกตใหม่", "มรกต", "มะม่วงมรกต"]) {
+      expect(normalizeProductName(name)).toBe(name);
+      expect(dictionaryCategoryFor(name)).toBe(UNCATEGORIZED_CATEGORY_ID);
+    }
+  });
+
+  describe("identity distinctness — new codes never alias into a pre-existing product", () => {
+    test("ส้มแมนดาริน is distinct from ส้มไต้หวัน (ม46) and ส้มเขียวหวาน (ม45)", () => {
+      expect(dictionaryEntryFor("ส้มแมนดาริน")?.code).toBe("ม69");
+      expect(dictionaryEntryFor("ส้มไต้หวัน")?.code).toBe("ม46");
+      expect(dictionaryEntryFor("ส้มเขียวหวาน")?.code).toBe("ม45");
+      const codes = new Set([
+        dictionaryEntryFor("ส้มแมนดาริน")?.code,
+        dictionaryEntryFor("ส้มไต้หวัน")?.code,
+        dictionaryEntryFor("ส้มเขียวหวาน")?.code,
+      ]);
+      expect(codes.size).toBe(3);
+      expect(normalizeProductName("ส้มแมนดาริน")).toBe("ส้มแมนดาริน");
+    });
+
+    test("องุ่นเคียวโฮ is distinct from องุ่นคิมสัน (ม68), องุ่นเขียว (ม52) and ไซมัส (ม54)", () => {
+      expect(dictionaryEntryFor("องุ่นเคียวโฮ")?.code).toBe("ม70");
+      expect(dictionaryEntryFor("องุ่นคิมสัน")?.code).toBe("ม68");
+      expect(dictionaryEntryFor("องุ่นเขียว")?.code).toBe("ม52");
+      expect(dictionaryEntryFor("ไซมัส")?.code).toBe("ม54");
+      const codes = new Set([
+        dictionaryEntryFor("องุ่นเคียวโฮ")?.code,
+        dictionaryEntryFor("องุ่นคิมสัน")?.code,
+        dictionaryEntryFor("องุ่นเขียว")?.code,
+        dictionaryEntryFor("ไซมัส")?.code,
+      ]);
+      expect(codes.size).toBe(4);
+      expect(normalizeProductName("องุ่นเคียวโฮ")).toBe("องุ่นเคียวโฮ");
+    });
+  });
+});
+
 type ReportCategoryExpectation = "ท" | "ม" | "ผ" | "ป" | "ห" | "พ";

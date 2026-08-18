@@ -1,13 +1,13 @@
 /**
  * Real PostgreSQL 17 proof for the Produce Product Dictionary Cleanup
  * migration (20260818100000): the ม54 spelling correction (ไชมัส → ไซมัส) and
- * the six new ม63-ม68 codes, applied on top of the base dictionary seed
+ * the nine new ม63-ม71 codes, applied on top of the base dictionary seed
  * (20260813090000).
  *
  * Four things need proving before this runs against Production:
  *
- *  1. the composed state is exactly right — 259 rows, 259 enabled, ม=68,
- *     ม54 corrected, ม63-ม68 resolving to their exact approved names;
+ *  1. the composed state is exactly right — 262 rows, 262 enabled, ม=71,
+ *     ม54 corrected, ม63-ม71 resolving to their exact approved names;
  *  2. the identity guard the base migration installs is STILL ARMED
  *     afterwards — this migration's own narrow, temporary DISABLE/ENABLE of
  *     that trigger must never leave it disabled in committed state, and this
@@ -143,14 +143,14 @@ describe.skipIf(!pgAvailable)("Produce Product Dictionary Cleanup on PostgreSQL 
 
   // ── 1. The composed state is exactly right ────────────────────────────────
 
-  test("composes to exactly 259 rows, 259 enabled, ม=68", async () => {
-    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("259");
+  test("composes to exactly 262 rows, 262 enabled, ม=71", async () => {
+    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("262");
     expect(await scalar(
       "SELECT count(*)::text FROM public.produce_product_codes WHERE code_enabled",
-    )).toBe("259");
+    )).toBe("262");
     expect(await scalar(
       "SELECT count(*)::text FROM public.produce_product_codes WHERE category_code = 'ม'",
-    )).toBe("68");
+    )).toBe("71");
   });
 
   test("ม54 is corrected to ไซมัส", async () => {
@@ -159,7 +159,7 @@ describe.skipIf(!pgAvailable)("Produce Product Dictionary Cleanup on PostgreSQL 
     )).toBe("ไซมัส");
   });
 
-  test("ม63-ม68 resolve to their exact expected name and category ผลไม้", async () => {
+  test("ม63-ม71 resolve to their exact expected name and category ผลไม้", async () => {
     const expected: Array<[string, string]> = [
       ["ม63", "มะม่วงจิ้ว"],
       ["ม64", "ลูกพีชเล็ก"],
@@ -167,6 +167,9 @@ describe.skipIf(!pgAvailable)("Produce Product Dictionary Cleanup on PostgreSQL 
       ["ม66", "ลูกไหนเขียว"],
       ["ม67", "ลูกไหนดำ"],
       ["ม68", "องุ่นคิมสัน"],
+      ["ม69", "ส้มแมนดาริน"],
+      ["ม70", "องุ่นเคียวโฮ"],
+      ["ม71", "ลิ้นจี่"],
     ];
     for (const [code, name] of expected) {
       expect(await scalar(
@@ -218,7 +221,7 @@ describe.skipIf(!pgAvailable)("Produce Product Dictionary Cleanup on PostgreSQL 
       "DELETE FROM public.produce_product_codes WHERE product_code = 'ม63'",
     );
     expect(error).toContain("must not be deleted");
-    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("259");
+    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("262");
   });
 
   // ── 3. Not silently destructive ───────────────────────────────────────────
@@ -229,7 +232,7 @@ describe.skipIf(!pgAvailable)("Produce Product Dictionary Cleanup on PostgreSQL 
         SELECT jsonb_object_agg(product_code, canonical_name)::text
         FROM public.produce_product_codes
         WHERE product_code <> 'ม54'
-          AND product_code NOT IN ('ม63', 'ม64', 'ม65', 'ม66', 'ม67', 'ม68')`),
+          AND product_code NOT IN ('ม63', 'ม64', 'ม65', 'ม66', 'ม67', 'ม68', 'ม69', 'ม70', 'ม71')`),
     ) as Record<string, string>;
     expect(Object.keys(otherRowsAfter)).toHaveLength(252);
     expect(otherRowsAfter).toEqual(otherRowsBefore);
@@ -242,7 +245,7 @@ describe.skipIf(!pgAvailable)("Produce Product Dictionary Cleanup on PostgreSQL 
     expect(error).toContain("already applied");
 
     // And state is exactly where the first application left it.
-    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("259");
+    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("262");
     expect(await scalar(
       "SELECT canonical_name FROM public.produce_product_codes WHERE product_code = 'ม54'",
     )).toBe("ไซมัส");
@@ -297,7 +300,7 @@ describe.skipIf(!pgAvailable)("cleanup migration refuses an unhealthy identity g
     )).toBe("ไชมัส");
     expect(await scratchScalar(`
       SELECT count(*)::text FROM public.produce_product_codes
-      WHERE product_code IN ('ม63','ม64','ม65','ม66','ม67','ม68')`)).toBe("0");
+      WHERE product_code IN ('ม63','ม64','ม65','ม66','ม67','ม68','ม69','ม70','ม71')`)).toBe("0");
   }
 
   beforeAll(async () => {
@@ -364,11 +367,11 @@ describe.skipIf(!pgAvailable)("cleanup migration refuses an unhealthy identity g
     expect(await scratchScalar(
       "SELECT canonical_name FROM public.produce_product_codes WHERE product_code = 'ม54'",
     )).toBe("ไซมัส");
-    expect(await scratchScalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("259");
+    expect(await scratchScalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("262");
     expect(await scratchScalar(`
       SELECT string_agg(canonical_name, ',' ORDER BY product_code)
       FROM public.produce_product_codes
-      WHERE product_code IN ('ม63','ม64','ม65','ม66','ม67','ม68')`))
-      .toBe("มะม่วงจิ้ว,ลูกพีชเล็ก,ลูกพีชใหญ่,ลูกไหนเขียว,ลูกไหนดำ,องุ่นคิมสัน");
+      WHERE product_code IN ('ม63','ม64','ม65','ม66','ม67','ม68','ม69','ม70','ม71')`))
+      .toBe("มะม่วงจิ้ว,ลูกพีชเล็ก,ลูกพีชใหญ่,ลูกไหนเขียว,ลูกไหนดำ,องุ่นคิมสัน,ส้มแมนดาริน,องุ่นเคียวโฮ,ลิ้นจี่");
   });
 });

@@ -80,6 +80,37 @@ export const CANCEL_ACTIVE_DRAFT_REFUSED_REPLY = [
 ].join("\n");
 
 /**
+ * The RPC does not exist on this database yet — an app-before-migration deploy.
+ *
+ * Distinct copy on purpose. "กรุณาลองใหม่อีกครั้ง" would send the operator into
+ * a retry loop that CANNOT succeed until the migration lands, which may be
+ * minutes or a deploy away. The honest instruction is the opposite one: the
+ * feature is unavailable, so carry on with the draft (or supersede it with a
+ * fresh header) and tell the team. Still fail-closed — nothing was cancelled
+ * and this reply never claims otherwise.
+ */
+export const CANCEL_ACTIVE_DRAFT_UNAVAILABLE_REPLY = [
+  "⛔ ยังใช้คำสั่งยกเลิกรายการไม่ได้",
+  "",
+  "ระบบยังไม่เปิดใช้งานคำสั่งนี้ รายการที่กำลังกรอกยังอยู่ครบ",
+  "กรอกรายการต่อได้ตามปกติ หรือแจ้งทีมผู้ดูแลระบบ",
+].join("\n");
+
+/** The `reason` this module returns when the RPC is absent. */
+export const CANCEL_ACTIVE_DRAFT_UNAVAILABLE_REASON = "rpc_unavailable";
+
+/**
+ * PostgreSQL 42883 is "function does not exist"; PostgREST answers PGRST202
+ * when no function matches the posted arguments. Same narrow pair as
+ * `isMissingFunctionError` in src/lib/line/pending-close-recovery.ts — every
+ * other RPC error keeps the generic busy refusal, because a real refusal
+ * (close_in_progress, draft_changed) IS worth retrying.
+ */
+function isMissingFunctionError(error: { code?: string | null }): boolean {
+  return error.code === "42883" || error.code === "PGRST202";
+}
+
+/**
  * Shown ONLY where the draft provably stays active and correction is still
  * possible. One shared constant — this string must never be copied inline.
  */
@@ -94,23 +125,20 @@ export function withCancelActiveDraftHint(reply: string): string {
 }
 
 /**
- * True only for a row this feature terminalized.
+ * Deliberately NOT re-read by any reporting consumer.
  *
- * `failed_closed` alone is NOT enough: it is also how a genuinely lost
- * document, a supersession and an unresolved close refusal terminate, and every
- * one of those IS missing produce. Only the structured reason distinguishes
- * them, so the reason is what is read — defensively, because
- * `finalization_error` is jsonb and can be null, a scalar or an array.
+ * `finalization_status = 'failed_closed'` with reason `user_cancelled` is the
+ * terminal shape this feature writes, and it is tempting to treat such a row as
+ * "resolved" in the Sales loader and in classifyRoundReturns. It is not.
+ * Cancelling a return DOCUMENT is not evidence the goods were sold: a round
+ * holding a persisted เบิก and an abandoned ชั่งคืน still has produce that is
+ * unaccounted for, and skipping the row would turn `blocked` into `none` — the
+ * legitimate sold-out reading — which is precisely the Production incident
+ * `round-return-status.ts` was written for. Those consumers stay fail-closed:
+ * a cancelled draft joins `superseded` and `close_refused_unresolved`. Once the
+ * operator retypes and the real return finalizes, `hasPersistedReturn` clears
+ * the round anyway.
  */
-export function isUserCancelledPendingRow(row: {
-  finalization_status?: string | null;
-  finalization_error?: unknown;
-}): boolean {
-  if (row.finalization_status !== "failed_closed") return false;
-  const error = row.finalization_error;
-  if (typeof error !== "object" || error === null || Array.isArray(error)) return false;
-  return (error as { reason?: unknown }).reason === "user_cancelled";
-}
 
 /** Discriminated outcome. `cancelled: false` never becomes a success reply. */
 export type CancelActiveDraftResult =
@@ -123,6 +151,8 @@ export interface CancelActiveDraftInput {
   sessionGeneration: string;
   /** The same row's `updated_at`. A NULL is refused by the database. */
   expectedUpdatedAt: string | null;
+  /** Authoritative LINE timestamp of the cancel event. */
+  lineTimestampMs: number;
   sourceId: string | null;
   lineEventId: string;
   runtimeEnvironment: RuntimeEnvironment;
@@ -144,11 +174,17 @@ export async function cancelActiveProduceDraft(
       p_session_key: input.sessionKey,
       p_session_generation: input.sessionGeneration,
       p_expected_updated_at: input.expectedUpdatedAt,
+      p_line_timestamp_ms: input.lineTimestampMs,
       p_source_id: input.sourceId,
       p_line_event_id: input.lineEventId,
       p_runtime_environment: input.runtimeEnvironment,
     });
-    if (error) return { cancelled: false, reason: error.message || "rpc_error" };
+    if (error) {
+      if (isMissingFunctionError(error)) {
+        return { cancelled: false, reason: CANCEL_ACTIVE_DRAFT_UNAVAILABLE_REASON };
+      }
+      return { cancelled: false, reason: error.message || "rpc_error" };
+    }
     const outcome = (data ?? null) as
       | { cancelled?: unknown; reason?: unknown; round_outcome?: unknown }
       | null;

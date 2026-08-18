@@ -5,7 +5,6 @@ import type {
   MenuSourceType,
   MenuTransactionTypeCode,
 } from "./menu-state-types";
-import { CANCEL_ACTIVE_DRAFT_HINT } from "@/lib/produce/cancel-active-draft";
 
 export const TX_CODE_TO_LABEL: Record<MenuTransactionTypeCode, string> = {
   withdraw: "เบิก",
@@ -83,15 +82,22 @@ export const GUIDED_MENU_COPY = {
   ].join("\n"),
   /**
    * 3B: dismissing the menu does NOT void an open round — it only closes the
-   * controls, and the draft keeps capturing. Abandoning the draft is now a
-   * separate, explicit contract the operator can invoke by typing the exact
-   * command (see src/lib/produce/cancel-active-draft.ts), so the copy names it
-   * instead of sending them to an administrator.
+   * controls, and the draft keeps capturing.
+   *
+   * A cancel contract now exists (`ยกเลิกรายการ`, see
+   * src/lib/produce/cancel-active-draft.ts), but this screen cannot prove the
+   * draft is still cancellable: it is rendered off a snapshot that refuses only
+   * on `terminalized`, so a session that has already requested close reaches it
+   * too — and there the RPC would refuse with `close_in_progress`. It therefore
+   * makes NO claim either way, in either direction. The old line
+   * ("กรุณาแจ้งผู้ดูแล") is gone because it is now false, and the hint is not
+   * here because it is not provably true. Two true sentences beat a third that
+   * is conditionally false; the hint is attached only where the caller can
+   * prove no close boundary has been written.
    */
   menuDismissedSessionOpen: [
     "ปิดเมนูแล้ว",
     "รายการที่เปิดไว้ยังอยู่ ส่งรายการสินค้าต่อได้",
-    CANCEL_ACTIVE_DRAFT_HINT,
   ].join("\n"),
   /** 3B: close accepted, waiting for the operator's final confirmation. */
   closeRequested: [

@@ -2039,6 +2039,7 @@ export interface Database {
            * generation alone cannot detect a concurrent correction.
            */
           p_expected_updated_at: string | null;
+          p_line_timestamp_ms: number;
           p_source_id: string | null;
           p_line_event_id: string;
           /**

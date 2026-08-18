@@ -160,18 +160,30 @@ interface PendingOptions {
   environment?: string | null;
   sourceId?: string | null;
   entryOrigin?: string | null;
+  /** Current-generation opener timestamp; NULL omits stamped evidence. */
+  openerTimestamp?: number | null;
+  openedLineEventId?: string;
 }
 
 async function seedPending(options: PendingOptions = {}) {
   const generation = nextUuid();
   const key = `group:${SOURCE}:user:${OWNER}:${generation}`;
   const shape = options.closeShape ?? null;
+  const structured = options.entryOrigin === "structured_menu";
+  const openerTimestamp = options.openerTimestamp === undefined ? 1000 : options.openerTimestamp;
+  const evidenceTimestamp = openerTimestamp ?? 1000;
+  const openerEventId = options.openedLineEventId ?? `evt-open-${generation}`;
+  const plainOpenerEventId = structured
+    ? null
+    : options.openedLineEventId ?? (openerTimestamp === null ? null : openerEventId);
   await scalar(`
     INSERT INTO public.pending_sessions (
       session_key, session_generation, source_id, line_user_id, accumulated_text,
       accountability_round_id, terminalized, created_at, updated_at,
       close_requested_at, close_event_timestamp_ms, close_finalize_started_at,
-      close_deadline_at, next_attempt_at, finalization_status, runtime_environment
+      close_deadline_at, next_attempt_at, finalization_status, runtime_environment,
+      entry_origin, opened_line_event_id,
+      plain_text_opened_line_event_id, plain_text_opened_line_timestamp_ms
     ) VALUES (
       ${q(key)}, ${q(generation)}::uuid,
       ${options.sourceId === null ? "NULL" : q(options.sourceId ?? SOURCE)},
@@ -187,8 +199,19 @@ async function seedPending(options: PendingOptions = {}) {
       ${shape === "finalizing" ? "now()" : "NULL"},
       NULL, NULL,
       ${shape === "processing" ? "'processing'" : "'pending'"},
-      ${options.environment === null ? "NULL" : q(options.environment ?? "production")}
+      ${options.environment === null ? "NULL" : q(options.environment ?? "production")},
+      ${structured ? q(options.entryOrigin!) : "NULL"},
+      ${structured ? q(openerEventId) : "NULL"},
+      ${plainOpenerEventId === null ? "NULL" : q(plainOpenerEventId)},
+      ${structured || openerTimestamp === null ? "NULL" : String(openerTimestamp)}
     ) RETURNING 1`);
+  const rawOpenerEventId = structured ? openerEventId : plainOpenerEventId;
+  if (rawOpenerEventId !== null) {
+    await scalar(`
+      INSERT INTO public.raw_messages (line_event_id, payload)
+      VALUES (${q(rawOpenerEventId)}, jsonb_build_object('timestamp', ${evidenceTimestamp}))
+      RETURNING 1`);
+  }
   return { key, generation };
 }
 
@@ -216,6 +239,7 @@ interface CancelOptions {
   generation?: string;
   sourceId?: string | null;
   lineEventId?: string;
+  lineTimestamp?: number | null;
   environment?: string | null;
 }
 
@@ -238,12 +262,14 @@ async function cancel(
   const expected = options.expected === undefined
     ? await pendingUpdatedAt(key)
     : options.expected;
+  const lineTimestamp = options.lineTimestamp === undefined ? 2000 : options.lineTimestamp;
   const environment = options.environment === undefined ? "production" : options.environment;
   return JSON.parse(await scalar(`
     SELECT public.cancel_active_pending_produce_draft(
       ${q(key)},
       ${q(options.generation ?? generation)}::uuid,
       ${expected === null ? "NULL" : `${q(expected)}::timestamptz`},
+      ${lineTimestamp === null ? "NULL" : String(lineTimestamp)},
       ${options.sourceId === null ? "NULL" : q(options.sourceId ?? SOURCE)},
       ${q(options.lineEventId ?? "evt-cancel")},
       ${environment === null ? "NULL" : q(environment)})`));
@@ -302,6 +328,14 @@ describe.skipIf(!pgAvailable)("cancel the active produce draft on PostgreSQL 17"
     expect(await scalar(`
       SELECT count(*)::text FROM pg_proc
       WHERE proname = 'cancel_active_pending_produce_draft'`)).toBe("1");
+    expect(await scalar(`
+      SELECT (to_regprocedure(
+        'public.cancel_active_pending_produce_draft(text,uuid,timestamptz,bigint,text,text,text)'
+      ) IS NOT NULL)::text`)).toBe("true");
+    expect(await scalar(`
+      SELECT (to_regprocedure(
+        'public.cancel_active_pending_produce_draft(text,uuid,timestamptz,text,text,text)'
+      ) IS NULL)::text`)).toBe("true");
   });
 
   // ── 1-4. Every draft shape, one primitive ──────────────────────────────────
@@ -327,6 +361,36 @@ describe.skipIf(!pgAvailable)("cancel the active produce draft on PostgreSQL 17"
       expect(await pendingField(key, "close_event_timestamp_ms")).toBe("<null>");
     });
   }
+
+  test("a prior close-refusal audit blob survives the cancellation", async () => {
+    // The PRIMARY UX path: the P4A gate refuses a plain-text close,
+    // mark_plain_text_close_refused records WHY (and writes no close boundary,
+    // so the draft stays cancellable), then the operator gives up and cancels.
+    // finalization_error must be MERGED, not assigned — the only record of the
+    // refusal reason lives in those keys, and the function's COMMENT promises
+    // it deletes nothing.
+    const { key, generation } = await seedPending();
+    await scalar(`
+      UPDATE public.pending_sessions
+      SET finalization_error = jsonb_build_object(
+            'reason', 'close_refused',
+            'close_line_event_id', 'evt-close',
+            'close_refused_reason', 'unmatched_products'
+          )
+      WHERE session_key = ${q(key)} RETURNING 1`);
+
+    expect((await cancel(key, generation)).cancelled).toBe(true);
+
+    // `reason` is overwritten — user_cancelled is the terminal truth now.
+    expect(await pendingField(key, "finalization_error->>'reason'")).toBe("user_cancelled");
+    expect(await pendingField(key, "finalization_error->>'cancel_line_event_id'"))
+      .toBe("evt-cancel");
+    // Every prior key survives beside it.
+    expect(await pendingField(key, "finalization_error->>'close_line_event_id'"))
+      .toBe("evt-close");
+    expect(await pendingField(key, "finalization_error->>'close_refused_reason'"))
+      .toBe("unmatched_products");
+  });
 
   // ── 5-7. Rounds and previously finalized business ──────────────────────────
 
@@ -468,6 +532,35 @@ describe.skipIf(!pgAvailable)("cancel the active produce draft on PostgreSQL 17"
     expect(await pendingField(key, "finalization_error->>'cancel_line_event_id'")).toBe("evt-a");
   });
 
+  test("a foreign SOURCE replaying a matching event id is refused, not congratulated", async () => {
+    // The replay branch answers cancelled=true, which the caller renders as ✅.
+    // Ownership therefore has to be decided BEFORE it: nothing is written
+    // either way, but a caller that does not own this row must never be told
+    // its cancellation succeeded.
+    const { key, generation } = await seedPending();
+    expect((await cancel(key, generation, { lineEventId: "evt-own" })).cancelled).toBe(true);
+    const afterFirst = await pendingUpdatedAt(key);
+
+    expect(await cancel(key, generation, {
+      lineEventId: "evt-own",
+      sourceId: OTHER_SOURCE,
+      expected: afterFirst,
+    })).toEqual({ cancelled: false, reason: "source_mismatch" });
+  });
+
+  test("a foreign ENVIRONMENT replaying a matching event id is refused, not congratulated", async () => {
+    const { key, generation } = await seedPending({ environment: "production" });
+    expect((await cancel(key, generation, { lineEventId: "evt-own" })).cancelled).toBe(true);
+    const afterFirst = await pendingUpdatedAt(key);
+
+    // Preview replaying against a Production-owned cancelled row.
+    expect(await cancel(key, generation, {
+      lineEventId: "evt-own",
+      environment: "preview",
+      expected: afterFirst,
+    })).toEqual({ cancelled: false, reason: "environment_mismatch" });
+  });
+
   test("a delayed duplicate cancel cannot cancel a newly opened generation", async () => {
     const { key, generation } = await seedPending();
     expect((await cancel(key, generation, { lineEventId: "evt-old" })).cancelled).toBe(true);
@@ -489,6 +582,186 @@ describe.skipIf(!pgAvailable)("cancel the active produce draft on PostgreSQL 17"
     expect(await pendingField(key, "terminalized")).toBe("false");
     expect(await pendingField(key, "session_generation")).toBe(fresh);
   });
+
+  test("a plain-text cancel at or before the current opener is refused", async () => {
+    const { key, generation } = await seedPending({ openerTimestamp: 2000 });
+
+    expect(await cancel(key, generation, { lineTimestamp: 1999 }))
+      .toEqual({ cancelled: false, reason: "event_before_opener" });
+    expect(await pendingField(key, "terminalized")).toBe("false");
+
+    expect((await cancel(key, generation, { lineTimestamp: 2001 })).cancelled).toBe(true);
+  });
+
+  test("legacy plain text with no explicit opener evidence refuses", async () => {
+    const { key, generation } = await seedPending({ openerTimestamp: null });
+
+    expect(await cancel(key, generation, { lineTimestamp: 999 }))
+      .toEqual({ cancelled: false, reason: "opener_boundary_unproven" });
+    expect(await cancel(key, generation, { lineTimestamp: 1001 }))
+      .toEqual({ cancelled: false, reason: "opener_boundary_unproven" });
+    expect(await pendingField(key, "terminalized")).toBe("false");
+  });
+
+  test("plain text never falls back to an earlier out-of-order admission item", async () => {
+    const { key, generation } = await seedPending({
+      openerTimestamp: null,
+      text: "draft-before-real-opener",
+    });
+
+    // MIN(admission) is 1000, the delayed cancel is 2000, and the real opener
+    // evidence is later at 3000 — but that raw event is not linked as this
+    // generation's explicit opener. The boundary is therefore unproven.
+    await scalar(`
+      INSERT INTO public.pending_session_admission (
+        session_key, session_generation, line_event_id, line_timestamp_ms
+      ) VALUES (${q(key)}, ${q(generation)}::uuid, 'evt-out-of-order-item', 1000)
+      RETURNING 1`);
+    await scalar(`
+      INSERT INTO public.raw_messages (line_event_id, payload)
+      VALUES ('evt-real-opener', jsonb_build_object('timestamp', 3000))
+      RETURNING 1`);
+
+    expect(await cancel(key, generation, { lineTimestamp: 2000 }))
+      .toEqual({ cancelled: false, reason: "opener_boundary_unproven" });
+    expect(await pendingField(key, "terminalized")).toBe("false");
+    expect(await pendingField(key, "accumulated_text")).toBe("draft-before-real-opener");
+  });
+
+  test("plain text can use its exact opener raw message timestamp", async () => {
+    const { key, generation } = await seedPending({
+      openerTimestamp: null,
+      openedLineEventId: "evt-plain-opener",
+    });
+
+    expect(await cancel(key, generation, { lineTimestamp: 999 }))
+      .toEqual({ cancelled: false, reason: "event_before_opener" });
+    expect((await cancel(key, generation, { lineTimestamp: 1001 })).cancelled).toBe(true);
+  });
+
+  test("structured cancellation uses the opener raw message timestamp", async () => {
+    const { key, generation } = await seedPending({
+      entryOrigin: "structured_menu",
+      openerTimestamp: 3000,
+    });
+
+    expect(await cancel(key, generation, { lineTimestamp: 2999 }))
+      .toEqual({ cancelled: false, reason: "event_before_opener" });
+    expect((await cancel(key, generation, { lineTimestamp: 3001 })).cancelled).toBe(true);
+  });
+
+  for (const structured of [false, true] as const) {
+    test(
+      `malformed opener evidence refuses cancellation (${structured ? "structured" : "plain-text"})`,
+      async () => {
+        const openerEventId = `evt-malformed-opener-${structured ? "structured" : "plain"}`;
+        const { key, generation } = await seedPending({
+          entryOrigin: structured ? "structured_menu" : null,
+          openerTimestamp: null,
+          openedLineEventId: openerEventId,
+        });
+        await scalar(`
+          UPDATE public.raw_messages
+          SET payload = jsonb_build_object('timestamp', '3000')
+          WHERE line_event_id = ${q(openerEventId)} RETURNING 1`);
+
+        expect(await cancel(key, generation, { lineTimestamp: 3001 }))
+          .toEqual({ cancelled: false, reason: "opener_boundary_unproven" });
+        expect(await pendingField(key, "terminalized")).toBe("false");
+      },
+    );
+  }
+
+  for (const structured of [false, true] as const) {
+    test(
+      `a delayed cancel cannot cross a generation boundary (${structured ? "structured" : "plain-text"})`,
+      async () => {
+        const generationA = await seedPending({
+          entryOrigin: structured ? "structured_menu" : null,
+          openerTimestamp: structured ? 3000 : 1000,
+        });
+        const generationB = nextUuid();
+        const openerEventB = `evt-open-b-${generationB}`;
+        const openerTimestampB = structured ? 3000 : 2500;
+
+        // Same session key, fresh generation. This is what the webhook lookup
+        // resolves while a delayed cancel authored for A is still in flight.
+        await scalar(`
+          UPDATE public.pending_sessions
+          SET session_generation = ${q(generationB)}::uuid,
+              terminalized = false,
+              finalization_status = 'pending',
+              finalization_error = NULL,
+              accumulated_text = ${q(`generation-B-${structured ? "structured" : "plain"}`)},
+              updated_at = clock_timestamp(),
+              entry_origin = ${structured ? q("structured_menu") : "NULL"},
+              opened_line_event_id = ${structured ? q(openerEventB) : "NULL"},
+              plain_text_opened_line_event_id = ${structured ? "NULL" : q(openerEventB)},
+              plain_text_opened_line_timestamp_ms = ${structured ? "NULL" : String(openerTimestampB)}
+          WHERE session_key = ${q(generationA.key)} RETURNING 1`);
+        if (structured) {
+          await scalar(`
+            INSERT INTO public.raw_messages (line_event_id, payload)
+            VALUES (${q(openerEventB)}, jsonb_build_object('timestamp', ${openerTimestampB}))
+            RETURNING 1`);
+        }
+
+        const snapshotB = await pendingUpdatedAt(generationA.key);
+        const delayed = await cancel(generationA.key, generationB, {
+          expected: snapshotB,
+          lineTimestamp: 2000,
+          lineEventId: `evt-cancel-a-${structured ? "structured" : "plain"}`,
+        });
+        expect(delayed).toEqual({ cancelled: false, reason: "event_before_opener" });
+        expect(await pendingField(generationA.key, "terminalized")).toBe("false");
+        expect(await pendingField(generationA.key, "session_generation"))
+          .toBe(generationB);
+        expect(await pendingField(generationA.key, "accumulated_text"))
+          .toBe(`generation-B-${structured ? "structured" : "plain"}`);
+
+        const currentEvent = `evt-cancel-b-${structured ? "structured" : "plain"}`;
+        expect((await cancel(generationA.key, generationB, {
+          expected: snapshotB,
+          lineTimestamp: openerTimestampB + 1,
+          lineEventId: currentEvent,
+        })).cancelled).toBe(true);
+        const replaySnapshot = await pendingUpdatedAt(generationA.key);
+        expect(await cancel(generationA.key, generationB, {
+          expected: replaySnapshot,
+          lineTimestamp: openerTimestampB + 1,
+          lineEventId: currentEvent,
+        })).toEqual({ cancelled: true, reason: "already_cancelled" });
+      },
+    );
+  }
+
+  for (const structured of [false, true] as const) {
+    test(
+      `missing opener evidence refuses cancellation (${structured ? "structured" : "plain-text"})`,
+      async () => {
+        const { key, generation } = await seedPending({
+          entryOrigin: structured ? "structured_menu" : null,
+        });
+        if (structured) {
+          await scalar(`
+            DELETE FROM public.raw_messages
+            WHERE line_event_id = (
+              SELECT opened_line_event_id FROM public.pending_sessions
+              WHERE session_key = ${q(key)}
+            ) RETURNING 1`);
+        } else {
+          await scalar(`
+            UPDATE public.pending_sessions
+            SET plain_text_opened_line_event_id = NULL,
+                plain_text_opened_line_timestamp_ms = NULL
+            WHERE session_key = ${q(key)} RETURNING 1`);
+        }
+        const result = await cancel(key, generation, { lineTimestamp: 2001 });
+        expect(result).toEqual({ cancelled: false, reason: "opener_boundary_unproven" });
+        expect(await pendingField(key, "terminalized")).toBe("false");
+      },
+    );
+  }
 
   // ── 16-18. Ownership ───────────────────────────────────────────────────────
 
@@ -546,11 +819,11 @@ describe.skipIf(!pgAvailable)("cancel the active produce draft on PostgreSQL 17"
     const { key, generation } = await seedPending();
     const noKey = await run(`
       SELECT public.cancel_active_pending_produce_draft(
-        '', ${q(generation)}::uuid, now(), ${q(SOURCE)}, 'evt', 'production')`);
+        '', ${q(generation)}::uuid, now(), 2000, ${q(SOURCE)}, 'evt', 'production')`);
     expect(noKey.code).not.toBe(0);
     const noEvent = await run(`
       SELECT public.cancel_active_pending_produce_draft(
-        ${q(key)}, ${q(generation)}::uuid, now(), ${q(SOURCE)}, '  ', 'production')`);
+        ${q(key)}, ${q(generation)}::uuid, now(), 2000, ${q(SOURCE)}, '  ', 'production')`);
     expect(noEvent.code).not.toBe(0);
     expect(await pendingField(key, "terminalized")).toBe("false");
   });

@@ -132,6 +132,8 @@ import {
   CANCEL_ACTIVE_DRAFT_NONE_REPLY,
   CANCEL_ACTIVE_DRAFT_REFUSED_REPLY,
   CANCEL_ACTIVE_DRAFT_SUCCESS_REPLY,
+  CANCEL_ACTIVE_DRAFT_UNAVAILABLE_REASON,
+  CANCEL_ACTIVE_DRAFT_UNAVAILABLE_REPLY,
   cancelActiveProduceDraft,
   isExactCancelActiveDraftCommand,
   withCancelActiveDraftHint,
@@ -946,6 +948,7 @@ export class WebhookService {
           sessionKey,
           sessionGeneration: pending.session_generation,
           expectedUpdatedAt: pending.updated_at,
+          lineTimestampMs: event.timestamp,
           sourceId,
           lineEventId: eventId,
           runtimeEnvironment: getRuntimeEnvironment(),
@@ -958,13 +961,22 @@ export class WebhookService {
           roundOutcome: cancelled.cancelled ? cancelled.roundOutcome ?? null : null,
         });
         if (replyToken) {
+          // Three outcomes, three replies. The unavailable case is separated
+          // out because "try again" is actively wrong advice when the RPC does
+          // not exist on this database yet (app deployed ahead of its
+          // migration) — the operator would retry forever. It is still a
+          // refusal: neither non-success branch ever claims the draft was
+          // cancelled.
+          let reply: string;
+          if (cancelled.cancelled) {
+            reply = CANCEL_ACTIVE_DRAFT_SUCCESS_REPLY;
+          } else if (cancelled.reason === CANCEL_ACTIVE_DRAFT_UNAVAILABLE_REASON) {
+            reply = CANCEL_ACTIVE_DRAFT_UNAVAILABLE_REPLY;
+          } else {
+            reply = CANCEL_ACTIVE_DRAFT_REFUSED_REPLY;
+          }
           try {
-            await this.replyMessage(
-              replyToken,
-              cancelled.cancelled
-                ? CANCEL_ACTIVE_DRAFT_SUCCESS_REPLY
-                : CANCEL_ACTIVE_DRAFT_REFUSED_REPLY,
-            );
+            await this.replyMessage(replyToken, reply);
           } catch (replyError) {
             log.error("produce draft cancellation reply failed", {
               error: String(replyError),

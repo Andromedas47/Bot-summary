@@ -15,8 +15,10 @@ import {
   CANCEL_ACTIVE_DRAFT_NONE_REPLY,
   CANCEL_ACTIVE_DRAFT_REFUSED_REPLY,
   CANCEL_ACTIVE_DRAFT_SUCCESS_REPLY,
+  CANCEL_ACTIVE_DRAFT_UNAVAILABLE_REASON,
+  CANCEL_ACTIVE_DRAFT_UNAVAILABLE_REPLY,
+  cancelActiveProduceDraft,
   isExactCancelActiveDraftCommand,
-  isUserCancelledPendingRow,
   withCancelActiveDraftHint,
 } from "@/lib/produce/cancel-active-draft";
 
@@ -43,6 +45,8 @@ class CancelDatabase {
   /** Scripted answer for the cancellation RPC. */
   cancelOutcome: Row = { cancelled: true, reason: "cancelled", round_outcome: "cancelled" };
   cancelError: string | null = null;
+  /** PostgREST/PG error code paired with cancelError, when the test needs one. */
+  cancelErrorCode: string | null = null;
   bindOutcome: Row = { outcome: "bound", accountability_round_id: ROUND };
   tables: Record<string, Row[]> = {
     pending_sessions: [],
@@ -119,7 +123,23 @@ class CancelDatabase {
     this.rpcCalls.push(name);
     if (name === "cancel_active_pending_produce_draft") {
       this.cancelArgs.push(args);
-      if (this.cancelError) return { data: null, error: { message: this.cancelError } };
+      if (this.cancelError) {
+        return {
+          data: null,
+          error: { message: this.cancelError, code: this.cancelErrorCode },
+        };
+      }
+      if (
+        this.pending
+        && typeof this.pending.plain_text_opened_line_timestamp_ms === "number"
+        && typeof args.p_line_timestamp_ms === "number"
+        && args.p_line_timestamp_ms <= this.pending.plain_text_opened_line_timestamp_ms
+      ) {
+        return {
+          data: { cancelled: false, reason: "event_before_opener" },
+          error: null,
+        };
+      }
       if (this.cancelOutcome.cancelled === true && this.pending) {
         // What the real RPC does, in the only respects this layer can observe.
         this.pending.terminalized = true;
@@ -221,10 +241,10 @@ function master(rows: Array<Partial<Row>>): Row[] {
   }));
 }
 
-function textEvent(text: string, eventId: string): LineMessageEvent {
+function textEvent(text: string, eventId: string, timestamp = Date.now()): LineMessageEvent {
   return {
     type: "message",
-    timestamp: Date.now(),
+    timestamp,
     source: { type: "group", groupId: "group-1", userId: "user-1" },
     replyToken: `reply-${eventId}`,
     webhookEventId: eventId,
@@ -262,8 +282,9 @@ describe("cancelling the active draft", () => {
     const row = pendingRow(WITHDRAWAL);
     const db = new CancelDatabase(row);
     const replies: string[] = [];
+    const event = textEvent(CANCEL_ACTIVE_DRAFT_COMMAND, "cancel-1", 2001);
     await build(db, replies).processEvents(
-      [textEvent(CANCEL_ACTIVE_DRAFT_COMMAND, "cancel-1")],
+      [event],
       "dest",
     );
 
@@ -274,6 +295,7 @@ describe("cancelling the active draft", () => {
     expect(db.cancelArgs[0]!.p_session_key).toBe(SESSION_KEY);
     expect(db.cancelArgs[0]!.p_session_generation).toBe(GENERATION);
     expect(db.cancelArgs[0]!.p_expected_updated_at).toBe(row.updated_at);
+    expect(db.cancelArgs[0]!.p_line_timestamp_ms).toBe(event.timestamp);
     expect(db.cancelArgs[0]!.p_source_id).toBe("group-1");
     expect(db.cancelArgs[0]!.p_line_event_id).toBe("cancel-1");
     expect(db.cancelArgs[0]!.p_runtime_environment).toBe("development");
@@ -339,6 +361,85 @@ describe("cancelling the active draft", () => {
 
     expect(replies).toEqual([CANCEL_ACTIVE_DRAFT_REFUSED_REPLY]);
     expect(db.pending!.terminalized).toBe(false);
+  });
+
+  it("says the feature is unavailable — not 'try again' — when the RPC is missing", async () => {
+    // App deployed ahead of its migration. The generic refusal tells the
+    // operator to retry, which CANNOT succeed until the migration lands, so
+    // they would retry forever. PG 42883 = function does not exist; PostgREST
+    // answers PGRST202 when no function matches the posted arguments — the same
+    // narrow pair src/lib/line/pending-close-recovery.ts detects.
+    for (const code of ["42883", "PGRST202"]) {
+      const db = new CancelDatabase(pendingRow(WITHDRAWAL));
+      db.cancelError = "Could not find the function public.cancel_active_pending_produce_draft";
+      db.cancelErrorCode = code;
+      const replies: string[] = [];
+      await build(db, replies).processEvents(
+        [textEvent(CANCEL_ACTIVE_DRAFT_COMMAND, `missing-${code}`)],
+        "dest",
+      );
+
+      expect(replies).toEqual([CANCEL_ACTIVE_DRAFT_UNAVAILABLE_REPLY]);
+      // Distinct from the busy refusal, and never a success.
+      expect(replies[0]).not.toBe(CANCEL_ACTIVE_DRAFT_REFUSED_REPLY);
+      expect(replies[0]).not.toContain("✅");
+      // Still fail-closed: the draft is untouched and stays capturable.
+      expect(db.pending!.terminalized).toBe(false);
+      expect(db.pending!.accumulated_text).toBe(WITHDRAWAL);
+    }
+  });
+
+  it("keeps the generic busy refusal for every other RPC error", async () => {
+    const db = new CancelDatabase(pendingRow(WITHDRAWAL));
+    db.cancelError = "deadlock detected";
+    db.cancelErrorCode = "40P01";
+    const replies: string[] = [];
+    await build(db, replies).processEvents(
+      [textEvent(CANCEL_ACTIVE_DRAFT_COMMAND, "cancel-deadlock")],
+      "dest",
+    );
+
+    expect(replies).toEqual([CANCEL_ACTIVE_DRAFT_REFUSED_REPLY]);
+  });
+
+  it("resolves the missing RPC to a distinct reason, not a leaked message", async () => {
+    const outcome = await cancelActiveProduceDraft(
+      {
+        rpc: async () => ({
+          data: null,
+          error: { code: "PGRST202", message: "Could not find the function" },
+        }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+      {
+        sessionKey: SESSION_KEY,
+        sessionGeneration: GENERATION,
+        expectedUpdatedAt: new Date().toISOString(),
+        lineTimestampMs: 2001,
+        sourceId: "group-1",
+        lineEventId: "evt",
+        runtimeEnvironment: "production",
+      },
+    );
+    expect(outcome).toEqual({
+      cancelled: false,
+      reason: CANCEL_ACTIVE_DRAFT_UNAVAILABLE_REASON,
+    });
+  });
+
+  it("passes a delayed cancel timestamp so the database cannot cancel the newer draft", async () => {
+    const db = new CancelDatabase(
+      pendingRow(WITHDRAWAL, { plain_text_opened_line_timestamp_ms: 2000 }),
+    );
+    const replies: string[] = [];
+    const event = textEvent(CANCEL_ACTIVE_DRAFT_COMMAND, "cancel-delayed", 1999);
+
+    await build(db, replies).processEvents([event], "dest");
+
+    expect(replies).toEqual([CANCEL_ACTIVE_DRAFT_REFUSED_REPLY]);
+    expect(db.cancelArgs[0]!.p_line_timestamp_ms).toBe(1999);
+    expect(db.pending!.terminalized).toBe(false);
+    expect(db.pending!.accumulated_text).toBe(WITHDRAWAL);
   });
 
   it("treats an already_cancelled replay as the success it is", async () => {
@@ -466,39 +567,5 @@ describe("the cancel hint", () => {
     expect(withCancelActiveDraftHint("เนื้อความ"))
       .toBe(`เนื้อความ\n\n${CANCEL_ACTIVE_DRAFT_HINT}`);
     expect(CANCEL_ACTIVE_DRAFT_HINT).toContain(CANCEL_ACTIVE_DRAFT_COMMAND);
-  });
-});
-
-describe("the user-cancelled predicate", () => {
-  it("is true only for a row this feature terminalized", () => {
-    expect(isUserCancelledPendingRow({
-      finalization_status: "failed_closed",
-      finalization_error: { reason: "user_cancelled", cancel_line_event_id: "e" },
-    })).toBe(true);
-  });
-
-  it("stays fail-closed for every other terminal shape", () => {
-    const cases: Array<{ finalization_status?: string | null; finalization_error?: unknown }> = [
-      // Genuinely lost produce, and the two other structured failed_closed reasons.
-      { finalization_status: "failed_closed", finalization_error: null },
-      { finalization_status: "failed_closed", finalization_error: { reason: "superseded" } },
-      {
-        finalization_status: "failed_closed",
-        finalization_error: { reason: "close_refused_unresolved" },
-      },
-      // Still in flight.
-      { finalization_status: "pending", finalization_error: null },
-      { finalization_status: "processing", finalization_error: null },
-      // The reason on a non-terminal status must not resolve anything either.
-      { finalization_status: "pending", finalization_error: { reason: "user_cancelled" } },
-      // Defensive: jsonb can be a scalar, an array or absent.
-      { finalization_status: "failed_closed", finalization_error: "user_cancelled" },
-      { finalization_status: "failed_closed", finalization_error: ["user_cancelled"] },
-      { finalization_status: "failed_closed", finalization_error: 7 },
-      { finalization_status: "failed_closed" },
-      { finalization_status: null, finalization_error: { reason: "user_cancelled" } },
-      {},
-    ];
-    for (const row of cases) expect(isUserCancelledPendingRow(row)).toBe(false);
   });
 });

@@ -34,7 +34,6 @@ import {
   type SalesSessionAudit,
   type SalesSourceRow,
 } from "./calculate";
-import { isUserCancelledPendingRow } from "@/lib/produce/cancel-active-draft";
 
 /**
  * P1 Daily Sales — the only path from the database to a SalesReport.
@@ -89,7 +88,7 @@ const RESOLVED_PENDING_STATUSES = new Set(["finalized", "duplicate"]);
  * are read from the accumulated text instead.
  */
 const PENDING_FAILURE_SELECT =
-  "id, session_key, session_generation, accumulated_text, created_at, finalization_status, finalization_error, business_date, source_id, staff_label, market_label, declared_transaction_type, accountability_round_id" as const;
+  "id, session_key, session_generation, accumulated_text, created_at, finalization_status, business_date, source_id, staff_label, market_label, declared_transaction_type, accountability_round_id" as const;
 
 /** Safety stop for the undated scope scans — a short read must never pass silently. */
 const SCOPE_SCAN_MAX_PAGES = 50;
@@ -501,7 +500,6 @@ async function scanUnresolvedPendingAttempts(
     accumulated_text?: string | null;
     created_at?: string | null;
     finalization_status?: string | null;
-    finalization_error?: unknown;
     business_date?: string | null;
     source_id?: string | null;
     staff_label?: string | null;
@@ -527,13 +525,7 @@ async function scanUnresolvedPendingAttempts(
   );
 
   const unresolved = rows.filter(
-    (row) =>
-      !RESOLVED_PENDING_STATUSES.has(row.finalization_status ?? "pending")
-      // A draft the operator explicitly cancelled is not lost produce: nothing
-      // was ever meant to land. It shares 'failed_closed' with genuinely lost
-      // documents, so the STRUCTURED reason is what resolves it — every other
-      // unknown status stays fail-closed exactly as before.
-      && !isUserCancelledPendingRow(row),
+    (row) => !RESOLVED_PENDING_STATUSES.has(row.finalization_status ?? "pending"),
   );
   if (unresolved.length === 0) return [];
 

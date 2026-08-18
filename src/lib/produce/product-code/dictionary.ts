@@ -77,7 +77,7 @@ const RAW: ReadonlyArray<readonly [string, string, string, string, boolean]> = [
   ["ม51","ม","ผลไม้","สาลี่หอม",true],
   ["ม52","ม","ผลไม้","องุ่นเขียว",true],
   ["ม53","ม","ผลไม้","องุ่นไข่ปลา",true],
-  ["ม54","ม","ผลไม้","ไชมัส",true],
+  ["ม54","ม","ผลไม้","ไซมัส",true],
   ["ม55","ม","ผลไม้","องุ่นดำ",true],
   ["ม56","ม","ผลไม้","องุ่นแดง",true],
   ["ม57","ม","ผลไม้","องุ่นแม่มด",true],
@@ -86,6 +86,12 @@ const RAW: ReadonlyArray<readonly [string, string, string, string, boolean]> = [
   ["ม60","ม","ผลไม้","อินทผลัม",true],
   ["ม61","ม","ผลไม้","อินทผลัมแดง",true],
   ["ม62","ม","ผลไม้","แอปเปิ้ล",true],
+  ["ม63","ม","ผลไม้","มะม่วงจิ้ว",true],
+  ["ม64","ม","ผลไม้","ลูกพีชเล็ก",true],
+  ["ม65","ม","ผลไม้","ลูกพีชใหญ่",true],
+  ["ม66","ม","ผลไม้","ลูกไหนเขียว",true],
+  ["ม67","ม","ผลไม้","ลูกไหนดำ",true],
+  ["ม68","ม","ผลไม้","องุ่นคิมสัน",true],
   ["ผ01","ผ","ผัก / สมุนไพร / เครื่องประกอบอาหาร","ฝักกระเจี๊ยบ",true],
   ["ผ02","ผ","ผัก / สมุนไพร / เครื่องประกอบอาหาร","กระชาย",true],
   ["ผ03","ผ","ผัก / สมุนไพร / เครื่องประกอบอาหาร","กระชายซอย",true],
@@ -285,7 +291,7 @@ export const PRODUCT_CODE_ENTRIES: ReadonlyArray<ProductCodeEntry> = RAW.map(
 );
 
 /** Every row in the approved dictionary, retired ones included. */
-export const PRODUCT_CODE_COUNT = 253;
+export const PRODUCT_CODE_COUNT = 259;
 
 /** Rows that currently resolve. Equal to PRODUCT_CODE_COUNT until one retires. */
-export const PRODUCT_CODE_ENABLED_COUNT = 253;
+export const PRODUCT_CODE_ENABLED_COUNT = 259;

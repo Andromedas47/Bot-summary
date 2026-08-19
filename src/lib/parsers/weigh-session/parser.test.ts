@@ -1587,6 +1587,27 @@ describe("canonical header price survives a subunit quantity conversion (regress
     });
   });
 
+  // The pre-fix price is kept on the parsed item as evidence, so a resend of a
+  // message imported before the fix still matches its own reservation (see
+  // legacySubunitPricedSession in session-dedup-service.ts). It is transient:
+  // it must never reach the produce_items row, where it would be a second,
+  // contradictory price.
+  it("keeps the retired price as lookup evidence only, never in the persisted row", async () => {
+    const { parsed, itemInserts } = await parseAndPersistItems(
+      [
+        "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+        "2องุ่นคิมสัน120บาท",
+        "0.7.ขีด",
+        "จบรายการเบิก",
+      ].join("\n"),
+      "production-grape-legacy-price-evidence",
+    );
+
+    expect(parsed.items[0].legacy_subunit_price_per_unit).toBe(1200);
+    expect(Object.keys(itemInserts[0])).not.toContain("legacy_subunit_price_per_unit");
+    expect(itemInserts[0].price_per_unit).toBe(120);
+  });
+
   it.each([
     // [header, quantityLine, expectedQuantity, expectedUnit, expectedPrice, expectedMoney]
     ["สินค้า100บาท", "1ขีด",   0.1, "โล", 100, 10],

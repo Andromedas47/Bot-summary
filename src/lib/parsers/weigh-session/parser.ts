@@ -14,7 +14,7 @@ import {
   unknownProductCodeError,
 } from "@/lib/produce/product-code/resolver";
 import { RE } from "./regex";
-import { isKnownUnit, normalizeUnitAlias, resolveUnitQuantity } from "./units";
+import { conversionFactor, isKnownUnit, normalizeUnitAlias, resolveUnitQuantity } from "./units";
 import type {
   WeighSession,
   WeighSessionItem,
@@ -452,6 +452,17 @@ function applyQuantity(
   const resolved = resolveUnitQuantity(quantity, unit);
   item.quantity  = resolved.quantity;
   item.unit      = resolved.unit;
+
+  // The one place the retired rescaling still gets computed — as evidence, not
+  // as the item's price. Every duplicate-detection fingerprint folds
+  // price_per_unit in, so a message imported before the fix is reserved under
+  // the OLD price; without this a resend of one would hash as a new document
+  // and persist a second time. Never assigned to price_per_unit, never
+  // persisted, never part of business content.
+  const factor = conversionFactor(unit);
+  if (item.basis_quantity == null && factor !== 1) {
+    item.legacy_subunit_price_per_unit = Number((item.price_per_unit! / factor).toFixed(2));
+  }
 }
 
 function finalize(
@@ -471,6 +482,7 @@ function finalize(
     basis_quantity:   p.basis_quantity ?? null,
     basis_unit:       p.basis_unit     ?? null,
     basis_price:      p.basis_price    ?? null,
+    legacy_subunit_price_per_unit: p.legacy_subunit_price_per_unit,
   };
 }
 

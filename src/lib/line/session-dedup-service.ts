@@ -86,11 +86,50 @@ export function sessionHashReservations(parsed: WeighSession): string[] {
 }
 
 /**
+ * The same document as the pre-2026-08-19 parser would have priced it, or null
+ * if no subunit conversion touched it.
+ *
+ * Until that fix, a quantity line in ขีด/กรัม/มิลลิลิตร also divided
+ * price_per_unit by the conversion factor, so a "120บาท / 0.7ขีด" withdrawal
+ * was recorded as 1200. Every fingerprint generation folds price_per_unit in,
+ * which means those already-imported documents are reserved under the old
+ * price. This rebuilds that historical identity — for LOOKUP only — from the
+ * evidence the parser carries on each converted item.
+ */
+export function legacySubunitPricedSession(parsed: WeighSession): WeighSession | null {
+  if (!parsed.items.some((item) => item.legacy_subunit_price_per_unit !== undefined)) return null;
+
+  return {
+    ...parsed,
+    items: parsed.items.map((item) =>
+      item.legacy_subunit_price_per_unit === undefined
+        ? item
+        : { ...item, price_per_unit: item.legacy_subunit_price_per_unit }),
+  };
+}
+
+/**
  * Every identity this document could already be recorded under — the
- * reservations plus the pre-PR #51 legacy hash. Read-only; never written.
+ * reservations, the pre-PR #51 legacy hash, and, for a document a subunit
+ * conversion touched, all three of those computed under the pre-fix price.
+ * Read-only; never written. The pre-fix price is deliberately absent from
+ * sessionHashReservations: a new document must never claim a hash derived from
+ * arithmetic this codebase no longer believes.
  */
 export function sessionHashCandidates(parsed: WeighSession): string[] {
-  return [...new Set([...sessionHashReservations(parsed), computeLegacySessionHash(parsed)])];
+  const legacyPriced = legacySubunitPricedSession(parsed);
+
+  return [...new Set([
+    ...sessionHashReservations(parsed),
+    computeLegacySessionHash(parsed),
+    ...(legacyPriced
+      ? [
+          computeSessionHash(legacyPriced),
+          ...weighSessionCompatibilityFingerprints(legacyPriced),
+          computeLegacySessionHash(legacyPriced),
+        ]
+      : []),
+  ])];
 }
 
 /** Which algorithm wrote a hash. See business-fingerprint.ts. */

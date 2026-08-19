@@ -1520,6 +1520,42 @@ describe("P1 lost-produce audit recognises proven duplicates", () => {
     expect(lostBlockers(report)).toBe(1);
   });
 
+  // A ขีด message imported before the 2026-08-19 subunit price fix was hashed
+  // with the old rescaled price (119 / 0.1 = 1190). Re-parsing it today yields
+  // 119, so without the legacy-priced reading its proof no longer matches and
+  // produce that demonstrably landed is reported as lost.
+  test("a duplicate imported before the subunit price fix keeps its proof", async () => {
+    const kheedText = [
+      "18:53 เสือ ตลาดกี้ เบิก 25/07/2569",
+      "18:53 เสือ 1.หมอนทอง119บาท",
+      "0.8ขีด",
+    ].join("\n");
+    const parsed = parseWeighSession(kheedText);
+    // Exactly what the pre-fix parser produced for this message: the price
+    // divided by the ขีด factor, spelled out rather than derived from the code
+    // under test.
+    const asImported = {
+      ...parsed,
+      items: parsed.items.map((item) => ({ ...item, price_per_unit: 1190 })),
+    };
+
+    expect(parsed.items[0]).toMatchObject({ quantity: 0.08, unit: "โล", price_per_unit: 119 });
+
+    const report = await loadSalesReport(
+      fakeSupabase(
+        lostFixture([resentMessage({ raw_text: kheedText })], {
+          importedSessions: [{ session_hash: computeSessionHash(asImported) }],
+          produceItems: asImported.items.map((item) => ({
+            item_hash: computeItemHash(asImported, item),
+          })),
+        }),
+      ),
+      DATE,
+    );
+
+    expect(lostBlockers(report)).toBe(0);
+  });
+
   test("A. a partially persisted session — item A landed, item B did not — still blocks", async () => {
     const twoItems = [
       "18:53 เสือ ตลาดกี้ เบิก 25/07/2569",

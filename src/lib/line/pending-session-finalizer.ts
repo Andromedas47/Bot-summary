@@ -461,8 +461,25 @@ export async function finalizePendingGeneration(
       canonicalLines: canonicalWithdrawalItemLines(parsed),
     }),
   };
+  // Named fields, not a spread of the parsed item. A WeighSessionItem also
+  // carries lookup-only evidence that must never reach a produce row —
+  // legacy_subunit_price_per_unit, the price the retired subunit rescaling
+  // would have stored (see types.ts). Sending the whole object put a second,
+  // contradictory price on the wire; today's RPC extracts named keys and drops
+  // it, but nothing in SQL enforces that, and the field it would resurrect is
+  // the exact bug this path was corrected for.
   const itemPayload = parsed.items.map((item) => ({
-    ...item,
+    item_number: item.item_number,
+    product_name: item.product_name,
+    price_per_unit: item.price_per_unit,
+    quantity: item.quantity,
+    unit: item.unit,
+    section: item.section,
+    transaction_type: item.transaction_type,
+    pricing_mode: item.pricing_mode,
+    basis_quantity: item.basis_quantity,
+    basis_unit: item.basis_unit,
+    basis_price: item.basis_price,
     item_hash: computeItemHash(parsed, item),
   }));
 

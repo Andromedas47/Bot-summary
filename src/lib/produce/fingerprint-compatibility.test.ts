@@ -159,3 +159,68 @@ describe("reservations and candidates", () => {
       .not.toContain(v1("พาชิโอ้"));
   });
 });
+
+/**
+ * The price generation — the 2026-08-19 subunit fix.
+ *
+ * Until then a quantity line in ขีด/กรัม/มิลลิลิตร also divided price_per_unit
+ * by the conversion factor, so the real "2องุ่นคิมสัน120บาท / 0.7.ขีด"
+ * withdrawal was imported as 1200. Every generation folds price_per_unit in, so
+ * those documents are reserved under the old price. If a resend hashed only
+ * under the corrected price it would look like a new document and persist a
+ * second time — a duplicate withdrawal, which is exactly what the blocker
+ * exists to stop.
+ *
+ * The pre-fix hashes below are built from the literal 1200 the old parser
+ * produced, not from the helper under test, so this cannot pass by tautology.
+ */
+describe("pre-fix subunit prices stay recognisable", () => {
+  const grapeWithdrawal = () =>
+    parseWeighSession(
+      ["เมย์-ราชพฤก เบิก 18/8/2569", "2องุ่นคิมสัน120บาท", "0.7.ขีด", "จบรายการเบิก"].join("\n"),
+      "2026-08-18",
+    );
+
+  /** The same document as the pre-fix parser priced it: 120 / 0.1 = 1200. */
+  const asImportedBeforeTheFix = () => {
+    const parsed = grapeWithdrawal();
+    return {
+      ...parsed,
+      items: parsed.items.map((item) => ({ ...item, price_per_unit: 1200 })),
+    };
+  };
+
+  it("prices the document correctly today", () => {
+    const item = grapeWithdrawal().items[0];
+    expect(item).toMatchObject({ quantity: 0.07, unit: "โล", price_per_unit: 120 });
+  });
+
+  it("still recognises the row imported under the old rescaled price", () => {
+    const candidates = sessionHashCandidates(grapeWithdrawal());
+    const beforeTheFix = asImportedBeforeTheFix();
+
+    expect(candidates).toContain(computeSessionHash(beforeTheFix));
+    expect(candidates).toContain(computeLegacySessionHash(beforeTheFix));
+    // Not the same hash — which is the whole reason the compatibility set is
+    // needed rather than nothing at all.
+    expect(computeSessionHash(beforeTheFix)).not.toBe(computeSessionHash(grapeWithdrawal()));
+  });
+
+  it("never RESERVES a hash built from the retired arithmetic", () => {
+    const reservations = sessionHashReservations(grapeWithdrawal());
+    const beforeTheFix = asImportedBeforeTheFix();
+
+    expect(reservations).not.toContain(computeSessionHash(beforeTheFix));
+    expect(reservations).not.toContain(computeLegacySessionHash(beforeTheFix));
+    expect(reservations[0]).toBe(computeSessionHash(grapeWithdrawal()));
+  });
+
+  it("adds nothing for a document no conversion touched", () => {
+    // The ต้อม withdrawal is แพค and โล only — factor 1 throughout.
+    const parsed = tomWithdrawal("พาซิโอ้");
+    expect(sessionHashCandidates(parsed)).toEqual([
+      ...sessionHashReservations(parsed),
+      computeLegacySessionHash(parsed),
+    ]);
+  });
+});

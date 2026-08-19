@@ -26,6 +26,18 @@ export interface WeighSessionItem {
   basis_quantity:   number | null;
   basis_unit:       string | null;
   basis_price:      number | null;
+  /** Transient, never persisted and never part of an item's business content:
+   *  the price_per_unit the pre-2026-08-19 parser would have stored for this
+   *  item, back when a subunit quantity line (ขีด/กรัม/มิลลิลิตร) also
+   *  rescaled the price. Present only on items a conversion touched. Read by
+   *  legacySubunitPricedSession in session-dedup-service.ts, so a resend of a
+   *  message imported before the price fix still matches its own reservation.
+   *  Every write path builds its produce row from named fields rather than
+   *  from this object, which is what keeps a second, contradictory price off
+   *  the wire — see persist() in parser.ts and the RPC payload in
+   *  pending-session-finalizer.ts. Anything that spreads a WeighSessionItem
+   *  toward storage has to strip it. */
+  legacy_subunit_price_per_unit?: number;
 }
 
 export interface WeighSession {

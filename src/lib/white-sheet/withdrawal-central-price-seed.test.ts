@@ -801,3 +801,90 @@ describe("central price seeds on withdrawal write, not White Sheet read", () => 
     expect(priceTable.seedRpcCalls).toBe(seedsBefore);
   });
 });
+
+// ── Regression: subunit price-rescaling fix must seed the un-rescaled price ──
+//
+// Before commit 87b1f98, applyQuantity() in the weigh-session parser divided
+// price_per_unit by the ขีด→โล conversion factor (0.1), so a real
+// "องุ่นคิมสัน 120บาท / 0.7ขีด" withdrawal seeded its central selling price
+// from an inflated 1200 baht (120000 satang) instead of the header's real
+// 120 baht (12000 satang). This drives the corrected parser output through
+// the actual write-path persist() → seedCentralPricesFromPersistedWithdrawals
+// boundary — not a hand-built item list — so a regression in either the
+// parser or the seeding math would be caught here.
+describe("central price seeding after the subunit price-rescaling fix", () => {
+  it("seeds 12000 satang, not 120000, for องุ่นคิมสัน 120บาท / 0.7ขีด via the full persist path", async () => {
+    const priceTable = makePriceTable();
+    const itemInserts: Array<Record<string, unknown>> = [];
+    const database = {
+      from(table: string) {
+        if (table === "produce_sessions") {
+          return {
+            insert() {
+              return {
+                select() {
+                  return {
+                    async single() {
+                      return { data: { id: "session-subunit-price-fix" }, error: null };
+                    },
+                  };
+                },
+              };
+            },
+          };
+        }
+        if (table === "produce_items") {
+          return {
+            insert(payload: Record<string, unknown>) {
+              itemInserts.push(payload);
+              return Promise.resolve({ error: null });
+            },
+          };
+        }
+        throw new Error(`unexpected table: ${table}`);
+      },
+      rpc: priceTable.rpc,
+    };
+
+    const event: LineMessageEvent = {
+      type: "message",
+      webhookEventId: "event-subunit-price-fix",
+      deliveryContext: { isRedelivery: false },
+      timestamp: Date.UTC(2026, 6, 24, 5, 0, 0),
+      source: { type: "user", userId: "user-1" },
+      mode: "active",
+      replyToken: "reply-token",
+      message: {
+        id: "message-subunit-price-fix",
+        type: "text",
+        quoteToken: "quote-token",
+        text: [
+          "กี้-ตลาดกี้ เบิก 24/7/2569",
+          "2องุ่นคิมสัน120บาท",
+          "0.7ขีด",
+          "จบรายการเบิก",
+        ].join("\n"),
+      },
+    };
+
+    const result = await new WeighSessionParser().parse(event);
+    await result.persist(database as never, "raw-subunit-price-fix");
+
+    expect(itemInserts).toHaveLength(1);
+    expect(itemInserts[0]).toMatchObject({
+      product_name:   "องุ่นคิมสัน",
+      quantity:       0.07,
+      unit:           "โล",
+      price_per_unit: 120,
+    });
+
+    expect(priceTable.rows).toHaveLength(1);
+    expect(priceTable.rows[0]).toMatchObject({
+      product_key:   "องุ่นคิมสัน",
+      unit_key:      "โล",
+      business_date: BUSINESS_DATE,
+      price_satang:  12000,
+      set_by:        SYSTEM_WITHDRAWAL_SEED_ACTOR,
+    });
+  });
+});

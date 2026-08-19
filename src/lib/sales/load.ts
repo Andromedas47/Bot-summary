@@ -2,7 +2,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { normalizedMarketLabel } from "@/lib/market";
 import { RE } from "@/lib/parsers/weigh-session/regex";
 import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
-import { computeItemHash, sessionHashCandidates } from "@/lib/line/session-dedup-service";
+import {
+  computeItemHash,
+  legacySubunitPricedSession,
+  sessionHashCandidates,
+} from "@/lib/line/session-dedup-service";
 import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
 import { isStrictBusinessDate } from "./cron";
 import { isQaMarketLabel } from "./qa-scopes";
@@ -1026,14 +1030,24 @@ async function accountedProduceMessages(
     .filter((row) => !accounted.has(row.id))
     .map((row) => {
       const parsed = parseWeighSession(row.raw_text ?? "");
-      const itemHashes = parsed.items.map((item) => computeItemHash(parsed, item));
       // Both identities: rows imported before the canonical business
       // fingerprint shipped are reserved under the legacy hash and must keep
       // proving themselves, or every one of them becomes a false "lost produce".
-      return { id: row.id, sessionHashes: sessionHashCandidates(parsed), itemHashes };
+      // The same applies to price: a message whose quantity line was in ขีด and
+      // that landed before the subunit price fix has item hashes built from the
+      // old rescaled price, so that reading has to stay provable too. Either
+      // variant proving itself in full is proof the produce landed.
+      const legacyPriced = legacySubunitPricedSession(parsed);
+      const itemHashVariants = [
+        parsed.items.map((item) => computeItemHash(parsed, item)),
+        ...(legacyPriced
+          ? [legacyPriced.items.map((item) => computeItemHash(legacyPriced, item))]
+          : []),
+      ];
+      return { id: row.id, sessionHashes: sessionHashCandidates(parsed), itemHashVariants };
     })
     // No items → nothing to prove landed. Fail closed.
-    .filter((row) => row.itemHashes.length > 0);
+    .filter((row) => row.itemHashVariants[0].length > 0);
   if (unexplained.length === 0) return accounted;
 
   const importedSessionHashes = new Set<string>();
@@ -1052,7 +1066,7 @@ async function accountedProduceMessages(
 
   // Persisted rows per item hash, so multiplicity is respected.
   const persistedCounts = new Map<string, number>();
-  const wanted = [...new Set(reserved.flatMap((row) => row.itemHashes))];
+  const wanted = [...new Set(reserved.flatMap((row) => row.itemHashVariants.flat()))];
   for (const chunk of chunks(wanted, LOOKUP_CHUNK_SIZE)) {
     const { data, error } = await supabase
       .from("produce_items")
@@ -1066,10 +1080,12 @@ async function accountedProduceMessages(
   }
 
   for (const row of reserved) {
-    const needed = new Map<string, number>();
-    for (const hash of row.itemHashes) needed.set(hash, (needed.get(hash) ?? 0) + 1);
+    const complete = row.itemHashVariants.some((variant) => {
+      const needed = new Map<string, number>();
+      for (const hash of variant) needed.set(hash, (needed.get(hash) ?? 0) + 1);
 
-    const complete = [...needed].every(([hash, count]) => (persistedCounts.get(hash) ?? 0) >= count);
+      return [...needed].every(([hash, count]) => (persistedCounts.get(hash) ?? 0) >= count);
+    });
     if (complete) accounted.add(row.id);
   }
 

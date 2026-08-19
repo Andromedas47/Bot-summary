@@ -339,3 +339,40 @@ describe("finalizer reads the same authoritative document as review/close/confir
     expect(call.args.p_raw_text).toBe(legacyText);
   });
 });
+
+/**
+ * A WeighSessionItem carries lookup-only evidence next to its real price:
+ * legacy_subunit_price_per_unit, the value the retired ขีด/กรัม rescaling
+ * would have produced (see weigh-session/types.ts). The RPC payload used to be
+ * a spread of the whole item, which put that second, contradictory price on
+ * the wire to Postgres — inert against today's named-key extraction, and one
+ * permissive change away from resurrecting the 120→1200 bug.
+ */
+describe("the finalizer RPC payload carries the item's real price only", () => {
+  const KHEED_TEXT = "\n1. องุ่นคิมสัน 120 บาท\n0.7 ขีด";
+
+  it("sends the header price and never the retired subunit rescaling", async () => {
+    const db = new FinalizerDocDouble(tables({
+      includeStaleCancelEvent: false,
+      accumulatedTextInLedger: KHEED_TEXT,
+    }));
+    await finalizePendingGeneration(
+      db.asClient(),
+      structuredSnapshot({ accumulated_text: KHEED_TEXT }),
+      async () => ({}),
+    );
+
+    const items = tryFinalizeCall(db).args.p_items as Row[];
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      product_name:   "องุ่นคิมสัน",
+      quantity:       0.07,
+      unit:           "โล",
+      price_per_unit: 120,
+    });
+    expect(Object.keys(items[0])).not.toContain("legacy_subunit_price_per_unit");
+    // Belt and braces: the retired value must not appear anywhere in the
+    // serialized payload, under any key.
+    expect(JSON.stringify(items[0])).not.toContain("1200");
+  });
+});

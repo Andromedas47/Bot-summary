@@ -140,6 +140,13 @@ export type FingerprintGeneration = "V0" | "V1" | "V2";
  *
  * V2 is the document's own identity, V0 the pre-PR #51 legacy hash, and
  * anything else in the reserved set is a V1 compatibility fingerprint.
+ *
+ * A pre-subunit-price-fix match (see legacySubunitPricedSession) reports as V1
+ * too, since it is neither of the two exact comparisons. That label is only
+ * ever logged — release() decides ownership from reserved_by_generation, never
+ * from this — so the imprecision costs a slightly vague log line and nothing
+ * else. Narrowing it would mean recomputing the whole legacy-priced set here
+ * on every call, for a value no branch reads.
  */
 export function fingerprintGenerationOf(
   parsed: WeighSession,

@@ -1545,3 +1545,152 @@ describe("RE.ITEM_WITH_BASIS", () => {
     expect("38โล".match(RE.ITEM_WITH_BASIS)).toBeNull();
   });
 });
+
+// ── Regression: canonical header price survives a subunit quantity conversion ──
+//
+// applyQuantity() used to divide price_per_unit by the ขีด/กรัม conversion
+// factor after converting the measurement, on the theory that price_per_unit
+// was quoted per the raw (sub)unit. It never was: an item header quotes its
+// price per the CANONICAL selling unit, so only the measurement should be
+// rescaled. See commit 87b1f98 for the fix and the real production message
+// that exposed it (below).
+describe("canonical header price survives a subunit quantity conversion (regression)", () => {
+  it('pins the real production withdrawal "2องุ่นคิมสัน120บาท" / "0.7.ขีด" at 0.070 โล × 120 = 8.40, not × 1200 = 84', async () => {
+    const { parsed, itemInserts } = await parseAndPersistItems(
+      [
+        "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+        "2องุ่นคิมสัน120บาท",
+        "0.7.ขีด",
+        "จบรายการเบิก",
+      ].join("\n"),
+      "production-grape-subunit-price-fix",
+    );
+    const item = parsed.items[0];
+
+    expect(parsed.parse_errors).toHaveLength(0);
+    expect(item).toMatchObject({
+      product_name: "องุ่นคิมสัน",
+      quantity: 0.07,
+      unit: "โล",
+      price_per_unit: 120,
+    });
+    // 0.07 * 120 is 8.400000000000002 in IEEE754 (0.07 has no exact binary
+    // representation) — toBeCloseTo absorbs that float noise instead of a
+    // brittle exact-equality assertion.
+    expect(item.price_per_unit * (item.quantity ?? 0)).toBeCloseTo(8.4, 10);
+    expect(() => assertWeighSessionFinalizable(parsed)).not.toThrow();
+    expect(itemInserts[0]).toMatchObject({
+      product_name: "องุ่นคิมสัน",
+      quantity: 0.07,
+      unit: "โล",
+      price_per_unit: 120,
+    });
+  });
+
+  it.each([
+    // [header, quantityLine, expectedQuantity, expectedUnit, expectedPrice, expectedMoney]
+    ["สินค้า100บาท", "1ขีด",   0.1, "โล", 100, 10],
+    ["สินค้า120บาท", "10ขีด",  1.0, "โล", 120, 120], // subunit quantity reaching a whole-kilo boundary
+    ["สินค้า120บาท", "0.5โล",  0.5, "โล", 120, 60],  // canonical โล input — completely unchanged by the fix
+  ])(
+    "%s / %s → quantity %s %s, price_per_unit %s, money %s",
+    (header, quantityLine, expectedQuantity, expectedUnit, expectedPrice, expectedMoney) => {
+      const parsed = parseWeighSession([
+        "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+        `1${header}`,
+        quantityLine,
+        "จบรายการเบิก",
+      ].join("\n"));
+
+      expect(parsed.parse_errors).toEqual([]);
+      expect(parsed.items).toHaveLength(1);
+      expect(parsed.items[0]).toMatchObject({
+        quantity: expectedQuantity,
+        unit: expectedUnit,
+        price_per_unit: expectedPrice,
+      });
+      expect(
+        parsed.items[0].price_per_unit * (parsed.items[0].quantity ?? 0),
+      ).toBeCloseTo(expectedMoney, 10);
+    },
+  );
+
+  // Punctuation variants of the same 0.7ขีด quantity line — verified against
+  // RE.QUANTITY directly (see the "RE.QUANTITY" describe block above and the
+  // regex comment in regex.ts: the dot before the unit is optional, and any
+  // amount of whitespace is allowed). All three genuinely parse and must
+  // produce identical results.
+  it.each(["0.7ขีด", "0.7.ขีด", "0.7 ขีด"])(
+    "treats punctuation variant %s identically: 0.07 โล at price 120",
+    (quantityLine) => {
+      const parsed = parseWeighSession([
+        "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+        "1สินค้า120บาท",
+        quantityLine,
+        "จบรายการเบิก",
+      ].join("\n"));
+
+      expect(parsed.parse_errors).toEqual([]);
+      expect(parsed.items[0]).toMatchObject({
+        quantity: 0.07,
+        unit: "โล",
+        price_per_unit: 120,
+      });
+      expect(
+        parsed.items[0].price_per_unit * (parsed.items[0].quantity ?? 0),
+      ).toBeCloseTo(8.4, 10);
+    },
+  );
+
+  // กรัม runs the same applyQuantity code path as ขีด (factor 0.001 instead
+  // of 0.1) but has ZERO production usage to date — verified read-only
+  // against produce_items: 0 raw messages contain a standalone กรัม quantity
+  // line, and the 43 rows containing กิโลกรัม are the factor-1 alias to โล
+  // (see UNIT_ALIASES in units.ts), not a กรัม conversion. This test pins
+  // the structural contract (same conversion path as ขีด) rather than an
+  // observed production shape.
+  it("converts กรัม the same way as ขีด: สินค้า120บาท / 500กรัม → 0.5 โล, price 120, money 60", () => {
+    const parsed = parseWeighSession([
+      "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+      "1สินค้า120บาท",
+      "500กรัม",
+      "จบรายการเบิก",
+    ].join("\n"));
+
+    expect(parsed.parse_errors).toEqual([]);
+    expect(parsed.items[0]).toMatchObject({
+      quantity: 0.5,
+      unit: "โล",
+      price_per_unit: 120,
+    });
+    expect(
+      parsed.items[0].price_per_unit * (parsed.items[0].quantity ?? 0),
+    ).toBeCloseTo(60, 10);
+  });
+
+  // Basis-priced entries (pricing_mode "basis") derive price_per_unit from
+  // basis_price/basis_quantity in parseItemLine's ITEM_WITH_BASIS branch —
+  // a wholly separate code path from applyQuantity's subunit conversion.
+  // This proves the fix did not reach into that branch: a following
+  // quantity line only converts the measurement, never price_per_unit.
+  it('leaves an explicit basis-priced entry unchanged: "1เงาะ30ขีด100บาท" keeps price_per_unit 33.33 regardless of the quantity line', () => {
+    const parsed = parseWeighSession([
+      "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+      "1เงาะ30ขีด100บาท",
+      "15.4โล",
+      "จบรายการเบิก",
+    ].join("\n"));
+    const item = parsed.items[0];
+
+    expect(parsed.parse_errors).toHaveLength(0);
+    expect(item).toMatchObject({
+      pricing_mode:   "basis",
+      basis_quantity: 3,
+      basis_unit:     "โล",
+      basis_price:    100,
+      price_per_unit: 33.33, // 100 / 3, rounded — unaffected by applyQuantity
+      quantity:       15.4,
+      unit:           "โล",
+    });
+  });
+});

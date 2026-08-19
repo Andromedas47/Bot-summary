@@ -573,8 +573,8 @@ describe("edge cases", () => {
   });
 
   it.each([
-    ["0.8.ขีด", 0.08, "โล",  1_000, 80],
-    ["0.2ขีด",  0.02, "โล",  1_000, 20],
+    ["0.8.ขีด", 0.08, "โล",  100, 8],
+    ["0.2ขีด",  0.02, "โล",  100, 2],
     ["1ชิ้น",    1,    "ชิ้น",   100, 100],
     ["1.ชิ้น",   1,    "ชิ้น",   100, 100],
     ["1.2.โล",   1.2,  "โล",     100, 120],
@@ -1346,11 +1346,12 @@ describe("real-world session: mixed plain, basis, and conversion lines", () => {
     });
 
     // Product name starting with the unit word ดอก, plus a ขีด→โล conversion
-    // on the quantity line — total-preserving price compensation unchanged.
+    // on the quantity line — only the measurement converts, price_per_unit
+    // stays the header price.
     expect(parsed.items[4]).toMatchObject({
-      item_number: 26, product_name: "ดอกผักปัง", quantity: 0.05, unit: "โล", price_per_unit: 1000,
+      item_number: 26, product_name: "ดอกผักปัง", quantity: 0.05, unit: "โล", price_per_unit: 100,
     });
-    expect(parsed.items[4].price_per_unit * (parsed.items[4].quantity ?? 0)).toBe(50);
+    expect(parsed.items[4].price_per_unit * (parsed.items[4].quantity ?? 0)).toBe(5);
 
     expect(() => assertWeighSessionFinalizable(parsed)).not.toThrow();
     expect(itemInserts.find((i) => i.item_number === 85)).toMatchObject({

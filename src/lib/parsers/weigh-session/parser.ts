@@ -14,7 +14,7 @@ import {
   unknownProductCodeError,
 } from "@/lib/produce/product-code/resolver";
 import { RE } from "./regex";
-import { conversionFactor, isKnownUnit, normalizeUnitAlias, resolveUnitQuantity } from "./units";
+import { isKnownUnit, normalizeUnitAlias, resolveUnitQuantity } from "./units";
 import type {
   WeighSession,
   WeighSessionItem,
@@ -444,18 +444,14 @@ function applyQuantity(
   quantity: number,
   unit: string,
 ): void {
+  // Only the measurement is converted. price_per_unit came off the item
+  // header, where it is always quoted per the canonical selling unit — a
+  // subunit quantity line (0.7ขีด) restates how much was weighed, never the
+  // price basis. A price quoted per a different amount is its own grammar:
+  // pricing_mode "basis" (see parseItemLine's ITEM_WITH_BASIS branch).
   const resolved = resolveUnitQuantity(quantity, unit);
-  const factor   = conversionFactor(unit);
   item.quantity  = resolved.quantity;
   item.unit      = resolved.unit;
-
-  // Legacy (non-basis) price_per_unit is quoted per the raw unit — rescale
-  // it so price_per_unit × quantity stays unchanged after conversion. Basis
-  // rows don't use price_per_unit for totals (see basis_quantity/basis_price
-  // in units.ts docs), so no compensation is needed or applied there.
-  if (item.basis_quantity == null && factor !== 1) {
-    item.price_per_unit = Number((item.price_per_unit! / factor).toFixed(2));
-  }
 }
 
 function finalize(

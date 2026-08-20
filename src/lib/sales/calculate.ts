@@ -406,19 +406,44 @@ function resolveDisplayLabels(aggregates: readonly IdentityAggregate[]): void {
 
 /**
  * Markets holding more than one ACTIVE main session of the same effective
- * transaction type.
+ * transaction type, where "market" means the legacy (source + label) identity
+ * — the one used when no accountability round is known.
  *
- * Production has no unambiguous authoritative resolution for this (the White
- * Sheet only warns), so P1 fails closed: every identity in such a market is
- * quantity-blocked. Voided sessions never reach here — produce_transactions is
- * already void-filtered — and additional (ชุดเพิ่ม) sessions are additive by
- * design and are excluded from the check.
+ * A P2E round is authoritative proof that its documents belong to the SAME
+ * accountability lifecycle: one round legitimately contains several persisted
+ * main documents of the same effective type (a main คืน split across two
+ * messages, a correction คืน filed after the first, and so on — Production
+ * 2026-08-19 showed rounds with two main คืน documents, product-disjoint, and
+ * one with a second main คืน document holding a single item). Document count
+ * inside a round is therefore never duplicate evidence by itself; the round
+ * id already scopes every row to the correct identity via `rowMarketKey`
+ * (see its docstring), so those rows are excluded from this scan entirely and
+ * simply aggregate together like any other multi-document round.
+ *
+ * A row with NO round, by contrast, carries no proof that two main sessions
+ * under the same (source + label) identity share one round — Production has
+ * no unambiguous authoritative resolution for that case (the White Sheet only
+ * warns), so P1 keeps failing closed there exactly as before: every identity
+ * in such a market is quantity-blocked. Voided sessions never reach here —
+ * produce_transactions is already void-filtered — and additional (ชุดเพิ่ม)
+ * sessions are additive by design and are excluded from the check.
+ *
+ * This intentionally does NOT attempt to detect two DISTINCT, separately
+ * populated rounds standing in for the same real-world market on the same
+ * day (e.g. an accidental second round for the same seller). `SalesSourceRow`
+ * carries no seller/staff identity to prove two round ids describe the same
+ * business event, only source + round + label, so that scenario cannot be
+ * told apart from two genuinely different rounds at this layer. Two distinct
+ * round ids already never aggregate together (each is its own `marketKey`),
+ * so they always surface as separate report entries rather than being
+ * silently netted into one trusted total — unchanged by this function.
  */
 function duplicateMainSessionMarkets(rows: readonly SalesSourceRow[]): Set<string> {
   const sessionsByMarketAndType = new Map<string, { marketKey: string; sessions: Set<string> }>();
 
   for (const row of rows) {
     if (row.sessionKind === "additional") continue;
+    if (roundId(row)) continue;
     const type = baseTransactionType(row.transactionType);
     if (!type) continue;
     const marketKey = rowMarketKey(row);

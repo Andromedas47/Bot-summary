@@ -1,7 +1,7 @@
 import { formatThaiDate } from "@/lib/date";
 import { cleanMarketName } from "@/lib/market";
 import { normalizeUnitAlias } from "@/lib/parsers/weigh-session/units";
-import { quantityTimesSatang, roundHalfUp, satangToBahtText } from "@/lib/sales/calculate";
+import { quantityTimesSatang, roundHalfUp, satangToBahtText, toMilliQuantity } from "@/lib/sales/calculate";
 import { isQaMarketLabel } from "@/lib/sales/qa-scopes";
 import { latestDataBlock, type LatestDataLookup } from "@/lib/summary/latest-data-hint";
 import { LINE_MESSAGE_MAX_CODE_POINTS, countCodePoints } from "@/lib/summary/line-chunking";
@@ -89,7 +89,10 @@ export type RoundLabelLookup = ReadonlyMap<string, { marketLabel: string }>;
 
 interface Cell {
   market: string; product: string; unit: string; resolvedMarket: boolean;
-  withdrawn: number; returned: number; damaged: number;
+  // Exact milli-unit (3 dp) integers — the same boundary as src/lib/sales/calculate.ts's
+  // toMilliQuantity — so accumulation across multiple rows and the over-return comparisons
+  // below never suffer IEEE-754 addition drift (e.g. 2.7 + 0.7 !== 3.4 in plain JS numbers).
+  withdrawn: bigint; returned: bigint; damaged: bigint;
   invalidWithdrawn: boolean; invalidReturned: boolean; invalidDamaged: boolean;
   prices: Set<number>; hasWithdrawal: boolean; invalidPrice: boolean;
 }
@@ -105,10 +108,13 @@ function priceSatang(value: number | null | undefined): number | null {
   return satang <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(satang) : null;
 }
 function displayUnit(unit: string): string { return unit === "โล" ? "กก." : unit || "—"; }
+/** Milli-unit bigint (see Cell) back to the plain-number quantity the public interfaces carry. */
+function milliToQuantity(value: bigint): number { return Number(value) / 1000; }
 function cellBlockers(cell: Cell): Blocker[] {
   if (!cell.resolvedMarket) return ["ระบุตลาดไม่ได้"];
   if (cell.invalidWithdrawn || cell.invalidReturned || cell.invalidDamaged || !cell.unit) return ["จำนวนไม่ถูกต้อง"];
-  if (!cell.hasWithdrawal || cell.withdrawn <= 0) return ["ไม่พบรายการเบิกที่ตรงกัน"];
+  if (!cell.hasWithdrawal || cell.withdrawn <= BigInt(0)) return ["ไม่พบรายการเบิกที่ตรงกัน"];
+  // Exact bigint comparisons on milli-units — no epsilon, no float addition drift.
   if (cell.returned > cell.withdrawn) return ["คืนมากกว่าเบิก"];
   if (cell.returned + cell.damaged > cell.withdrawn) return ["คืนและคืนเสียรวมมากกว่าเบิก"];
   if (cell.invalidPrice || cell.prices.size === 0) return ["รายการเบิกไม่มีราคา"];
@@ -146,40 +152,49 @@ export function buildDailyGoodReturnValueReport(businessDate: string, rows: read
     // Never let two unresolved rows become matching price/withdrawal evidence.
     const identity = roundId ? `round:${roundId}` : market;
     const key = identity ? `${identity}||${product}||${unit}` : `unresolved:${index}`;
-    const cell = cells.get(key) ?? { market: market ?? (row.market_name?.trim() || "ไม่ทราบตลาด"), product, unit, resolvedMarket: Boolean(market), withdrawn: 0, returned: 0, damaged: 0, invalidWithdrawn: false, invalidReturned: false, invalidDamaged: false, prices: new Set<number>(), hasWithdrawal: false, invalidPrice: false };
-    if (row.quantity === null || !Number.isFinite(row.quantity) || row.quantity < 0) {
+    const cell = cells.get(key) ?? { market: market ?? (row.market_name?.trim() || "ไม่ทราบตลาด"), product, unit, resolvedMarket: Boolean(market), withdrawn: BigInt(0), returned: BigInt(0), damaged: BigInt(0), invalidWithdrawn: false, invalidReturned: false, invalidDamaged: false, prices: new Set<number>(), hasWithdrawal: false, invalidPrice: false };
+    // toMilliQuantity is the same exact-arithmetic gate calculate.ts uses: it returns null for
+    // exactly the same not-finite/negative rows the old inline check rejected, so a row that
+    // cannot be represented exactly still sets the invalid flag below rather than coercing to 0.
+    const milli = row.quantity === null ? null : toMilliQuantity(row.quantity);
+    if (milli === null) {
       if (bucket === "เบิก") cell.invalidWithdrawn = true; else if (bucket === "คืน") cell.invalidReturned = true; else cell.invalidDamaged = true;
-    } else if (bucket === "เบิก") { cell.withdrawn += row.quantity; cell.hasWithdrawal = true; const price = priceSatang(row.price_per_unit); if (price === null) cell.invalidPrice = true; else cell.prices.add(price); }
-    else if (bucket === "คืน") cell.returned += row.quantity; else cell.damaged += row.quantity;
+    } else if (bucket === "เบิก") { cell.withdrawn += milli; cell.hasWithdrawal = true; const price = priceSatang(row.price_per_unit); if (price === null) cell.invalidPrice = true; else cell.prices.add(price); }
+    else if (bucket === "คืน") cell.returned += milli; else cell.damaged += milli;
     cells.set(key, cell);
   });
   const products = new Map<string, GoodReturnValueProduct>(); const anomalies: MarketAnomaly[] = []; const anomalyMarketsByProduct = new Map<string, Set<string>>();
   for (const cell of cells.values()) {
     // Normal: a withdrawal with no good return is sold, not a warning. But an
     // invalid good-return row IS reportable dirty data even with zero valid quantity.
-    if (cell.returned <= 0 && !cell.invalidReturned) continue;
+    if (cell.returned <= BigInt(0) && !cell.invalidReturned) continue;
     const key = `${cell.product}||${cell.unit}`;
     const blockers = cellBlockers(cell);
+    // Converted once per cell back to the plain-number boundary the public
+    // interfaces use. Exact by construction (milli round-trips through the
+    // same string-based conversion toMilliQuantity itself relies on), so this
+    // is not a re-introduction of float drift into the cell's own value.
+    const returnedQty = milliToQuantity(cell.returned);
     // An invalid quantity is unknown, not zero — it must never inflate the
     // physical aggregate with a zero-quantity product row. Only a genuinely
     // positive recorded good-return quantity creates or updates the product.
-    if (cell.returned > 0) {
+    if (cell.returned > BigInt(0)) {
       const product = products.get(key) ?? { productName: cell.product, unit: cell.unit, quantity: 0, valuedQuantity: 0, unvaluedQuantity: 0, valueSatang: 0, anomalyMarketCount: 0 };
-      product.quantity += cell.returned;
-      const value = blockers.length ? null : quantityTimesSatang(cell.returned, [...cell.prices][0]!);
-      if (value === null) product.unvaluedQuantity += cell.returned;
-      else { product.valuedQuantity += cell.returned; product.valueSatang += value; }
+      product.quantity += returnedQty;
+      const value = blockers.length ? null : quantityTimesSatang(returnedQty, [...cell.prices][0]!);
+      if (value === null) product.unvaluedQuantity += returnedQty;
+      else { product.valuedQuantity += returnedQty; product.valueSatang += value; }
       products.set(key, product);
     }
     if (blockers.length) {
       const markets = anomalyMarketsByProduct.get(key) ?? new Set<string>(); markets.add(cell.market); anomalyMarketsByProduct.set(key, markets);
       anomalies.push({
         marketName: cell.market, productName: cell.product, unit: cell.unit,
-        withdrawnQuantity: cell.invalidWithdrawn ? null : cell.withdrawn,
-        returnedQuantity: cell.invalidReturned ? null : cell.returned,
-        damagedQuantity: cell.invalidDamaged ? null : cell.damaged,
+        withdrawnQuantity: cell.invalidWithdrawn ? null : milliToQuantity(cell.withdrawn),
+        returnedQuantity: cell.invalidReturned ? null : returnedQty,
+        damagedQuantity: cell.invalidDamaged ? null : milliToQuantity(cell.damaged),
         priceEvidence: [...cell.prices].sort((a, b) => a - b), blockers,
-        valuedQuantity: 0, unvaluedQuantity: cell.invalidReturned ? null : cell.returned, valueSatang: 0,
+        valuedQuantity: 0, unvaluedQuantity: cell.invalidReturned ? null : returnedQty, valueSatang: 0,
       });
     }
   }

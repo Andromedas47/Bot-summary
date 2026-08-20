@@ -649,4 +649,89 @@ describe("daily good-return value", () => {
     expect(text).toContain("   • สินค้าABC");
     expect(text).toContain("รวมมูลค่าของดีที่ยืนยันได้ 130.00 บาท");
   });
+
+  // ── Exact quantity reconciliation — IEEE-754 float over-return false positive ──
+  // Production 2026-08-19, ราชพฤ / ลูกไหนแดง / โล: เบิก 3.400, คืน 2.700, คืนเสีย 0.700,
+  // exactly balanced, but 2.7 + 0.7 === 3.4000000000000004 in plain JS float addition,
+  // which used to falsely raise "คืนและคืนเสียรวมมากกว่าเบิก". See ADDENDUM section B.
+
+  test("22. exact float trap on the confirmed production shape (ราชพฤ/ลูกไหนแดง/โล): valid, no blocker", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-19", [
+      base({ market_name: "ราชพฤ", product_name: "ลูกไหนแดง", unit: "โล", transaction_type: "เบิก", quantity: 3.4, price_per_unit: 40 }),
+      base({ market_name: "ราชพฤ", product_name: "ลูกไหนแดง", unit: "โล", quantity: 2.7 }),
+      base({ market_name: "ราชพฤ", product_name: "ลูกไหนแดง", unit: "โล", transaction_type: "คืนเสีย", quantity: 0.7 }),
+    ]);
+    // Sanity: plain IEEE-754 float addition alone would falsely trip the old comparison.
+    expect(2.7 + 0.7).not.toBe(3.4);
+    expect(report.anomalies).toHaveLength(0);
+    expect(report.products[0]).toMatchObject({ quantity: 2.7, valuedQuantity: 2.7, unvaluedQuantity: 0, valueSatang: 10_800 });
+  });
+
+  test("23. exact float trap, second pinned pair: 25.3 + 3.1 == 28.4 is valid, no blocker", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-19", [
+      base({ market_name: "ตลาด A", transaction_type: "เบิก", quantity: 28.4, price_per_unit: 40 }),
+      base({ market_name: "ตลาด A", quantity: 25.3 }),
+      base({ market_name: "ตลาด A", transaction_type: "คืนเสีย", quantity: 3.1 }),
+    ]);
+    expect(report.anomalies).toHaveLength(0);
+    expect(report.products[0]).toMatchObject({ quantity: 25.3, valuedQuantity: 25.3, unvaluedQuantity: 0 });
+  });
+
+  test("24. true over-return still blocks exactly: 2.701 + 0.700 > 3.400", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-19", [
+      base({ market_name: "ตลาด A", transaction_type: "เบิก", quantity: 3.400, price_per_unit: 40 }),
+      base({ market_name: "ตลาด A", quantity: 2.701 }),
+      base({ market_name: "ตลาด A", transaction_type: "คืนเสีย", quantity: 0.700 }),
+    ]);
+    expect(report.anomalies).toEqual([
+      expect.objectContaining({
+        marketName: "ตลาด A", withdrawnQuantity: 3.4, returnedQuantity: 2.701, damagedQuantity: 0.7,
+        blockers: ["คืนและคืนเสียรวมมากกว่าเบิก"],
+      }),
+    ]);
+  });
+
+  test("25. returned-alone float trap (the line-112 path): 0.1+0.1+0.1 stays exactly equal, not greater", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-19", [
+      base({ market_name: "ตลาด A", transaction_type: "เบิก", quantity: 0.3, price_per_unit: 40 }),
+      base({ market_name: "ตลาด A", quantity: 0.1 }),
+      base({ market_name: "ตลาด A", quantity: 0.1 }),
+      base({ market_name: "ตลาด A", quantity: 0.1 }),
+    ]);
+    // Sanity: plain float addition of these three rows alone is already > 0.3.
+    expect(0.1 + 0.1 + 0.1).toBeGreaterThan(0.3);
+    expect(report.anomalies).toHaveLength(0);
+  });
+
+  test("26. multi-row withdrawal accumulation: ten 0.1 withdrawal rows still equal a 1.0 return exactly", () => {
+    // A single accumulated float (10 x += 0.1) undershoots 1.0 (0.9999999999999999),
+    // which would falsely trip "คืนมากกว่าเบิก" against an exact 1.0 return. The
+    // accumulator itself — not just the final comparison operands — must be exact.
+    const report = buildDailyGoodReturnValueReport("2026-08-19", [
+      ...Array.from({ length: 10 }, () => base({ market_name: "ตลาด A", transaction_type: "เบิก", quantity: 0.1, price_per_unit: 40 })),
+      base({ market_name: "ตลาด A", quantity: 1.0 }),
+    ]);
+    expect(report.anomalies).toHaveLength(0);
+    expect(report.products[0]).toMatchObject({ quantity: 1.0, valuedQuantity: 1.0, unvaluedQuantity: 0 });
+  });
+
+  test("27. multi-row good-return AND damaged-return accumulation compounds correctly against a single-row withdrawal", () => {
+    // 27 x 0.1 (คืน) and 7 x 0.1 (คืนเสีย) each decimal-sum exactly to 2.7 and 0.7, but
+    // naive float += drifts both partial sums, and their float sum overshoots 3.4 —
+    // this is the exact multi-row compounding shape a single-row test cannot catch.
+    const report = buildDailyGoodReturnValueReport("2026-08-19", [
+      base({ market_name: "ตลาด A", transaction_type: "เบิก", quantity: 3.4, price_per_unit: 40 }),
+      ...Array.from({ length: 27 }, () => base({ market_name: "ตลาด A", quantity: 0.1 })),
+      ...Array.from({ length: 7 }, () => base({ market_name: "ตลาด A", transaction_type: "คืนเสีย", quantity: 0.1 })),
+    ]);
+    expect(report.anomalies).toHaveLength(0);
+    expect(report.products[0]).toMatchObject({ quantity: 2.7, valuedQuantity: 2.7, unvaluedQuantity: 0 });
+  });
+
+  test("28. no-withdrawal path is unchanged by the exact-arithmetic rewrite", () => {
+    const report = buildDailyGoodReturnValueReport("2026-08-19", [base({ market_name: "ตลาดปลา", quantity: 2.7 })]);
+    expect(report.anomalies).toEqual([
+      expect.objectContaining({ marketName: "ตลาดปลา", withdrawnQuantity: 0, returnedQuantity: 2.7, blockers: ["ไม่พบรายการเบิกที่ตรงกัน"] }),
+    ]);
+  });
 });

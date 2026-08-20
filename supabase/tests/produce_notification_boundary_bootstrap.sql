@@ -8,6 +8,19 @@
 -- CREATE time, so 0034's try_finalize_pending_generation can reference
 -- imported_sessions/raw_messages/produce_items without those tables existing
 -- here; this test never calls that function.
+--
+-- CRITICAL: this bootstrap must reproduce the actual vulnerable starting
+-- state, not just the roles. Production's P0 exists because of a
+-- project-level `ALTER DEFAULT PRIVILEGES` that grants anon/authenticated
+-- (and service_role) full privileges on every table and function role
+-- `postgres` subsequently creates in schema public (proven via
+-- pg_default_acl introspection — see the lockdown migration's header). If
+-- this bootstrap does not set the same default privileges BEFORE 0034 runs,
+-- the tables/functions 0034 creates come out clean by pure accident of a
+-- fresh local database's own (non-Supabase) defaults, and the lockdown
+-- migration's pg test would pass even if the migration were a no-op — it
+-- would never reproduce the bug it exists to catch. This must run before
+-- ANY table or function is created by role postgres in schema public.
 
 CREATE SCHEMA IF NOT EXISTS extensions;
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
@@ -29,6 +42,16 @@ END
 $$;
 
 GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
+
+-- Reproduce production's project-level default ACL. Anything role postgres
+-- creates in schema public from this point on — including everything 0034
+-- creates — is born with full anon/authenticated/service_role privileges,
+-- exactly as pg_default_acl shows in production. This is the actual
+-- vulnerable starting state the lockdown migration has to fix.
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+  GRANT ALL ON TABLES TO anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+  GRANT ALL ON FUNCTIONS TO anon, authenticated, service_role;
 
 CREATE TABLE public.pending_sessions (
   id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),

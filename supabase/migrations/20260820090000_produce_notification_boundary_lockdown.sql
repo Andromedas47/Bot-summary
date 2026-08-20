@@ -116,7 +116,12 @@
 --   exposure.
 --
 -- ROLLBACK (documented per repo convention; nobody should ever run this — it
--- restores the P0)
+-- restores the P0). The function grant step is deliberately a dynamic loop
+-- over pg_proc, NOT a hardcoded signature: hardcoding one overload is
+-- exactly the bug that let claim_due_produce_notifications drift when a
+-- second overload was added later (0061/0062). A hardcoded rollback here
+-- would silently leave a future overload's EXECUTE grant untouched and the
+-- boundary half-restored-half-open.
 -- --------
 --   ALTER TABLE public.produce_session_notifications NO FORCE ROW LEVEL SECURITY;
 --   ALTER TABLE public.produce_session_notifications DISABLE ROW LEVEL SECURITY;
@@ -124,10 +129,20 @@
 --   ALTER TABLE public.produce_notification_attempts DISABLE ROW LEVEL SECURITY;
 --   GRANT ALL ON TABLE public.produce_session_notifications, public.produce_notification_attempts
 --     TO anon, authenticated, service_role;
---   GRANT EXECUTE ON FUNCTION public.complete_produce_notification_attempt(
---     uuid, integer, text, text, boolean, timestamptz, integer, integer
---   ) TO anon, authenticated;
---   GRANT EXECUTE ON FUNCTION public.requeue_produce_notification(uuid) TO anon, authenticated;
+--   DO $$
+--   DECLARE
+--     v_sig text;
+--   BEGIN
+--     FOR v_sig IN
+--       SELECT format('%I.%I(%s)', n.nspname, p.proname, pg_get_function_identity_arguments(p.oid))
+--       FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+--       WHERE n.nspname = 'public'
+--         AND p.proname IN ('complete_produce_notification_attempt', 'requeue_produce_notification')
+--     LOOP
+--       EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO anon, authenticated', v_sig);
+--     END LOOP;
+--   END
+--   $$;
 
 -- ── 0) Preconditions ─────────────────────────────────────────────────────────
 
@@ -195,7 +210,12 @@ $$;
 
 DO $$
 DECLARE
-  v_count int;
+  v_count      int;
+  -- MAINTAIN is new in PG17 (production is 17.6; production relacl for both
+  -- tables shows the trailing 'm'). has_table_privilege('...','MAINTAIN')
+  -- raises "unrecognized privilege type" on an older server, so this is
+  -- gated on the actual running server version rather than assumed.
+  v_pg17_plus  boolean := current_setting('server_version_num')::int >= 170000;
 BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_class
@@ -212,9 +232,13 @@ BEGIN
       ('produce_session_notifications'), ('produce_notification_attempts')
     ) AS t(tbl)
     CROSS JOIN (VALUES ('anon'), ('authenticated')) AS r(role_name)
-    CROSS JOIN (VALUES
-      ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'),
-      ('TRUNCATE'), ('REFERENCES'), ('TRIGGER')
+    CROSS JOIN (
+      SELECT p FROM (VALUES
+        ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'),
+        ('TRUNCATE'), ('REFERENCES'), ('TRIGGER')
+      ) AS base(p)
+      UNION ALL
+      SELECT 'MAINTAIN' WHERE v_pg17_plus
     ) AS priv(p)
     WHERE has_table_privilege(r.role_name, ('public.' || t.tbl)::regclass, priv.p)
   ) THEN
@@ -231,6 +255,8 @@ BEGIN
        OR NOT has_table_privilege('service_role', ('public.' || t.tbl)::regclass, 'UPDATE')
        OR has_table_privilege('service_role', ('public.' || t.tbl)::regclass, 'DELETE')
        OR has_table_privilege('service_role', ('public.' || t.tbl)::regclass, 'TRUNCATE')
+       OR (v_pg17_plus
+           AND has_table_privilege('service_role', ('public.' || t.tbl)::regclass, 'MAINTAIN'))
   ) THEN
     RAISE EXCEPTION '20260820090000: service_role must have exactly SELECT/INSERT/UPDATE on the notification tables';
   END IF;

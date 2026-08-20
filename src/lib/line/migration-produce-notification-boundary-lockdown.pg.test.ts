@@ -168,6 +168,19 @@ async function seedProduceSession(): Promise<string> {
 
 const pgAvailable = await probe();
 let databaseCreated = false;
+// Captured in beforeAll, BEFORE the lockdown migration is applied. This is
+// the load-bearing proof that the bootstrap reproduces the actual bug this
+// migration fixes — not just the roles and tables, but the vulnerable
+// starting privileges (production's project-level ALTER DEFAULT PRIVILEGES).
+// If the bootstrap ever regresses to a "clean by accident" local database,
+// `preLockdownState` flips to already-safe and the assertions on it below
+// fail loudly, instead of the whole suite silently becoming a no-op check.
+let preLockdownState: {
+  anonSelect: string;
+  anonInsert: string;
+  anonExecuteRequeue: string;
+  anonOrAuthenticatedExecuteClaimDue: string;
+} | null = null;
 
 describe.skipIf(!pgAvailable)(
   "produce notification boundary lockdown on PostgreSQL 17",
@@ -179,12 +192,47 @@ describe.skipIf(!pgAvailable)(
       databaseCreated = true;
       await apply(BOOTSTRAP);
       for (const migration of DEPENDENCY_MIGRATIONS) await apply(migration);
+
+      preLockdownState = {
+        anonSelect: await scalar(`
+          SELECT has_table_privilege('anon', 'public.produce_session_notifications', 'SELECT')::text`),
+        anonInsert: await scalar(`
+          SELECT has_table_privilege('anon', 'public.produce_session_notifications', 'INSERT')::text`),
+        anonExecuteRequeue: await scalar(`
+          SELECT has_function_privilege('anon',
+            (SELECT oid FROM pg_proc WHERE proname = 'requeue_produce_notification'),
+            'EXECUTE')::text`),
+        // claim_due_produce_notifications is only cleaned up by 0050/0061/
+        // 0062, none of which this minimal harness applies (out of scope
+        // dependency chain for an out-of-scope function). So in THIS
+        // disposable database it is expected to still be default-ACL dirty
+        // before AND after the lockdown migration — the migration must
+        // leave it exactly as it found it, not clean it. See the matching
+        // assertion below.
+        anonOrAuthenticatedExecuteClaimDue: await scalar(`
+          SELECT (has_function_privilege('anon', oid, 'EXECUTE')
+            OR has_function_privilege('authenticated', oid, 'EXECUTE'))::text
+          FROM pg_proc WHERE proname = 'claim_due_produce_notifications'
+          LIMIT 1`),
+      };
+
       await apply(MIGRATION);
     }, 120_000);
 
     afterAll(async () => {
       if (!databaseCreated) return;
       await psql(["-d", "postgres", "-c", `DROP DATABASE IF EXISTS ${DATABASE}`], "postgres");
+    });
+
+    test("the bootstrap actually reproduces the vulnerable pre-migration state", () => {
+      // If this fails, every "anon cannot ..." test below is meaningless —
+      // it would be proving anon was never able to do it in the first
+      // place, not that the migration stopped it. This is the regression
+      // guard for that exact failure mode.
+      expect(preLockdownState).not.toBeNull();
+      expect(preLockdownState!.anonSelect).toBe("true");
+      expect(preLockdownState!.anonInsert).toBe("true");
+      expect(preLockdownState!.anonExecuteRequeue).toBe("true");
     });
 
     test("the migration is idempotent", async () => {
@@ -415,49 +463,83 @@ describe.skipIf(!pgAvailable)(
     // ── explicit privilege assertions (catalog-level, belt-and-suspenders) ──
 
     test("catalog privileges match the intended boundary exactly", async () => {
+      // MAINTAIN is new in PG17 and is what production's relacl actually
+      // shows (arwdDxtm has a trailing 'm'). This whole describe block is
+      // gated on server_version_num >= 170000 by probe()/pgAvailable above,
+      // so MAINTAIN is always a valid privilege name here — no separate
+      // version guard is needed inside the test itself.
+      //
+      // Each table is checked with ONE psql spawn (a privilege x role
+      // matrix in a single query) rather than one spawn per cell — this
+      // used to be ~50 sequential psql spawns in this one test, which was
+      // flaky under Windows process-spawn load. Batching removed the flake
+      // and is simply better test hygiene regardless.
+      const tablePrivs = [
+        "SELECT", "INSERT", "UPDATE", "DELETE",
+        "TRUNCATE", "REFERENCES", "TRIGGER", "MAINTAIN",
+      ];
       for (const table of ["produce_session_notifications", "produce_notification_attempts"]) {
-        for (const role of ["anon", "authenticated"]) {
-          for (const priv of ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]) {
-            expect(await scalar(
-              `SELECT has_table_privilege('${role}', 'public.${table}', '${priv}')::text`,
-            )).toBe("false");
+        const matrix = await run(`
+          SELECT priv, role_name, has_table_privilege(role_name, 'public.${table}', priv)::text
+          FROM unnest(ARRAY[${tablePrivs.map((p) => q(p)).join(",")}]) AS priv
+          CROSS JOIN unnest(ARRAY['anon','authenticated','service_role']) AS role_name
+          ORDER BY priv, role_name;`);
+        expect(matrix.code, matrix.stderr).toBe(0);
+        const rows = new Map<string, string>();
+        for (const line of matrix.stdout.split("\n").map((l) => l.trim()).filter(Boolean)) {
+          const [priv, roleName, value] = line.split("|");
+          rows.set(`${priv}:${roleName}`, value);
+        }
+        for (const priv of tablePrivs) {
+          for (const role of ["anon", "authenticated"]) {
+            expect(rows.get(`${priv}:${role}`), `${table} ${priv} for ${role}`).toBe("false");
           }
         }
         for (const priv of ["SELECT", "INSERT", "UPDATE"]) {
-          expect(await scalar(
-            `SELECT has_table_privilege('service_role', 'public.${table}', '${priv}')::text`,
-          )).toBe("true");
+          expect(rows.get(`${priv}:service_role`), `${table} ${priv} for service_role`).toBe("true");
         }
-        for (const priv of ["DELETE", "TRUNCATE"]) {
-          expect(await scalar(
-            `SELECT has_table_privilege('service_role', 'public.${table}', '${priv}')::text`,
-          )).toBe("false");
+        for (const priv of ["DELETE", "TRUNCATE", "MAINTAIN"]) {
+          expect(rows.get(`${priv}:service_role`), `${table} ${priv} for service_role`).toBe("false");
         }
       }
 
+      const fnMatrix = await run(`
+        SELECT p.proname, role_name,
+          bool_or(has_function_privilege(role_name, p.oid, 'EXECUTE'))::text AS any_overload,
+          bool_and(has_function_privilege(role_name, p.oid, 'EXECUTE'))::text AS all_overloads
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        CROSS JOIN unnest(ARRAY['anon','authenticated','service_role']) AS role_name
+        WHERE n.nspname = 'public'
+          AND p.proname IN ('complete_produce_notification_attempt', 'requeue_produce_notification')
+        GROUP BY p.proname, role_name
+        ORDER BY p.proname, role_name;`);
+      expect(fnMatrix.code, fnMatrix.stderr).toBe(0);
+      const fnRows = new Map<string, { any: string; all: string }>();
+      for (const line of fnMatrix.stdout.split("\n").map((l) => l.trim()).filter(Boolean)) {
+        const [fn, roleName, anyOverload, allOverloads] = line.split("|");
+        fnRows.set(`${fn}:${roleName}`, { any: anyOverload, all: allOverloads });
+      }
       for (const fn of ["complete_produce_notification_attempt", "requeue_produce_notification"]) {
-        expect(await scalar(`
-          SELECT bool_or(
-            has_function_privilege('anon', p.oid, 'EXECUTE')
-            OR has_function_privilege('authenticated', p.oid, 'EXECUTE')
-          )::text
-          FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-          WHERE n.nspname = 'public' AND p.proname = '${fn}'`)).toBe("false");
-        expect(await scalar(`
-          SELECT bool_and(has_function_privilege('service_role', p.oid, 'EXECUTE'))::text
-          FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-          WHERE n.nspname = 'public' AND p.proname = '${fn}'`)).toBe("true");
+        for (const role of ["anon", "authenticated"]) {
+          expect(fnRows.get(`${fn}:${role}`)?.any, `${fn} EXECUTE for ${role}`).toBe("false");
+        }
+        expect(fnRows.get(`${fn}:service_role`)?.all, `${fn} EXECUTE for service_role`).toBe("true");
       }
 
-      // claim_due_produce_notifications / try_finalize_pending_generation are
-      // out of scope for this migration and must remain exactly as clean as
-      // they already were (0034 created them; this migration does not touch
-      // either).
-      expect(await scalar(`
+      // claim_due_produce_notifications is out of scope for this migration:
+      // in production it's already clean via 0050/0061/0062, none of which
+      // this minimal harness applies. The correct claim here is therefore
+      // NOT "it's clean" (it isn't, in this disposable DB) but "this
+      // migration didn't touch it either way" — compared against the value
+      // captured before the lockdown migration ran.
+      expect(preLockdownState).not.toBeNull();
+      const claimDueAfter = await scalar(`
         SELECT (has_function_privilege('anon', oid, 'EXECUTE')
           OR has_function_privilege('authenticated', oid, 'EXECUTE'))::text
         FROM pg_proc WHERE proname = 'claim_due_produce_notifications'
-        LIMIT 1`)).toBe("false");
+        LIMIT 1`);
+      expect(claimDueAfter).toBe(preLockdownState!.anonOrAuthenticatedExecuteClaimDue);
     });
   },
 );

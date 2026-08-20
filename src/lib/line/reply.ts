@@ -5,6 +5,7 @@ import { ADDITIONAL_TYPE_LABEL } from "@/lib/parsers/weigh-session/parser";
 import { produceCategoryTotals, resolveProduceCategory } from "@/lib/summary/produce-category-totals";
 import { LINE_MESSAGE_MAX_CODE_POINTS, countCodePoints } from "@/lib/summary/line-chunking";
 import type { TransactionBucket } from "@/lib/summary/transactions";
+import { quantityTimesSatang, roundHalfUp, toMilliQuantity } from "@/lib/sales/calculate";
 
 export function measureLineText(text: string): { codePoints: number; utf8Bytes: number } {
   return {
@@ -210,15 +211,49 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
-// Basis rows (e.g. "3โล100บาท") total round(qty * basis_price / basis_quantity, 2),
-// never (qty * price_per_unit) — price_per_unit is only a rounded display
-// approximation for those rows and multiplying it back out reintroduces
-// the rounding error.
-export function weighItemTotal(item: WeighSessionItem): number {
+/**
+ * price_per_unit and basis_price are numeric(*, 2) DB columns — exactly 2
+ * decimal places at the source. Math.round tolerates the ordinary float
+ * representation noise such a value picks up crossing JSON/JS (unlike
+ * Number.isSafeInteger, which rejects it outright — see the P2A physical
+ * inventory parser fix for that failure mode), so this recovers the exact
+ * satang count the DB actually stored.
+ */
+function baht2ToSatang(baht: number): number {
+  return Math.round(baht * 100);
+}
+
+/**
+ * Exact BigInt satang total for one weigh-session item — the SAME formula
+ * the `produce_transactions` DB view computes (supabase/migrations/
+ * 0033_produce_basis_pricing.sql), reused here instead of reimplemented in
+ * floating point, so the LINE receipt and the view agree to the satang.
+ *
+ * Basis rows (e.g. "3โล100บาท"): round(qty * basis_price / basis_quantity, 2)
+ * — never (qty * price_per_unit); price_per_unit is only a rounded display
+ * approximation for those rows and multiplying it back out reintroduces the
+ * rounding error. Unit rows: qty * price_per_unit, rounded half-up to the
+ * nearest satang via quantityTimesSatang — the same quantity×price money
+ * boundary P1 Daily Sales uses (src/lib/sales/calculate.ts) — rather than a
+ * raw floating-point multiply that never gets rounded at all.
+ */
+export function weighItemTotalSatang(item: WeighSessionItem): number {
+  const quantity = item.quantity ?? 0;
   if (item.basis_quantity && item.basis_price != null) {
-    return round2((item.quantity ?? 0) * item.basis_price / item.basis_quantity);
+    const quantityMilli = toMilliQuantity(quantity);
+    const basisQuantityMilli = toMilliQuantity(item.basis_quantity);
+    if (quantityMilli === null || basisQuantityMilli === null || basisQuantityMilli <= BigInt(0)) {
+      return 0;
+    }
+    const basisPriceSatang = baht2ToSatang(item.basis_price);
+    return Number(roundHalfUp(quantityMilli * BigInt(basisPriceSatang), basisQuantityMilli));
   }
-  return (item.price_per_unit ?? 0) * (item.quantity ?? 0);
+  const priceSatang = baht2ToSatang(item.price_per_unit ?? 0);
+  return quantityTimesSatang(quantity, priceSatang) ?? 0;
+}
+
+export function weighItemTotal(item: WeighSessionItem): number {
+  return weighItemTotalSatang(item) / 100;
 }
 
 export function buildWeighSessionSummary(session: WeighSession): string {

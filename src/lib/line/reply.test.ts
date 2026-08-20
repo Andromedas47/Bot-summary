@@ -8,8 +8,10 @@ import {
   pushLineMessage,
   replyLineMessage,
   replyLineMessages,
+  weighItemTotal,
+  weighItemTotalSatang,
 } from "./reply";
-import type { WeighSession } from "@/lib/parsers/weigh-session/types";
+import type { WeighSession, WeighSessionItem } from "@/lib/parsers/weigh-session/types";
 import { LINE_MESSAGE_MAX_CODE_POINTS, countCodePoints } from "@/lib/summary/line-chunking";
 
 const originalFetch = globalThis.fetch;
@@ -612,5 +614,142 @@ describe("buildAdditionalSessionSummary — previous total line", () => {
 
     expect(result).toContain("ยอดเดิมก่อนเพิ่ม: 12.35 บาท");
     expect(result).toContain("ยอดสะสมของวัน: 1,012.35 บาท");
+  });
+});
+
+function weighItem(overrides: Partial<WeighSessionItem>): WeighSessionItem {
+  return {
+    item_number: 1,
+    product_name: "ทดสอบ",
+    price_per_unit: 0,
+    quantity: 0,
+    unit: "โล",
+    section: "",
+    transaction_type: "เบิก",
+    pricing_mode: "unit",
+    basis_quantity: null,
+    basis_unit: null,
+    basis_price: null,
+    ...overrides,
+  };
+}
+
+// Independent reference for the "documented DB formula" — half-up division
+// on plain BigInt. Deliberately NOT imported from src/lib/sales/calculate.ts,
+// so the generated sweeps below check weighItemTotalSatang against the
+// formula's definition, not against the implementation reusing its own helper.
+function exactRoundHalfUp(value: bigint, divisor: bigint): bigint {
+  const quotient = value / divisor;
+  const remainder = value % divisor;
+  return remainder * BigInt(2) >= divisor ? quotient + BigInt(1) : quotient;
+}
+
+describe("weighItemTotalSatang — exact money, no floating-point reimplementation", () => {
+  // Regression: produce_transactions computes a unit row's total as
+  // `quantity * price_per_unit` and a basis row's total as
+  // `ROUND(quantity * basis_price / basis_quantity, 2)`
+  // (supabase/migrations/0033_produce_basis_pricing.sql). The pre-fix LINE
+  // receipt reimplemented this in IEEE-754 floating point, and the unit
+  // branch applied NO rounding at all: quantity 1.001 x price 10 returned
+  // the raw float 10.009999999999998, not 10.01.
+  it("unit row: quantity 1.001 x price 10 — old code returned the raw unrounded float", () => {
+    const item = weighItem({ quantity: 1.001, price_per_unit: 10, pricing_mode: "unit" });
+    // What the pre-fix code literally returned for this input:
+    expect(1.001 * 10).toBe(10.009999999999998);
+    // What the fixed code returns:
+    expect(weighItemTotalSatang(item)).toBe(1_001);
+    expect(weighItemTotal(item)).toBe(10.01);
+  });
+
+  it("unit row: quantity 1.001 x price 2 — old code returned the raw unrounded float", () => {
+    const item = weighItem({ quantity: 1.001, price_per_unit: 2, pricing_mode: "unit" });
+    // What the pre-fix code literally returned for this input:
+    expect(1.001 * 2).toBe(2.002);
+    // What the fixed code returns:
+    expect(weighItemTotalSatang(item)).toBe(200);
+    expect(weighItemTotal(item)).toBe(2);
+  });
+
+  it("basis row: quantity 1.001, basis price 10 / basis qty 3 — round(qty*price/basis,2)", () => {
+    const item = weighItem({
+      quantity: 1.001,
+      pricing_mode: "basis",
+      basis_quantity: 3,
+      basis_price: 10,
+    });
+    // round(1.001 * 10 / 3, 2) = round(3.336666..., 2) = 3.34
+    expect(weighItemTotalSatang(item)).toBe(334);
+    expect(weighItemTotal(item)).toBe(3.34);
+  });
+
+  it("basis row: quantity 1.001, basis price 2 / basis qty 3 — round(qty*price/basis,2)", () => {
+    const item = weighItem({
+      quantity: 1.001,
+      pricing_mode: "basis",
+      basis_quantity: 3,
+      basis_price: 2,
+    });
+    // round(1.001 * 2 / 3, 2) = round(0.667333..., 2) = 0.67
+    expect(weighItemTotalSatang(item)).toBe(67);
+    expect(weighItemTotal(item)).toBe(0.67);
+  });
+
+  // A real rounding-boundary case the old float division got wrong by a
+  // whole satang: 0.225 x 17.40 / 1 = 3.915 exactly, which is a half-up
+  // tie that rounds to 3.92 — but JS computes 0.225 * 17.4 as
+  // 3.9149999999999996, and Math.round(391.49999999999994) floors to 391.
+  it("basis row: a real float-division rounding-boundary miss (0.225 x 17.40 / 1)", () => {
+    const item = weighItem({
+      quantity: 0.225,
+      pricing_mode: "basis",
+      basis_quantity: 1,
+      basis_price: 17.4,
+    });
+    const oldFloatResult = Math.round(((0.225 * 17.4) / 1) * 100) / 100;
+    expect(oldFloatResult).toBe(3.91); // the bug: off by one satang
+    expect(weighItemTotalSatang(item)).toBe(392);
+    expect(weighItemTotal(item)).toBe(3.92); // the correct half-up result
+  });
+
+  // Generated property-style sweep: weighItemTotalSatang must equal the
+  // documented DB formula, computed independently in exact integer
+  // arithmetic, for every generated quantity/price pair — including many
+  // rounding-boundary combinations, never just the hand-picked cases above.
+  it("matches the documented DB formula for many generated quantity/price pairs (unit rows)", () => {
+    let checked = 0;
+    for (let qtyMilli = 1; qtyMilli <= 20_000; qtyMilli += 37) {
+      for (let priceSatang = 1; priceSatang <= 3_000; priceSatang += 211) {
+        const item = weighItem({
+          quantity: qtyMilli / 1000,
+          price_per_unit: priceSatang / 100,
+          pricing_mode: "unit",
+        });
+        const expected = exactRoundHalfUp(BigInt(qtyMilli) * BigInt(priceSatang), BigInt(1000));
+        expect(weighItemTotalSatang(item)).toBe(Number(expected));
+        checked += 1;
+      }
+    }
+    expect(checked).toBeGreaterThan(200);
+  });
+
+  it("matches the documented DB formula for many generated quantity/price/basis-quantity triples (basis rows)", () => {
+    const basisQtyMillis = [1, 13, 999, 1_000, 3_000, 7_000, 11_000].map(BigInt);
+    let checked = 0;
+    for (let qtyMilli = 1; qtyMilli <= 5_000; qtyMilli += 233) {
+      for (let priceSatang = 1; priceSatang <= 2_000; priceSatang += 251) {
+        for (const basisQtyMilli of basisQtyMillis) {
+          const item = weighItem({
+            quantity: qtyMilli / 1000,
+            pricing_mode: "basis",
+            basis_quantity: Number(basisQtyMilli) / 1000,
+            basis_price: priceSatang / 100,
+          });
+          const expected = exactRoundHalfUp(BigInt(qtyMilli) * BigInt(priceSatang), basisQtyMilli);
+          expect(weighItemTotalSatang(item)).toBe(Number(expected));
+          checked += 1;
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(500);
   });
 });

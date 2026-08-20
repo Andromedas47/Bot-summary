@@ -5,7 +5,7 @@ import { ADDITIONAL_TYPE_LABEL } from "@/lib/parsers/weigh-session/parser";
 import { produceCategoryTotals, resolveProduceCategory } from "@/lib/summary/produce-category-totals";
 import { LINE_MESSAGE_MAX_CODE_POINTS, countCodePoints } from "@/lib/summary/line-chunking";
 import type { TransactionBucket } from "@/lib/summary/transactions";
-import { quantityTimesSatang, roundHalfUp, toMilliQuantity } from "@/lib/sales/calculate";
+import { roundHalfUp, toMilliQuantity } from "@/lib/sales/calculate";
 
 export function measureLineText(text: string): { codePoints: number; utf8Bytes: number } {
   return {
@@ -224,36 +224,97 @@ function baht2ToSatang(baht: number): number {
 }
 
 /**
- * Exact BigInt satang total for one weigh-session item — the SAME formula
- * the `produce_transactions` DB view computes (supabase/migrations/
- * 0033_produce_basis_pricing.sql), reused here instead of reimplemented in
- * floating point, so the LINE receipt and the view agree to the satang.
- *
- * Basis rows (e.g. "3โล100บาท"): round(qty * basis_price / basis_quantity, 2)
- * — never (qty * price_per_unit); price_per_unit is only a rounded display
- * approximation for those rows and multiplying it back out reintroduces the
- * rounding error. Unit rows: qty * price_per_unit, rounded half-up to the
- * nearest satang via quantityTimesSatang — the same quantity×price money
- * boundary P1 Daily Sales uses (src/lib/sales/calculate.ts) — rather than a
- * raw floating-point multiply that never gets rounded at all.
+ * The finest unit that holds quantity (numeric(10,3)) x price_per_unit
+ * (numeric(*,2)) exactly: 1/1000 of a satang, i.e. 10^-5 baht. Matches the
+ * EXACT_SCALE = 5 convention src/lib/summary/produce-category-totals.ts
+ * already documents for this identical reason — total_amount is
+ * numeric(10,3) x numeric(10,2), so five decimal places hold it exactly.
  */
-export function weighItemTotalSatang(item: WeighSessionItem): number {
+const MILLI_SATANG_PER_SATANG = BigInt(1000);
+
+/**
+ * Exact per-item total in milli-satang — the SAME value the
+ * `produce_transactions` DB view computes (supabase/migrations/
+ * 0033_produce_basis_pricing.sql), to the last digit, with NO floating-point
+ * arithmetic anywhere in the computation:
+ *
+ *   basis rows (e.g. "3โล100บาท"): ROUND(qty * basis_price / basis_quantity, 2)
+ *     — the view itself rounds this term, so it is rounded to the satang
+ *     here too (never derived from price_per_unit, which is only a rounded
+ *     display approximation for basis rows), then scaled up to milli-satang
+ *     exactly. One rounding, matching the view's one rounding.
+ *
+ *   unit rows: qty * price_per_unit — plain NUMERIC multiplication in
+ *     Postgres, which is exact and is NEVER rounded by the view. This must
+ *     not round it either: quantityMilli (scale 3) x priceSatang (scale 2)
+ *     is one BigInt multiplication landing exactly on scale 5 (milli-satang),
+ *     with no division and therefore no rounding at all — matching the
+ *     view's unrounded term exactly, not just to the satang.
+ *
+ * Fails closed rather than returning a silent 0 for a precondition this
+ * receipt should never see in practice (negative/non-finite quantity or
+ * basis_quantity, a non-positive basis_quantity, or a negative price) — a
+ * plausible-looking "0.00" line on an operator-facing receipt is money
+ * silently vanishing, which is worse than a loud failure for something the
+ * current parser never actually produces. Mirrors the same
+ * throw-on-invalid-item precedent house-stock-report.ts already uses.
+ */
+export function weighItemTotalMilliSatang(item: WeighSessionItem): bigint {
   const quantity = item.quantity ?? 0;
+  const quantityMilli = toMilliQuantity(quantity);
+  if (quantityMilli === null) {
+    throw new Error(`invalid_weigh_item_quantity:${item.item_number}`);
+  }
+
   if (item.basis_quantity && item.basis_price != null) {
-    const quantityMilli = toMilliQuantity(quantity);
     const basisQuantityMilli = toMilliQuantity(item.basis_quantity);
-    if (quantityMilli === null || basisQuantityMilli === null || basisQuantityMilli <= BigInt(0)) {
-      return 0;
+    if (basisQuantityMilli === null || basisQuantityMilli <= BigInt(0)) {
+      throw new Error(`invalid_weigh_item_basis_quantity:${item.item_number}`);
     }
     const basisPriceSatang = baht2ToSatang(item.basis_price);
-    return Number(roundHalfUp(quantityMilli * BigInt(basisPriceSatang), basisQuantityMilli));
+    if (basisPriceSatang < 0) {
+      throw new Error(`invalid_weigh_item_basis_price:${item.item_number}`);
+    }
+    const basisSatang = roundHalfUp(quantityMilli * BigInt(basisPriceSatang), basisQuantityMilli);
+    return basisSatang * MILLI_SATANG_PER_SATANG;
   }
+
   const priceSatang = baht2ToSatang(item.price_per_unit ?? 0);
-  return quantityTimesSatang(quantity, priceSatang) ?? 0;
+  if (priceSatang < 0) {
+    throw new Error(`invalid_weigh_item_price:${item.item_number}`);
+  }
+  // Exact: quantityMilli (scale 3) x priceSatang (scale 2) = scale 5 = milli-satang.
+  return quantityMilli * BigInt(priceSatang);
+}
+
+/**
+ * Per-item DISPLAY total in satang — the one place a unit row's otherwise
+ * exact, unrounded value gets rounded, exactly once, for printing on one
+ * receipt line. Aggregates must NOT be built by summing this per-item
+ * rounded value (see sumWeighItemsSatang) — that reintroduces the
+ * pre-rounded-sum drift this codebase has already hit once (see the
+ * buildSection comment below).
+ */
+export function weighItemTotalSatang(item: WeighSessionItem): number {
+  return Number(roundHalfUp(weighItemTotalMilliSatang(item), MILLI_SATANG_PER_SATANG));
 }
 
 export function weighItemTotal(item: WeighSessionItem): number {
   return weighItemTotalSatang(item) / 100;
+}
+
+/**
+ * Sum many items' EXACT milli-satang totals and round to the satang ONCE,
+ * at the end — never per item first. Summing per-item rounded satang (or
+ * worse, per-item floats) before rounding again is how a receipt's own
+ * grouped subtotal can disagree with the sum of its own printed lines.
+ */
+export function sumWeighItemsSatang(items: readonly WeighSessionItem[]): number {
+  const totalMilliSatang = items.reduce(
+    (sum, item) => sum + weighItemTotalMilliSatang(item),
+    BigInt(0),
+  );
+  return Number(roundHalfUp(totalMilliSatang, MILLI_SATANG_PER_SATANG));
 }
 
 export function buildWeighSessionSummary(session: WeighSession): string {
@@ -275,8 +336,9 @@ export function buildWeighSessionSummary(session: WeighSession): string {
 
   const lineTotal = weighItemTotal;
 
-  const sumItems = (items: Item[]) =>
-    items.reduce((acc, it) => acc + lineTotal(it), 0);
+  // Exact milli-satang sum, rounded once at the end — never the sum of
+  // per-item rounded (or floating-point) totals. See sumWeighItemsSatang.
+  const sumItems = (items: Item[]) => sumWeighItemsSatang(items) / 100;
 
   const borrowTotal    = sumItems(borrowItems);
   const returnTotal    = sumItems(returnItems);
@@ -430,7 +492,8 @@ export function buildAdditionalSessionSummary(
   const label = session.declared_transaction_type
     ? ADDITIONAL_TYPE_LABEL[session.declared_transaction_type]
     : "เพิ่ม";
-  const batchTotal = session.items.reduce((sum, item) => sum + weighItemTotal(item), 0);
+  // Exact milli-satang sum, rounded once at the end — see sumWeighItemsSatang.
+  const batchTotal = sumWeighItemsSatang(session.items) / 100;
 
   // Previous day total before this addition; clamp floating-point residue.
   let previousTotal = round2(day.cumulativeTotal - batchTotal);

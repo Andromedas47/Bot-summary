@@ -8,7 +8,9 @@ import {
   pushLineMessage,
   replyLineMessage,
   replyLineMessages,
+  sumWeighItemsSatang,
   weighItemTotal,
+  weighItemTotalMilliSatang,
   weighItemTotalSatang,
 } from "./reply";
 import type { WeighSession, WeighSessionItem } from "@/lib/parsers/weigh-session/types";
@@ -751,5 +753,146 @@ describe("weighItemTotalSatang — exact money, no floating-point reimplementati
       }
     }
     expect(checked).toBeGreaterThan(500);
+  });
+});
+
+describe("weighItemTotalMilliSatang — unit rows are EXACT, never rounded (adversarial-review BLOCKER)", () => {
+  // produce_transactions_all's unit-row term is plain NUMERIC multiplication
+  // (`quantity * price_per_unit`) and the view NEVER rounds it — only the
+  // basis-row term gets ROUND(...,2). A receipt total that rounds the unit
+  // branch disagrees with every other consumer of total_amount (financial
+  // summary, report summary, daily-summary-cron, settlement, both PDF
+  // exports). This locks in that the exact internal value — not just the
+  // rounded display value — matches the view bit for bit.
+  it("quantity 1.001 x price 2 is exactly 2.002 baht (200200 milli-satang), matching the DB's unrounded NUMERIC product", () => {
+    const item = weighItem({ quantity: 1.001, price_per_unit: 2, pricing_mode: "unit" });
+    // 1.001 * 2 = 2.002 baht exactly = 200200 milli-satang (10^-5 baht). The
+    // internal value is NOT 200 satang (2.00) — that only appears once this
+    // is rounded for single-line display via weighItemTotalSatang.
+    expect(weighItemTotalMilliSatang(item)).toBe(BigInt(200_200));
+    // The rounded display value is still 2.00 — rounding happens ONCE, at
+    // the display boundary, not lost from the exact value above.
+    expect(weighItemTotal(item)).toBe(2);
+  });
+
+  it("quantity 1.001 x price 10 is exactly 10.01 baht (1001000 milli-satang) with zero remainder", () => {
+    const item = weighItem({ quantity: 1.001, price_per_unit: 10, pricing_mode: "unit" });
+    expect(weighItemTotalMilliSatang(item)).toBe(BigInt(1_001_000));
+  });
+
+  it("a unit row with a genuine sub-satang remainder keeps it in the exact value", () => {
+    // quantity 0.333 x price 0.01 = 0.00333 baht = 333 milli-satang exactly
+    // — a real amount the DB view stores and never rounds away.
+    const item = weighItem({ quantity: 0.333, price_per_unit: 0.01, pricing_mode: "unit" });
+    expect(weighItemTotalMilliSatang(item)).toBe(BigInt(333));
+    expect(weighItemTotalSatang(item)).toBe(0); // rounds to 0 satang for single-line display
+  });
+
+  it("basis rows scale the DB's already-rounded satang up to milli-satang exactly (no second rounding)", () => {
+    const item = weighItem({
+      quantity: 1.001,
+      pricing_mode: "basis",
+      basis_quantity: 3,
+      basis_price: 10,
+    });
+    // round(1.001 * 10 / 3, 2) = 3.34 baht = 334 satang = 334_000 milli-satang.
+    expect(weighItemTotalMilliSatang(item)).toBe(BigInt(334_000));
+  });
+
+  // Generated sweep: the exact milli-satang value for a unit row must equal
+  // quantityMilli * priceSatang with NO rounding, for many combinations —
+  // including ones whose product is not a whole number of satang.
+  it("matches quantityMilli x priceSatang exactly (no rounding) for many generated unit-row pairs", () => {
+    let checked = 0;
+    for (let qtyMilli = 1; qtyMilli <= 20_000; qtyMilli += 37) {
+      for (let priceSatang = 1; priceSatang <= 3_000; priceSatang += 211) {
+        const item = weighItem({
+          quantity: qtyMilli / 1000,
+          price_per_unit: priceSatang / 100,
+          pricing_mode: "unit",
+        });
+        expect(weighItemTotalMilliSatang(item)).toBe(BigInt(qtyMilli) * BigInt(priceSatang));
+        checked += 1;
+      }
+    }
+    expect(checked).toBeGreaterThan(200);
+  });
+});
+
+describe("sumWeighItemsSatang — exact sum, rounded ONCE at the end (MEDIUM 1)", () => {
+  // The exact regression this codebase already documented once (see the
+  // comment above buildSection about 0.13 + 0.13 + 0.13 printing as 0.39
+  // against a 0.38 subtotal): summing PRE-ROUNDED per-item totals can drift
+  // from rounding the exact sum once. Three items whose milli-satang value
+  // each rounds down to 13 satang individually, but whose exact sum rounds
+  // UP to 40 satang, not 39.
+  it("sums the exact milli-satang value, not three pre-rounded satang values", () => {
+    // quantity 13.334 x price 0.01 = 0.13334 baht = 13334 milli-satang.
+    // Rounded per item: 13334 -> round(13.334) = 13 satang. Three of those
+    // summed the old (wrong) way = 39 satang = 0.39 baht.
+    const item = weighItem({ quantity: 13.334, price_per_unit: 0.01, pricing_mode: "unit" });
+    expect(weighItemTotalMilliSatang(item)).toBe(BigInt(13_334));
+    expect(weighItemTotalSatang(item)).toBe(13); // per-item display, rounds down
+
+    const wrongSumOfRoundedItems = 3 * weighItemTotalSatang(item); // the old bug's shape
+    expect(wrongSumOfRoundedItems).toBe(39);
+
+    // Exact sum: 13334 * 3 = 40002 milli-satang -> round once -> 40 satang.
+    expect(sumWeighItemsSatang([item, item, item])).toBe(40);
+  });
+
+  it("an empty item list sums to exactly zero", () => {
+    expect(sumWeighItemsSatang([])).toBe(0);
+  });
+});
+
+describe("weighItemTotalMilliSatang — fails closed, never a silent zero (MEDIUM 2 / MEDIUM 3)", () => {
+  it("throws rather than returning 0 for a non-finite quantity", () => {
+    const item = weighItem({ quantity: Number.NaN, price_per_unit: 10, pricing_mode: "unit" });
+    expect(() => weighItemTotalMilliSatang(item)).toThrow(/invalid_weigh_item_quantity/);
+  });
+
+  it("throws rather than returning 0 for a negative quantity", () => {
+    const item = weighItem({ quantity: -1, price_per_unit: 10, pricing_mode: "unit" });
+    expect(() => weighItemTotalMilliSatang(item)).toThrow(/invalid_weigh_item_quantity/);
+  });
+
+  it("basis_quantity: 0 is falsy, so it falls through to the unit branch by design", () => {
+    // Matches the pre-existing `if (item.basis_quantity && ...)` guard: a
+    // zero basis_quantity was never a valid basis row, so this is not a new
+    // precondition to enforce — it is the unit branch, unchanged.
+    const item = weighItem({
+      quantity: 1,
+      price_per_unit: 10,
+      pricing_mode: "basis",
+      basis_quantity: 0,
+      basis_price: 20,
+    });
+    expect(weighItemTotalMilliSatang(item)).toBe(BigInt(1000) * BigInt(1000));
+  });
+
+  it("throws rather than returning 0 for a negative basis_quantity", () => {
+    const item = weighItem({
+      quantity: 1,
+      pricing_mode: "basis",
+      basis_quantity: -1,
+      basis_price: 10,
+    });
+    expect(() => weighItemTotalMilliSatang(item)).toThrow(/invalid_weigh_item_basis_quantity/);
+  });
+
+  it("throws rather than returning 0 for a negative basis_price (MEDIUM 3 sign guard)", () => {
+    const item = weighItem({
+      quantity: 1,
+      pricing_mode: "basis",
+      basis_quantity: 3,
+      basis_price: -10,
+    });
+    expect(() => weighItemTotalMilliSatang(item)).toThrow(/invalid_weigh_item_basis_price/);
+  });
+
+  it("throws rather than returning 0 for a negative price_per_unit", () => {
+    const item = weighItem({ quantity: 1, price_per_unit: -10, pricing_mode: "unit" });
+    expect(() => weighItemTotalMilliSatang(item)).toThrow(/invalid_weigh_item_price/);
   });
 });

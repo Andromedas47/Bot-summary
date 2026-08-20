@@ -8,6 +8,7 @@
 
 import { parseBuddhistDate } from "@/lib/parsers/weigh-session/parser";
 import { isKnownUnit, normalizeUnitAlias } from "@/lib/parsers/weigh-session/units";
+import { parseExactDocumentMoney } from "@/lib/purchases/exact-decimal";
 import { roundHalfUp, toMilliQuantity } from "@/lib/sales/calculate";
 import {
   isPhysicalInventoryHeaderLine,
@@ -239,13 +240,22 @@ function parseUnitPrice(text: string): {
   const match = UNIT_PRICE_SUFFIX.exec(nfcCollapse(text));
   if (!match) return { product: nfcCollapse(text), unitPriceSatang: null, priceReason: "missing_unit_price" };
   const [, product, amount] = match;
-  const [, fraction = ""] = amount.split(".");
-  if (fraction.length > 2) return { product: nfcCollapse(product), unitPriceSatang: null, priceReason: "invalid_unit_price" };
-  const satang = Number(amount) * 100;
-  if (!Number.isSafeInteger(satang) || satang <= 0) {
+  // Exact BigInt decimal→satang conversion (same helper the Purchase Capture
+  // pipeline uses) — never `Number(amount) * 100`, which misrounds valid
+  // 2-decimal baht amounts like 2.01 or 10.05 under IEEE-754 (see
+  // src/lib/purchases/exact-decimal.ts). The parser regex allows a leading
+  // "-", but parseExactDocumentMoney's grammar is unsigned, so a negative
+  // amount fails to parse and falls into the same invalid_unit_price path
+  // negative/zero prices already took.
+  const parsed = parseExactDocumentMoney(amount);
+  if (!parsed.ok) {
     return { product: nfcCollapse(product), unitPriceSatang: null, priceReason: "invalid_unit_price" };
   }
-  return { product: nfcCollapse(product), unitPriceSatang: satang, priceReason: null };
+  const satang = parsed.value.satang;
+  if (satang <= BigInt(0) || !Number.isSafeInteger(Number(satang))) {
+    return { product: nfcCollapse(product), unitPriceSatang: null, priceReason: "invalid_unit_price" };
+  }
+  return { product: nfcCollapse(product), unitPriceSatang: Number(satang), priceReason: null };
 }
 
 /**

@@ -88,6 +88,48 @@ describe("priced House Stock parser", () => {
     }
   });
 
+  // Regression: `Number(text) * 100` is not exact for many valid 2-decimal
+  // baht amounts under IEEE-754 (e.g. 2.01 * 100 === 200.99999999999997,
+  // which is not a safe integer). A valid 2-decimal price must never be
+  // rejected because of floating-point representation — see
+  // src/lib/purchases/exact-decimal.ts for the exact BigInt conversion this
+  // parser now shares with Purchase Capture.
+  test("valid 2-decimal prices that break naive Number(text)*100 are accepted exactly", () => {
+    const cases: Array<[string, number]> = [
+      ["2.01", 201],
+      ["10.05", 1_005],
+      ["0.01", 1],
+      ["999.99", 99_999],
+      ["1.10", 110],
+      ["5.05", 505],
+    ];
+    for (const [amount, expectedSatang] of cases) {
+      const parsed = parsePhysicalInventoryDocument(
+        `ผลไม้คงเหลือในบ้าน 3/8/69\n1 ทุเรียน ${amount} บาท\n1 โล\nจบ`,
+        { requireUnitPrice: true },
+      );
+      const item = parsed.items[0]!;
+      expect(item.resolutionStatus).not.toBe("REJECTED");
+      expect(item.unitPriceSatang).toBe(expectedSatang);
+    }
+  });
+
+  test("invalid-precision and malformed prices are rejected, not silently truncated", () => {
+    const cases: Array<[string, string]> = [
+      ["1 ทุเรียน 2.019 บาท\n1 โล", "invalid_unit_price"], // 3+ decimals
+      ["1 ทุเรียน 12.345 บาท\n1 โล", "invalid_unit_price"], // 3+ decimals
+      ["1 ทุเรียน abc บาท\n1 โล", "missing_unit_price"], // garbage, no digits
+      ["1 ทุเรียน บาท\n1 โล", "missing_unit_price"], // empty amount
+    ];
+    for (const [body, reason] of cases) {
+      const parsed = parsePhysicalInventoryDocument(`ผลไม้คงเหลือในบ้าน 3/8/69\n${body}\nจบ`, {
+        requireUnitPrice: true,
+      });
+      expect(parsed.items[0]?.resolutionStatus).toBe("REJECTED");
+      expect(parsed.items[0]?.reason).toBe(reason);
+    }
+  });
+
   test("invalid reply identifies exact items", () => {
     const parsed = parsePhysicalInventoryDocument(
       "ผลไม้คงเหลือในบ้าน 3/8/69\n1 ทุเรียน\n1 โล\n2 มังคุด 30 บาท\n2\nจบ",

@@ -698,9 +698,24 @@ export class PendingSessionService {
     if (error) throw new Error(`pending session delete failed: ${error.message}`);
   }
 
+  // F-4 fix (20260820110000_produce_generation_scoped_ledger.sql): this used to
+  // delete straight from pending_sessions, filtered by session_key AND
+  // session_generation. That filter is correctly scoped to one generation, but
+  // pending_session_ingest/admission's ON DELETE CASCADE was keyed on
+  // session_key ALONE, so deleting the one pending_sessions row for a
+  // session_key cascaded away EVERY generation's ledger evidence for that key
+  // — not just the generation being rolled back (this is the only reachable
+  // caller: replaceGeneration's catch block, cleaning up a failed rotation).
+  //
+  // pending_session_generations is the new append-only (session_key,
+  // session_generation) registry the ledger tables' composite FK now targets.
+  // Deleting the registry row for exactly this generation cascades ONLY to
+  // that generation's ingest/admission rows; pending_sessions itself, and
+  // every other generation's ledger evidence, is untouched. See
+  // src/lib/line/migration-generation-scoped-ledger.pg.test.ts for the proof.
   async deleteGeneration(sessionKey: string, sessionGeneration: string): Promise<boolean> {
     const { data, error } = await this.supabase
-      .from("pending_sessions")
+      .from("pending_session_generations")
       .delete()
       .eq("session_key", sessionKey)
       .eq("session_generation", sessionGeneration)

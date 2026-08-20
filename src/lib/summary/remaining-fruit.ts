@@ -78,13 +78,19 @@ export const PRODUCT_ALIASES: Record<string, string> = {
   //
   // Known limit, and NOT specific to this entry: normalizeProductName feeds
   // businessContentFingerprint, so a document recorded BEFORE an alias lands
-  // hashes differently once it does. If such a document is re-sent afterwards,
-  // sessionHashCandidates will not recognise its stored session_hash and the
-  // duplicate blocker misses it. Market aliases have a compatibility layer for
-  // exactly this (weighSessionCompatibilityFingerprints, V1/V2 generations);
-  // product aliases have no equivalent, and never have \u2014 every entry above
-  // carries the same gap. Closing it belongs in its own change, covering the
-  // whole map rather than one word.
+  // hashes differently once it does. Every entry above carries this gap.
+  //
+  // CLOSED (dedup-historical-compatibility, 20260820100000): a document
+  // re-sent after an alias lands is recognised via
+  // weighSessionAliasCompatibilityFingerprints in business-fingerprint.ts \u2014
+  // the product/unit-alias counterpart of the market compatibility layer
+  // (weighSessionCompatibilityFingerprints, V1/V2). It is a LOOKUP-only
+  // reading, folded into duplicateLookupCandidates in
+  // session-dedup-service.ts, and reaches both the direct ingest path and the
+  // pending-session finalizer. See that module for the one known limit that
+  // remains: it reverts every alias-affected item in a document together, not
+  // per-alias by historical date, because no per-alias "added on" timeline is
+  // tracked anywhere in this codebase.
   \u0E44\u0E0A\u0E21\u0E31\u0E2A: "\u0E44\u0E0B\u0E21\u0E31\u0E2A",
 
   // \u2500\u2500 \u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15 \u2192 \u0E21\u0E30\u0E21\u0E48\u0E27\u0E07\u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15 (\u0E2131 shop-floor short form) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500

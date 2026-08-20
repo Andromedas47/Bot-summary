@@ -19,6 +19,7 @@ import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 import {
   computeItemHash,
   computeSessionHash,
+  duplicateLookupCandidates,
 } from "@/lib/line/session-dedup-service";
 import {
   canonicalWithdrawalItemLines,
@@ -423,6 +424,28 @@ export async function finalizePendingGeneration(
   const transactionTypes = [...new Set(
     parsed.items.map((item) => item.transaction_type),
   )].sort().join(",");
+
+  // The document's own identity is the current-generation hash. The
+  // compatibility set is what the SAME document was hashed as by the previous
+  // generation, under the market's other reviewed spellings; the RPC reserves
+  // it atomically so neither a historical row nor a concurrent old-build
+  // submission can be missed. See business-fingerprint.ts for V0/V1/V2.
+  const businessFingerprint = computeSessionHash(parsed);
+  const compatibilityFingerprints = weighSessionCompatibilityFingerprints(parsed);
+  // Everything ELSE this document could already be recorded under —
+  // duplicateLookupCandidates minus the two reservation sets above — for a
+  // read-only existence check, never a reservation: V0, a retired
+  // subunit-price rescaling, or a since-superseded product/unit alias
+  // reading. See the "KNOWN COUPLING" note this function's module-level
+  // comment refers to, and duplicateLookupCandidates itself for why this must
+  // stay LOOKUP-only and never join compatibilityFingerprints into the RPC's
+  // reserve-and-check array: the deployed RPC RESERVES every hash it is given
+  // there, and a new document must never reserve identity under arithmetic
+  // this codebase no longer believes.
+  const reserved = new Set([businessFingerprint, ...compatibilityFingerprints]);
+  const lookupOnlyHashes = duplicateLookupCandidates(parsed)
+    .filter((hash) => !reserved.has(hash));
+
   const sessionPayload: Record<string, unknown> = {
     raw_message_id: rawMessageId,
     staff_name: parsed.staff_name,
@@ -460,6 +483,10 @@ export async function finalizePendingGeneration(
       marketLabel: parsed.session_title,
       canonicalLines: canonicalWithdrawalItemLines(parsed),
     }),
+    // Read-only existence check (migration 20260820100000). Riding inside the
+    // existing payload keeps the RPC signature unchanged, so neither deploy
+    // order can break — see lookupOnlyHashes above.
+    duplicate_lookup_hashes: lookupOnlyHashes,
   };
   // Named fields, not a spread of the parsed item. A WeighSessionItem also
   // carries lookup-only evidence that must never reach a produce row —
@@ -483,13 +510,6 @@ export async function finalizePendingGeneration(
     item_hash: computeItemHash(parsed, item),
   }));
 
-  // The document's own identity is the current-generation hash. The
-  // compatibility set is what the SAME document was hashed as by the previous
-  // generation, under the market's other reviewed spellings; the RPC reserves
-  // it atomically so neither a historical row nor a concurrent old-build
-  // submission can be missed. See business-fingerprint.ts for V0/V1/V2.
-  const businessFingerprint = computeSessionHash(parsed);
-  const compatibilityFingerprints = weighSessionCompatibilityFingerprints(parsed);
   const result = await service.tryFinalizeGeneration(
     snapshot.session_key,
     snapshot.session_generation,

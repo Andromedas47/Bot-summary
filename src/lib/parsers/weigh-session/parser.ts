@@ -463,6 +463,16 @@ function applyQuantity(
   if (item.basis_quantity == null && factor !== 1) {
     item.legacy_subunit_price_per_unit = Number((item.price_per_unit! / factor).toFixed(2));
   }
+
+  // A pure spelling alias (factor 1, so no quantity/price rescaling) still
+  // has to leave evidence: `normalizeUnitAlias` runs HERE, in the parser, so
+  // this is the only point the raw pre-alias token still exists — a
+  // fingerprint computed later can never recover it from `item.unit`. See
+  // legacy_unit_alias_raw in types.ts.
+  const trimmedRawUnit = unit.trim();
+  if (factor === 1 && resolved.unit !== trimmedRawUnit) {
+    item.legacy_unit_alias_raw = trimmedRawUnit;
+  }
 }
 
 function finalize(
@@ -483,6 +493,7 @@ function finalize(
     basis_unit:       p.basis_unit     ?? null,
     basis_price:      p.basis_price    ?? null,
     legacy_subunit_price_per_unit: p.legacy_subunit_price_per_unit,
+    legacy_unit_alias_raw: p.legacy_unit_alias_raw,
   };
 }
 

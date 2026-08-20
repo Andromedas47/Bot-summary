@@ -131,20 +131,56 @@ function canonicalTransactionType(value: string | null | undefined): string {
 }
 
 /**
+ * The fingerprint's product/unit identity component, per reading. See the
+ * alias-compatibility note above `weighSessionAliasCompatibilityFingerprints`.
+ */
+export interface ItemIdentityResolver {
+  resolveProduct: (baseNormalized: string) => string;
+  resolveUnit: (baseNormalized: string) => string;
+}
+
+/** Current — `normalizeProductName` / `normalizeUnitAlias`, aliases folded. */
+const CURRENT_ITEM_IDENTITY: ItemIdentityResolver = {
+  resolveProduct: (name) => normalizeProductName(name),
+  resolveUnit: (unit) => normalizeUnitAlias(unit),
+};
+
+/**
+ * Raw — no PRODUCT_ALIASES / UNIT_ALIASES applied at all, the base-normalized
+ * text as-is. Reconstructs what an item would have canonicalized to before
+ * whichever of today's alias entries affects it existed. LOOKUP only; see
+ * `weighSessionAliasCompatibilityFingerprints`.
+ */
+const RAW_ITEM_IDENTITY: ItemIdentityResolver = {
+  resolveProduct: (name) => name,
+  resolveUnit: (unit) => unit,
+};
+
+/**
  * One item as canonical business content.
  *
  * Product identity is `normalizeProductName` — the SAME canonicalization P4A
  * validates withdrawals against and the reports aggregate by. Nothing here
  * rewrites stored evidence; this string never leaves the hash.
+ *
+ * `resolveItem` defaults to the current (alias-folded) reading, which is every
+ * caller's identity today. `weighSessionAliasCompatibilityFingerprints` is the
+ * only caller that passes `RAW_ITEM_IDENTITY`.
  */
-export function canonicalItemLine(item: BusinessItemInput): string {
+export function canonicalItemLine(
+  item: BusinessItemInput,
+  resolveItem: ItemIdentityResolver = CURRENT_ITEM_IDENTITY,
+): string {
+  const productName = (item.productName ?? "").normalize("NFC").trim();
+  const unit         = (item.unit ?? "").normalize("NFC").trim();
+  const basisUnit    = (item.basisUnit ?? "").normalize("NFC").trim();
   return [
-    normalizeProductName((item.productName ?? "").normalize("NFC").trim()),
-    normalizeUnitAlias((item.unit ?? "").normalize("NFC").trim()),
+    resolveItem.resolveProduct(productName),
+    resolveItem.resolveUnit(unit),
     decimal(item.quantity, QUANTITY_SCALE),
     decimal(item.pricePerUnit, PRICE_SCALE),
     decimal(item.basisQuantity, QUANTITY_SCALE),
-    normalizeUnitAlias((item.basisUnit ?? "").normalize("NFC").trim()),
+    resolveItem.resolveUnit(basisUnit),
     decimal(item.basisPrice, PRICE_SCALE),
     canonicalTransactionType(item.transactionType),
   ].join("|");
@@ -155,14 +191,18 @@ export function canonicalItemLine(item: BusinessItemInput): string {
  * Exported because the composite detector needs the multiset itself, not only
  * its digest.
  */
-export function canonicalItemLines(items: readonly BusinessItemInput[]): string[] {
-  return items.map(canonicalItemLine).sort();
+export function canonicalItemLines(
+  items: readonly BusinessItemInput[],
+  resolveItem: ItemIdentityResolver = CURRENT_ITEM_IDENTITY,
+): string[] {
+  return items.map((item) => canonicalItemLine(item, resolveItem)).sort();
 }
 
 /** The canonical document, before hashing. Exported for test diagnostics. */
 export function canonicalBusinessContent(
   input: BusinessContentInput,
   resolveMarket: MarketResolver = marketIdentity,
+  resolveItem: ItemIdentityResolver = CURRENT_ITEM_IDENTITY,
 ): string {
   const transactionTypes = [
     ...new Set(input.items.map((item) => canonicalTransactionType(item.transactionType))),
@@ -173,16 +213,17 @@ export function canonicalBusinessContent(
     normalizeSellerLabel(input.sellerLabel),
     resolveMarket(input.marketLabel),
     transactionTypes,
-    canonicalItemLines(input.items).join("\n"),
+    canonicalItemLines(input.items, resolveItem).join("\n"),
   ].join("||");
 }
 
 export function businessContentFingerprint(
   input: BusinessContentInput,
   resolveMarket: MarketResolver = marketIdentity,
+  resolveItem: ItemIdentityResolver = CURRENT_ITEM_IDENTITY,
 ): string {
   return createHash("sha256")
-    .update(canonicalBusinessContent(input, resolveMarket), "utf8")
+    .update(canonicalBusinessContent(input, resolveMarket, resolveItem), "utf8")
     .digest("hex");
 }
 
@@ -243,13 +284,29 @@ export function weighSessionBusinessFingerprint(parsed: WeighSession): string {
  * set — its V1 and V2 hashes are already identical.
  */
 export function weighSessionCompatibilityFingerprints(parsed: WeighSession): string[] {
+  return marketSpellingFingerprintsFor(parsed, CURRENT_ITEM_IDENTITY);
+}
+
+/**
+ * `weighSessionCompatibilityFingerprints`, parameterized over the item
+ * identity reading. Shared by the V1 market-alias set (current item identity
+ * — reservations) and `weighSessionAliasCompatibilityFingerprints` (raw item
+ * identity — lookup only), so the two never drift apart on how a market
+ * spelling equivalence class is walked.
+ */
+function marketSpellingFingerprintsFor(
+  parsed: WeighSession,
+  resolveItem: ItemIdentityResolver,
+): string[] {
   const canonical = canonicalMarketLabel(parsed.session_title);
   if (!canonical) return [];
 
-  const seen = new Set<string>([weighSessionBusinessFingerprint(parsed)]);
+  const seen = new Set<string>([
+    businessContentFingerprint(businessContentOf(parsed), marketIdentity, resolveItem),
+  ]);
   const compatibility: string[] = [];
   for (const spelling of reviewedMarketSpellings(canonical)) {
-    const hash = weighSessionLegacyMarketFingerprint(parsed, spelling);
+    const hash = weighSessionLegacyMarketFingerprint(parsed, spelling, resolveItem);
     if (seen.has(hash)) continue;
     seen.add(hash);
     compatibility.push(hash);
@@ -272,11 +329,100 @@ export function weighSessionCompatibilityFingerprints(parsed: WeighSession): str
 export function weighSessionLegacyMarketFingerprint(
   parsed: WeighSession,
   spelling?: string,
+  resolveItem: ItemIdentityResolver = CURRENT_ITEM_IDENTITY,
 ): string {
   return businessContentFingerprint(
     businessContentOf(parsed),
     spelling === undefined ? v1MarketIdentity : () => spelling,
+    resolveItem,
   );
+}
+
+/**
+ * Product/unit alias compatibility — the LOOKUP-only counterpart of
+ * `weighSessionCompatibilityFingerprints`, for `normalizeProductName` /
+ * `normalizeUnitAlias` instead of the market resolver.
+ *
+ * The gap
+ * -------
+ * `canonicalItemLine` folds PRODUCT_ALIASES / UNIT_ALIASES (remaining-fruit.ts
+ * and units.ts respectively) into every V1/V2 hash, at WHATEVER state that
+ * alias table is in when the hash is computed. Unlike the market registry,
+ * which has always had a reviewed equivalence class and a compatibility layer
+ * (above), product and unit aliases never did — see the ไชมัส entry in
+ * remaining-fruit.ts, which named this exact gap in place and deferred
+ * closing it to "its own change, covering the whole map". This is that
+ * change.
+ *
+ * A document recorded before an alias entry existed hashed under the RAW
+ * (base-normalized only) spelling. Once the alias lands, recomputing that
+ * SAME raw text folds it to the alias's target, and the hash no longer
+ * matches the historical row.
+ *
+ * What this reconstructs, and why callers pass TWO different readings
+ * ----------------------------------------------------------------------
+ * This function always bypasses BOTH product and unit alias folding
+ * (`RAW_ITEM_IDENTITY`) — but which reading of `parsed` it needs to run
+ * against differs by axis, because product and unit are resolved at
+ * different pipeline stages:
+ *
+ *   product   `item.product_name` is untouched raw text all the way to hash
+ *             time — `canonicalItemLine` is the only place PRODUCT_ALIASES is
+ *             ever applied. So calling this directly on `parsed` already
+ *             reconstructs the pre-alias reading.
+ *
+ *   unit      `item.unit` is ALREADY canonical by the time anything past the
+ *             PARSER sees it — parser.ts applies `normalizeUnitAlias` while
+ *             building the item, so `RAW_ITEM_IDENTITY` on `parsed` directly
+ *             changes nothing (it bypasses a fold that already happened).
+ *             `duplicateLookupCandidates` instead calls this on
+ *             `legacyUnitAliasSession(parsed)` — the item, with `unit` put
+ *             back to the RAW token the operator typed, from
+ *             `legacy_unit_alias_raw` (types.ts). That field only exists
+ *             because the parser captured it at the one moment the raw
+ *             spelling was still available.
+ *
+ * A document needing BOTH reverted at once is covered too:
+ * `legacyUnitAliasSession` only touches `unit`, so `product_name` in that
+ * reading is still the untouched raw text, and running THIS function against
+ * it bypasses both.
+ *
+ * Every reading is also crossed with every market spelling
+ * `weighSessionCompatibilityFingerprints` already covers, so a document that
+ * predates a product/unit alias AND a market alias is still recognised in one
+ * lookup. Returns `[]` for a reading nothing here touches (the common case),
+ * so a document nothing here touches costs nothing extra to look up.
+ *
+ * Known limit, matching the one legacySubunitPricedSession accepts: the
+ * product axis is all-or-nothing across every affected item in one reading —
+ * a document where item A's alias existed at import time but item B's did
+ * not is not reconstructed exactly. No per-alias "added on" date is tracked
+ * anywhere in this codebase, so an exact reconstruction is not possible; this
+ * bounds the gap instead of leaving it wide open. LOOKUP only — see
+ * `duplicateLookupCandidates` in session-dedup-service.ts. Never reserved: a
+ * new document must never claim identity under an alias table it does not
+ * believe in any more.
+ */
+export function weighSessionAliasCompatibilityFingerprints(parsed: WeighSession): string[] {
+  const content = businessContentOf(parsed);
+  const currentLines = canonicalItemLines(content.items, CURRENT_ITEM_IDENTITY).join("\n");
+  const rawLines = canonicalItemLines(content.items, RAW_ITEM_IDENTITY).join("\n");
+  if (currentLines === rawLines) return [];
+
+  const seen = new Set<string>([
+    businessContentFingerprint(content, marketIdentity, CURRENT_ITEM_IDENTITY),
+    ...marketSpellingFingerprintsFor(parsed, CURRENT_ITEM_IDENTITY),
+  ]);
+  const compatibility: string[] = [];
+  for (const hash of [
+    businessContentFingerprint(content, marketIdentity, RAW_ITEM_IDENTITY),
+    ...marketSpellingFingerprintsFor(parsed, RAW_ITEM_IDENTITY),
+  ]) {
+    if (seen.has(hash)) continue;
+    seen.add(hash);
+    compatibility.push(hash);
+  }
+  return compatibility;
 }
 
 /**

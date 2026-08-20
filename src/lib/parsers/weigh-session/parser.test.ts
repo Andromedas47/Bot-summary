@@ -1608,6 +1608,41 @@ describe("canonical header price survives a subunit quantity conversion (regress
     expect(itemInserts[0].price_per_unit).toBe(120);
   });
 
+  // The raw pre-alias unit token is kept as evidence only (see
+  // legacy_unit_alias_raw in types.ts / legacyUnitAliasSession in
+  // session-dedup-service.ts), never in the persisted row — same contract as
+  // the retired price above, for the pure-spelling-alias case (no rescaling).
+  it("keeps the raw unit alias token as lookup evidence only, never in the persisted row", async () => {
+    const { parsed, itemInserts } = await parseAndPersistItems(
+      [
+        "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+        "มะม่วง100บาท",
+        "5กก",
+        "จบรายการเบิก",
+      ].join("\n"),
+      "production-mango-legacy-unit-alias-evidence",
+    );
+
+    expect(parsed.items[0].legacy_unit_alias_raw).toBe("กก");
+    expect(parsed.items[0].unit).toBe("โล");
+    expect(Object.keys(itemInserts[0])).not.toContain("legacy_unit_alias_raw");
+    expect(itemInserts[0].unit).toBe("โล");
+  });
+
+  it("leaves no unit-alias evidence when the operator typed the canonical spelling", async () => {
+    const { parsed } = await parseAndPersistItems(
+      [
+        "กี้-วัดทุ่งลานนา เบิก 29/6/2569",
+        "มะม่วง100บาท",
+        "5โล",
+        "จบรายการเบิก",
+      ].join("\n"),
+      "production-mango-canonical-unit",
+    );
+
+    expect(parsed.items[0].legacy_unit_alias_raw).toBeUndefined();
+  });
+
   it.each([
     // [header, quantityLine, expectedQuantity, expectedUnit, expectedPrice, expectedMoney]
     ["สินค้า100บาท", "1ขีด",   0.1, "โล", 100, 10],

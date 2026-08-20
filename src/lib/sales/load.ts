@@ -5,7 +5,7 @@ import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
 import {
   computeItemHash,
   legacySubunitPricedSession,
-  sessionHashCandidates,
+  duplicateLookupCandidates,
 } from "@/lib/line/session-dedup-service";
 import { bangkokBusinessDateFromTimestamp } from "@/lib/business-date";
 import { isStrictBusinessDate } from "./cron";
@@ -1044,7 +1044,7 @@ async function accountedProduceMessages(
           ? [legacyPriced.items.map((item) => computeItemHash(legacyPriced, item))]
           : []),
       ];
-      return { id: row.id, sessionHashes: sessionHashCandidates(parsed), itemHashVariants };
+      return { id: row.id, sessionHashes: duplicateLookupCandidates(parsed), itemHashVariants };
     })
     // No items → nothing to prove landed. Fail closed.
     .filter((row) => row.itemHashVariants[0].length > 0);

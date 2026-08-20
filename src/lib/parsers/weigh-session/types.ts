@@ -38,6 +38,20 @@ export interface WeighSessionItem {
    *  pending-session-finalizer.ts. Anything that spreads a WeighSessionItem
    *  toward storage has to strip it. */
   legacy_subunit_price_per_unit?: number;
+  /** Transient, never persisted and never part of an item's business content:
+   *  the RAW unit token this line was typed with, present only when
+   *  normalizeUnitAlias resolved it to a DIFFERENT spelling (a pure alias, no
+   *  quantity rescaling — contrast legacy_subunit_price_per_unit, which is the
+   *  rescaling case). Unlike a product name or a market label, a unit alias is
+   *  resolved by the PARSER itself, before any fingerprint sees the item, so
+   *  there is no later point at which the raw spelling could be recovered from
+   *  `unit` — this is the only place it still exists. Read by
+   *  legacyUnitAliasSession in business-fingerprint.ts, so a resend of a
+   *  message typed with an alias spelling still matches its own reservation.
+   *  Every write path builds its produce row from named fields rather than
+   *  from this object — see persist() in parser.ts and the RPC payload in
+   *  pending-session-finalizer.ts — which is what keeps this off the wire. */
+  legacy_unit_alias_raw?: string;
 }
 
 export interface WeighSession {

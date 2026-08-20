@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { WeighSession, WeighSessionItem } from "@/lib/parsers/weigh-session/types";
 import {
+  weighSessionAliasCompatibilityFingerprints,
   weighSessionBusinessFingerprint,
   weighSessionCompatibilityFingerprints,
 } from "@/lib/produce/business-fingerprint";
@@ -109,26 +110,73 @@ export function legacySubunitPricedSession(parsed: WeighSession): WeighSession |
 }
 
 /**
- * Every identity this document could already be recorded under — the
- * reservations, the pre-PR #51 legacy hash, and, for a document a subunit
- * conversion touched, all three of those computed under the pre-fix price.
- * Read-only; never written. The pre-fix price is deliberately absent from
- * sessionHashReservations: a new document must never claim a hash derived from
- * arithmetic this codebase no longer believes.
+ * The same document with `unit` put back to the RAW token the operator typed,
+ * wherever the parser recognised an alias spelling — or null if no item was
+ * typed with one.
+ *
+ * `normalizeUnitAlias` runs in the PARSER (units.ts), before any fingerprint
+ * ever sees the item, so `item.unit` is already canonical by the time
+ * `canonicalItemLine` runs — bypassing the alias there (the trick that works
+ * for a product name, see RAW_ITEM_IDENTITY in business-fingerprint.ts)
+ * reconstructs nothing, because there is nothing left to bypass. This rebuilds
+ * that historical identity — for LOOKUP only — from the one piece of evidence
+ * that still has the raw spelling: `legacy_unit_alias_raw` (types.ts),
+ * captured by the parser at the moment it applied the alias.
  */
-export function sessionHashCandidates(parsed: WeighSession): string[] {
+export function legacyUnitAliasSession(parsed: WeighSession): WeighSession | null {
+  if (!parsed.items.some((item) => item.legacy_unit_alias_raw !== undefined)) return null;
+
+  return {
+    ...parsed,
+    items: parsed.items.map((item) =>
+      item.legacy_unit_alias_raw === undefined
+        ? item
+        : { ...item, unit: item.legacy_unit_alias_raw }),
+  };
+}
+
+/**
+ * Every identity this document could already be recorded under: the
+ * reservations, the pre-PR #51 legacy hash (V0), the product/unit
+ * alias-compatibility readings, and — for a document a subunit conversion or
+ * a unit alias touched — all of those again computed under the pre-fix price
+ * and/or the raw pre-alias unit, including both together.
+ *
+ * This is THE shared lookup concept: the ingest path
+ * (SessionDedupService.findDuplicate, below) and the pending-session
+ * finalizer (pending-session-finalizer.ts) both call this one function and
+ * nothing narrower, so the two paths can never drift on what counts as "this
+ * document, historically". `sessionHashReservations` is the other half —
+ * distinct on purpose — and stays exactly what a NEW write may claim.
+ *
+ * Read-only; never written. The pre-fix price, the V0 shape and the alias
+ * readings are deliberately absent from `sessionHashReservations`: a new
+ * document must never claim a hash derived from arithmetic this codebase no
+ * longer believes.
+ */
+export function duplicateLookupCandidates(parsed: WeighSession): string[] {
   const legacyPriced = legacySubunitPricedSession(parsed);
+  const legacyUnitAliased = legacyUnitAliasSession(parsed);
+  // legacyUnitAliasSession only rewrites `unit`, so applying it again to the
+  // price-reverted reading combines both axes for a document a subunit
+  // conversion AND a unit alias both touched.
+  const legacyBoth = legacyPriced ? legacyUnitAliasSession(legacyPriced) : null;
+
+  const readings = [
+    parsed,
+    ...(legacyPriced ? [legacyPriced] : []),
+    ...(legacyUnitAliased ? [legacyUnitAliased] : []),
+    ...(legacyBoth ? [legacyBoth] : []),
+  ];
 
   return [...new Set([
     ...sessionHashReservations(parsed),
-    computeLegacySessionHash(parsed),
-    ...(legacyPriced
-      ? [
-          computeSessionHash(legacyPriced),
-          ...weighSessionCompatibilityFingerprints(legacyPriced),
-          computeLegacySessionHash(legacyPriced),
-        ]
-      : []),
+    ...readings.flatMap((reading) => [
+      computeLegacySessionHash(reading),
+      computeSessionHash(reading),
+      ...weighSessionCompatibilityFingerprints(reading),
+      ...weighSessionAliasCompatibilityFingerprints(reading),
+    ]),
   ])];
 }
 
@@ -229,7 +277,7 @@ export class SessionDedupService {
     const { data, error } = await this.supabase
       .from("imported_sessions")
       .select("session_hash, reserved_by_generation")
-      .in("session_hash", sessionHashCandidates(parsed))
+      .in("session_hash", duplicateLookupCandidates(parsed))
       .limit(1)
       .maybeSingle();
 

@@ -619,6 +619,193 @@ describe("P1 session integrity", () => {
   });
 });
 
+// Production 2026-08-19 shapes (SELECT-verified, none voided, no declared
+// transaction type): a P2E round legitimately spans several persisted main
+// documents of the same effective type. Round ids and seller/market labels
+// below are the real production identities from the addendum; product counts
+// are scaled down from the originals (e.g. 40/34, 22/19, 12/12, 8/8 for
+// ตลาด72) to a handful of representative products while preserving the exact
+// invariants that were verified in production — a zero-intersection product
+// set between two main คืน documents, and a second main คืน document holding
+// a single item.
+describe("P1 duplicate main session — round scoping (2026-08-19 regression)", () => {
+  const ROUND_KWAN = "f17c54cc-09c7-4091-bf8e-4dcdf8bdb6c0"; // ขวัญ, ตลาด72
+  const ROUND_JA = "ff236c81-13e3-4149-939b-a8d298c037e5"; // จ้า, ทรัพย์พัน
+  const ROUND_DAM = "2b611dac-75c6-4a35-9960-dc527308a315"; // ดำ, วัดตะกล่ำ
+
+  const PRICES = prices([
+    ["ทุเรียน", "โล", 10_000],
+    ["มะม่วง", "โล", 5_000],
+    ["ชมพู่", "โล", 3_000],
+  ]);
+
+  test("1: same round + same return type + DISJOINT products aggregates, no duplicate_main_session", () => {
+    const report = build(
+      [
+        row({ accountabilityRoundId: ROUND_KWAN, sessionId: "f23ae1e9", productName: "ทุเรียน", quantity: 10, transactionType: TX_WITHDRAW }),
+        row({ accountabilityRoundId: ROUND_KWAN, sessionId: "f23ae1e9", productName: "มะม่วง", quantity: 10, transactionType: TX_WITHDRAW }),
+        row({ accountabilityRoundId: ROUND_KWAN, sessionId: "ddf0ebda", productName: "ทุเรียน", quantity: 3, transactionType: TX_RETURN }),
+        row({ accountabilityRoundId: ROUND_KWAN, sessionId: "69bb468f", productName: "มะม่วง", quantity: 4, transactionType: TX_RETURN }),
+      ],
+      { centralPrices: PRICES },
+    );
+
+    expect(report.blocked).toHaveLength(0);
+    const durian = report.markets[0].rows.find((r) => r.productName === "ทุเรียน");
+    const mango = report.markets[0].rows.find((r) => r.productName === "มะม่วง");
+    expect(durian?.status).toBe("TRUSTED");
+    expect(durian?.soldQuantity).toBe(7);
+    expect(mango?.status).toBe("TRUSTED");
+    expect(mango?.soldQuantity).toBe(6);
+    for (const r of report.markets[0].rows) expect(r.reasons).not.toContain("duplicate_main_session");
+  });
+
+  test("2: same round + same return type + OVERLAPPING products aggregates per normal semantics — document count alone is not duplicate evidence", () => {
+    const report = build(
+      [
+        row({ accountabilityRoundId: ROUND_KWAN, sessionId: "f23ae1e9", productName: "ทุเรียน", quantity: 10, transactionType: TX_WITHDRAW }),
+        row({ accountabilityRoundId: ROUND_KWAN, sessionId: "ddf0ebda", productName: "ทุเรียน", quantity: 3, transactionType: TX_RETURN }),
+        row({ accountabilityRoundId: ROUND_KWAN, sessionId: "69bb468f", productName: "ทุเรียน", quantity: 2, transactionType: TX_RETURN }),
+      ],
+      { centralPrices: PRICES },
+    );
+
+    const result = onlyRow(report);
+    expect(result.status).toBe("TRUSTED");
+    expect(result.goodReturnQuantity).toBe(5);
+    expect(result.soldQuantity).toBe(5);
+    expect(result.reasons).not.toContain("duplicate_main_session");
+  });
+
+  test("3: withdrawal + multiple good-return documents (+ damaged, + additional) in one round is trusted when arithmetic is valid", () => {
+    const report = build(
+      [
+        row({ accountabilityRoundId: ROUND_KWAN, sessionId: "f23ae1e9", productName: "ทุเรียน", quantity: 10, transactionType: TX_WITHDRAW }),
+        row({ accountabilityRoundId: ROUND_KWAN, sessionId: "ddf0ebda", productName: "ทุเรียน", quantity: 3, transactionType: TX_RETURN }),
+        row({ accountabilityRoundId: ROUND_KWAN, sessionId: "69bb468f", productName: "ทุเรียน", quantity: 2, transactionType: TX_RETURN }),
+        row({ accountabilityRoundId: ROUND_KWAN, sessionId: "790e1f87", productName: "ทุเรียน", quantity: 1, transactionType: TX_DAMAGED }),
+        row({
+          accountabilityRoundId: ROUND_KWAN,
+          sessionId: "9dea923f",
+          sessionKind: "additional",
+          productName: "ทุเรียน",
+          quantity: 1,
+          transactionType: TX_RETURN_MORE,
+        }),
+      ],
+      { centralPrices: PRICES },
+    );
+
+    const result = onlyRow(report);
+    expect(result.status).toBe("TRUSTED");
+    expect(result.withdrawnQuantity).toBe(10);
+    expect(result.goodReturnQuantity).toBe(6); // 3 + 2 + 1 additional
+    expect(result.damagedReturnQuantity).toBe(1);
+    expect(result.soldQuantity).toBe(3);
+    expect(report.blocked).toHaveLength(0);
+  });
+
+  test("3b: a second main document holding a SINGLE item is the same shape, not a duplicate (round ff236c81)", () => {
+    const report = build(
+      [
+        row({ accountabilityRoundId: ROUND_JA, marketName: "ทรัพย์พัน", sessionId: "06e68e3c", productName: "ชมพู่", quantity: 5, transactionType: TX_WITHDRAW }),
+        row({ accountabilityRoundId: ROUND_JA, marketName: "ทรัพย์พัน", sessionId: "fdcbd52f", productName: "ชมพู่", quantity: 3, transactionType: TX_RETURN }),
+        // 75302548: the second main คืน document, holding a single item.
+        row({ accountabilityRoundId: ROUND_JA, marketName: "ทรัพย์พัน", sessionId: "75302548", productName: "ชมพู่", quantity: 1, transactionType: TX_RETURN }),
+      ],
+      { centralPrices: PRICES },
+    );
+
+    const result = onlyRow(report);
+    expect(result.status).toBe("TRUSTED");
+    expect(result.goodReturnQuantity).toBe(4);
+    expect(result.soldQuantity).toBe(1);
+    expect(result.reasons).not.toContain("duplicate_main_session");
+  });
+
+  test("3c: same shape for round 2b611dac (a second main document holding a single item)", () => {
+    const report = build(
+      [
+        row({ accountabilityRoundId: ROUND_DAM, marketName: "วัดตะกล่ำ", sessionId: "aadf35c2", productName: "ชมพู่", quantity: 6, transactionType: TX_WITHDRAW }),
+        row({ accountabilityRoundId: ROUND_DAM, marketName: "วัดตะกล่ำ", sessionId: "85025fe8", productName: "ชมพู่", quantity: 4, transactionType: TX_RETURN }),
+        // 73cc3660: the second main คืน document, holding a single item.
+        row({ accountabilityRoundId: ROUND_DAM, marketName: "วัดตะกล่ำ", sessionId: "73cc3660", productName: "ชมพู่", quantity: 1, transactionType: TX_RETURN }),
+      ],
+      { centralPrices: PRICES },
+    );
+
+    const result = onlyRow(report);
+    expect(result.status).toBe("TRUSTED");
+    expect(result.goodReturnQuantity).toBe(5);
+    expect(result.soldQuantity).toBe(1);
+    expect(result.reasons).not.toContain("duplicate_main_session");
+  });
+
+  test("4: multiple DISTINCT populated rounds for the same business identity stay separate — never silently aggregated (protection ii, unweakened)", () => {
+    const OTHER_ROUND = "11111111-2222-4333-8444-555555555555";
+    const report = build(
+      [
+        row({ accountabilityRoundId: ROUND_KWAN, sessionId: "round-a-main", productName: "ทุเรียน", quantity: 10, transactionType: TX_WITHDRAW }),
+        row({ accountabilityRoundId: OTHER_ROUND, sessionId: "round-b-main", productName: "ทุเรียน", quantity: 8, transactionType: TX_WITHDRAW }),
+      ],
+      { centralPrices: PRICES },
+    );
+
+    // Two distinct round ids for the same source + label never collapse into
+    // one identity: each keeps its own marketKey and its own row, so a real
+    // second round is always visible in the report rather than netted away.
+    expect(report.markets).toHaveLength(2);
+    const quantities = report.markets
+      .flatMap((m) => m.rows.map((r) => r.withdrawnQuantity))
+      .sort((a, b) => a - b);
+    expect(quantities).toEqual([8, 10]);
+    for (const market of report.markets) {
+      for (const r of market.rows) expect(r.reasons).not.toContain("duplicate_main_session");
+    }
+  });
+
+  test("5: an additional session inside a round stays additive, not a duplicate (unchanged)", () => {
+    const report = build(
+      [
+        row({ accountabilityRoundId: ROUND_KWAN, sessionId: "main-1", quantity: 10, transactionType: TX_WITHDRAW }),
+        row({
+          accountabilityRoundId: ROUND_KWAN,
+          sessionId: "additional-1",
+          sessionKind: "additional",
+          quantity: 5,
+          transactionType: TX_WITHDRAW_MORE,
+        }),
+      ],
+      { centralPrices: DURIAN_PRICE },
+    );
+
+    const result = onlyRow(report);
+    expect(result.withdrawnQuantity).toBe(15);
+    expect(result.status).toBe("TRUSTED");
+    expect(result.reasons).not.toContain("duplicate_main_session");
+  });
+
+  test("6: legacy rows with NO round still fail closed on two main sessions of the same type (unchanged)", () => {
+    // No accountabilityRoundId here is deliberate: without a round, there is no
+    // proof that two main sessions of the same type share one accountability
+    // lifecycle, so P1 keeps blocking exactly as it did before this fix. Voided
+    // sessions are excluded upstream in load.ts (produce_transactions is
+    // already void-filtered) and never reach this calculator either way.
+    const report = build(
+      [
+        row({ quantity: 10, transactionType: TX_WITHDRAW, sessionId: "legacy-1" }),
+        row({ quantity: 10, transactionType: TX_WITHDRAW, sessionId: "legacy-2" }),
+      ],
+      { centralPrices: DURIAN_PRICE },
+    );
+
+    expect(report.blocked).toHaveLength(1);
+    for (const blocked of report.blocked) {
+      expect(blocked.reasons).toContain("duplicate_main_session");
+    }
+  });
+});
+
 // ── Product and unit identity ───────────────────────────────────────────────
 
 describe("P1 product and unit identity", () => {

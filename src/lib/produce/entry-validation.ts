@@ -16,9 +16,9 @@
  *  - it never merges two products because their names look alike. Fuzzy
  *    distance produces a SUGGESTION for a human, never a match — เขียวมรกต and
  *    เขียวมรกตเก่า are one character apart and are different goods;
- *  - it never coerces a price. A return price is allowed to differ from the
- *    withdrawal price; it just has to be acknowledged, and the acknowledgement
- *    is data-entry approval, not financial certification.
+ *  - it never coerces a price. A return price may differ from the withdrawal
+ *    price; the difference is reported as an advisory while the entered price
+ *    remains authoritative for the transaction.
  */
 
 import { createHash } from "node:crypto";
@@ -40,7 +40,7 @@ import {
 /** Quantities are numeric(10,3); prices numeric(10,2). Compare inside that grid. */
 const QUANTITY_EPSILON = 0.0005;
 
-export type ProduceValidationSeverity = "blocking" | "review_required";
+export type ProduceValidationSeverity = "blocking" | "review_required" | "advisory";
 
 export type ProduceValidationException =
   /** The unit is not part of the shop vocabulary at all ("โลก"). */
@@ -94,10 +94,10 @@ export type ProduceValidationException =
       productName: string;
       suggestions: ProductVocabularySuggestion[];
     }
-  /** An intentional price change is allowed — but it has to be acknowledged. */
+  /** An intentional price change is allowed and shown after a successful save. */
   | {
       kind: "price_not_withdrawn";
-      severity: "review_required";
+      severity: "advisory";
       itemNumber: number;
       productName: string;
       unit: string;
@@ -106,10 +106,24 @@ export type ProduceValidationException =
       withdrawnPrices: number[];
     };
 
+export type ProduceValidationBlocking = Extract<
+  ProduceValidationException,
+  { severity: "blocking" }
+>;
+export type ProduceValidationReview = Extract<
+  ProduceValidationException,
+  { severity: "review_required" }
+>;
+export type ProduceValidationAdvisory = Extract<
+  ProduceValidationException,
+  { severity: "advisory" }
+>;
+
 export interface ProduceValidationResult {
   status: "clean" | "review_required" | "blocked";
-  blocking: ProduceValidationException[];
-  reviews: ProduceValidationException[];
+  blocking: ProduceValidationBlocking[];
+  reviews: ProduceValidationReview[];
+  advisories: ProduceValidationAdvisory[];
   /**
    * Immutable fingerprint of (session content + the exception set shown). A
    * confirmation is stored against it, so it can only ever approve the exact
@@ -239,8 +253,9 @@ export function validateProduceEntry(input: ProduceValidationInput): ProduceVali
   const sessionRows = masterRowsFromSession(parsed);
   const master = buildWithdrawalMaster([...roundRows, ...sessionRows]);
 
-  const blocking: ProduceValidationException[] = [];
-  const reviews: ProduceValidationException[] = [];
+  const blocking: ProduceValidationBlocking[] = [];
+  const reviews: ProduceValidationReview[] = [];
+  const advisories: ProduceValidationAdvisory[] = [];
 
   // ── 1. Unit vocabulary. Applies to every item, withdrawal included: a
   // withdrawal booked in "โลก" poisons its own master cell.
@@ -316,9 +331,9 @@ export function validateProduceEntry(input: ProduceValidationInput): ProduceVali
       const cell = master.cells.get(`${product}|${unit}`);
       const entered = roundPrice(item.price_per_unit);
       if (cell && entered !== null && cell.prices.length > 0 && !cell.prices.includes(entered)) {
-        reviews.push({
+        advisories.push({
           kind: "price_not_withdrawn",
-          severity: "review_required",
+          severity: "advisory",
           itemNumber: item.item_number,
           productName: item.product_name,
           unit,
@@ -356,7 +371,7 @@ export function validateProduceEntry(input: ProduceValidationInput): ProduceVali
     : reviews.length > 0
       ? "review_required"
       : "clean";
-  return { status, blocking, reviews, digest };
+  return { status, blocking, reviews, advisories, digest };
 }
 
 /**
@@ -366,9 +381,9 @@ export function validateProduceEntry(input: ProduceValidationInput): ProduceVali
  * one spelling to fix, not one per line that carries it. Ordered by item
  * number so the reply is deterministic.
  */
-function vocabularyExceptions(parsed: WeighSession): ProduceValidationException[] {
+function vocabularyExceptions(parsed: WeighSession): ProduceValidationReview[] {
   const seen = new Set<string>();
-  const exceptions: ProduceValidationException[] = [];
+  const exceptions: ProduceValidationReview[] = [];
   for (const item of [...parsed.items].sort((a, b) => a.item_number - b.item_number)) {
     if (baseTransactionType(item.transaction_type) !== "เบิก") continue;
     const name = item.product_name.normalize("NFC").replace(/\s+/g, " ").trim();
@@ -425,8 +440,8 @@ function round3(value: number): number {
  */
 export function computeValidationDigest(
   parsed: WeighSession,
-  blocking: ProduceValidationException[],
-  reviews: ProduceValidationException[],
+  blocking: ProduceValidationBlocking[],
+  reviews: ProduceValidationReview[],
 ): string {
   const canonicalItems = [...parsed.items]
     .sort((a, b) => a.item_number - b.item_number)

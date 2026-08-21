@@ -1864,9 +1864,9 @@ export class WebhookService {
    * on purpose: the deferred finalizer already reports those in its own words,
    * and calling a malformed line an "unknown product" would be misleading.
    *
-   * The price-review protocol is two closes: the first records the exception
-   * set and shows it, the second — a different LINE event, so a duplicate
-   * delivery can never stand in for it — acknowledges exactly that set.
+   * Confirmable reviews use two closes: the first records and shows the
+   * exception set; the second acknowledges exactly that set. Price differences
+   * are advisories and do not enter this protocol.
    */
   private async runPlainTextCloseGate(
     pending:   PendingSession,

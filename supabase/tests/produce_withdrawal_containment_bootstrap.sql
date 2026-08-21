@@ -57,11 +57,6 @@ CREATE TABLE public.accountability_rounds (
   closed_at               timestamptz
 );
 
-CREATE TABLE public.produce_transactions (
-  accountability_round_id uuid NOT NULL REFERENCES public.accountability_rounds(id),
-  base_transaction_type   text NOT NULL
-);
-
 ALTER TABLE public.pending_sessions
   ADD COLUMN IF NOT EXISTS accountability_round_id uuid
     REFERENCES public.accountability_rounds(id),
@@ -78,6 +73,31 @@ ALTER TABLE public.produce_sessions
   ADD COLUMN IF NOT EXISTS accountability_round_id uuid
     REFERENCES public.accountability_rounds(id),
   ADD COLUMN IF NOT EXISTS voided_at timestamptz;
+
+-- Same persistence projection the application reads after finalization. The
+-- market-binding functions need only accountability_round_id/base type; the
+-- price-advisory persistence proof also verifies the stored item price through
+-- this projection instead of a hand-seeded shadow table.
+CREATE VIEW public.produce_transactions AS
+SELECT
+  pi.id,
+  pi.session_id,
+  ps.accountability_round_id,
+  ps.staff_name,
+  pi.product_name,
+  pi.price_per_unit,
+  pi.quantity,
+  pi.unit,
+  pi.transaction_type,
+  CASE
+    WHEN pi.transaction_type LIKE 'เบิก%' THEN 'เบิก'
+    WHEN pi.transaction_type LIKE 'คืนเสีย%' THEN 'คืนเสีย'
+    WHEN pi.transaction_type LIKE 'คืน%' THEN 'คืน'
+    ELSE NULL
+  END AS base_transaction_type
+FROM public.produce_items pi
+JOIN public.produce_sessions ps ON ps.id = pi.session_id
+WHERE ps.voided_at IS NULL;
 
 -- Only the shape matters. 20260811090000 and 20260815160000 both preflight on
 -- this signature existing, and both then CREATE OR REPLACE it with the real

@@ -6,6 +6,9 @@
  * report and the Stock summary can share one splitter without an import cycle.
  */
 
+/** LINE's absolute limit for one text message. */
+export const LINE_TEXT_MESSAGE_HARD_MAX_CODE_POINTS = 5000;
+/** Conservative report budget used by existing multi-message formatters. */
 export const LINE_MESSAGE_MAX_CODE_POINTS = 4000;
 export const LINE_REPLY_MAX_MESSAGES = 5;
 export const OVERFLOW_NOTICE = "\n\nรายการยังไม่ครบ — ดูรายละเอียดทั้งหมดในหน้าเว็บ";

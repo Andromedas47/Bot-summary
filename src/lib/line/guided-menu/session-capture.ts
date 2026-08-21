@@ -92,12 +92,7 @@ export type GuidedCaptureCloseOutcome =
    * capture and corrections are still accepted.
    */
   | ({ status: "validation_failed"; errors: string[]; detail?: string } & GuidedSessionSnapshot)
-  /**
-   * P4A: the entry gate found price lines that differ from the round's
-   * withdrawal prices. Allowed, but not silently — no close boundary was
-   * created, so the operator can either correct the line or press again to
-   * acknowledge exactly the exception set that was shown.
-   */
+  /** A confirmable validation review was shown before creating a close boundary. */
   | ({ status: "review_required"; detail: string } & GuidedSessionSnapshot)
   | { status: "refused"; reason: GuidedCaptureRefusal }
   | { status: "conflict"; reason: string; detail?: string };
@@ -121,7 +116,7 @@ export type GuidedCaptureFinalizeOutcome =
    * the finalizer applies. Refused before the confirm RPC — zero writes.
    */
   | ({ status: "validation_failed"; errors: string[]; detail?: string } & GuidedSessionSnapshot)
-  /** P4A: unacknowledged price exceptions. Nothing was released. */
+  /** A confirmable validation review remains unacknowledged. */
   | ({ status: "review_required"; detail: string } & GuidedSessionSnapshot)
   /** The close barrier says the round is not ready — nothing was released. */
   | {

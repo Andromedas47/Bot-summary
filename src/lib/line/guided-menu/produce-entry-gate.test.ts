@@ -220,29 +220,23 @@ describe("guided close under the P4A gate", () => {
     expect(harness.closeCalls).toBe(1);
   });
 
-  it("shows a price change first and closes on the second press", async () => {
+  it("closes a price change on the first press without a review", async () => {
     const harness = new Harness();
     const first = await close(harness, PRICE_CHANGE_RETURN, "E1");
 
-    expect(first.status).toBe("review_required");
-    expect(harness.closeCalls).toBe(0);
-    if (first.status === "review_required") {
-      expect(first.detail).toContain("50");
-      expect(first.detail).toContain("45");
-    }
-
-    const second = await close(harness, PRICE_CHANGE_RETURN, "E2");
-    expect(second.status).toBe("closed");
+    expect(first.status).toBe("closed");
     expect(harness.closeCalls).toBe(1);
+    expect(harness.reviews.size).toBe(0);
   });
 
-  it("does not treat a redelivery of the presenting event as acknowledgement", async () => {
+  it("keeps price mismatch data unchanged while closing", async () => {
     const harness = new Harness();
-    await close(harness, PRICE_CHANGE_RETURN, "E1");
-    const replay = await close(harness, PRICE_CHANGE_RETURN, "E1");
+    const outcome = await close(harness, PRICE_CHANGE_RETURN, "E1");
 
-    expect(replay.status).toBe("review_required");
-    expect(harness.closeCalls).toBe(0);
+    expect(outcome.status).toBe("closed");
+    if (outcome.status === "closed") {
+      expect(outcome.parsed.items[0]?.price_per_unit).toBe(50);
+    }
   });
 
   it("refuses rather than closing when the round master cannot be read", async () => {

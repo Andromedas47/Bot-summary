@@ -198,6 +198,8 @@ interface SubmitOptions {
    * database re-validates each one; only the content comes from here.
    */
   historical?: HistoricalCandidate[];
+  /** Stored and delivered only after the authoritative transaction commits. */
+  notificationPayload?: string;
 }
 
 interface HistoricalCandidate {
@@ -251,7 +253,13 @@ function finalizeSql(
       : parsed.declared_transaction_type,
     ingest_idempotency_key: `${sessionKey}:${generation}`,
     ingest_source: "line_webhook",
+    validation_errors: [],
   };
+  if (options.notificationPayload) {
+    sessionPayload.notification_payload = options.notificationPayload;
+    sessionPayload.notification_source_id = options.sourceId ?? SOURCE;
+    sessionPayload.correlation_id = `${sessionKey}:${generation}`;
+  }
   if (!options.withoutContainmentKey) {
     sessionPayload.canonical_withdrawal_item_lines = containment;
     sessionPayload.historical_withdrawal_candidates = options.historical ?? [];
@@ -304,6 +312,8 @@ describe.skipIf(!pgAvailable)("plain-withdrawal containment guard on PostgreSQL 
     await apply(join(ROOT, "supabase", "migrations", "20260815150000_produce_fingerprint_compatibility.sql"));
     await apply(join(ROOT, "supabase", "migrations", "20260817090100_produce_withdrawal_containment_guard.sql"));
     await apply(join(ROOT, "supabase", "migrations", "20260817090400_produce_historical_withdrawal_containment.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260810090000_p4a_produce_entry_validation_gate.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260810160000_p4a_review_session_generation_uuid.sql"));
   }, 120_000);
 
   afterAll(async () => {
@@ -327,6 +337,55 @@ describe.skipIf(!pgAvailable)("plain-withdrawal containment guard on PostgreSQL 
     // An empty subset is contained by anything, which is exactly why the guard
     // never runs on a document with no withdrawal rows.
     expect(await contains(["a"], [])).toBe("t");
+  });
+
+  test("price advisory finalization persists the entered return price and outbox payload", async () => {
+    const seller = "ขวัญราคา";
+    const withdrawal = document({
+      seller,
+      rows: [{ product: "แตงไทย", price: 20, quantity: 28, unit: "ลูก" }],
+    });
+    expect((await submit("price-withdrawal", withdrawal)).status).toBe("finalized");
+
+    const returned = parseWeighSession([
+      `${seller}-${MARKET} ชั่งคืน ${DATE}`,
+      "1.แตงไทย25บาท",
+      "22ลูก",
+      "จบรายการชั่งคืน",
+    ].join("\n"), ISO_DATE);
+    const warning = [
+      "บันทึกแล้ว ✅",
+      "",
+      "⚠️ พบ 1 รายการที่ราคาแตกต่างจากตอนเบิก",
+      "• แตงไทย — เบิก 20 บาท/ลูก → ชั่งคืน 25 บาท/ลูก",
+      "",
+      "ระบบบันทึกตามราคาที่กรอกไว้แล้ว",
+    ].join("\n");
+    const finalized = await submit("price-return", returned, {
+      notificationPayload: warning,
+    });
+    expect(finalized.status).toBe("finalized");
+
+    expect(await scalar(`
+      SELECT price_per_unit::text FROM public.produce_items
+      WHERE product_name = 'แตงไทย' AND transaction_type = 'เบิก'`)).toBe("20");
+    expect(await scalar(`
+      SELECT price_per_unit::text FROM public.produce_items
+      WHERE product_name = 'แตงไทย' AND transaction_type = 'คืน'`)).toBe("25");
+    expect(await scalar(`
+      SELECT price_per_unit::text FROM public.produce_transactions
+      WHERE product_name = 'แตงไทย' AND transaction_type = 'คืน'`)).toBe("25");
+    expect(await scalar(`
+      SELECT price_per_unit::text FROM public.produce_transactions
+      WHERE product_name = 'แตงไทย' AND transaction_type = 'เบิก'`)).toBe("20");
+    expect(JSON.parse(await scalar(`
+      SELECT to_json(notification_payload)::text
+      FROM public.produce_session_notifications
+      WHERE produce_session_id = ${q(finalized.session_id ?? "")}::uuid`))).toContain(
+      "แตงไทย — เบิก 20 บาท/ลูก → ชั่งคืน 25 บาท/ลูก",
+    );
+    expect(await scalar("SELECT count(*)::text FROM public.produce_entry_validation_reviews"))
+      .toBe("0");
   });
 
   // ── The Production incident ───────────────────────────────────────────────

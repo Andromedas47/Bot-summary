@@ -1096,9 +1096,8 @@ export class GuidedMenuUxHandler {
     // The round cannot finalize, so NO close boundary was created. The operator
     // stays in capture: "จบรายการ" is offered again and a corrected item line is
     // still an ordinary append — no administrator, no reopen contract.
-    // P4A: price lines that differ from the round's withdrawal prices. The
-    // round is still open — the operator either corrects the line or presses
-    // "จบรายการ" again, which acknowledges exactly this exception set.
+    // P4A confirmable review. The round stays open until the operator corrects
+    // the line or acknowledges exactly this exception set.
     if (outcome.status === "review_required") {
       const controls = await this.buildCaptureStageControls(input.identity);
       return resultEnvelope(
@@ -1183,8 +1182,8 @@ export class GuidedMenuUxHandler {
       );
     }
 
-    // P4A: unacknowledged price exceptions. Nothing was released; pressing
-    // "ยืนยัน" again acknowledges exactly the set shown here.
+    // P4A confirmable review. Nothing was released; pressing "ยืนยัน" again
+    // acknowledges exactly the set shown here.
     if (outcome.status === "review_required") {
       const controls = await this.buildConfirmStageControls(input.identity);
       return resultEnvelope(

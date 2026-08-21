@@ -409,6 +409,28 @@ describe("date guard", () => {
     expect(flag.flagged).toBe(false);
   });
 
+  it("UAT 20 ส.ค. 69 06:59:16 Bangkok matches batch date 20/8/2569 and is not a 2025 miss", () => {
+    const tx = parseSlipExtraction({
+      slip_type: "THAI_HELP_THAI",
+      gross_amount: 107,
+      discount_amount: 64.2,
+      paid_amount: 42.8,
+      transfer_amount: null,
+      reference_id: "9ecc8f59c10945afad6165371ace1741-qr",
+      transaction_time: "20 ส.ค. 69 - 06:59:16 น.",
+      sender_name: "นฤมล พี.",
+      receiver_name: "ฟรุตแวลู",
+      receiver_account_tail: null,
+      confidence: 0.9,
+    }).transactionTime;
+    expect(tx).toBe("2026-08-19T23:59:16.000Z");
+
+    const ev = makeExtractedWithTime(107, tx);
+    const [flag] = computeValidationFlags([ev], parseBatchDate("20/8/2569"));
+    expect(flag.flagged).toBe(false);
+    expect(flag.flagReasons).not.toContain("วันที่รายการไม่ตรงกับรอบ");
+  });
+
   it("keeps genuinely wrong Thai short Buddhist year dates flagged", () => {
     const tx = parseSlipExtraction({
       slip_type: "BANK_SLIP_QR",

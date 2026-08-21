@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { OpenAiSlipExtractor, ExtractionHttpError } from "@/lib/slips/extractor";
+import { OpenAiSlipExtractor, ExtractionHttpError, EXTRACTION_PROMPT } from "@/lib/slips/extractor";
 
 type FetchMockHandler = (...args: Parameters<typeof fetch>) => ReturnType<typeof fetch>;
 
@@ -177,5 +177,19 @@ describe("OpenAiSlipExtractor", () => {
     // The responseSnippet is the body the *provider* returned — capped at 500 chars.
     expect(httpErr.responseSnippet).toBe('{"error":"invalid key"}');
     expect(httpErr.responseSnippet.length).toBeLessThanOrEqual(500);
+  });
+
+  it("prompt keeps calendar conversion and Thai Help Thai labels out of model arithmetic", () => {
+    expect(EXTRACTION_PROMPT).not.toMatch(/Convert a visible Thai Buddhist year/i);
+    expect(EXTRACTION_PROMPT).toMatch(/Do NOT convert Buddhist Era to Gregorian/);
+    expect(EXTRACTION_PROMPT).toMatch(/Preserve a visible short year such as 69/);
+    expect(EXTRACTION_PROMPT).toMatch(/project_right_amount: สิทธิโครงการฯ/);
+    expect(EXTRACTION_PROMPT).toMatch(/gwallet_amount: G-Wallet/);
+    expect(EXTRACTION_PROMPT).toMatch(/discount_amount must equal project_right_amount/);
+    expect(EXTRACTION_PROMPT).toMatch(/paid_amount must equal gwallet_amount/);
+    expect(EXTRACTION_PROMPT).toMatch(/Never calculate/);
+    expect(EXTRACTION_PROMPT).toMatch(/รับเงินจาก/);
+    expect(EXTRACTION_PROMPT).toMatch(/must NOT populate receiver_account_tail/);
+    expect(EXTRACTION_PROMPT).toMatch(/join with no\s+spaces or newlines/);
   });
 });

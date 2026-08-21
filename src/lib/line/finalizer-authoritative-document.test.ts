@@ -385,6 +385,36 @@ describe("finalizer reads the same authoritative document as review/close/confir
   });
 });
 
+describe("durable success notification limit", () => {
+  it("caps an oversized advisory-free finalizer payload before storing the outbox row", async () => {
+    const largeText = Array.from(
+      { length: 150 },
+      (_, index) => `${index + 1}. แตงโม 25 บาท\n1 ลูก`,
+    ).join("\n");
+    const db = new FinalizerDocDouble({
+      ...tables({ includeStaleCancelEvent: false }),
+      produce_items: [],
+      produce_transactions: [],
+      produce_entry_validation_reviews: [],
+      produce_session_notifications: [],
+    });
+
+    const result = await finalizePendingGeneration(
+      db.asClient(),
+      structuredSnapshot({ accumulated_text: largeText }),
+      async () => ({}),
+    );
+
+    expect(result.status).toBe("finalized");
+    expect(tryFinalizeCall(db).args.p_items as Row[]).toHaveLength(150);
+    const payload = String(db.rows("produce_session_notifications")[0]?.notification_payload);
+    expect(countCodePoints(payload)).toBeLessThanOrEqual(5000);
+    expect(payload).toContain("…สรุปรายการถูกย่อเนื่องจากข้อความยาวเกินกำหนด");
+    expect(payload).not.toContain("…สรุปรายการถูกย่อเพื่อแสดงคำเตือนราคา");
+    expect(payload).not.toContain("⚠️ พบ");
+  });
+});
+
 /**
  * A WeighSessionItem carries lookup-only evidence next to its real price:
  * legacy_subunit_price_per_unit, the value the retired ขีด/กรัม rescaling

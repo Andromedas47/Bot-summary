@@ -20,7 +20,8 @@ import type {
 /** Beyond this the reply summarizes the remainder instead of listing it. */
 const MAX_LISTED_EXCEPTIONS = 10;
 const ADVISORY_SEPARATOR = "\n\n";
-const SUMMARY_TRUNCATED_NOTICE = "…สรุปรายการถูกย่อเพื่อแสดงคำเตือนราคา";
+const PRICE_ADVISORY_SUMMARY_TRUNCATED_NOTICE = "…สรุปรายการถูกย่อเพื่อแสดงคำเตือนราคา";
+const GENERIC_SUMMARY_TRUNCATED_NOTICE = "…สรุปรายการถูกย่อเนื่องจากข้อความยาวเกินกำหนด";
 
 function formatPrice(value: number): string {
   return Number.isInteger(value) ? value.toString() : value.toFixed(2);
@@ -132,9 +133,13 @@ function warningWithinBudget(
   throw new Error("price advisory cannot fit within the LINE text limit");
 }
 
-function truncateSummaryForAdvisory(summary: string, maxCodePoints: number): string {
+function truncateSummary(
+  summary: string,
+  maxCodePoints: number,
+  notice: string,
+): string {
   if (countCodePoints(summary) <= maxCodePoints) return summary;
-  const suffix = `\n${SUMMARY_TRUNCATED_NOTICE}`;
+  const suffix = `\n${notice}`;
   const bodyBudget = maxCodePoints - countCodePoints(suffix);
   const prefix = [...summary].slice(0, Math.max(0, bodyBudget)).join("");
   const lineBoundary = prefix.lastIndexOf("\n");
@@ -148,7 +153,9 @@ export function buildPriceAdvisoryNotification(
   advisories: ProduceValidationAdvisory[],
   maxCodePoints = LINE_TEXT_MESSAGE_HARD_MAX_CODE_POINTS,
 ): string {
-  if (advisories.length === 0) return summary;
+  if (advisories.length === 0) {
+    return truncateSummary(summary, maxCodePoints, GENERIC_SUMMARY_TRUNCATED_NOTICE);
+  }
 
   const fullWarning = buildPriceAdvisoryWarning(advisories);
   const full = `${summary}${ADVISORY_SEPARATOR}${fullWarning}`;
@@ -158,7 +165,11 @@ export function buildPriceAdvisoryNotification(
   const summaryBudget = maxCodePoints
     - countCodePoints(ADVISORY_SEPARATOR)
     - countCodePoints(compactWarning);
-  const safeSummary = truncateSummaryForAdvisory(summary, summaryBudget);
+  const safeSummary = truncateSummary(
+    summary,
+    summaryBudget,
+    PRICE_ADVISORY_SUMMARY_TRUNCATED_NOTICE,
+  );
   const warningBudget = maxCodePoints
     - countCodePoints(safeSummary)
     - countCodePoints(ADVISORY_SEPARATOR);

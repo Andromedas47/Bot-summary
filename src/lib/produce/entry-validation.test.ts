@@ -472,6 +472,47 @@ describe("replies", () => {
     );
   });
 
+  it("keeps a small success summary with no advisories byte-for-byte unchanged", () => {
+    const summary = "บันทึกแล้ว ✅\n\nขวัญ — 20/8/2569";
+    expect(buildPriceAdvisoryNotification(summary, [])).toBe(summary);
+  });
+
+  it("caps an oversized advisory-free summary at a complete line with a generic notice", () => {
+    const summaryLines = [
+      "บันทึกแล้ว ✅",
+      ...Array.from(
+        { length: 150 },
+        (_, index) => `${index + 1}. แตงโม ${"ก".repeat(40)} 1 ลูก × 25 = 25 บาท`,
+      ),
+    ];
+    const summary = summaryLines.join("\n");
+    const notification = buildPriceAdvisoryNotification(summary, []);
+    const outputLines = notification.split("\n");
+    const genericNotice = "…สรุปรายการถูกย่อเนื่องจากข้อความยาวเกินกำหนด";
+
+    expect(countCodePoints(summary)).toBeGreaterThan(
+      LINE_TEXT_MESSAGE_HARD_MAX_CODE_POINTS,
+    );
+    expect(countCodePoints(notification)).toBeLessThanOrEqual(
+      LINE_TEXT_MESSAGE_HARD_MAX_CODE_POINTS,
+    );
+    expect(outputLines.at(-1)).toBe(genericNotice);
+    expect(notification).not.toContain("…สรุปรายการถูกย่อเพื่อแสดงคำเตือนราคา");
+    for (const line of outputLines.slice(0, -1)) {
+      expect(summaryLines).toContain(line);
+    }
+  });
+
+  it("keeps an advisory-free summary unchanged at the hard limit", () => {
+    const summary = "ก".repeat(LINE_TEXT_MESSAGE_HARD_MAX_CODE_POINTS);
+    const notification = buildPriceAdvisoryNotification(summary, []);
+
+    expect(countCodePoints(notification)).toBe(
+      LINE_TEXT_MESSAGE_HARD_MAX_CODE_POINTS,
+    );
+    expect(notification).toBe(summary);
+  });
+
   it("budgets complete advisory rows against a near-limit success summary", () => {
     const advisories = Array.from({ length: 10 }, (_, index) => ({
       kind: "price_not_withdrawn" as const,

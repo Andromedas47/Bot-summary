@@ -121,6 +121,8 @@ const extraction: SlipExtraction = {
   senderName: "ผู้โอน",
   receiverName: "ร้านรับเงิน",
   receiverAccountTail: "1234",
+  paymentChannelText: null,
+  headlineTotalAmount: null,
   confidence: 0.94,
 };
 

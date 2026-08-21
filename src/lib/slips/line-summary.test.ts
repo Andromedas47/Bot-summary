@@ -13,6 +13,8 @@ const walletExtraction: SlipExtraction = {
   senderName: null,
   receiverName: "ร้านทดสอบ",
   receiverAccountTail: null,
+  paymentChannelText: null,
+  headlineTotalAmount: null,
   confidence: 0.92,
 };
 

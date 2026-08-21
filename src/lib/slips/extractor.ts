@@ -249,6 +249,20 @@ project_right_amount and gwallet_amount because another interpretation seems
 more financially intuitive. Never calculate a missing amount from
 gross = subsidy + wallet.
 
+headline_total_amount is the visible top-level successful-receipt / goods-and-
+services total shown near the top of the receipt (รับเงินสำเร็จ, ยอดรับรวม,
+ยอดรวมการรับเงิน). Transcribe the number exactly as printed. Never compute it
+from other amounts, and never invent it when no such line is visible.
+This deliberately overlaps with gross_amount above. Production showed the model
+returning a null gross_amount while still reading the headline number correctly,
+so the two fields are kept separate on purpose — do not merge them back into one.
+
+payment_channel_text is the visible payment-channel or programme line,
+transcribed verbatim (for example "ไทยช่วยไทย พลัส (60/40)"). Copy only what is
+printed — do not summarize, translate, or interpret it. This field never
+determines slip_type on its own; classify slip_type from the overall visible
+layout as usual.
+
 For bank slips:
 - transfer_amount is the visible transferred amount.
 

@@ -32,6 +32,12 @@ export interface SlipExtraction {
   senderName: string | null;
   receiverName: string | null;
   receiverAccountTail: string | null;
+  // Raw transcription signals kept for forensics, not business semantics. They are
+  // what the canonicalization above actually decided on, so persisting them is the
+  // difference between "why was this slip classified GWALLET?" being answerable
+  // from the record and needing a fresh, non-deterministic re-extraction.
+  paymentChannelText: string | null;
+  headlineTotalAmount: number | null;
   confidence: number;
 }
 
@@ -54,6 +60,13 @@ export const SLIP_EXTRACTION_JSON_SCHEMA = {
       minimum: 0,
       description: "Visible number beside G-Wallet or ยอด G-Wallet. Not สิทธิโครงการฯ.",
     },
+    headline_total_amount: {
+      type: ["number", "null"],
+      minimum: 0,
+      description:
+        "Visible top-level successful-receipt / goods-and-services total, e.g. beside " +
+        "รับเงินสำเร็จ, ยอดรับรวม, or ยอดรวมการรับเงิน. Transcribe only; never a computed sum.",
+    },
     transfer_amount: { type: ["number", "null"], minimum: 0 },
     reference_id: { type: ["string", "null"] },
     transaction_time: {
@@ -68,6 +81,12 @@ export const SLIP_EXTRACTION_JSON_SCHEMA = {
       description:
         "Last four digits of the receiver/payee/merchant account only. Null when only sender/payer digits are visible.",
     },
+    payment_channel_text: {
+      type: ["string", "null"],
+      description:
+        "Visible payment-channel or programme line, transcribed verbatim (e.g. " +
+        "\"ไทยช่วยไทย พลัส (60/40)\"). Copy only what is printed; do not interpret it.",
+    },
     confidence: { type: "number", minimum: 0, maximum: 1 },
   },
   required: [
@@ -77,27 +96,68 @@ export const SLIP_EXTRACTION_JSON_SCHEMA = {
     "paid_amount",
     "project_right_amount",
     "gwallet_amount",
+    "headline_total_amount",
     "transfer_amount",
     "reference_id",
     "transaction_time",
     "sender_name",
     "receiver_name",
     "receiver_account_tail",
+    "payment_channel_text",
     "confidence",
   ],
 } as const;
 
+// Exact substring the model must transcribe verbatim on the payment-channel line
+// for a raw GWALLET reading to be canonicalized to THAI_HELP_THAI. Substring match
+// only, after whitespace normalization — no fuzzy/semantic matching.
+const THAI_HELP_THAI_MARKER = "ไทยช่วยไทย";
+
+// Raw slip types the ไทยช่วยไทย marker is allowed to upgrade to THAI_HELP_THAI.
+// THAI_HELP_THAI and GWALLET are the same underlying receipt layout — a labeled
+// wallet slip with an optional government-subsidy line — so a raw GWALLET reading
+// that also carries a visible ไทยช่วยไทย programme line is the sibling-type
+// misclassification actually seen in production (this is exactly defect #1).
+// Every other raw type is deliberately excluded:
+//   - BANK_SLIP_QR / BANK_SLIP_NO_QR are a structurally different receipt (real
+//     transfer_amount, real merchant account tail); a stray marker on one of these
+//     must not silently rewrite it into a labeled-wallet slip.
+//   - NUMBERS_ONLY / WHITE_PAPER / UNKNOWN are already low-confidence fallback
+//     classifications; upgrading them on a text match would manufacture a specific
+//     business type out of an extraction the model itself couldn't classify.
+const MARKER_UPGRADEABLE_RAW_TYPES: ReadonlySet<SlipType> = new Set(["GWALLET"]);
+
 export function parseSlipExtraction(value: unknown): SlipExtraction {
   if (!isRecord(value)) throw new Error("Extractor returned a non-object result");
 
-  const slipType = parseSlipType(value.slip_type);
+  const rawSlipType = parseSlipType(value.slip_type);
+  const paymentChannelText = parseChannelText(value.payment_channel_text);
+  const hasThaiHelpThaiMarker = paymentChannelText !== null
+    && paymentChannelText.includes(THAI_HELP_THAI_MARKER);
+
+  // Canonicalization runs first — every downstream business-semantics decision
+  // (labeled-amount mapping, receiver-tail fail-closed rule) reads the canonical
+  // slipType below, never value.slip_type directly.
+  const slipType: SlipType = hasThaiHelpThaiMarker && MARKER_UPGRADEABLE_RAW_TYPES.has(rawSlipType)
+    ? "THAI_HELP_THAI"
+    : rawSlipType;
+
   const labeledWalletSlip = slipType === "THAI_HELP_THAI" || slipType === "GWALLET";
   const projectRightAmount = parseNullableAmount(value.project_right_amount);
   const gwalletAmount = parseNullableAmount(value.gwallet_amount);
+  const headlineTotalAmount = parseNullableAmount(value.headline_total_amount);
+  const genericGrossAmount = parseNullableAmount(value.gross_amount);
 
   return {
     slipType,
-    grossAmount: parseNullableAmount(value.gross_amount),
+    // headline_total_amount names the exact visible receipt line (รับเงินสำเร็จ,
+    // ยอดรับรวม, ยอดรวมการรับเงิน); gross_amount is a looser catch-all the model can
+    // fill from a different, less certain number. The explicit label wins over a
+    // contradictory generic gross_amount reading. Never derived arithmetically —
+    // if both are null, grossAmount stays null even when discount + paid are known.
+    grossAmount: labeledWalletSlip
+      ? headlineTotalAmount ?? genericGrossAmount
+      : genericGrossAmount,
     discountAmount: labeledWalletSlip
       ? projectRightAmount ?? parseNullableAmount(value.discount_amount)
       : parseNullableAmount(value.discount_amount),
@@ -109,10 +169,17 @@ export function parseSlipExtraction(value: unknown): SlipExtraction {
     transactionTime: parseNullableTimestamp(value.transaction_time),
     senderName: parseNullableText(value.sender_name),
     receiverName: parseNullableText(value.receiver_name),
-    // ponytail: Thai Help Thai receipts show payer **NNNN under รับเงินจาก, not a merchant tail
-    receiverAccountTail: slipType === "THAI_HELP_THAI"
+    // ponytail: Thai Help Thai AND G-Wallet receipts show the payer's **NNNN under
+    // รับเงินจาก, not a merchant tail — fail closed for both canonical labeled-wallet
+    // types. Gated on the canonical slipType computed above, not raw value.slip_type,
+    // so a raw GWALLET that gets upgraded to THAI_HELP_THAI is still nulled here, and
+    // a raw GWALLET that stays GWALLET is now nulled too (closing the tail leak from
+    // the production defect, where the null-guard only fired on raw THAI_HELP_THAI).
+    receiverAccountTail: labeledWalletSlip
       ? null
       : parseAccountTail(value.receiver_account_tail),
+    paymentChannelText,
+    headlineTotalAmount,
     confidence: parseConfidence(value.confidence),
   };
 }
@@ -161,6 +228,8 @@ export function extractionToJson(extraction: SlipExtraction): Json {
     sender_name: extraction.senderName,
     receiver_name: extraction.receiverName,
     receiver_account_tail: extraction.receiverAccountTail,
+    payment_channel_text: extraction.paymentChannelText,
+    headline_total_amount: extraction.headlineTotalAmount,
     confidence: extraction.confidence,
   };
 }
@@ -185,6 +254,25 @@ function parseNullableText(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeWhitespace(text: string): string {
+  return text.trim().replace(/\s+/g, " ");
+}
+
+// Free text the model transcribes off the receipt, so it is treated as untrusted
+// before it is matched against or persisted. The receiver tail is deliberately
+// nulled for wallet slips; a run of four or more digits swept in from a
+// neighbouring line would defeat that guarantee from the next column over, so it
+// is redacted here. Short runs such as the "(60/40)" split ratio are part of the
+// programme label itself and are kept.
+const CHANNEL_TEXT_MAX_LENGTH = 120;
+
+function parseChannelText(value: unknown): string | null {
+  const text = parseNullableText(value);
+  if (!text) return null;
+  const redacted = normalizeWhitespace(text).replace(/\d{4,}/g, "[redacted]");
+  return redacted.length > 0 ? redacted.slice(0, CHANNEL_TEXT_MAX_LENGTH) : null;
 }
 
 function parseReferenceId(value: unknown): string | null {

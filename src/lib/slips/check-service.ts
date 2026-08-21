@@ -262,6 +262,8 @@ const emptyExtraction = {
   senderName: null,
   receiverName: null,
   receiverAccountTail: null,
+  paymentChannelText: null,
+  headlineTotalAmount: null,
   confidence: 0,
 };
 

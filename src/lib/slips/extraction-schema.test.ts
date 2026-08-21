@@ -349,6 +349,35 @@ describe("production defect fixture — raw GWALLET misclassification (A5)", () 
     // The leaked payer tail must not reach the database.
     expect(persisted.receiver_account_tail).toBeNull();
   });
+
+  it("redacts long digit runs swept into the channel text, keeping the marker and the split ratio", () => {
+    const extraction = parseSlipExtraction({
+      slip_type: "GWALLET",
+      gross_amount: null,
+      discount_amount: null,
+      paid_amount: null,
+      project_right_amount: 64.2,
+      gwallet_amount: 42.8,
+      headline_total_amount: 107,
+      transfer_amount: null,
+      reference_id: "ref",
+      transaction_time: null,
+      sender_name: null,
+      receiver_name: null,
+      receiver_account_tail: "2418",
+      // The model sweeping an adjacent masked-account line into the channel field
+      // must not reintroduce the payer digits that receiverAccountTail nulls out.
+      payment_channel_text: "ไทยช่วยไทย พลัส (60/40)\nรับเงินจาก นฤมล **2418",
+      confidence: 0.9,
+    });
+
+    expect(extraction.paymentChannelText).not.toContain("2418");
+    expect(extraction.paymentChannelText).toContain("ไทยช่วยไทย");
+    expect(extraction.paymentChannelText).toContain("(60/40)");
+    // Redaction must not cost us the canonicalization it feeds.
+    expect(extraction.slipType).toBe("THAI_HELP_THAI");
+    expect(extraction.receiverAccountTail).toBeNull();
+  });
 });
 
 describe("payment channel canonicalization (A1, A6)", () => {

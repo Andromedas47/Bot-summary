@@ -131,9 +131,9 @@ export function parseSlipExtraction(value: unknown): SlipExtraction {
   if (!isRecord(value)) throw new Error("Extractor returned a non-object result");
 
   const rawSlipType = parseSlipType(value.slip_type);
-  const paymentChannelText = parseNullableText(value.payment_channel_text);
+  const paymentChannelText = parseChannelText(value.payment_channel_text);
   const hasThaiHelpThaiMarker = paymentChannelText !== null
-    && normalizeWhitespace(paymentChannelText).includes(THAI_HELP_THAI_MARKER);
+    && paymentChannelText.includes(THAI_HELP_THAI_MARKER);
 
   // Canonicalization runs first — every downstream business-semantics decision
   // (labeled-amount mapping, receiver-tail fail-closed rule) reads the canonical
@@ -258,6 +258,21 @@ function parseNullableText(value: unknown): string | null {
 
 function normalizeWhitespace(text: string): string {
   return text.trim().replace(/\s+/g, " ");
+}
+
+// Free text the model transcribes off the receipt, so it is treated as untrusted
+// before it is matched against or persisted. The receiver tail is deliberately
+// nulled for wallet slips; a run of four or more digits swept in from a
+// neighbouring line would defeat that guarantee from the next column over, so it
+// is redacted here. Short runs such as the "(60/40)" split ratio are part of the
+// programme label itself and are kept.
+const CHANNEL_TEXT_MAX_LENGTH = 120;
+
+function parseChannelText(value: unknown): string | null {
+  const text = parseNullableText(value);
+  if (!text) return null;
+  const redacted = normalizeWhitespace(text).replace(/\d{4,}/g, "[redacted]");
+  return redacted.length > 0 ? redacted.slice(0, CHANNEL_TEXT_MAX_LENGTH) : null;
 }
 
 function parseReferenceId(value: unknown): string | null {

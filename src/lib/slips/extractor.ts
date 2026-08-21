@@ -223,25 +223,41 @@ function buildRequestBody(model: string, input: SlipExtractionInput): string {
   });
 }
 
-const EXTRACTION_PROMPT = `
+export const EXTRACTION_PROMPT = `
 Extract only information visibly present in this Thai payment evidence image.
 Never infer, calculate, or guess a missing financial value. Return null when unclear.
 Classify the image as BANK_SLIP_QR, BANK_SLIP_NO_QR, THAI_HELP_THAI, GWALLET,
 NUMBERS_ONLY, WHITE_PAPER, or UNKNOWN.
 
-For THAI_HELP_THAI or GWALLET:
-- gross_amount is the visible goods/services total.
-- discount_amount is the visible government right, subsidy, or discount.
-- paid_amount is the visible amount actually paid.
+For transaction_time:
+- Copy the visibly written date and time text.
+- Do NOT convert Buddhist Era to Gregorian.
+- Do NOT guess a missing digit or year.
+- Preserve a visible short year such as 69.
+- Application code performs calendar normalization.
+Use transaction_time only when both date and time are visible.
+
+For THAI_HELP_THAI or GWALLET, copy each labeled number into the matching field:
+- project_right_amount: สิทธิโครงการฯ, สิทธิรัฐบาล, or เงินสนับสนุนจากรัฐ.
+- gwallet_amount: G-Wallet or ยอด G-Wallet.
+- gross_amount: the visible successful receipt / goods-services total
+  (รับเงินสำเร็จ, ยอดรับรวม).
+- discount_amount must equal project_right_amount.
+- paid_amount must equal gwallet_amount.
+If all three amounts are visible, use those visible values. Never swap
+project_right_amount and gwallet_amount because another interpretation seems
+more financially intuitive. Never calculate a missing amount from
+gross = subsidy + wallet.
 
 For bank slips:
 - transfer_amount is the visible transferred amount.
 
-Use transaction_time only when both date and time are visible. Include Thailand's
-+07:00 offset unless the image explicitly shows another offset. Convert a visible
-Thai Buddhist year to the equivalent Gregorian year for ISO 8601. Keep reference_id
-exactly as shown. Return only the last four visible receiver account digits.
-Do not return OCR prose or any full bank account number.
+receiver_account_tail is ONLY the last four digits of the receiver, payee, or
+merchant account. Digits under รับเงินจาก, ผู้จ่าย, ผู้โอน, sender, or payer
+must NOT populate receiver_account_tail; return null instead.
+
+Keep reference_id exactly as shown. If it wraps across lines, join with no
+spaces or newlines. Do not return OCR prose or any full bank account number.
 `.trim();
 
 function readOutputText(payload: unknown): string | null {

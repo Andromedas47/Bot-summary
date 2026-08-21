@@ -376,6 +376,29 @@ describe("dictionary cleanup extension — ม69–ม71 and the เขียว
   });
 });
 
+describe("ม72 พุทราจีน — approved vocabulary, not an alias of พุทรา*", () => {
+  it("accepts พุทราจีน as an exact canonical name with code ม72", () => {
+    expect(isApprovedProductName("พุทราจีน")).toBe(true);
+    expect(approvedProductCode("พุทราจีน")).toBe("ม72");
+  });
+
+  it("does not fold พุทราจีน into any pre-existing พุทรา* spelling", () => {
+    expect(approvedProductCode("พุทรา")).toBe("ม25");
+    expect(approvedProductCode("พุทราไทย")).toBe("ม26");
+    expect(approvedProductCode("พุทรานม")).toBe("ม27");
+    expect(approvedProductCode("พุทรานมสด")).toBe("ม28");
+    expect(approvedProductCode("พุทราจีน")).toBe("ม72");
+    const codes = new Set([
+      approvedProductCode("พุทรา"),
+      approvedProductCode("พุทราไทย"),
+      approvedProductCode("พุทรานม"),
+      approvedProductCode("พุทรานมสด"),
+      approvedProductCode("พุทราจีน"),
+    ]);
+    expect(codes.size).toBe(5);
+  });
+});
+
 describe("review digest", () => {
   it("changes when a suspicious spelling is corrected", () => {
     const before = withdraw("มะม่วงเขียวรกต").digest;

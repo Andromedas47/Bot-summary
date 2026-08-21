@@ -276,4 +276,43 @@ describe("dictionary cleanup extension — ม69–ม71 and the เขียว
   });
 });
 
+describe("ม72 พุทราจีน — distinct from the existing พุทรา* dictionary rows", () => {
+  test("dictionaryCategoryFor(\"พุทราจีน\") === \"ม\"", () => {
+    expect(dictionaryCategoryFor("พุทราจีน")).toBe("ม");
+    expect(reportCategoryHeading("ม")).toBe("🍉 ผลไม้");
+  });
+
+  test("พุทราจีน → ม72", () => {
+    expect(dictionaryEntryFor("พุทราจีน")?.code).toBe("ม72");
+    expect(dictionaryEntryFor("พุทราจีน")?.categoryCode).toBe("ม");
+    expect(dictionaryEntryFor("พุทราจีน")?.category).toBe("ผลไม้");
+    expect(dictionaryEntryFor("พุทราจีน")?.enabled).toBe(true);
+  });
+
+  describe("identity distinctness — no silent alias among พุทรา / พุทราไทย / พุทรานม / พุทรานมสด / พุทราจีน", () => {
+    test("each พุทรา* name keeps its own stable code", () => {
+      expect(dictionaryEntryFor("พุทรา")?.code).toBe("ม25");
+      expect(dictionaryEntryFor("พุทราไทย")?.code).toBe("ม26");
+      expect(dictionaryEntryFor("พุทรานม")?.code).toBe("ม27");
+      expect(dictionaryEntryFor("พุทรานมสด")?.code).toBe("ม28");
+      expect(dictionaryEntryFor("พุทราจีน")?.code).toBe("ม72");
+      const codes = new Set([
+        dictionaryEntryFor("พุทรา")?.code,
+        dictionaryEntryFor("พุทราไทย")?.code,
+        dictionaryEntryFor("พุทรานม")?.code,
+        dictionaryEntryFor("พุทรานมสด")?.code,
+        dictionaryEntryFor("พุทราจีน")?.code,
+      ]);
+      expect(codes.size).toBe(5);
+    });
+
+    test("none of the พุทรา* names is swallowed by normalizeProductName", () => {
+      for (const name of ["พุทรา", "พุทราไทย", "พุทรานม", "พุทรานมสด", "พุทราจีน"]) {
+        expect(normalizeProductName(name)).toBe(name);
+        expect(dictionaryCategoryFor(name)).toBe("ม");
+      }
+    });
+  });
+});
+
 type ReportCategoryExpectation = "ท" | "ม" | "ผ" | "ป" | "ห" | "พ";

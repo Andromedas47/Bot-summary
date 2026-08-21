@@ -337,6 +337,32 @@ describe("dictionary cleanup extension — ม69–ม71 and the เขียว
   });
 });
 
+describe("ม72 พุทราจีน — classifies to ผลไม้, distinct from พุทรา*", () => {
+  test("พุทราจีน classifies to ม (ผลไม้)", () => {
+    expect(resolveProduceCategory("พุทราจีน")).toBe("ม");
+  });
+
+  test("พุทราจีน aggregates under ผลไม้, not ❓ ไม่จัดหมวด", () => {
+    const result = produceCategoryTotals([
+      row({ product_name: "พุทราจีน", transaction_type: "เบิก", total_amount: 100 }),
+    ]);
+    expect(result.เบิก.categories.map((c) => c.id)).toEqual(["ม"]);
+    expect(result.เบิก.categories.find((c) => c.id === UNCATEGORIZED_CATEGORY_ID)).toBeUndefined();
+  });
+
+  test("พุทรา / พุทราไทย / พุทรานม / พุทรานมสด / พุทราจีน each stay ม without collapsing", () => {
+    const names = ["พุทรา", "พุทราไทย", "พุทรานม", "พุทรานมสด", "พุทราจีน"];
+    for (const name of names) {
+      expect(resolveProduceCategory(name)).toBe("ม");
+    }
+    const result = produceCategoryTotals(
+      names.map((product_name) => row({ product_name, transaction_type: "เบิก", total_amount: 50 })),
+    );
+    expect(result.เบิก.categories.map((c) => c.id)).toEqual(["ม"]);
+    expect(result.เบิก.categories[0]!.itemCount).toBe(names.length);
+  });
+});
+
 describe("categoryLedger", () => {
   test("transposes a bucket-shaped breakdown into a category-shaped ledger", () => {
     const breakdown = produceCategoryTotals([

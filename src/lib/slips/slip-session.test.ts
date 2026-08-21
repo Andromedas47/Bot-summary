@@ -10,6 +10,14 @@ import type { Database } from "@/types/database";
 // ── parseSlipSessionHeader ─────────────────────────────────────────────────
 
 describe("parseSlipSessionHeader", () => {
+  it("keeps the production Thai slash date as operator-facing text", () => {
+    const result = parseSlipSessionHeader("พี่ดำ วัดตะกล่ำ สลิปเงินโอน 20/8/2569");
+    expect(result).not.toBeNull();
+    expect(result!.sellerName).toBe("พี่ดำ");
+    expect(result!.marketName).toBe("วัดตะกล่ำ");
+    expect(result!.slipDate).toBe("20/8/2569");
+  });
+
   it("parses space-separated header", () => {
     const result = parseSlipSessionHeader("กี้ วัดทุ่งลานนา สลิปเงินโอน 9/6/2569");
     expect(result).not.toBeNull();

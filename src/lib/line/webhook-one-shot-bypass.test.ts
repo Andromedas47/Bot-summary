@@ -45,6 +45,24 @@ const RETURN_MATCHING = [
   "จบรายการชั่งคืน",
 ].join("\n");
 
+const RETURN_PRICE_MISMATCHES = [
+  "ขวัญ-ตลาด72 ชั่งคืน 20/8/2569",
+  "1.แตงไทย25บาท",
+  "22ลูก",
+  "2.ทับทิม35บาท",
+  "6ลูก",
+  "จบรายการชั่งคืน",
+].join("\n");
+
+const RETURN_PRICE_AND_EXCESS = [
+  "ขวัญ-ตลาด72 ชั่งคืน 20/8/2569",
+  "1.มังคุด50บาท",
+  "35.2โล",
+  "2.แตงไทย25บาท",
+  "22ลูก",
+  "จบรายการชั่งคืน",
+].join("\n");
+
 /** The round's persisted withdrawal — what a return is validated against. */
 const MASTER: Row[] = [{
   accountability_round_id: ROUND,
@@ -54,6 +72,37 @@ const MASTER: Row[] = [{
   price_per_unit: 100,
   transaction_type: "เบิก",
 }];
+
+const PRICE_MASTER: Row[] = [
+  {
+    accountability_round_id: ROUND,
+    product_name: "แตงไทย",
+    unit: "ลูก",
+    quantity: 28,
+    price_per_unit: 20,
+    transaction_type: "เบิก",
+  },
+  {
+    accountability_round_id: ROUND,
+    product_name: "ทับทิม",
+    unit: "ลูก",
+    quantity: 15,
+    price_per_unit: 20,
+    transaction_type: "เบิก",
+  },
+];
+
+const PRICE_AND_EXCESS_MASTER: Row[] = [
+  {
+    accountability_round_id: ROUND,
+    product_name: "มังคุด",
+    unit: "โล",
+    quantity: 28.8,
+    price_per_unit: 45,
+    transaction_type: "เบิก",
+  },
+  PRICE_MASTER[0]!,
+];
 
 class Query {
   private readonly filters: Array<(row: Row) => boolean> = [];
@@ -283,6 +332,45 @@ describe("a pasted complete produce document cannot bypass P4A", () => {
     expect(payload.accountability_round_id).toBe(ROUND);
     expect(payload.validation_errors).toEqual([]);
     expect(db.rows("produce_sessions")).toHaveLength(1);
+  });
+
+  it("finalizes two price mismatches once, preserves entered prices, and warns in success", async () => {
+    const db = new BypassDatabase(PRICE_MASTER);
+    const replies = await paste(db, RETURN_PRICE_MISMATCHES);
+
+    expect(replies).toEqual([PRODUCE_CLOSE_PENDING_REPLY]);
+    expect(db.rows("produce_entry_validation_reviews")).toHaveLength(0);
+
+    const result = await finalizePendingGeneration(db as never, db.pending);
+
+    expect(result.status).toBe("finalized");
+    expect(db.rows("produce_sessions")).toHaveLength(1);
+    expect(db.rows("produce_entry_validation_reviews")).toHaveLength(0);
+
+    const call = db.finalizeCalls[0];
+    const payload = call.p_session as Row;
+    expect(payload.validation_errors).toEqual([]);
+    expect(payload.notification_payload).toContain("⚠️ พบ 2 รายการที่ราคาแตกต่างจากตอนเบิก");
+    expect(payload.notification_payload).toContain("แตงไทย — เบิก 20 บาท/ลูก → ชั่งคืน 25 บาท/ลูก");
+    expect(payload.notification_payload).toContain("ทับทิม — เบิก 20 บาท/ลูก → ชั่งคืน 35 บาท/ลูก");
+    expect(payload.notification_payload).toContain("ระบบบันทึกตามราคาที่กรอกไว้แล้ว");
+
+    expect(call.p_items).toMatchObject([
+      { product_name: "แตงไทย", quantity: 22, unit: "ลูก", price_per_unit: 25 },
+      { product_name: "ทับทิม", quantity: 6, unit: "ลูก", price_per_unit: 35 },
+    ]);
+  });
+
+  it("keeps a price advisory visible while a quantity invariant blocks all persistence", async () => {
+    const db = new BypassDatabase(PRICE_AND_EXCESS_MASTER);
+    await paste(db, RETURN_PRICE_AND_EXCESS);
+
+    const result = await finalizePendingGeneration(db as never, db.pending, async () => {});
+
+    expect(result.status).toBe("failed_closed");
+    expect(db.rows("produce_sessions")).toHaveLength(0);
+    const payload = db.finalizeCalls[0].p_session as Row;
+    expect(payload.validation_errors).toContain("return_exceeds_withdrawal");
   });
 
   it("refuses the unit mismatch that Production accepted, and persists nothing", async () => {

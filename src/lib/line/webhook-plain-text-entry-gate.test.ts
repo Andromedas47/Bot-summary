@@ -281,7 +281,7 @@ describe("P4A on the plain-text close", () => {
     expect(db.tables.produce_transactions).toHaveLength(before);
   });
 
-  it("shows a changed price for review, then accepts the second close as the acknowledgement", async () => {
+  it("accepts a changed price on the first close without a review record", async () => {
     const db = new PlainTextGateDatabase(
       pendingRow([RETURN_HEADER, "1.มังคุด120บาท", "2โล"].join("\n")),
       master([{ price_per_unit: 100, quantity: 5 }]),
@@ -289,35 +289,24 @@ describe("P4A on the plain-text close", () => {
     const replies: string[] = [];
     const service = build(db, replies);
 
-    await service.processEvents([textEvent("จบรายการชั่งคืน", "close-4a")], "dest");
-    expect(replies[0]).toContain("⚠️");
-    expect(replies[0]).toContain("120");
-    expect(replies[0]).toContain("100");
-    expect(db.pending.close_event_timestamp_ms).toBeNull();
-    expect(db.reviews).toHaveLength(1);
-    expect(db.reviews[0]!.confirmed_at).toBeNull();
-
-    await service.processEvents([textEvent("จบรายการชั่งคืน", "close-4b")], "dest");
-    expect(replies[1]).toBe(PRODUCE_CLOSE_PENDING_REPLY);
-    expect(db.reviews[0]!.confirmed_at).not.toBeNull();
-    expect(db.pending.close_line_event_id).toBe("close-4b");
+    await service.processEvents([textEvent("จบรายการชั่งคืน", "close-4")], "dest");
+    expect(replies).toEqual([PRODUCE_CLOSE_PENDING_REPLY]);
+    expect(db.reviews).toHaveLength(0);
+    expect(db.pending.close_line_event_id).toBe("close-4");
   });
 
-  it("never reads a duplicate delivery of the first close as the acknowledgement", async () => {
+  it("does not stamp a price advisory as a refused close", async () => {
     const db = new PlainTextGateDatabase(
       pendingRow([RETURN_HEADER, "1.มังคุด120บาท", "2โล"].join("\n")),
       master([{ price_per_unit: 100, quantity: 5 }]),
     );
     const replies: string[] = [];
-    const service = build(db, replies);
+    await build(db, replies).processEvents([textEvent("จบรายการชั่งคืน", "close-5")], "dest");
 
-    await service.processEvents([textEvent("จบรายการชั่งคืน", "close-5")], "dest");
-    // Same LINE event id redelivered — the operator pressed nothing new.
-    db.pending.accumulated_text = [RETURN_HEADER, "1.มังคุด120บาท", "2โล"].join("\n");
-    await service.processEvents([textEvent("จบรายการชั่งคืน", "close-5")], "dest");
-
-    expect(db.reviews[0]!.confirmed_at).toBeNull();
-    expect(db.pending.close_event_timestamp_ms).toBeNull();
+    expect(replies).toEqual([PRODUCE_CLOSE_PENDING_REPLY]);
+    expect(db.reviews).toHaveLength(0);
+    expect(db.pending.close_event_timestamp_ms).not.toBeNull();
+    expect(db.closeRefusals).toEqual([]);
   });
 
   it("refuses a return with no withdrawal round rather than finalizing it unbound", async () => {

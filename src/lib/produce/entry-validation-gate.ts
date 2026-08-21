@@ -195,7 +195,7 @@ export type ProduceCloseGateDecision =
   | { decision: "proceed"; result: ProduceValidationResult }
   /** Impossible or unidentifiable data. Never confirmable — it has to be corrected. */
   | { decision: "blocked"; result: ProduceValidationResult }
-  /** Price exceptions were shown and are waiting for a second, explicit press. */
+  /** Confirmable review exceptions await a second, explicit press. */
   | { decision: "review_presented"; result: ProduceValidationResult };
 
 /**
@@ -203,10 +203,10 @@ export type ProduceCloseGateDecision =
  *
  * No close boundary exists yet at this point, which is the whole reason the
  * gate lives here: a refusal leaves the round in capture, where a corrected
- * line is still an ordinary item message. The price-review protocol is two
- * presses of the same button — the first shows the exceptions and records
- * them, the second (a different LINE event, so a duplicate delivery can never
- * stand in for it) acknowledges exactly the exception set that was shown.
+ * line is still an ordinary item message. Confirmable reviews use two presses
+ * of the same button — the first shows the exceptions and records them, the
+ * second (a different LINE event, so a duplicate delivery can never stand in
+ * for it) acknowledges exactly the exception set that was shown.
  */
 export async function runProduceCloseGate(
   supabase: AnyClient,

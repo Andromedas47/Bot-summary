@@ -102,26 +102,26 @@ describe("CASE D — withdrawn and returned by the same code", () => {
   });
 });
 
-// ── CASE E — price drift still needs review ─────────────────────────────────
+// ── CASE E — price drift remains visible but non-blocking ───────────────────
 
 describe("CASE E — price mismatch through a code", () => {
-  it("sends a changed price to review instead of accepting it", () => {
+  it("accepts a changed price with an advisory", () => {
     const round = roundOf(withdrawal("ม01 50 บาท", "2 โล"));
     const result = validate(goodReturn("ม01 60 บาท", "1 โล"), round);
 
-    expect(result.status).toBe("review_required");
-    expect(kinds(result.reviews)).toContain("price_not_withdrawn");
-    expect(result.reviews[0]).toMatchObject({
+    expect(result.status).toBe("clean");
+    expect(kinds(result.advisories)).toContain("price_not_withdrawn");
+    expect(result.advisories[0]).toMatchObject({
       productName: "กล้วยไข่", enteredPrice: 60, withdrawnPrices: [50],
     });
   });
 
-  it("reviews a price change across the code/word boundary too", () => {
+  it("advises on a price change across the code/word boundary too", () => {
     const round = roundOf(withdrawal("กล้วยไข่ 50 บาท", "2 โล"));
     const result = validate(goodReturn("ม01 60 บาท", "1 โล"), round);
 
-    expect(result.status).toBe("review_required");
-    expect(kinds(result.reviews)).toContain("price_not_withdrawn");
+    expect(result.status).toBe("clean");
+    expect(kinds(result.advisories)).toContain("price_not_withdrawn");
   });
 });
 

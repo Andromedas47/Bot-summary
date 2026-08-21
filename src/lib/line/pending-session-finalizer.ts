@@ -44,8 +44,10 @@ import { runProduceFinalizeGate } from "@/lib/produce/entry-validation-gate";
 import { bindPlainTextRound } from "@/lib/produce/plain-text-round-binding";
 import {
   buildBlockingValidationReply,
+  buildPriceAdvisoryNotification,
   buildUnconfirmedReviewReply,
 } from "@/lib/produce/entry-validation-message";
+import type { ProduceValidationAdvisory } from "@/lib/produce/entry-validation";
 import { getRuntimeEnvironment } from "@/lib/runtime-environment";
 
 type Supabase = SupabaseClient<Database>;
@@ -359,6 +361,7 @@ export async function finalizePendingGeneration(
   // left exactly as they are.
   let accountabilityRoundId = snapshot.accountability_round_id ?? null;
   let entryGateDetail: string | null = null;
+  let entryGateAdvisories: ProduceValidationAdvisory[] = [];
   if (validationErrors.length === 0 && !seed) {
     const binding = await bindPlainTextRound(
       supabase,
@@ -394,6 +397,13 @@ export async function finalizePendingGeneration(
     }
   }
 
+  // Structured sessions are bound atomically when opened. Reaching the
+  // finalizer without that identity is corrupt state, not a legacy session
+  // that may be validated against an empty master.
+  if (validationErrors.length === 0 && seed && !accountabilityRoundId) {
+    validationErrors.push("structured session accountability round is missing");
+  }
+
   // P4A: the last revalidation, against live master data. A round that was
   // clean at confirm time can stop being clean — a withdrawal voided, an
   // additional batch landing — and an approval never outranks impossible data.
@@ -408,6 +418,7 @@ export async function finalizePendingGeneration(
     );
     validationErrors.push(...gate.errors);
     entryGateDetail = gate.detail;
+    entryGateAdvisories = gate.advisories;
   }
 
   const rawMessageId = await findCloseRawMessageId(supabase, snapshot);
@@ -416,9 +427,13 @@ export async function finalizePendingGeneration(
   // Success notification is snapshotted before the authoritative RPC. For an
   // addition it reports batch and cumulative day totals and never claims the
   // original session was modified.
-  const notificationPayload = isAdditional && validationErrors.length === 0
+  const notificationSummary = isAdditional && validationErrors.length === 0
     ? buildAdditionalSessionSummary(parsed, await loadAdditionalDayContext(supabase, parsed))
     : buildWeighSessionSummary(parsed);
+  const notificationPayload = buildPriceAdvisoryNotification(
+    notificationSummary,
+    entryGateAdvisories,
+  );
 
   const transactionTypes = [...new Set(
     parsed.items.map((item) => item.transaction_type),
@@ -751,16 +766,20 @@ async function reportBusinessDuplicate(
 
 /**
  * P4A entry gate, as the deferred finalizer runs it: read-only, fail-closed,
- * and it never presents or confirms anything. A price review that was never
- * acknowledged, an impossible quantity, an unknown unit — all of them make the
- * session fail closed here rather than persist and surface in the morning.
+ * and it never presents or confirms anything. Confirmable reviews, impossible
+ * quantities, and unknown units fail closed; price advisories pass through to
+ * the successful notification.
  */
 async function runEntryGateForFinalization(
   supabase: Supabase,
   snapshot: PendingSession,
   accountabilityRoundId: string | null,
   parsed: WeighSession,
-): Promise<{ errors: string[]; detail: string | null }> {
+): Promise<{
+  errors: string[];
+  detail: string | null;
+  advisories: ProduceValidationAdvisory[];
+}> {
   let gate: Awaited<ReturnType<typeof runProduceFinalizeGate>>;
   try {
     gate = await runProduceFinalizeGate(
@@ -780,6 +799,7 @@ async function runEntryGateForFinalization(
     return {
       errors: [error instanceof Error ? error.message : "entry validation failed"],
       detail: null,
+      advisories: [],
     };
   }
 
@@ -787,15 +807,21 @@ async function runEntryGateForFinalization(
     return {
       errors: gate.result.blocking.map((exception) => exception.kind),
       detail: buildBlockingValidationReply(gate.result),
+      advisories: [],
     };
   }
   if (gate.decision === "review_presented") {
     return {
       errors: ["entry validation review was never confirmed"],
       detail: buildUnconfirmedReviewReply(gate.result),
+      advisories: [],
     };
   }
-  return { errors: [], detail: null };
+  return {
+    errors: [],
+    detail: null,
+    advisories: gate.result.advisories,
+  };
 }
 
 export async function finalizeDuePendingGenerations(

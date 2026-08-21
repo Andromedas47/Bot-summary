@@ -531,7 +531,7 @@ describe("the cancel hint", () => {
     expect(db.pending!.close_event_timestamp_ms).toBeNull();
   });
 
-  it("is appended to a presented price review", async () => {
+  it("is not appended to an accepted price advisory", async () => {
     const db = new CancelDatabase(
       pendingRow([RETURN_HEADER, "1.มังคุด120บาท", "2โล"].join("\n")),
       master([{ price_per_unit: 100, quantity: 5 }]),
@@ -539,8 +539,8 @@ describe("the cancel hint", () => {
     const replies: string[] = [];
     await build(db, replies).processEvents([textEvent("จบรายการชั่งคืน", "hint-2")], "dest");
 
-    expect(replies[0]).toContain("⚠️");
-    expect(replies[0]).toContain(CANCEL_ACTIVE_DRAFT_HINT);
+    expect(replies).toEqual([PRODUCE_CLOSE_PENDING_REPLY]);
+    expect(replies[0]).not.toContain(CANCEL_ACTIVE_DRAFT_HINT);
   });
 
   it("is NEVER appended to an accepted close", async () => {

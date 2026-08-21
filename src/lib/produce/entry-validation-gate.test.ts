@@ -227,24 +227,21 @@ describe("close gate", () => {
     expect(db.reviews).toHaveLength(0);
   });
 
-  it("presents a price review on the first press and acknowledges it on the second", async () => {
+  it("lets a price mismatch through on the first press without recording a review", async () => {
     const db = new FakeDb({ [ROUND]: withdrawal });
-    const first = await runProduceCloseGate(db.client(), REF, priceChange(), "E1");
-    expect(first.decision).toBe("review_presented");
-    expect(db.reviews).toHaveLength(1);
-    expect(db.reviews[0].confirmed_at).toBeNull();
-    expect(db.reviews[0].presented_by_line_user_id).toBe("U-typist");
-
-    const second = await runProduceCloseGate(db.client(), REF, priceChange(), "E2");
-    expect(second.decision).toBe("proceed");
-    expect(db.reviews).toHaveLength(1);
-    expect(db.reviews[0].confirmed_line_event_id).toBe("E2");
+    const gate = await runProduceCloseGate(db.client(), REF, priceChange(), "E1");
+    expect(gate.decision).toBe("proceed");
+    expect(gate.result.reviews).toEqual([]);
+    expect(gate.result.advisories).toMatchObject([
+      { kind: "price_not_withdrawn", enteredPrice: 120, withdrawnPrices: [100] },
+    ]);
+    expect(db.reviews).toHaveLength(0);
   });
 
   it("treats a duplicate delivery of the presenting event as a duplicate, not an acknowledgement", async () => {
     const db = new FakeDb({ [ROUND]: withdrawal });
-    await runProduceCloseGate(db.client(), REF, priceChange(), "E1");
-    const replay = await runProduceCloseGate(db.client(), REF, priceChange(), "E1");
+    await runProduceCloseGate(db.client(), REF, suspiciousWithdrawal(), "E1");
+    const replay = await runProduceCloseGate(db.client(), REF, suspiciousWithdrawal(), "E1");
 
     expect(replay.decision).toBe("review_presented");
     expect(db.reviews).toHaveLength(1);
@@ -253,11 +250,11 @@ describe("close gate", () => {
 
   it("is idempotent when the acknowledging event is delivered twice", async () => {
     const db = new FakeDb({ [ROUND]: withdrawal });
-    await runProduceCloseGate(db.client(), REF, priceChange(), "E1");
-    await runProduceCloseGate(db.client(), REF, priceChange(), "E2");
+    await runProduceCloseGate(db.client(), REF, suspiciousWithdrawal(), "E1");
+    await runProduceCloseGate(db.client(), REF, suspiciousWithdrawal(), "E2");
     const confirmedAt = db.reviews[0].confirmed_at;
 
-    const replay = await runProduceCloseGate(db.client(), REF, priceChange(), "E2");
+    const replay = await runProduceCloseGate(db.client(), REF, suspiciousWithdrawal(), "E2");
     expect(replay.decision).toBe("proceed");
     expect(db.reviews).toHaveLength(1);
     expect(db.reviews[0].confirmed_at).toBe(confirmedAt);
@@ -265,11 +262,11 @@ describe("close gate", () => {
   });
 
   it("does not let an acknowledgement carry over to changed content", async () => {
-    const db = new FakeDb({ [ROUND]: withdrawal });
-    await runProduceCloseGate(db.client(), REF, priceChange(120), "E1");
-    await runProduceCloseGate(db.client(), REF, priceChange(120), "E2");
+    const db = new FakeDb({ [ROUND]: [] });
+    await runProduceCloseGate(db.client(), REF, suspiciousWithdrawal(), "E1");
+    await runProduceCloseGate(db.client(), REF, suspiciousWithdrawal(), "E2");
 
-    const changed = await runProduceCloseGate(db.client(), REF, priceChange(130), "E3");
+    const changed = await runProduceCloseGate(db.client(), REF, suspiciousWithdrawal("อินทผรัม"), "E3");
     expect(changed.decision).toBe("review_presented");
     expect(db.reviews).toHaveLength(2);
     expect(db.reviews[1].confirmed_at).toBeNull();
@@ -278,14 +275,13 @@ describe("close gate", () => {
   it("never writes the entered price back to the withdrawal price", async () => {
     const db = new FakeDb({ [ROUND]: withdrawal });
     const parsed = priceChange(120);
-    await runProduceCloseGate(db.client(), REF, parsed, "E1");
-    await runProduceCloseGate(db.client(), REF, parsed, "E2");
+    const gate = await runProduceCloseGate(db.client(), REF, parsed, "E1");
 
+    expect(gate.decision).toBe("proceed");
     expect(parsed.items[0].price_per_unit).toBe(120);
     expect(withdrawal[0].price_per_unit).toBe(100);
-    const [recorded] = db.reviews[0].exceptions as Array<{ enteredPrice: number; withdrawnPrices: number[] }>;
-    expect(recorded.enteredPrice).toBe(120);
-    expect(recorded.withdrawnPrices).toEqual([100]);
+    expect(gate.result.advisories[0]).toMatchObject({ enteredPrice: 120, withdrawnPrices: [100] });
+    expect(db.reviews).toHaveLength(0);
   });
 });
 
@@ -345,41 +341,38 @@ describe("fail closed", () => {
   it("refuses to record a review with no identifiable data-entry actor", async () => {
     const db = new FakeDb({ [ROUND]: withdrawal });
     await expect(
-      runProduceCloseGate(db.client(), { ...REF, lineUserId: null }, priceChange(), "E1"),
+      runProduceCloseGate(db.client(), { ...REF, lineUserId: null }, suspiciousWithdrawal(), "E1"),
     ).rejects.toBeInstanceOf(ProduceValidationGateError);
   });
 });
 
 describe("finalize gate", () => {
-  it("holds a session whose price review was never acknowledged", async () => {
+  it("lets a price advisory finalize without acknowledgement", async () => {
     const db = new FakeDb({ [ROUND]: withdrawal });
-    await runProduceCloseGate(db.client(), REF, priceChange(), "E1");
-
     const gate = await runProduceFinalizeGate(db.client(), REF, priceChange());
-    expect(gate.decision).toBe("review_presented");
+    expect(gate.decision).toBe("proceed");
+    expect(gate.result.advisories).toHaveLength(1);
+    expect(db.reviews).toHaveLength(0);
   });
 
   it("lets an acknowledged session finalize", async () => {
-    const db = new FakeDb({ [ROUND]: withdrawal });
-    await runProduceCloseGate(db.client(), REF, priceChange(), "E1");
-    await runProduceCloseGate(db.client(), REF, priceChange(), "E2");
+    const db = new FakeDb({ [ROUND]: [] });
+    await runProduceCloseGate(db.client(), REF, suspiciousWithdrawal(), "E1");
+    await runProduceCloseGate(db.client(), REF, suspiciousWithdrawal(), "E2");
 
-    const gate = await runProduceFinalizeGate(db.client(), REF, priceChange());
+    const gate = await runProduceFinalizeGate(db.client(), REF, suspiciousWithdrawal());
     expect(gate.decision).toBe("proceed");
   });
 
   it("never presents or acknowledges anything of its own", async () => {
     const db = new FakeDb({ [ROUND]: withdrawal });
     const gate = await runProduceFinalizeGate(db.client(), REF, priceChange());
-    expect(gate.decision).toBe("review_presented");
+    expect(gate.decision).toBe("proceed");
     expect(db.reviews).toHaveLength(0);
   });
 
   it("blocks an acknowledged session once its withdrawal is voided away", async () => {
     const db = new FakeDb({ [ROUND]: withdrawal });
-    await runProduceCloseGate(db.client(), REF, priceChange(), "E1");
-    await runProduceCloseGate(db.client(), REF, priceChange(), "E2");
-
     // produce_transactions excludes voided sessions, so the master simply
     // stops containing the withdrawal.
     db.masterRowOverride = [];

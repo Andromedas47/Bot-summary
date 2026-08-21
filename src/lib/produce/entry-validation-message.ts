@@ -7,10 +7,21 @@
  */
 
 import { formatQuantity } from "@/lib/summary/remaining-fruit";
-import type { ProduceValidationException, ProduceValidationResult } from "./entry-validation";
+import {
+  countCodePoints,
+  LINE_TEXT_MESSAGE_HARD_MAX_CODE_POINTS,
+} from "@/lib/summary/line-chunking";
+import type {
+  ProduceValidationAdvisory,
+  ProduceValidationException,
+  ProduceValidationResult,
+} from "./entry-validation";
 
 /** Beyond this the reply summarizes the remainder instead of listing it. */
 const MAX_LISTED_EXCEPTIONS = 10;
+const ADVISORY_SEPARATOR = "\n\n";
+const PRICE_ADVISORY_SUMMARY_TRUNCATED_NOTICE = "…สรุปรายการถูกย่อเพื่อแสดงคำเตือนราคา";
+const GENERIC_SUMMARY_TRUNCATED_NOTICE = "…สรุปรายการถูกย่อเนื่องจากข้อความยาวเกินกำหนด";
 
 function formatPrice(value: number): string {
   return Number.isInteger(value) ? value.toString() : value.toFixed(2);
@@ -79,6 +90,93 @@ function numberedBlocks(exceptions: ProduceValidationException[]): string[] {
   return lines;
 }
 
+function renderPriceAdvisoryWarning(
+  advisories: ProduceValidationAdvisory[],
+  listedCount: number,
+): string {
+  const listed = advisories.slice(0, listedCount);
+  const lines = [
+    `⚠️ พบ ${advisories.length} รายการที่ราคาแตกต่างจากตอนเบิก`,
+    ...listed.map((advisory) =>
+      `• ${advisory.productName} — เบิก ${advisory.withdrawnPrices.map(formatPrice).join(", ")} บาท/${advisory.unit} → ชั่งคืน ${formatPrice(advisory.enteredPrice)} บาท/${advisory.unit}`
+    ),
+  ];
+  const hidden = advisories.length - listed.length;
+  if (hidden > 0) lines.push(`…และอีก ${hidden} รายการที่ราคาแตกต่าง`);
+  lines.push("", "ระบบบันทึกตามราคาที่กรอกไว้แล้ว");
+  return lines.join("\n");
+}
+
+/** Price differences are visible after save, never framed as a refusal. */
+export function buildPriceAdvisoryWarning(
+  advisories: ProduceValidationAdvisory[],
+): string {
+  if (advisories.length === 0) return "";
+  return renderPriceAdvisoryWarning(
+    advisories,
+    Math.min(advisories.length, MAX_LISTED_EXCEPTIONS),
+  );
+}
+
+function warningWithinBudget(
+  advisories: ProduceValidationAdvisory[],
+  maxCodePoints: number,
+): string {
+  for (
+    let listed = Math.min(advisories.length, MAX_LISTED_EXCEPTIONS);
+    listed >= 0;
+    listed -= 1
+  ) {
+    const warning = renderPriceAdvisoryWarning(advisories, listed);
+    if (countCodePoints(warning) <= maxCodePoints) return warning;
+  }
+  throw new Error("price advisory cannot fit within the LINE text limit");
+}
+
+function truncateSummary(
+  summary: string,
+  maxCodePoints: number,
+  notice: string,
+): string {
+  if (countCodePoints(summary) <= maxCodePoints) return summary;
+  const suffix = `\n${notice}`;
+  const bodyBudget = maxCodePoints - countCodePoints(suffix);
+  const prefix = [...summary].slice(0, Math.max(0, bodyBudget)).join("");
+  const lineBoundary = prefix.lastIndexOf("\n");
+  const body = (lineBoundary > 0 ? prefix.slice(0, lineBoundary) : prefix).trimEnd();
+  return `${body}${suffix}`;
+}
+
+/** Build the one durable success notification without crossing LINE's hard limit. */
+export function buildPriceAdvisoryNotification(
+  summary: string,
+  advisories: ProduceValidationAdvisory[],
+  maxCodePoints = LINE_TEXT_MESSAGE_HARD_MAX_CODE_POINTS,
+): string {
+  if (advisories.length === 0) {
+    return truncateSummary(summary, maxCodePoints, GENERIC_SUMMARY_TRUNCATED_NOTICE);
+  }
+
+  const fullWarning = buildPriceAdvisoryWarning(advisories);
+  const full = `${summary}${ADVISORY_SEPARATOR}${fullWarning}`;
+  if (countCodePoints(full) <= maxCodePoints) return full;
+
+  const compactWarning = renderPriceAdvisoryWarning(advisories, 0);
+  const summaryBudget = maxCodePoints
+    - countCodePoints(ADVISORY_SEPARATOR)
+    - countCodePoints(compactWarning);
+  const safeSummary = truncateSummary(
+    summary,
+    summaryBudget,
+    PRICE_ADVISORY_SUMMARY_TRUNCATED_NOTICE,
+  );
+  const warningBudget = maxCodePoints
+    - countCodePoints(safeSummary)
+    - countCodePoints(ADVISORY_SEPARATOR);
+  const warning = warningWithinBudget(advisories, warningBudget);
+  return `${safeSummary}${ADVISORY_SEPARATOR}${warning}`;
+}
+
 /**
  * The round cannot finalize. Nothing was written and the round stays open, so
  * the operator can send the corrected line as an ordinary item message.
@@ -94,61 +192,24 @@ export function buildBlockingValidationReply(result: ProduceValidationResult): s
   ].join("\n");
 }
 
-/**
- * The review set carries two unrelated problems — a price that differs from
- * the withdrawal, and a withdrawal product name that is not an approved
- * dictionary spelling — so the wording is composed from whichever are present
- * rather than assuming the price case.
- */
-function reviewComposition(result: ProduceValidationResult): {
-  vocabulary: number;
-  price: number;
-} {
-  const vocabulary = result.reviews.filter(
-    (exception) => exception.kind === "unknown_product_vocabulary",
-  ).length;
-  return { vocabulary, price: result.reviews.length - vocabulary };
-}
-
 function reviewHeadline(result: ProduceValidationResult): string {
-  const { vocabulary, price } = reviewComposition(result);
-  if (vocabulary === 0) return `⚠️ พบ ${price} รายการที่ราคาไม่ตรงกับรายการเบิก`;
-  if (price === 0) return `⚠️ พบ ${vocabulary} ชื่อสินค้าที่ไม่ตรงกับรายการมาตรฐาน`;
-  return `⚠️ พบ ${result.reviews.length} รายการที่ต้องตรวจสอบก่อนบันทึก`;
+  return `⚠️ พบ ${result.reviews.length} ชื่อสินค้าที่ไม่ตรงกับรายการมาตรฐาน`;
 }
 
 /**
- * What the operator is being asked to weigh up. Nothing is rewritten either
- * way: an unapproved name is persisted exactly as typed once it is confirmed,
- * and a suggestion is never applied on the operator's behalf.
+ * An unapproved name is persisted exactly as typed once confirmed; a
+ * suggestion is never applied on the operator's behalf.
  */
-function reviewGuidance(result: ProduceValidationResult): string[] {
-  const { vocabulary, price } = reviewComposition(result);
-  const lines: string[] = [];
-  if (vocabulary > 0) {
-    lines.push(
-      "หากพิมพ์ผิด กรุณาแก้ชื่อสินค้าแล้วส่งรายการที่ถูกต้องใหม่",
-      "หากเป็นสินค้าใหม่จริง ระบบจะบันทึกชื่อตามที่ส่งมาทุกตัวอักษร",
-    );
-  }
-  if (price > 0) {
-    lines.push("ราคาเปลี่ยนระหว่างวันได้ ระบบจะเก็บราคาที่ส่งมาไว้ตามเดิม");
-  }
-  return lines;
-}
-
-function reviewConfirmPrompt(result: ProduceValidationResult, action: string): string {
-  const { vocabulary, price } = reviewComposition(result);
-  if (vocabulary === 0) return `กรุณาตรวจว่าปรับราคาจริง แล้ว${action}`;
-  if (price === 0) return `หากตรวจแล้วว่าถูกต้อง ${action}`;
-  return `กรุณาตรวจรายการข้างต้น แล้ว${action}`;
+function reviewGuidance(): string[] {
+  return [
+    "หากพิมพ์ผิด กรุณาแก้ชื่อสินค้าแล้วส่งรายการที่ถูกต้องใหม่",
+    "หากเป็นสินค้าใหม่จริง ระบบจะบันทึกชื่อตามที่ส่งมาทุกตัวอักษร",
+  ];
 }
 
 /**
- * The round can finalize, but something in it needs a human to look once: a
- * price that differs from what was withdrawn, or a withdrawal product name
- * that is not an approved dictionary spelling. Both are kept exactly as
- * entered — the operator only has to say they are intentional.
+ * A withdrawal product name outside the approved dictionary needs one human
+ * confirmation before finalization.
  */
 export function buildReviewValidationReply(result: ProduceValidationResult): string {
   return [
@@ -156,8 +217,8 @@ export function buildReviewValidationReply(result: ProduceValidationResult): str
     "",
     ...numberedBlocks(result.reviews),
     "",
-    ...reviewGuidance(result),
-    reviewConfirmPrompt(result, 'กด "ยืนยัน" เพื่อบันทึก'),
+    ...reviewGuidance(),
+    'หากตรวจแล้วว่าถูกต้อง กด "ยืนยัน" เพื่อบันทึก',
   ].join("\n");
 }
 
@@ -176,22 +237,16 @@ export function buildPlainTextReviewValidationReply(
     "",
     ...numberedBlocks(result.reviews),
     "",
-    ...reviewGuidance(result),
-    reviewConfirmPrompt(result, "ส่งข้อความจบรายการอีกครั้งเพื่อยืนยัน"),
+    ...reviewGuidance(),
+    "หากตรวจแล้วว่าถูกต้อง ส่งข้อความจบรายการอีกครั้งเพื่อยืนยัน",
   ].join("\n");
 }
 
 /** One-line form for a session held because its review was never acknowledged. */
 export function buildUnconfirmedReviewReply(result?: ProduceValidationResult): string {
-  const { vocabulary, price } = result
-    ? reviewComposition(result)
-    : { vocabulary: 0, price: 1 };
-  const subject =
-    vocabulary === 0
-      ? "ราคาที่ไม่ตรงกับรายการเบิก"
-      : price === 0
-        ? "ชื่อสินค้าที่ไม่ตรงกับรายการมาตรฐาน"
-        : "รายการที่ต้องตรวจสอบ";
+  const subject = result?.reviews.length
+    ? "ชื่อสินค้าที่ไม่ตรงกับรายการมาตรฐาน"
+    : "รายการที่ต้องตรวจสอบ";
   return [
     `ยังบันทึกไม่ได้ ${subject}ยังไม่ได้รับการยืนยัน`,
     'กรุณากด "จบรายการ" อีกครั้งเพื่อดูรายการที่ต้องตรวจ',

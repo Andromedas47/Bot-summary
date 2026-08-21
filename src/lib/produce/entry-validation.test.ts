@@ -9,8 +9,13 @@ import {
 } from "./entry-validation";
 import {
   buildBlockingValidationReply,
-  buildReviewValidationReply,
+  buildPriceAdvisoryNotification,
+  buildPriceAdvisoryWarning,
 } from "./entry-validation-message";
+import {
+  countCodePoints,
+  LINE_TEXT_MESSAGE_HARD_MAX_CODE_POINTS,
+} from "@/lib/summary/line-chunking";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 //
@@ -222,15 +227,15 @@ describe("price buckets", () => {
     expect(result.status).toBe("clean");
   });
 
-  it("asks for review on a price that is in neither bucket", () => {
+  it("warns on a price that is in neither bucket without blocking", () => {
     const result = bound(
       session([
         item({ product_name: "หมอนทอง", quantity: 8, price_per_unit: 109, transaction_type: "คืน" }),
       ]),
       durian,
     );
-    expect(result.status).toBe("review_required");
-    const [exception] = result.reviews;
+    expect(result.status).toBe("clean");
+    const [exception] = result.advisories;
     expect(exception.kind === "price_not_withdrawn" && exception.withdrawnPrices).toEqual([100, 119]);
     expect(exception.kind === "price_not_withdrawn" && exception.enteredPrice).toBe(109);
   });
@@ -239,14 +244,22 @@ describe("price buckets", () => {
 // ── CASE E — a price change is allowed, never coerced ─────────────────────────
 
 describe("price change", () => {
-  it("reviews 120 against a withdrawal of 100 and keeps the entered price", () => {
+  it("advises on 120 against a withdrawal of 100 and keeps the entered price", () => {
     const parsed = session([
       item({ product_name: "อะโวคาโด", quantity: 4, price_per_unit: 120, transaction_type: "คืน" }),
     ]);
     const result = bound(parsed, master([{ product_name: "อะโวคาโด", quantity: 10, price_per_unit: 100 }]));
 
-    expect(result.status).toBe("review_required");
+    expect(result.status).toBe("clean");
     expect(result.blocking).toEqual([]);
+    expect(result.reviews).toEqual([]);
+    expect(result.advisories).toEqual([expect.objectContaining({
+      kind: "price_not_withdrawn",
+      severity: "advisory",
+      quantity: 4,
+      enteredPrice: 120,
+      withdrawnPrices: [100],
+    })]);
     // Nothing was rewritten: the item still carries what the operator typed.
     expect(parsed.items[0].price_per_unit).toBe(120);
   });
@@ -257,6 +270,26 @@ describe("price change", () => {
       master([{ product_name: "ส้ม", quantity: 5, price_per_unit: null }]),
     );
     expect(result.status).toBe("clean");
+    expect(result.advisories).toEqual([]);
+  });
+
+  it("reports both Production price differences as advisories", () => {
+    const result = bound(
+      session([
+        item({ product_name: "แตงไทย", unit: "ลูก", quantity: 22, price_per_unit: 25, transaction_type: "คืน" }),
+        item({ product_name: "ทับทิม", unit: "ลูก", quantity: 6, price_per_unit: 35, transaction_type: "คืน" }),
+      ]),
+      master([
+        { product_name: "แตงไทย", unit: "ลูก", quantity: 28, price_per_unit: 20 },
+        { product_name: "ทับทิม", unit: "ลูก", quantity: 15, price_per_unit: 20 },
+      ]),
+    );
+
+    expect(result.status).toBe("clean");
+    expect(result.advisories).toMatchObject([
+      { productName: "แตงไทย", unit: "ลูก", quantity: 22, enteredPrice: 25, withdrawnPrices: [20] },
+      { productName: "ทับทิม", unit: "ลูก", quantity: 6, enteredPrice: 35, withdrawnPrices: [20] },
+    ]);
   });
 });
 
@@ -276,6 +309,19 @@ describe("quantity invariant", () => {
     const [exception] = result.blocking;
     expect(exception.kind).toBe("return_exceeds_withdrawal");
     expect(exception.kind === "return_exceeds_withdrawal" && exception.excessQuantity).toBe(2);
+  });
+
+  it("keeps a price advisory alongside a real quantity block", () => {
+    const result = bound(
+      session([
+        item({ product_name: "มังคุด", quantity: 35.2, price_per_unit: 50, transaction_type: "คืน" }),
+      ]),
+      master([{ product_name: "มังคุด", quantity: 28.8, price_per_unit: 45 }]),
+    );
+
+    expect(result.status).toBe("blocked");
+    expect(kinds(result.blocking)).toContain("return_exceeds_withdrawal");
+    expect(kinds(result.advisories)).toContain("price_not_withdrawn");
   });
 
   it("aggregates across every price bucket instead of per bucket", () => {
@@ -374,12 +420,12 @@ describe("validation digest", () => {
   it("does not depend on exception ordering", () => {
     const parsed = priced(120);
     const forward = computeValidationDigest(parsed, [], [
-      { kind: "price_not_withdrawn", severity: "review_required", itemNumber: 1, productName: "a", unit: "โล", quantity: 1, enteredPrice: 2, withdrawnPrices: [1] },
-      { kind: "price_not_withdrawn", severity: "review_required", itemNumber: 2, productName: "b", unit: "โล", quantity: 1, enteredPrice: 2, withdrawnPrices: [1] },
+      { kind: "unknown_product_vocabulary", severity: "review_required", itemNumber: 1, productName: "a", suggestions: [] },
+      { kind: "unknown_product_vocabulary", severity: "review_required", itemNumber: 2, productName: "b", suggestions: [] },
     ]);
     const reversed = computeValidationDigest(parsed, [], [
-      { kind: "price_not_withdrawn", severity: "review_required", itemNumber: 2, productName: "b", unit: "โล", quantity: 1, enteredPrice: 2, withdrawnPrices: [1] },
-      { kind: "price_not_withdrawn", severity: "review_required", itemNumber: 1, productName: "a", unit: "โล", quantity: 1, enteredPrice: 2, withdrawnPrices: [1] },
+      { kind: "unknown_product_vocabulary", severity: "review_required", itemNumber: 2, productName: "b", suggestions: [] },
+      { kind: "unknown_product_vocabulary", severity: "review_required", itemNumber: 1, productName: "a", suggestions: [] },
     ]);
     expect(forward).toBe(reversed);
   });
@@ -408,10 +454,94 @@ describe("replies", () => {
         { product_name: "หมอน", quantity: 5, price_per_unit: 119 },
       ]),
     );
-    const reply = buildReviewValidationReply(result);
+    const reply = buildPriceAdvisoryWarning(result.advisories);
     expect(reply).toContain("109");
     expect(reply).toContain("100, 119");
-    expect(reply).toContain("ยืนยัน");
+    expect(reply).toContain("ระบบบันทึกตามราคาที่กรอกไว้แล้ว");
+    expect(reply).not.toContain("ยืนยัน");
+  });
+
+  it("keeps small success advisories byte-for-byte unchanged", () => {
+    const advisories = bound(
+      session([item({ product_name: "มังคุด", quantity: 2, price_per_unit: 50, transaction_type: "คืน" })]),
+      master([{ product_name: "มังคุด", quantity: 5, price_per_unit: 45 }]),
+    ).advisories;
+    const summary = "บันทึกแล้ว ✅";
+    expect(buildPriceAdvisoryNotification(summary, advisories)).toBe(
+      `${summary}\n\n${buildPriceAdvisoryWarning(advisories)}`,
+    );
+  });
+
+  it("keeps a small success summary with no advisories byte-for-byte unchanged", () => {
+    const summary = "บันทึกแล้ว ✅\n\nขวัญ — 20/8/2569";
+    expect(buildPriceAdvisoryNotification(summary, [])).toBe(summary);
+  });
+
+  it("caps an oversized advisory-free summary at a complete line with a generic notice", () => {
+    const summaryLines = [
+      "บันทึกแล้ว ✅",
+      ...Array.from(
+        { length: 150 },
+        (_, index) => `${index + 1}. แตงโม ${"ก".repeat(40)} 1 ลูก × 25 = 25 บาท`,
+      ),
+    ];
+    const summary = summaryLines.join("\n");
+    const notification = buildPriceAdvisoryNotification(summary, []);
+    const outputLines = notification.split("\n");
+    const genericNotice = "…สรุปรายการถูกย่อเนื่องจากข้อความยาวเกินกำหนด";
+
+    expect(countCodePoints(summary)).toBeGreaterThan(
+      LINE_TEXT_MESSAGE_HARD_MAX_CODE_POINTS,
+    );
+    expect(countCodePoints(notification)).toBeLessThanOrEqual(
+      LINE_TEXT_MESSAGE_HARD_MAX_CODE_POINTS,
+    );
+    expect(outputLines.at(-1)).toBe(genericNotice);
+    expect(notification).not.toContain("…สรุปรายการถูกย่อเพื่อแสดงคำเตือนราคา");
+    for (const line of outputLines.slice(0, -1)) {
+      expect(summaryLines).toContain(line);
+    }
+  });
+
+  it("keeps an advisory-free summary unchanged at the hard limit", () => {
+    const summary = "ก".repeat(LINE_TEXT_MESSAGE_HARD_MAX_CODE_POINTS);
+    const notification = buildPriceAdvisoryNotification(summary, []);
+
+    expect(countCodePoints(notification)).toBe(
+      LINE_TEXT_MESSAGE_HARD_MAX_CODE_POINTS,
+    );
+    expect(notification).toBe(summary);
+  });
+
+  it("budgets complete advisory rows against a near-limit success summary", () => {
+    const advisories = Array.from({ length: 10 }, (_, index) => ({
+      kind: "price_not_withdrawn" as const,
+      severity: "advisory" as const,
+      itemNumber: index + 1,
+      productName: `สินค้า${index + 1}`,
+      unit: "โล",
+      quantity: 1,
+      enteredPrice: 50,
+      withdrawnPrices: [45],
+    }));
+    const summary = `บันทึกแล้ว ✅\n${"ก".repeat(4475)}`;
+    const notification = buildPriceAdvisoryNotification(summary, advisories);
+    const lines = notification.split("\n");
+    const warningRows = lines.filter((line) => line.startsWith("• "));
+    const omittedLine = lines.find((line) => line.startsWith("…และอีก "));
+    const omitted = Number(omittedLine?.match(/…และอีก (\d+) รายการ/)?.[1]);
+
+    expect(countCodePoints(notification)).toBeLessThanOrEqual(
+      LINE_TEXT_MESSAGE_HARD_MAX_CODE_POINTS,
+    );
+    expect(warningRows.length).toBeGreaterThan(0);
+    expect(warningRows.length + omitted).toBe(advisories.length);
+    expect(omittedLine).toBe(`…และอีก ${omitted} รายการที่ราคาแตกต่าง`);
+    warningRows.forEach((line, index) => {
+      expect(line).toBe(
+        `• สินค้า${index + 1} — เบิก 45 บาท/โล → ชั่งคืน 50 บาท/โล`,
+      );
+    });
   });
 
   it("summarizes instead of listing when a session is pathological", () => {

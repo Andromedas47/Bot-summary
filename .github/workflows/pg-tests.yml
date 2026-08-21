@@ -34,6 +34,8 @@ jobs:
       - run: bun install
       - name: P2E real-PostgreSQL identity and constraint suite
         run: bun run test:pg:p2e
+      - name: Slip Thai date accountability-round guard hotfix
+        run: bun run test:pg:slip-date-round-guard
       - name: P2E application and produce compatibility tests
         run: >-
           bun test

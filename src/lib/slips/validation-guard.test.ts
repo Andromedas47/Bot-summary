@@ -73,6 +73,13 @@ describe("parseBatchDate", () => {
   it("parses Thai Buddhist D/M/BBBB → ISO Gregorian", () => {
     expect(parseBatchDate("10/6/2569")).toBe("2026-06-10");
   });
+  it("parses the 2026-08-21 production header date 20/8/2569 as 2026-08-20", () => {
+    expect(parseBatchDate("20/8/2569")).toBe("2026-08-20");
+  });
+  it("does not swap 11/8/2569 into November", () => {
+    expect(parseBatchDate("11/8/2569")).toBe("2026-08-11");
+    expect(parseBatchDate("11/8/2569")).not.toBe("2026-11-08");
+  });
   it("parses leading-zero DD/MM/BBBB", () => {
     expect(parseBatchDate("01/01/2569")).toBe("2026-01-01");
   });

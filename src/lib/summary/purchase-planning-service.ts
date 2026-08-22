@@ -105,9 +105,11 @@ const SESSION_LOOKUP_CHUNK = 500;
  *
  * Same two findings P1 Sales blocks an identity on (loadSessionIssues in
  * src/lib/sales/load.ts): the parser admitted it could not read every line, or
- * a different number of rows landed than the session claimed to have parsed. A
- * ชั่งคืน document that lost a line understates the return and would inflate
- * this report's sold quantity, so its products must not be ranked.
+ * a different number of rows landed than the session claimed to have parsed.
+ * A requested id that produce_sessions does not return is the same failure —
+ * completeness is unprovable. A ชั่งคืน document that lost a line understates
+ * the return and would inflate this report's sold quantity, so its products
+ * must not be ranked.
  */
 async function loadUnreliableSessionIds(
   supabase: Supabase,
@@ -129,7 +131,15 @@ async function loadUnreliableSessionIds(
       .in("id", chunk);
     if (error) throw new Error(`produce session integrity query failed: ${error.message}`);
 
-    for (const session of data ?? []) {
+    // Missing metadata cannot prove completeness. data == null and [] are the
+    // same: every requested id that did not come back is unreliable.
+    const returned = data ?? [];
+    const found = new Set(returned.map((session) => session.id));
+    for (const sessionId of chunk) {
+      if (!found.has(sessionId)) unreliable.add(sessionId);
+    }
+
+    for (const session of returned) {
       const parserErrors = session.parser_errors;
       const hasParserErrors = Array.isArray(parserErrors)
         ? parserErrors.length > 0

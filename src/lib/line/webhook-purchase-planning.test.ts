@@ -69,6 +69,9 @@ function seedDay(db: FakeDatabase): FakeDatabase {
     ])
     .seed("accountability_rounds", [
       { id: ROUND, seller_label: "โอม", market_label: "ตลาด72" },
+    ])
+    .seed("produce_sessions", [
+      { id: "session-1", total_items: 2, parser_errors: [] },
     ]);
 }
 

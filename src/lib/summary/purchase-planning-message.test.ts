@@ -191,6 +191,26 @@ describe("purchase planning message — recommendations", () => {
     expect(text).toContain("→ มีของพร้อมขายต่ออยู่มาก ควรเช็กก่อนซื้อเพิ่ม");
   });
 
+  test("a damage-heavy 🟠 does not claim leftover good stock is high", () => {
+    const text = joined(report({
+      items: [item({
+        withdrawnQuantity: 100,
+        goodReturnQuantity: 0,
+        damagedQuantity: 55,
+        estimatedSoldQuantity: 45,
+        sellThroughRate: 45,
+        band: "medium",
+        status: "surplus",
+        houseStockQuantity: 0,
+        nextDayGoodStockQuantity: 0,
+        nextStockToSoldRatio: 0,
+      })],
+    }));
+    expect(text).toContain(STATUS_HEADINGS.surplus);
+    expect(text).toContain("→ ขายออกปานกลางแต่มีของเสียสูง ควรเช็กก่อนซื้อเพิ่ม");
+    expect(text).not.toContain("มีของพร้อมขายต่ออยู่มาก");
+  });
+
   test("a damage-heavy 🔴 does not claim the good stock is high", () => {
     const text = joined(report({
       items: [item({

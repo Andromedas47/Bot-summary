@@ -132,7 +132,14 @@ function recommendationLines(item: PurchasePlanningItem): string[] {
   }
   if (item.status === "strong") return ["→ ขายออกดีและของดีพร้อมขายต่อเหลือน้อย"];
   if (item.status === "surplus") {
-    if (item.band === "medium") return ["→ มีของพร้อมขายต่ออยู่มาก ควรเช็กก่อนซื้อเพิ่ม"];
+    if (item.band === "medium") {
+      // Same damage-vs-good test as 🔴: leftover that came back ruined is
+      // not sellable stock waiting to go out tomorrow.
+      if (item.damagedQuantity > item.goodReturnQuantity) {
+        return ["→ ขายออกปานกลางแต่มีของเสียสูง ควรเช็กก่อนซื้อเพิ่ม"];
+      }
+      return ["→ มีของพร้อมขายต่ออยู่มาก ควรเช็กก่อนซื้อเพิ่ม"];
+    }
     // HIGH sell-through held back: either a lot is ready to sell tomorrow, or
     // the house side is unknown. Neither may be presented as 🟢.
     if (item.nextStockToSoldRatio !== null) {

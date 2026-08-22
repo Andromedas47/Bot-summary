@@ -42,6 +42,10 @@ function snapshotRow(overrides: Row = {}): Row {
   };
 }
 
+function cleanSession(totalItems: number): Row {
+  return { id: "session-1", total_items: totalItems, parser_errors: [] };
+}
+
 function itemRow(overrides: Row = {}): Row {
   return {
     id: `stock-${Math.random().toString(36).slice(2)}`,
@@ -69,7 +73,8 @@ function highSellingDay(db = new FakeDatabase()): FakeDatabase {
     ])
     .seed("accountability_rounds", [
       { id: ROUND, seller_label: "โอม", market_label: "ตลาด72" },
-    ]);
+    ])
+    .seed("produce_sessions", [cleanSession(2)]);
 }
 
 const client = (db: FakeDatabase): SupabaseClient<Database> =>
@@ -234,11 +239,34 @@ describe("loadPurchasePlanningReport — house stock wiring", () => {
       ])
       .seed("accountability_rounds", [
         { id: ROUND, seller_label: "โอม", market_label: "ตลาด72" },
-      ]);
+      ])
+      .seed("produce_sessions", [cleanSession(3)]);
 
     const report = await loadPurchasePlanningReport(client(db), BUSINESS_DATE);
 
     expect(report.items[0]!.damagedQuantity).toBe(30);
     expect(report.items[0]!.estimatedSoldQuantity).toBe(50);
+  });
+
+  test("a missing produce_sessions row fails closed instead of ranking", async () => {
+    // Same HIGH + low-house numbers that turn green when metadata is present.
+    // produce_sessions is unseeded, so the lookup returns [] — not an error.
+    const db = new FakeDatabase()
+      .seed("produce_transactions", [
+        produceRow({ transaction_type: "เบิก", quantity: 100 }),
+        produceRow({ transaction_type: "คืน", quantity: 20 }),
+      ])
+      .seed("accountability_rounds", [
+        { id: ROUND, seller_label: "โอม", market_label: "ตลาด72" },
+      ])
+      .seed("physical_inventory_snapshots", [snapshotRow()])
+      .seed("physical_inventory_items", [itemRow({ quantity: 10 })]);
+
+    const report = await loadPurchasePlanningReport(client(db), BUSINESS_DATE);
+
+    expect(report.items[0]!.status).toBe("unknown");
+    expect(report.items[0]!.uncertaintyReasons).toContain("session_integrity");
+    expect(report.items[0]!.band).toBeNull();
+    expect(report.items[0]!.status).not.toBe("strong");
   });
 });

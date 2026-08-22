@@ -27,6 +27,10 @@ const CLEANUP_MIGRATION = join(
   HERE, "..", "..", "..", "..",
   "supabase", "migrations", "20260818100000_produce_product_dictionary_cleanup.sql",
 );
+const JUJUBE_MIGRATION = join(
+  HERE, "..", "..", "..", "..",
+  "supabase", "migrations", "20260821180000_produce_product_dictionary_chinese_jujube.sql",
+);
 
 interface Row {
   code: string;
@@ -93,6 +97,10 @@ const APPLIED_MIGRATIONS: AppliedMigration[] = [
     insertAfterCode: "ม62",
     renames: { "ม54": "ไซมัส" }, // ไซมัส
   },
+  {
+    file: JUJUBE_MIGRATION,
+    insertAfterCode: "ม71",
+  },
 ];
 
 /**
@@ -134,11 +142,11 @@ const moduleRows = (): Row[] =>
   }));
 
 describe("the approved dictionary is the source of truth", () => {
-  it("carries exactly the 262 approved codes", () => {
-    expect(PRODUCT_CODE_COUNT).toBe(262);
-    expect(PRODUCT_CODE_ENABLED_COUNT).toBe(262);
-    expect(PRODUCT_CODE_ENTRIES).toHaveLength(262);
-    expect(csvRows()).toHaveLength(262);
+  it("carries exactly the 263 approved codes", () => {
+    expect(PRODUCT_CODE_COUNT).toBe(263);
+    expect(PRODUCT_CODE_ENABLED_COUNT).toBe(263);
+    expect(PRODUCT_CODE_ENTRIES).toHaveLength(263);
+    expect(csvRows()).toHaveLength(263);
   });
 
   it("matches the CSV row for row, in the approved order and numbering", () => {
@@ -149,9 +157,9 @@ describe("the approved dictionary is the source of truth", () => {
   it("composes to the identical rows once every migration is applied in order", () => {
     // migrationRows() replays the base seed (20260813090000) plus every
     // migration layered on top of it (20260818100000's ม54 correction and its
-    // nine new rows) — the actual sequence a Production database runs. That
-    // composed result has to equal the approved CSV, or the migrations and the
-    // CSV have drifted apart.
+    // nine new rows, then 20260821180000's ม72 พุทราจีน) — the actual sequence
+    // a Production database runs. That composed result has to equal the
+    // approved CSV, or the migrations and the CSV have drifted apart.
     expect(migrationRows()).toEqual(csvRows());
   });
 
@@ -161,7 +169,7 @@ describe("the approved dictionary is the source of truth", () => {
       counts.set(entry.categoryCode, (counts.get(entry.categoryCode) ?? 0) + 1);
     }
     expect(Object.fromEntries(counts)).toEqual({
-      ม: 71, ผ: 118, ป: 36, ท: 26, ห: 4, พ: 7,
+      ม: 72, ผ: 118, ป: 36, ท: 26, ห: 4, พ: 7,
     });
   });
 
@@ -207,9 +215,9 @@ describe("real mappings from the approved CSV resolve", () => {
 });
 
 describe("unregistered codes do not resolve", () => {
-  // ม63-ม71 exist as of this extension, so ม72 — the code right past the new
-  // boundary — is the genuinely unissued example, not ม63 or ม69.
-  for (const code of ["ม99", "ม999", "ผ999", "ป99", "ท99", "ห99", "พ99", "ผ119", "ม72"]) {
+  // ม63-ม72 exist as of this extension, so ม73 — the code right past the new
+  // boundary — is the genuinely unissued example, not ม63, ม69 or ม72.
+  for (const code of ["ม99", "ม999", "ผ999", "ป99", "ท99", "ห99", "พ99", "ผ119", "ม73"]) {
     it(`${code} is unknown`, () => {
       expect(resolveProductCode(code)).toBeNull();
       expect(resolveItemLineProductCode(`${code} 50 บาท`)).toEqual({ kind: "unknown", code });
@@ -361,6 +369,49 @@ describe("dictionary cleanup extension — ม69–ม71 (ส้มแมนด�
     // Verified, not assumed: insertedRowsOf() re-parses the migration file's
     // own VALUES block with the same regex the base suite relies on, so a
     // formatting slip in the new ม69-ม71 rows would fail here.
+    expect(migrationRows()).toEqual(csvRows());
+  });
+});
+
+describe("ม72 พุทราจีน — a new fruit code, distinct from the existing พุทรา* rows", () => {
+  it("ม72 → พุทราจีน", () => {
+    expect(resolveProductCode("ม72")).toBe("พุทราจีน");
+  });
+
+  it("พุทราจีน is enabled and keeps category ผลไม้", () => {
+    const entry = PRODUCT_CODE_ENTRIES.find((e) => e.code === "ม72");
+    expect(entry).toMatchObject({
+      code: "ม72",
+      categoryCode: "ม",
+      category: "ผลไม้",
+      canonicalName: "พุทราจีน",
+      enabled: true,
+    });
+  });
+
+  describe("independence — the pre-existing พุทรา* codes were not merged or renumbered", () => {
+    it("ม25–ม28 still resolve to their own products", () => {
+      expect(resolveProductCode("ม25")).toBe("พุทรา");
+      expect(resolveProductCode("ม26")).toBe("พุทราไทย");
+      expect(resolveProductCode("ม27")).toBe("พุทรานม");
+      expect(resolveProductCode("ม28")).toBe("พุทรานมสด");
+    });
+
+    it("พุทราจีน is a distinct identity from every pre-existing พุทรา* code", () => {
+      expect(resolveProductCode("ม72")).not.toBe(resolveProductCode("ม25"));
+      expect(resolveProductCode("ม72")).not.toBe(resolveProductCode("ม26"));
+      expect(resolveProductCode("ม72")).not.toBe(resolveProductCode("ม27"));
+      expect(resolveProductCode("ม72")).not.toBe(resolveProductCode("ม28"));
+    });
+  });
+
+  it("no product code collision — ม72 appears exactly once in the full set", () => {
+    const codes = PRODUCT_CODE_ENTRIES.map((e) => e.code);
+    expect(new Set(codes).size).toBe(codes.length);
+    expect(codes.filter((c) => c === "ม72")).toHaveLength(1);
+  });
+
+  it("the composed migration-parity check still holds with the ม72 INSERT", () => {
     expect(migrationRows()).toEqual(csvRows());
   });
 });

@@ -179,11 +179,15 @@ describe.skipIf(!pgAvailable)("Produce Product Dictionary Cleanup on PostgreSQL 
     }
   });
 
-  test("matches PRODUCT_CODE_ENTRIES exactly, the whole table", async () => {
+  test("matches PRODUCT_CODE_ENTRIES exactly for the cleanup-composed rows", async () => {
+    // This suite proves 20260818100000's own composed state (262 rows). ม72 is
+    // issued by a later migration and is proven against the full module there.
     const actual = JSON.parse(await scalar(
       "SELECT jsonb_object_agg(product_code, canonical_name)::text FROM public.produce_product_codes",
     )) as Record<string, string>;
-    const expected = Object.fromEntries(PRODUCT_CODE_ENTRIES.map((e) => [e.code, e.canonicalName]));
+    const expected = Object.fromEntries(
+      PRODUCT_CODE_ENTRIES.filter((e) => e.code !== "ม72").map((e) => [e.code, e.canonicalName]),
+    );
     expect(actual).toEqual(expected);
   });
 

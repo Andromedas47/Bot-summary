@@ -32,10 +32,14 @@ const MIGRATION = join(
   ROOT, "supabase", "migrations", "20260813090000_produce_product_code_dictionary.sql",
 );
 // 20260818100000 corrects ม54's canonical_name (ไชมัส → ไซมัส) and seeds
-// ม63-ม71. It is applied right after the base seed, same as it would run in
-// Production, so every assertion below reflects the composed 262-row state.
+// ม63-ม71. 20260821180000 then issues ม72 (พุทราจีน). Both are applied right
+// after the base seed, same as they would run in Production, so every
+// assertion below reflects the composed 263-row state.
 const CLEANUP_MIGRATION = join(
   ROOT, "supabase", "migrations", "20260818100000_produce_product_dictionary_cleanup.sql",
+);
+const JUJUBE_MIGRATION = join(
+  ROOT, "supabase", "migrations", "20260821180000_produce_product_dictionary_chinese_jujube.sql",
 );
 const BOOTSTRAP = join(
   ROOT, "supabase", "tests", "produce_product_code_dictionary_bootstrap.sql",
@@ -125,6 +129,7 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
 
     await apply(MIGRATION);
     await apply(CLEANUP_MIGRATION);
+    await apply(JUJUBE_MIGRATION);
   });
 
   afterAll(async () => {
@@ -134,11 +139,11 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
 
   // ── The seed is the approved dictionary ───────────────────────────────────
 
-  test("seeds exactly the 262 approved codes (base + cleanup), all enabled", async () => {
-    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("262");
+  test("seeds exactly the 263 approved codes (base + cleanup + ม72), all enabled", async () => {
+    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("263");
     expect(await scalar(
       "SELECT count(*)::text FROM public.produce_product_codes WHERE code_enabled",
-    )).toBe("262");
+    )).toBe("263");
   });
 
   test("keeps the approved namespace ranges", async () => {
@@ -148,7 +153,7 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
         SELECT category_code, count(*) AS n
         FROM public.produce_product_codes GROUP BY category_code
       ) t`);
-    expect(rows).toBe("ท=26,ป=36,ผ=118,พ=7,ม=71,ห=4");
+    expect(rows).toBe("ท=26,ป=36,ผ=118,พ=7,ม=72,ห=4");
   });
 
   test("stores the canonical name of every code exactly as approved", async () => {
@@ -186,7 +191,7 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
       "DELETE FROM public.produce_product_codes WHERE product_code = 'ม02'",
     );
     expect(error).toContain("must not be deleted");
-    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("262");
+    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("263");
   });
 
   test("refuses to repoint a code at a different product", async () => {
@@ -250,7 +255,7 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
     // re-executed after 20260818100000 already ran (each migration file
     // applies exactly once, tracked by the migration runner), so re-running it
     // atop the shared DATABASE here — which by this point also has the
-    // cleanup migration's 262 rows — would fail that assertion for a scenario
+    // cleanup + ม72 migrations' 263 rows — would fail that assertion for a scenario
     // that cannot happen in Production. This isolated database proves the
     // narrower, real property: the base migration alone is idempotent.
     //

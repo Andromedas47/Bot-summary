@@ -183,7 +183,12 @@ export async function recordProduceValidationReview(
   const row = (data ?? {}) as {
     confirmed?: boolean;
     presented_line_event_id?: string | null;
+    reason?: string;
+    recorded?: boolean;
   };
+  if (row.reason === "terminalized") {
+    throw new ProduceValidationGateError("generation is terminalized");
+  }
   return {
     confirmed: Boolean(row.confirmed),
     presentedLineEventId: row.presented_line_event_id ?? lineEventId,
@@ -230,9 +235,10 @@ export async function runProduceCloseGate(
     result.digest,
     lineEventId,
   );
-  return confirmation === "not_found"
-    ? { decision: "review_presented", result }
-    : { decision: "proceed", result };
+  if (confirmation === "terminalized" || confirmation === "not_found") {
+    return { decision: "review_presented", result };
+  }
+  return { decision: "proceed", result };
 }
 
 /**
@@ -255,7 +261,11 @@ export async function runProduceFinalizeGate(
   return { decision: "review_presented", result };
 }
 
-export type ProduceReviewConfirmation = "confirmed" | "already_confirmed" | "not_found";
+export type ProduceReviewConfirmation =
+  | "confirmed"
+  | "already_confirmed"
+  | "not_found"
+  | "terminalized";
 
 /**
  * Acknowledge the exception set identified by `digest`.
@@ -289,7 +299,12 @@ export async function confirmProduceValidationReview(
     );
   }
   const status = (data as { status?: string } | null)?.status;
-  if (status === "confirmed" || status === "already_confirmed" || status === "not_found") {
+  if (
+    status === "confirmed"
+    || status === "already_confirmed"
+    || status === "not_found"
+    || status === "terminalized"
+  ) {
     return status;
   }
   throw new ProduceValidationGateError("validation confirmation returned an unknown status");

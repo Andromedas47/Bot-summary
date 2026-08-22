@@ -97,6 +97,16 @@ describe("approved vocabulary", () => {
     // it an approved spelling — resolving it here is exactly the silent
     // acceptance this guard exists to stop.
     expect(isApprovedProductName("อะโวคาโด้")).toBe(false);
+    expect(withdraw("อะโวคาโด").status).toBe("clean");
+    expect(withdraw("อะโวคาโด้").status).toBe("review_required");
+    expect(vocabulary(withdraw("อะโวคาโด้"))[0]).toMatchObject({
+      kind: "unknown_product_vocabulary",
+      productName: "อะโวคาโด้",
+    });
+    expect(suggestDictionaryProducts("อะโวคาโด้")[0]).toEqual({
+      productCode: "ม59",
+      canonicalName: "อะโวคาโด",
+    });
   });
 
   it("suggests nothing for a product that is already approved", () => {
@@ -328,7 +338,7 @@ describe("20260818100000 dictionary cleanup — ม54 correction and ม63–ม
   it("accepts every new exact canonical name — ไซมัส plus the six new ม products", () => {
     for (const name of [
       "ไซมัส",
-      "มะม่วงจิ้ว",
+      "มะม่วงจิ๋ว",
       "ลูกพีชเล็ก",
       "ลูกพีชใหญ่",
       "ลูกไหนเขียว",
@@ -356,6 +366,26 @@ describe("20260818100000 dictionary cleanup — ม54 correction and ม63–ม
     // Vocabulary Guard does not consult PRODUCT_ALIASES, so the raw legacy
     // spelling is still unapproved — same shape as อะโวคาโด้ above.
     expect(isApprovedProductName("ไชมัส")).toBe(false);
+  });
+});
+
+describe("ม63 มะม่วงจิ๋ว / มะม่วงจิ้ว intake vocabulary", () => {
+  it("accepts the canonical spelling มะม่วงจิ๋ว as ม63", () => {
+    expect(isApprovedProductName("มะม่วงจิ๋ว")).toBe(true);
+    expect(approvedProductCode("มะม่วงจิ๋ว")).toBe("ม63");
+    expect(withdraw("มะม่วงจิ๋ว").status).toBe("clean");
+  });
+
+  it("accepts the exact mai-tho alias มะม่วงจิ้ว as the same ม63 identity", () => {
+    expect(isApprovedProductName("มะม่วงจิ้ว")).toBe(true);
+    expect(approvedProductCode("มะม่วงจิ้ว")).toBe("ม63");
+    expect(withdraw("มะม่วงจิ้ว").status).toBe("clean");
+  });
+
+  it("does not mint a second product when both spellings appear in one session", () => {
+    const result = withdraw("มะม่วงจิ๋ว", "มะม่วงจิ้ว");
+    expect(result.status).toBe("clean");
+    expect(vocabulary(result)).toHaveLength(0);
   });
 });
 

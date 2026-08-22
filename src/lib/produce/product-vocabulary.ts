@@ -66,14 +66,32 @@ const CODE_BY_CANONICAL_NAME: ReadonlyMap<string, string> = new Map(
     .reverse(), // first code wins if two rows ever share a canonical name
 );
 
+/**
+ * Intake-approved exact aliases. Unlike PRODUCT_ALIASES (reporting only),
+ * these spellings are themselves valid at withdrawal — they resolve to the
+ * same product code as the canonical name and do not raise a vocabulary
+ * review. Never fuzzy; never a second economic identity.
+ */
+const APPROVED_PRODUCT_NAME_ALIASES: ReadonlyMap<string, string> = new Map([
+  [mechanical("มะม่วงจิ้ว"), mechanical("มะม่วงจิ๋ว")],
+]);
+
+function approvedCodeFor(name: string): string | null {
+  const entered = mechanical(name);
+  const direct = CODE_BY_CANONICAL_NAME.get(entered);
+  if (direct) return direct;
+  const canonical = APPROVED_PRODUCT_NAME_ALIASES.get(entered);
+  return canonical ? (CODE_BY_CANONICAL_NAME.get(canonical) ?? null) : null;
+}
+
 /** True when the operator typed an approved spelling exactly. */
 export function isApprovedProductName(name: string): boolean {
-  return CODE_BY_CANONICAL_NAME.has(mechanical(name));
+  return approvedCodeFor(name) !== null;
 }
 
 /** The code an approved spelling belongs to, or null. */
 export function approvedProductCode(name: string): string | null {
-  return CODE_BY_CANONICAL_NAME.get(mechanical(name)) ?? null;
+  return approvedCodeFor(name);
 }
 
 /**

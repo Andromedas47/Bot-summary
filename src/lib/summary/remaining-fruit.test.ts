@@ -590,6 +590,20 @@ describe("PRODUCT_ALIASES — อะโวคาโด spellings", () => {
   });
 });
 
+describe("PRODUCT_ALIASES — ม63 มะม่วงจิ๋ว canonical spelling (20260822180100)", () => {
+  test("the mai-tho dictionary seeding is the same product as มะม่วงจิ๋ว", () => {
+    expect(normalizeProductName("มะม่วงจิ้ว")).toBe("มะม่วงจิ๋ว");
+  });
+
+  test("the canonical spelling is left unchanged", () => {
+    expect(normalizeProductName("มะม่วงจิ๋ว")).toBe("มะม่วงจิ๋ว");
+  });
+
+  test("a genuinely different near-miss spelling is not swept in", () => {
+    expect(normalizeProductName("มะม่วงจิ๋วเก่า")).not.toBe("มะม่วงจิ๋ว");
+  });
+});
+
 describe("PRODUCT_ALIASES — ม54 dictionary spelling correction (20260818100000)", () => {
   // Required by the alias map's own rule: every entry gets a regression test.
   // ม54 was seeded with the misspelling ไชมัส; the dictionary row itself was

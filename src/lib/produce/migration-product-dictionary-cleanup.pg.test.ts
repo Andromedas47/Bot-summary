@@ -41,6 +41,9 @@ const BASE_MIGRATION = join(
 const CLEANUP_MIGRATION = join(
   ROOT, "supabase", "migrations", "20260818100000_produce_product_dictionary_cleanup.sql",
 );
+const MANGO_SPELLING_MIGRATION = join(
+  ROOT, "supabase", "migrations", "20260822180100_mango_canonical_spelling.sql",
+);
 
 function assertSafe(): void {
   if (process.env.ALLOW_DISPOSABLE_POSTGRES_TESTS !== "1") {
@@ -179,7 +182,8 @@ describe.skipIf(!pgAvailable)("Produce Product Dictionary Cleanup on PostgreSQL 
     }
   });
 
-  test("matches PRODUCT_CODE_ENTRIES exactly, the whole table", async () => {
+  test("matches PRODUCT_CODE_ENTRIES exactly after the ม63 spelling correction", async () => {
+    await apply(MANGO_SPELLING_MIGRATION);
     const actual = JSON.parse(await scalar(
       "SELECT jsonb_object_agg(product_code, canonical_name)::text FROM public.produce_product_codes",
     )) as Record<string, string>;

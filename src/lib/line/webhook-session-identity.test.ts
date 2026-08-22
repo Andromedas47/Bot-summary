@@ -696,6 +696,7 @@ describe("pending produce session — sender identity isolation (Release A)", ()
     for (const call of calls) {
       expect(Object.prototype.hasOwnProperty.call(call.args, "p_expected_session_generation")).toBe(true);
     }
+    expect(calls[1].args.p_expected_ingest_revision).toBeNull();
     expect(calls[0].name).toBe("admit_pending_session_event");
     expect(calls[1].name).toBe("append_pending_session");
     expect(calls[2].name).toBe("claim_pending_close_finalize");

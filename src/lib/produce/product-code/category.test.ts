@@ -166,7 +166,7 @@ describe("2026-08-14 production products no longer fall into ไม่จัด�
 describe("20260818100000 dictionary cleanup — ม54 correction and ม63–ม68", () => {
   const NEW_NAMES = [
     "ไซมัส",
-    "มะม่วงจิ้ว",
+    "มะม่วงจิ๋ว",
     "ลูกพีชเล็ก",
     "ลูกพีชใหญ่",
     "ลูกไหนเขียว",
@@ -180,6 +180,12 @@ describe("20260818100000 dictionary cleanup — ม54 correction and ม63–ม
       expect(dictionaryCategoryFor(name)).toBe("ม");
     },
   );
+
+  test("the mai-tho alias มะม่วงจิ้ว classifies to ม after identity normalize", () => {
+    expect(dictionaryCategoryFor("มะม่วงจิ้ว")).toBe(UNCATEGORIZED_CATEGORY_ID);
+    expect(dictionaryCategoryFor(normalizeProductName("มะม่วงจิ้ว"))).toBe("ม");
+    expect(dictionaryEntryFor("มะม่วงจิ๋ว")?.code).toBe("ม63");
+  });
 
   describe("independence — the pre-existing ม42/ม43/ม44 rows were not merged into the new rows", () => {
     test("ลูกพีช / ลูกไหน / ลูกไหนแดง still classify to ม on their own dictionary entry", () => {

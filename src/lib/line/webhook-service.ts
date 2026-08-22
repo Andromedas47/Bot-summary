@@ -52,6 +52,7 @@ import {
   PendingSessionAfterCloseBoundaryError,
   PendingSessionClosedError,
   PendingSessionGenerationConflictError,
+  PendingSessionRevisionConflictError,
   type PendingSession,
 } from "@/lib/line/pending-session-service";
 import { NEW_HEADER_REQUIRED_REPLY } from "@/lib/line/pending-produce-reorder";
@@ -214,6 +215,11 @@ const ALREADY_CLOSING_REPLY = "รับทราบแล้ว กำลัง
 
 const STALE_PRODUCE_SESSION_REPLY =
   "พบรายการเดิมที่ยังปิดไม่สมบูรณ์ กรุณาให้ทีมงานเคลียร์รายการเดิมก่อนเริ่มรายการใหม่";
+
+const CLOSE_REVISION_CHANGED_REPLY = [
+  "มีรายการเข้ามาเพิ่มระหว่างตรวจสอบ",
+  'กรุณากด "จบรายการ" อีกครั้งเพื่อให้ระบบตรวจรายการล่าสุด',
+].join("\n");
 
 function buildPhysicalInventoryItemParseFailureReply(sequence: number | null): string {
   return [
@@ -1059,13 +1065,38 @@ export class WebhookService {
         && !incomingHeader
         && (pending as StructuredPendingSession).entry_origin == null
       ) {
-        closeGateRefusal = await this.runPlainTextCloseGate(
-          pending,
-          text,
-          eventId,
-          log,
-        );
-        if (closeGateRefusal) markClose = false;
+        if (pending.terminalized) {
+          if (replyToken) await this.replyMessage(replyToken, STALE_PRODUCE_SESSION_REPLY);
+          return { eventId, eventType: event.type, status: "saved", parsed: false };
+        }
+        if (pending.close_event_timestamp_ms != null) {
+          // Control event only: never append จบรายการ after the immutable
+          // boundary. Confirmation is digest + distinct event id, not Produce
+          // content. Resume (if held) happens inside this helper.
+          const reply = await this.runPlainTextPostBoundaryClose(
+            pending,
+            eventId,
+            log,
+          );
+          if (replyToken) {
+            try {
+              await this.replyMessage(replyToken, reply ?? PRODUCE_CLOSE_PENDING_REPLY);
+            } catch (replyError) {
+              log.error("post-boundary close reply failed", {
+                error: String(replyError),
+              });
+            }
+          }
+          return { eventId, eventType: event.type, status: "saved", parsed: false };
+        } else {
+          closeGateRefusal = await this.runPlainTextCloseGate(
+            pending,
+            text,
+            eventId,
+            log,
+          );
+          if (closeGateRefusal) markClose = false;
+        }
       }
 
       let updated;
@@ -1192,6 +1223,7 @@ export class WebhookService {
           updated = await pendingService.append(
             sessionKey, text, replyToken, eventId, event.timestamp, markClose,
             pending.session_generation, expectedItemCount ?? undefined,
+            pending.ingest_revision,
           );
           const appendParse = parseWeighSession(updated.accumulated_text, bangkokToday());
           log.info("pending session append succeeded", {
@@ -1222,6 +1254,24 @@ export class WebhookService {
                 await this.replyMessage(replyToken, STALE_PRODUCE_SESSION_REPLY);
               } catch (replyError) {
                 log.error("generation conflict reply failed", { error: String(replyError) });
+              }
+            }
+            return { eventId, eventType: event.type, status: "saved", parsed: false };
+          }
+          if (appendError instanceof PendingSessionRevisionConflictError) {
+            log.warn("pending session close rejected — stale validation snapshot", {
+              sessionKey,
+              sessionGeneration: pending.session_generation,
+              expectedRevision: appendError.expectedRevision,
+              currentRevision: appendError.currentRevision,
+            });
+            if (replyToken) {
+              try {
+                await this.replyMessage(replyToken, CLOSE_REVISION_CHANGED_REPLY);
+              } catch (replyError) {
+                log.error("stale close-revision reply failed", {
+                  error: String(replyError),
+                });
               }
             }
             return { eventId, eventType: event.type, status: "saved", parsed: false };
@@ -1364,7 +1414,10 @@ export class WebhookService {
       });
       if (replyToken) {
         try {
-          await this.replyMessage(replyToken, PRODUCE_CLOSE_PENDING_REPLY);
+          await this.replyMessage(
+            replyToken,
+            PRODUCE_CLOSE_PENDING_REPLY,
+          );
         } catch (replyError) {
           log.error("additional close acknowledgement failed", {
             error: String(replyError),
@@ -1940,6 +1993,84 @@ export class WebhookService {
       // Fail closed. Validating a return against a master we failed to load
       // would pass everything, which is worse than making the operator retry.
       log.error("plain-text produce entry gate failed", {
+        sessionKey: pending.session_key,
+        error:      error instanceof Error ? error.message : String(error),
+      });
+      return PRODUCE_ENTRY_GATE_UNAVAILABLE_REPLY;
+    }
+  }
+
+  /**
+   * Distinct จบรายการ after the immutable close boundary. Control event only:
+   * it must not append close-command text as Produce content. A late pre-close
+   * item may have changed the authoritative document, so this re-runs the
+   * entry gate and lets a second distinct event confirm the current digest.
+   */
+  private async runPlainTextPostBoundaryClose(
+    pending: PendingSession,
+    eventId: string,
+    log:     ChildLogger,
+  ): Promise<string | null> {
+    const parsed = parseWeighSession(pending.accumulated_text, bangkokToday());
+    if (getWeighSessionFinalizationErrors(parsed).length > 0) return null;
+
+    try {
+      const binding = await bindPlainTextRound(
+        this.supabase,
+        {
+          sessionKey:        pending.session_key,
+          sessionGeneration: pending.session_generation,
+          sourceId:          pending.source_id,
+          lineUserId:        pending.line_user_id,
+        },
+        parsed,
+      );
+      if (binding.status === "refused") {
+        log.warn("post-boundary plain-text round binding refused", {
+          sessionKey: pending.session_key,
+          reason:     binding.reason,
+        });
+        return binding.detail;
+      }
+
+      const decision = await runProduceCloseGate(
+        this.supabase,
+        {
+          sessionKey:            pending.session_key,
+          sessionGeneration:     pending.session_generation,
+          accountabilityRoundId:
+            binding.status === "bound" ? binding.accountabilityRoundId : null,
+          businessDate:  parsed.date,
+          marketLabel:   parsed.session_title,
+          staffLabel:    parsed.staff_name,
+          lineUserId:    pending.line_user_id,
+        },
+        parsed,
+        eventId,
+      );
+      if (decision.decision === "blocked") {
+        return buildBlockingValidationReply(decision.result);
+      }
+      if (decision.decision === "review_presented") {
+        return buildPlainTextReviewValidationReply(decision.result);
+      }
+
+      if (pending.next_attempt_at == null) {
+        const pendingService = new PendingSessionService(this.supabase);
+        const resumed = await pendingService.resumeCloseFinalization(
+          pending.session_key,
+          pending.session_generation,
+        );
+        log.info("post-boundary validation confirmation resumed finalization", {
+          sessionKey: pending.session_key,
+          sessionGeneration: pending.session_generation,
+          accepted: resumed.accepted,
+          reason: resumed.reason ?? null,
+        });
+      }
+      return null;
+    } catch (error) {
+      log.error("post-boundary produce entry gate failed", {
         sessionKey: pending.session_key,
         error:      error instanceof Error ? error.message : String(error),
       });

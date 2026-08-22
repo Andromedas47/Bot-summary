@@ -48,6 +48,7 @@ class FakeDb {
   readonly masterQueries: Array<string | null> = [];
   masterError: string | null = null;
   masterRowOverride: RoundMasterRow[] | null = null;
+  terminalized = false;
 
   constructor(private readonly rowsByRound: Record<string, RoundMasterRow[]> = {}) {}
 
@@ -103,6 +104,17 @@ class FakeDb {
 
   private rpc(name: string, params: Record<string, unknown>) {
     if (name === "record_produce_validation_review") {
+      if (this.terminalized) {
+        return Promise.resolve({
+          data: {
+            recorded: false,
+            reason: "terminalized",
+            confirmed: false,
+            presented_line_event_id: params.p_line_event_id,
+          },
+          error: null,
+        });
+      }
       const existing = this.find(params);
       if (existing) {
         return Promise.resolve({
@@ -133,6 +145,9 @@ class FakeDb {
     }
 
     if (name === "confirm_produce_validation_review") {
+      if (this.terminalized) {
+        return Promise.resolve({ data: { status: "terminalized" }, error: null });
+      }
       const row = this.find(params);
       if (!row) return Promise.resolve({ data: { status: "not_found" }, error: null });
       if (row.confirmed_at) {
@@ -343,6 +358,15 @@ describe("fail closed", () => {
     await expect(
       runProduceCloseGate(db.client(), { ...REF, lineUserId: null }, suspiciousWithdrawal(), "E1"),
     ).rejects.toBeInstanceOf(ProduceValidationGateError);
+  });
+
+  it("refuses to record a review against a terminalized generation", async () => {
+    const db = new FakeDb({ [ROUND]: [] });
+    db.terminalized = true;
+    await expect(
+      runProduceCloseGate(db.client(), REF, suspiciousWithdrawal(), "E-late"),
+    ).rejects.toBeInstanceOf(ProduceValidationGateError);
+    expect(db.reviews).toHaveLength(0);
   });
 });
 

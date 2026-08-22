@@ -274,6 +274,82 @@ describe("purchase planning — house-stock modifier", () => {
     expect(report.stockAbsence).toBe("unavailable");
     expect(only(report).status).toBe("surplus");
   });
+
+  test("a complete snapshot with the product wholly absent is house stock zero", () => {
+    const item = only(build(cell(34, 10, 0, { product_name: "สับปะรด", unit: "ถุง" }), {
+      houseStock: stock({ productName: "ลูกพลับ", unit: "ลูก", quantity: 230 }),
+    }));
+    expect(item.houseStockQuantity).toBe(0);
+    expect(item.nextDayGoodStockQuantity).toBe(10);
+    expect(item.stockAbsence).toBeNull();
+  });
+
+  test("pineapple: complete-snapshot absence at 70.6% is 🟢", () => {
+    const item = only(build(cell(34, 10, 0, { product_name: "สับปะรด", unit: "ถุง" }), {
+      houseStock: stock(
+        { productName: "ลูกพลับ", unit: "ลูก", quantity: 230 },
+        { productName: "สาลี่", unit: "ลูก", quantity: 216 },
+        { productName: "ลูกไหนดำ", unit: "โล", quantity: 25 },
+        { productName: "มังคุด", unit: "โล", quantity: 45 },
+      ),
+    }));
+    expect(item.estimatedSoldQuantity).toBe(24);
+    expect(item.sellThroughRate).toBeCloseTo(70.588, 3);
+    expect(item.band).toBe("high");
+    expect(item.houseStockQuantity).toBe(0);
+    expect(item.nextDayGoodStockQuantity).toBe(10);
+    expect(item.nextStockToSoldRatio).toBeCloseTo(10 / 24, 6);
+    expect(item.status).toBe("strong");
+  });
+
+  test("the same product in an incompatible house unit is never zero", () => {
+    const item = only(build(cell(100, 20, 0, { product_name: "สินค้า X", unit: "โล" }), {
+      houseStock: stock({ productName: "สินค้า X", unit: "ลูก", quantity: 40 }),
+    }));
+    expect(item.houseStockQuantity).toBeNull();
+    expect(item.nextDayGoodStockQuantity).toBeNull();
+    expect(item.stockAbsence).toBe("no_match");
+    expect(item.status).toBe("surplus");
+  });
+
+  test("a valid empty complete snapshot is zero for every market product", () => {
+    const item = only(build(cell(34, 10, 0, { product_name: "สับปะรด", unit: "ถุง" }), {
+      houseStock: { status: "empty" },
+    }));
+    expect(item.houseStockQuantity).toBe(0);
+    expect(item.nextDayGoodStockQuantity).toBe(10);
+    expect(item.status).toBe("strong");
+  });
+
+  test("MEDIUM stays 🟠 when the complete snapshot simply has none of it", () => {
+    const rows = [
+      row({ transaction_type: WITHDRAW, quantity: 89 }),
+      row({ transaction_type: WITHDRAW, quantity: 145 }),
+      row({ transaction_type: RETURN, quantity: 134 }),
+      row({ transaction_type: DAMAGED, quantity: 5 }),
+    ];
+    const item = only(build(rows, {
+      houseStock: stock({ productName: "ลูกพลับ", unit: "ลูก", quantity: 230 }),
+    }));
+    expect(item.sellThroughRate).toBeCloseTo(40.598, 3);
+    expect(item.houseStockQuantity).toBe(0);
+    expect(item.nextDayGoodStockQuantity).toBe(134);
+    expect(item.status).toBe("surplus");
+  });
+
+  test("house-zero on a complete snapshot cannot rescue incomplete market evidence", () => {
+    const item = only(build(
+      cell(34, 10, 0, { product_name: "สับปะรด", unit: "ถุง", session_id: "broken" }),
+      {
+        houseStock: stock({ productName: "ลูกพลับ", unit: "ลูก", quantity: 230 }),
+        unreliableSessionIds: new Set(["broken"]),
+      },
+    ));
+    expect(item.status).toBe("unknown");
+    expect(item.uncertaintyReasons).toContain("session_integrity");
+    expect(item.houseStockQuantity).toBe(0);
+    expect(item.estimatedSoldQuantity).toBeNull();
+  });
 });
 
 describe("purchase planning — price never touches the quantity signal", () => {

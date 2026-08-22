@@ -189,10 +189,30 @@ export function buildNoHouseStockMessage(businessDate: string): string[] {
   ].join("\n\n")];
 }
 
-export async function fetchAuthoritativeHouseStockReport(
+/** The one authoritative snapshot for a business date, with its item rows. */
+export interface AuthoritativeHouseStockItems {
+  /** The snapshot's own business date, not the requested one. */
+  businessDate: string;
+  items: ItemRow[];
+}
+
+/**
+ * The authoritative House Stock snapshot for a date, as structured rows.
+ *
+ * Extracted from fetchAuthoritativeHouseStockReport so the formatted 🏠 report
+ * and any other consumer read through ONE definition of "authoritative": a
+ * single finalized MAIN snapshot of the priced parser version that nothing has
+ * replaced. Anything that needs quantities must call this rather than parse the
+ * formatted Thai report back into data, or the two would drift.
+ *
+ * Returns null when the day has no such snapshot; throws
+ * HouseStockSnapshotConflictError when more than one is active, because
+ * choosing one silently would invent a stock level.
+ */
+export async function fetchAuthoritativeHouseStockItems(
   supabase: Supabase,
   businessDate: string,
-): Promise<HouseStockReport | null> {
+): Promise<AuthoritativeHouseStockItems | null> {
   const { data: snapshots, error: snapshotError } = await supabase
     .from("physical_inventory_snapshots")
     .select("*")
@@ -212,5 +232,14 @@ export async function fetchAuthoritativeHouseStockReport(
     .eq("snapshot_id", snapshot.id)
     .order("item_ordinal", { ascending: true });
   if (itemError) throw new Error(`House Stock item lookup failed: ${itemError.message}`);
-  return reportFromItems(snapshot.business_date, items ?? []);
+  return { businessDate: snapshot.business_date, items: items ?? [] };
+}
+
+export async function fetchAuthoritativeHouseStockReport(
+  supabase: Supabase,
+  businessDate: string,
+): Promise<HouseStockReport | null> {
+  const snapshot = await fetchAuthoritativeHouseStockItems(supabase, businessDate);
+  if (!snapshot) return null;
+  return reportFromItems(snapshot.businessDate, snapshot.items);
 }

@@ -86,6 +86,9 @@ import { fetchRemainingFruitRows } from "@/lib/summary/remaining-fruit-data";
 import { buildRemainingFruitMessagesFromRows } from "@/lib/summary/remaining-fruit-message";
 import { parseSalesSummaryCommandFromMessage } from "@/lib/sales/command";
 import { parsePreflightCommandFromMessage } from "@/lib/produce/preflight-command";
+import { parsePurchasePlanningCommandFromMessage } from "@/lib/summary/purchase-planning-command";
+import { loadPurchasePlanningReport } from "@/lib/summary/purchase-planning-service";
+import { buildPurchasePlanningMessages } from "@/lib/summary/purchase-planning-message";
 import { runDailyClosePreflight } from "@/lib/produce/preflight-service";
 import { buildPreflightMessages } from "@/lib/produce/preflight-message";
 import { loadSalesReport } from "@/lib/sales/load";
@@ -867,6 +870,14 @@ export class WebhookService {
     const preflightCmd = parsePreflightCommandFromMessage(text);
     if (preflightCmd) {
       return this.processPreflightCommand(msgEvent, preflightCmd, eventId, event.type, log);
+    }
+
+    // Purchase planning — read-only, same bypass as the three reports above.
+    const purchasePlanningCmd = parsePurchasePlanningCommandFromMessage(text);
+    if (purchasePlanningCmd) {
+      return this.processPurchasePlanningCommand(
+        msgEvent, purchasePlanningCmd, eventId, event.type, log,
+      );
     }
 
     // ── 3.5. Slip session commands (checked before produce session logic) ─────
@@ -2361,6 +2372,37 @@ export class WebhookService {
       log.error("daily close preflight command failed", { error: errorMessage });
       if (replyToken) {
         await this.replyMessage(replyToken, "ไม่สามารถตรวจความพร้อมได้ กรุณาลองใหม่");
+      }
+      return { eventId, eventType, status: "error", parsed: false, error: errorMessage };
+    }
+  }
+
+  // ── Purchase planning summary command ─────────────────────────────────────
+  private async processPurchasePlanningCommand(
+    event:     LineMessageEvent,
+    command:   ReturnType<typeof parsePurchasePlanningCommandFromMessage> & object,
+    eventId:   string,
+    eventType: string,
+    log:       ChildLogger,
+  ): Promise<WebhookProcessResult> {
+    const replyToken = event.replyToken;
+    // Same default as Sales and the Preflight: the day that just closed. A
+    // day still in progress has returns that have not been weighed back yet,
+    // which would read as a false sell-out.
+    const businessDate = command.businessDate ?? previousBangkokBusinessDate();
+
+    log.info("purchase planning command", { businessDate });
+
+    try {
+      const report = await loadPurchasePlanningReport(this.supabase, businessDate);
+      const messages = buildPurchasePlanningMessages(report);
+      if (replyToken) await this.replyMessages(replyToken, messages);
+      return { eventId, eventType, status: "saved", parsed: false };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error("purchase planning command failed", { error: errorMessage });
+      if (replyToken) {
+        await this.replyMessage(replyToken, "ไม่สามารถสร้างสรุปสำหรับวางแผนซื้อของได้ กรุณาลองใหม่");
       }
       return { eventId, eventType, status: "error", parsed: false, error: errorMessage };
     }

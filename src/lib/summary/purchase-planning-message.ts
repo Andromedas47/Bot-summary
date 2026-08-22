@@ -1,14 +1,9 @@
 /**
- * 📦 สรุปสำหรับวางแผนซื้อของ — LINE rendering.
+ * 📦 แผนซื้อของประจำวัน — compact LINE rendering.
  *
- * Pure. Takes a PurchasePlanningReport and returns LINE-safe messages through
- * the shared chunker, so this report obeys the same limits as every other one.
- *
- * ponytail: each product block carries its own status emoji rather than relying
- * on the section heading above it. chunkBlocks packs whole blocks and may start
- * a new message mid-section, which would otherwise leave products under no
- * visible heading. Repeating the emoji per product is cheaper and safer than a
- * bespoke section-aware packer.
+ * Pure. Classification and quantities come from PurchasePlanningReport; this
+ * module only decides what the operator sees. Audit fields stay on the report
+ * so a later detail command can use them without changing the decision model.
  */
 
 import { formatThaiDate } from "@/lib/date";
@@ -16,6 +11,7 @@ import { formatQuantity } from "@/lib/summary/remaining-fruit";
 import {
   capAtMaxMessages,
   chunkBlocks,
+  countCodePoints,
   LINE_MESSAGE_MAX_CODE_POINTS,
   LINE_REPLY_MAX_MESSAGES,
 } from "@/lib/summary/line-chunking";
@@ -25,16 +21,10 @@ import {
   type PurchasePlanningItem,
   type PurchasePlanningReport,
   type PurchaseStatus,
-  type PurchaseUncertaintyReason,
   type SellThroughBand,
-  type StockSignalAbsence,
 } from "@/lib/summary/purchase-planning";
 
-export const PURCHASE_PLANNING_TITLE = "📦 สรุปสำหรับวางแผนซื้อของ";
-export const PURCHASE_PLANNING_METHOD_NOTE = [
-  "วิเคราะห์จากยอดเบิก ของดีคืน ของเสีย และของที่เหลือในบ้านหลังเบิก",
-  "ราคาไม่ใช้ในการจัดอันดับการขาย",
-].join("\n");
+export const PURCHASE_PLANNING_TITLE = "📦 แผนซื้อของประจำวัน";
 
 /** This report has no web page of its own, so the notice names no destination. */
 export const PURCHASE_PLANNING_OVERFLOW_NOTICE =
@@ -43,49 +33,22 @@ export const PURCHASE_PLANNING_OVERFLOW_NOTICE =
 export const PURCHASE_PLANNING_EMPTY_NOTICE =
   "ยังไม่มีข้อมูลเบิก/ชั่งคืนที่บันทึกสำเร็จสำหรับวันนี้";
 
+export const EMPTY_GREEN_NOTICE = "ยังไม่มีรายการที่ยืนยันได้";
+
+export const WAITING_HOUSE_STOCK = "รอสต๊อกในบ้าน";
+
 export const STATUS_HEADINGS: Record<PurchaseStatus, string> = {
   reduce: "🔴 ควรลดการซื้อ",
-  surplus: "🟠 ของเหลือค่อนข้างมาก",
-  strong: "🟢 ขายดี",
-  unknown: "⚠️ ข้อมูลไม่พอประเมิน",
+  surplus: "🟠 ยังไม่ควรซื้อเพิ่ม",
+  strong: "🟢 ควรซื้อเพิ่ม",
+  unknown: "⚠️ ยังประเมินไม่ได้",
 };
 
-const STATUS_EMOJI: Record<PurchaseStatus, string> = {
-  reduce: "🔴",
-  surplus: "🟠",
-  strong: "🟢",
-  unknown: "⚠️",
-};
+/** Buy-first reading order. Green is always shown, even when empty. */
+const STATUS_SEQUENCE: readonly PurchaseStatus[] = ["strong", "surplus", "reduce", "unknown"];
 
-/** Report order. Mirrors the operator's reading order, worst news first. */
-const STATUS_SEQUENCE: readonly PurchaseStatus[] = ["reduce", "surplus", "strong", "unknown"];
-
-export const PRICE_CONFLICT_NOTE = "⚠️ ราคาขัดแย้ง แต่จำนวนใช้ประเมินได้";
-
-const UNCERTAINTY_TEXT: Record<PurchaseUncertaintyReason, string> = {
-  product_return_absent: "ยังไม่พบรายการชั่งคืนของสินค้านี้ในรอบที่เบิก",
-  return_not_round_tagged: "มีรายการชั่งคืนของสินค้านี้ แต่ไม่ผูกกับรอบที่เบิก จึงยืนยันความครบไม่ได้",
-  session_integrity: "ชุดรายการที่บันทึกสินค้านี้อ่านได้ไม่ครบ",
-  return_missing: "รอบที่เบิกยังไม่มีรายการชั่งคืนที่บันทึกสำเร็จ",
-  return_incomplete: "มีรายการชั่งคืนที่ยังบันทึกไม่สำเร็จ",
-  unattributed_round: "รายการเบิกไม่มีรอบความรับผิดชอบ จึงตรวจความครบของการคืนไม่ได้",
-  returns_exceed_withdrawal: "ยอดคืนรวมมากกว่ายอดเบิก",
-  no_withdrawal: "ไม่มียอดเบิกให้ใช้เทียบ",
-  invalid_quantity: "มีจำนวนที่บันทึกไม่ถูกต้อง",
-  unknown_transaction_type: "พบประเภทรายการที่ไม่รู้จัก",
-};
-
-const STOCK_ABSENCE_TEXT: Record<StockSignalAbsence, string> = {
-  no_snapshot: "เหลือในบ้านหลังเบิก: ยังไม่มีข้อมูลของวันนี้",
-  snapshot_conflict: "เหลือในบ้านหลังเบิก: มีข้อมูลซ้ำซ้อน จึงใช้เทียบไม่ได้",
-  unavailable: "เหลือในบ้านหลังเบิก: อ่านข้อมูลไม่ได้",
-  snapshot_empty: "เหลือในบ้านหลังเบิก: มีการบันทึกของวันนี้ แต่ไม่มีรายการที่ใช้เทียบได้",
-  no_match: "เหลือในบ้านหลังเบิก: ไม่พบรายการที่เทียบหน่วยเดียวกันได้",
-};
-
-/** Said whenever the house side is missing, so Z is never read as complete. */
-export const INCOMPLETE_STOCK_NOTE =
-  "→ ยังยืนยันของคงเหลือทั้งหมดไม่ได้ เพราะไม่มีข้อมูลสต๊อกในบ้านที่ใช้เทียบได้";
+export const PRICE_CONFLICT_FOOTER =
+  "⚠️ บางรายการมีราคาขัดแย้ง แต่จำนวนยังใช้ประเมินได้";
 
 /**
  * The house-stock report's own display convention (โล is stored, กก. is read).
@@ -114,131 +77,119 @@ export function formatSellThroughRate(
   return Number.isInteger(value) ? `${value}%` : `${value.toFixed(1)}%`;
 }
 
-function quantityLine(label: string, quantity: number, unit: string): string {
-  return `${label} ${formatQuantity(quantity)} ${displayPurchaseUnit(unit)}`;
+function byIdentity(a: PurchasePlanningItem, b: PurchasePlanningItem): number {
+  return (
+    a.productName.localeCompare(b.productName, "th")
+    || a.unit.localeCompare(b.unit, "th")
+  );
 }
 
-function recommendationLines(item: PurchasePlanningItem): string[] {
-  if (item.status === "reduce") {
-    // "ของเหลือสูง" would be a lie about a product that came back damaged
-    // rather than unsold, so the reason names what actually happened.
-    if (item.damagedQuantity > item.goodReturnQuantity) {
-      return ["→ ขายออกน้อยและมีของเสียสูง ควรลดการซื้อ"];
-    }
-    if (item.goodReturnQuantity > 0 || (item.nextDayGoodStockQuantity ?? 0) > 0) {
-      return ["→ ขายออกน้อยและยังมีของดีเหลือมาก ควรลดการซื้อ"];
-    }
-    return ["→ ขายออกน้อย ควรลดการซื้อ"];
-  }
-  if (item.status === "strong") return ["→ ขายออกดีและของดีพร้อมขายต่อเหลือน้อย"];
-  if (item.status === "surplus") {
-    if (item.band === "medium") {
-      // Same damage-vs-good test as 🔴: leftover that came back ruined is
-      // not sellable stock waiting to go out tomorrow.
-      if (item.damagedQuantity > item.goodReturnQuantity) {
-        return ["→ ขายออกปานกลางแต่มีของเสียสูง ควรเช็กก่อนซื้อเพิ่ม"];
-      }
-      return ["→ มีของพร้อมขายต่ออยู่มาก ควรเช็กก่อนซื้อเพิ่ม"];
-    }
-    // HIGH sell-through held back: either a lot is ready to sell tomorrow, or
-    // the house side is unknown. Neither may be presented as 🟢.
-    if (item.nextStockToSoldRatio !== null) {
-      return ["→ ขายดีแต่ยังมีของพร้อมขายต่ออยู่มาก ควรเช็กก่อนซื้อเพิ่ม"];
-    }
-    return ["→ ขายดี แต่ยังไม่มีข้อมูลสต๊อกในบ้านที่ใช้เทียบได้", INCOMPLETE_STOCK_NOTE];
-  }
-  return item.uncertaintyReasons.map((reason) => `→ ${UNCERTAINTY_TEXT[reason]}`);
+function isHighWaitingForHouseStock(item: PurchasePlanningItem): boolean {
+  return item.status === "surplus"
+    && item.band === "high"
+    && item.nextStockToSoldRatio === null;
 }
 
-/**
- * The stock story, in the order it physically happened: what stayed home after
- * the markets were supplied, then what came back good, then the sum of the two.
- * Damaged return is never part of that sum, so it never appears here.
- */
-function stockLines(item: PurchasePlanningItem): string[] {
-  if (item.houseStockQuantity === null) {
-    return [STOCK_ABSENCE_TEXT[item.stockAbsence ?? "no_match"]];
+/** Presentation order only. Does not change classification. */
+function sortForDisplay(
+  items: PurchasePlanningItem[],
+  status: PurchaseStatus,
+): PurchasePlanningItem[] {
+  const copy = [...items];
+  if (status === "strong") {
+    return copy.sort((a, b) => {
+      const rate = (b.sellThroughRate ?? 0) - (a.sellThroughRate ?? 0);
+      return rate !== 0 ? rate : byIdentity(a, b);
+    });
   }
-  return [
-    quantityLine("เหลือในบ้านหลังเบิก", item.houseStockQuantity, item.unit),
-    quantityLine(
-      "ของดีพร้อมขายต่อประมาณ",
-      item.nextDayGoodStockQuantity ?? item.houseStockQuantity,
-      item.unit,
-    ),
-  ];
+  if (status === "surplus") {
+    return copy.sort((a, b) => {
+      const aWait = isHighWaitingForHouseStock(a);
+      const bWait = isHighWaitingForHouseStock(b);
+      if (aWait !== bWait) return aWait ? -1 : 1;
+      const rate = (b.sellThroughRate ?? 0) - (a.sellThroughRate ?? 0);
+      return rate !== 0 ? rate : byIdentity(a, b);
+    });
+  }
+  if (status === "reduce") {
+    return copy.sort((a, b) => {
+      const rate = (a.sellThroughRate ?? 0) - (b.sellThroughRate ?? 0);
+      return rate !== 0 ? rate : byIdentity(a, b);
+    });
+  }
+  return copy.sort(byIdentity);
+}
+
+function productLabel(
+  item: PurchasePlanningItem,
+  duplicateNames: ReadonlySet<string>,
+): string {
+  if (!duplicateNames.has(item.productName)) return item.productName;
+  return `${item.productName} (${displayPurchaseUnit(item.unit)})`;
 }
 
 export function buildPurchasePlanningItemBlock(
   item: PurchasePlanningItem,
-  position: number,
+  duplicateNames: ReadonlySet<string> = new Set(),
 ): string {
-  const lines: string[] = [
-    `${STATUS_EMOJI[item.status]} ${position}. ${item.productName}`,
-  ];
+  const name = productLabel(item, duplicateNames);
+  if (item.sellThroughRate === null) return name;
 
-  if (item.withdrawnQuantity > 0) {
-    lines.push(quantityLine("เบิก", item.withdrawnQuantity, item.unit));
+  const parts = [`${name} — ขายออก ${formatSellThroughRate(item.sellThroughRate, item.band)}`];
+  if (isHighWaitingForHouseStock(item)) {
+    parts.push(WAITING_HOUSE_STOCK);
+  } else if (item.nextDayGoodStockQuantity !== null) {
+    parts.push(
+      `เหลือขายต่อ ~${formatQuantity(item.nextDayGoodStockQuantity)} ${displayPurchaseUnit(item.unit)}`,
+    );
   }
-  if (item.estimatedSoldQuantity !== null) {
-    lines.push(quantityLine("ขายประมาณ", item.estimatedSoldQuantity, item.unit));
-  }
-  lines.push(quantityLine("คืนดีจากตลาด", item.goodReturnQuantity, item.unit));
-  if (item.damagedQuantity > 0) {
-    lines.push(quantityLine("คืนเสีย", item.damagedQuantity, item.unit));
-  }
-  if (item.sellThroughRate !== null) {
-    lines.push(`ขายออก ${formatSellThroughRate(item.sellThroughRate, item.band)}`);
-  } else {
-    lines.push("⚠️ ข้อมูลไม่พอประเมิน");
-  }
-  if (item.status !== "unknown") lines.push(...stockLines(item));
-  if (item.priceConflict) lines.push(PRICE_CONFLICT_NOTE);
-  lines.push(...recommendationLines(item));
+  return parts.join(" • ");
+}
 
-  return lines.join("\n");
+function packedNameBlocks(names: readonly string[]): string[] {
+  const blocks: string[] = [];
+  let current: string[] = [];
+  for (const name of names) {
+    const candidate = current.length === 0 ? name : `${current.join(", ")}, ${name}`;
+    if (countCodePoints(candidate) <= LINE_MESSAGE_MAX_CODE_POINTS) {
+      current.push(name);
+      continue;
+    }
+    if (current.length > 0) blocks.push(current.join(", "));
+    current = [name];
+  }
+  if (current.length > 0) blocks.push(current.join(", "));
+  return blocks;
 }
 
 function globalWarningBlocks(report: PurchasePlanningReport): string[] {
   const blocks: string[] = [];
+  const unknownCount = report.items.filter((item) => item.status === "unknown").length;
 
   if (report.unresolvedSessionCount > 0) {
-    blocks.push([
-      "⚠️ ข้อมูลวันนี้ยังไม่ครบ",
-      `มีชุดรายการที่ยังบันทึกไม่สำเร็จ ${report.unresolvedSessionCount} ชุด`,
-      "อันดับนี้อ้างอิงเฉพาะข้อมูลที่บันทึกสำเร็จ",
-    ].join("\n"));
+    const lines = [`⚠️ ข้อมูลไม่สมบูรณ์ ${report.unresolvedSessionCount} ชุด`];
+    if (unknownCount > 0) {
+      lines.push("รายการ ⚠️ ด้านบนจึงยังไม่ถูกใช้ตัดสินใจซื้อ");
+    }
+    blocks.push(lines.join("\n"));
   }
 
   if (report.stockAbsence === "no_snapshot") {
-    blocks.push([
-      "⚠️ ยังไม่มีข้อมูลสต๊อกในบ้านของวันนี้",
-      "สินค้าที่ขายออกดีจึงยังไม่ยืนยันว่าควรซื้อเพิ่ม",
-    ].join("\n"));
+    blocks.push("⚠️ ยังไม่มีข้อมูลสต๊อกในบ้านของวันนี้");
   } else if (report.stockAbsence === "snapshot_conflict") {
-    blocks.push([
-      "⚠️ พบข้อมูลสต๊อกในบ้านมากกว่าหนึ่งชุดสำหรับวันนี้",
-      "จึงไม่ใช้ข้อมูลสต๊อกในการประเมิน",
-    ].join("\n"));
+    blocks.push("⚠️ พบข้อมูลสต๊อกในบ้านมากกว่าหนึ่งชุด จึงไม่ใช้เทียบ");
   } else if (report.stockAbsence === "unavailable") {
-    blocks.push([
-      "⚠️ อ่านข้อมูลสต๊อกในบ้านไม่ได้",
-      "จึงไม่ใช้ข้อมูลสต๊อกในการประเมิน",
-    ].join("\n"));
+    blocks.push("⚠️ อ่านข้อมูลสต๊อกในบ้านไม่ได้ จึงไม่ใช้เทียบ");
   } else if (report.stockAbsence === "snapshot_empty") {
-    blocks.push([
-      "⚠️ มีการบันทึกสต๊อกในบ้านของวันนี้ แต่ไม่มีรายการที่ใช้เทียบได้",
-      "จึงไม่ใช้ข้อมูลสต๊อกในการประเมิน",
-    ].join("\n"));
+    blocks.push("⚠️ มีการบันทึกสต๊อกในบ้าน แต่ไม่มีรายการที่ใช้เทียบได้");
   }
 
-  // Rows that carried no usable product or unit are named rather than left as
-  // a quiet difference between what was recorded and what the ranking covers.
   if (report.unidentifiedRowCount > 0) {
-    blocks.push([
-      `⚠️ มีรายการที่ระบุสินค้าหรือหน่วยไม่ได้ ${report.unidentifiedRowCount} รายการ`,
-      "รายการเหล่านี้ไม่ได้อยู่ในอันดับด้านบน",
-    ].join("\n"));
+    blocks.push(`⚠️ มีรายการที่ระบุสินค้าหรือหน่วยไม่ได้ ${report.unidentifiedRowCount} รายการ`);
+  }
+
+  if (report.items.some((item) => item.priceConflict)) {
+    blocks.push(PRICE_CONFLICT_FOOTER);
   }
 
   return blocks;
@@ -248,28 +199,52 @@ export function buildPurchasePlanningBlocks(report: PurchasePlanningReport): str
   const header = [
     PURCHASE_PLANNING_TITLE,
     `ข้อมูลวันที่ ${formatThaiDate(report.businessDate)}`,
-    "",
-    PURCHASE_PLANNING_METHOD_NOTE,
   ].join("\n");
 
   const blocks: string[] = [header];
+  const duplicateNames = new Set(
+    report.items
+      .filter((item, index, all) =>
+        all.some((other, otherIndex) =>
+          otherIndex !== index && other.productName === item.productName,
+        ),
+      )
+      .map((item) => item.productName),
+  );
 
   if (report.items.length === 0) {
+    blocks.push(STATUS_HEADINGS.strong);
+    blocks.push(EMPTY_GREEN_NOTICE);
     blocks.push(PURCHASE_PLANNING_EMPTY_NOTICE);
     blocks.push(...globalWarningBlocks(report));
     return blocks;
   }
 
-  // Numbering is continuous across sections, so a product can be referred to by
-  // its number no matter which message it landed in.
-  let position = 0;
   for (const status of STATUS_SEQUENCE) {
-    const items = report.items.filter((item) => item.status === status);
+    const items = sortForDisplay(
+      report.items.filter((item) => item.status === status),
+      status,
+    );
+    if (status === "strong") {
+      blocks.push(STATUS_HEADINGS.strong);
+      if (items.length === 0) {
+        blocks.push(EMPTY_GREEN_NOTICE);
+        continue;
+      }
+      for (const item of items) {
+        blocks.push(buildPurchasePlanningItemBlock(item, duplicateNames));
+      }
+      continue;
+    }
     if (items.length === 0) continue;
+    if (status === "unknown") {
+      blocks.push(`${STATUS_HEADINGS.unknown} ${items.length} รายการ`);
+      blocks.push(...packedNameBlocks(items.map((item) => productLabel(item, duplicateNames))));
+      continue;
+    }
     blocks.push(STATUS_HEADINGS[status]);
     for (const item of items) {
-      position += 1;
-      blocks.push(buildPurchasePlanningItemBlock(item, position));
+      blocks.push(buildPurchasePlanningItemBlock(item, duplicateNames));
     }
   }
 

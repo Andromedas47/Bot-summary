@@ -4,9 +4,10 @@ import {
   LINE_MESSAGE_MAX_CODE_POINTS,
   LINE_REPLY_MAX_MESSAGES,
 } from "@/lib/summary/line-chunking";
-import type {
-  PurchasePlanningItem,
-  PurchasePlanningReport,
+import {
+  buildPurchasePlanningReport,
+  type PurchasePlanningItem,
+  type PurchasePlanningReport,
 } from "./purchase-planning";
 import {
   buildPurchasePlanningBlocks,
@@ -109,6 +110,44 @@ describe("purchase planning message — compact operator UX", () => {
     expect(text).toContain("สับปะรด — ขายออก 82% • เหลือขายต่อ ~4 ถุง");
     expect(text).not.toContain(EMPTY_GREEN_NOTICE);
     for (const leak of AUDIT_LEAKS) expect(text).not.toContain(leak);
+  });
+
+  test("pineapple absent from a complete snapshot prints as 🟢 leftover return", () => {
+    const text = joined(buildPurchasePlanningReport({
+      businessDate: DATE,
+      rows: [
+        {
+          market_name: "ตลาด72",
+          product_name: "สับปะรด",
+          quantity: 34,
+          unit: "ถุง",
+          transaction_type: "เบิก",
+          accountability_round_id: "11111111-1111-4111-8111-111111111111",
+        },
+        {
+          market_name: "ตลาด72",
+          product_name: "สับปะรด",
+          quantity: 10,
+          unit: "ถุง",
+          transaction_type: "คืน",
+          accountability_round_id: "11111111-1111-4111-8111-111111111111",
+        },
+      ],
+      roundReturnStates: new Map([["11111111-1111-4111-8111-111111111111", "persisted"]]),
+      houseStock: {
+        status: "available",
+        entries: [
+          { productName: "ลูกพลับ", unit: "ลูก", quantity: 230 },
+          { productName: "สาลี่", unit: "ลูก", quantity: 216 },
+          { productName: "ลูกไหนดำ", unit: "โล", quantity: 25 },
+          { productName: "มังคุด", unit: "โล", quantity: 45 },
+        ],
+      },
+    }));
+    expect(text).toContain(STATUS_HEADINGS.strong);
+    expect(text).toContain("สับปะรด — ขายออก 70.6% • เหลือขายต่อ ~10 ถุง");
+    expect(text).not.toContain(WAITING_HOUSE_STOCK);
+    expect(text).not.toContain(EMPTY_GREEN_NOTICE);
   });
 
   test("HIGH with missing stock stays 🟠 and asks to wait for house stock", () => {
@@ -239,11 +278,10 @@ describe("purchase planning message — compact operator UX", () => {
           estimatedSoldQuantity: 24,
           sellThroughRate: 70.588,
           band: "high",
-          status: "surplus",
-          houseStockQuantity: null,
-          stockAbsence: "no_match",
-          nextDayGoodStockQuantity: null,
-          nextStockToSoldRatio: null,
+          status: "strong",
+          houseStockQuantity: 0,
+          nextDayGoodStockQuantity: 10,
+          nextStockToSoldRatio: 10 / 24,
         }),
         item({
           productName: "อะโวคาโด",
@@ -269,9 +307,9 @@ describe("purchase planning message — compact operator UX", () => {
           sellThroughRate: 40.598,
           band: "medium",
           status: "surplus",
-          houseStockQuantity: null,
-          nextDayGoodStockQuantity: null,
-          nextStockToSoldRatio: null,
+          houseStockQuantity: 0,
+          nextDayGoodStockQuantity: 134,
+          nextStockToSoldRatio: 134 / 95,
         }),
         item({
           productName: "ลูกพลับ",
@@ -328,9 +366,10 @@ describe("purchase planning message — compact operator UX", () => {
       ],
     }));
 
-    expect(text).toContain(`${STATUS_HEADINGS.strong}\n\n${EMPTY_GREEN_NOTICE}`);
-    expect(text).toContain(`สับปะรด — ขายออก 70.6% • ${WAITING_HOUSE_STOCK}`);
-    expect(text).toContain("แอปเปิ้ล — ขายออก 40.6%");
+    expect(text).toContain(`${STATUS_HEADINGS.strong}\n\nสับปะรด — ขายออก 70.6% • เหลือขายต่อ ~10 ถุง`);
+    expect(text).not.toContain(EMPTY_GREEN_NOTICE);
+    expect(text).not.toContain(`สับปะรด — ขายออก 70.6% • ${WAITING_HOUSE_STOCK}`);
+    expect(text).toContain("แอปเปิ้ล — ขายออก 40.6% • เหลือขายต่อ ~134 ลูก");
     expect(text).toContain("ลูกพลับ — ขายออก 18.7% • เหลือขายต่อ ~447 ลูก");
     expect(text).toContain("สาลี่ — ขายออก 29% • เหลือขายต่อ ~581 ลูก");
     expect(text).toContain("มังคุด — ขายออก 29.9% • เหลือขายต่อ ~172.4 กก.");

@@ -178,7 +178,7 @@ describe("loadPurchasePlanningReport — house stock wiring", () => {
     expect(report.items[0]!.status).toBe("surplus");
   });
 
-  test("a snapshot whose entries are all rejected is not a matched snapshot", async () => {
+  test("a snapshot whose accepted entries are empty is a complete zero count", async () => {
     const db = highSellingDay()
       .seed("physical_inventory_snapshots", [snapshotRow()])
       .seed("physical_inventory_items", [
@@ -187,9 +187,58 @@ describe("loadPurchasePlanningReport — house stock wiring", () => {
 
     const report = await loadPurchasePlanningReport(client(db), BUSINESS_DATE);
 
-    expect(report.stockAbsence).toBe("snapshot_empty");
-    expect(report.items[0]!.houseStockQuantity).toBeNull();
-    expect(report.items[0]!.status).toBe("surplus");
+    expect(report.stockAbsence).toBeNull();
+    expect(report.items[0]!.houseStockQuantity).toBe(0);
+    expect(report.items[0]!.nextDayGoodStockQuantity).toBe(20);
+    expect(report.items[0]!.status).toBe("strong");
+  });
+
+  test("pineapple absent from the complete 21/08-shaped snapshot is 🟢", async () => {
+    const db = new FakeDatabase()
+      .seed("produce_transactions", [
+        produceRow({
+          product_name: "สับปะรด",
+          unit: "ถุง",
+          transaction_type: "เบิก",
+          quantity: 34,
+        }),
+        produceRow({
+          product_name: "สับปะรด",
+          unit: "ถุง",
+          transaction_type: "คืน",
+          quantity: 10,
+        }),
+      ])
+      .seed("accountability_rounds", [
+        { id: ROUND, seller_label: "โอม", market_label: "ตลาด72" },
+      ])
+      .seed("produce_sessions", [cleanSession(2)])
+      .seed("physical_inventory_snapshots", [snapshotRow()])
+      .seed("physical_inventory_items", [
+        itemRow({
+          raw_product_description: "ลูกพลับ",
+          normalized_product: "ลูกพลับ",
+          quantity: 230,
+          raw_unit: "ลูก",
+          normalized_unit: "ลูก",
+        }),
+        itemRow({
+          raw_product_description: "สาลี่",
+          normalized_product: "สาลี่",
+          quantity: 216,
+          raw_unit: "ลูก",
+          normalized_unit: "ลูก",
+        }),
+      ]);
+
+    const report = await loadPurchasePlanningReport(client(db), BUSINESS_DATE);
+    const pineapple = report.items[0]!;
+
+    expect(pineapple.productName).toBe("สับปะรด");
+    expect(pineapple.houseStockQuantity).toBe(0);
+    expect(pineapple.nextDayGoodStockQuantity).toBe(10);
+    expect(pineapple.nextStockToSoldRatio).toBeCloseTo(10 / 24, 6);
+    expect(pineapple.status).toBe("strong");
   });
 
   test("a session that failed to parse blocks its own products", async () => {

@@ -25,11 +25,11 @@
  * never subtracted from it either; it stays its own signal.
  *
  * The snapshot remains a capture-only observation (migration 0047: "Does NOT
- * post inventory ledger movements"; src/lib/physical-inventory/types.ts:
- * "Capture-only observation model. No database IDs, no ledger semantics."), so
- * it is still not derived from the return rows, and house stock only ever
- * DOWNGRADES purchasing urgency — it can never promote an uncertain market
- * result into a confident 🟢.
+ * post inventory ledger movements"), but the operator has confirmed it is a
+ * COMPLETE house count after every market was supplied. A canonical product
+ * wholly absent from that snapshot is therefore zero at home — not unknown.
+ * A product that IS present but only in an incompatible unit stays unmatched.
+ * House stock still cannot promote an uncertain market result into a 🟢.
  */
 
 import { normalizedMarketLabel } from "@/lib/market";
@@ -149,8 +149,9 @@ export interface PurchasePlanningItem {
   uncertaintyReasons: PurchaseUncertaintyReason[];
   /**
    * เหลือในบ้านหลังเบิก — what the house count found for this product AFTER the
-   * markets were supplied. null when there is no safe match; never zero by
-   * assumption (see `houseStockByKey`).
+   * markets were supplied. 0 when an authoritative complete snapshot exists
+   * and this canonical product is wholly absent from it. null when there is
+   * no snapshot, or the product is present but no unit is safely comparable.
    */
   houseStockQuantity: number | null;
   stockAbsence: StockSignalAbsence | null;
@@ -424,39 +425,55 @@ function compareItems(a: PurchasePlanningItem, b: PurchasePlanningItem): number 
 
 /**
  * Canonicalizes house-stock entries onto the market's identity space and sums
- * duplicates. Entries whose product or unit cannot be canonicalized are dropped
- * rather than guessed at — an unmatched product simply has no stock signal.
- *
- * A product ABSENT from the snapshot is NOT read as zero. The snapshot cannot
- * express a zero: `physical_inventory_items_accepted_fields` (migration 0047)
- * requires `quantity > 0` on every accepted row, so "none left at home" and
- * "never typed" are stored identically. Nothing in the repository claims the
- * document is a complete whole-house count either — the table comment calls it
- * an "Immutable P2A physical observation header. Capture-only". Absence
- * therefore stays unknown, which costs a 🟢 rather than risking a false one.
+ * same-unit duplicates. The authoritative snapshot is a complete house count,
+ * so a canonical product with no observation at all is zero. A product that
+ * appears only in an incompatible unit is NOT zero — the count exists, it
+ * just cannot be compared.
  */
-function houseStockByKey(
-  signal: HouseStockSignal | undefined,
-): Map<string, number> | null {
-  if (!signal || signal.status !== "available") return null;
+function indexHouseStock(signal: HouseStockSignal | undefined): {
+  complete: boolean;
+  byKey: Map<string, number>;
+  products: Set<string>;
+} {
+  const empty = { complete: false, byKey: new Map<string, number>(), products: new Set<string>() };
+  if (!signal) return empty;
+  if (signal.status === "none" || signal.status === "conflict" || signal.status === "unavailable") {
+    return empty;
+  }
+  if (signal.status === "empty") {
+    return { complete: true, byKey: new Map(), products: new Set() };
+  }
   const byKey = new Map<string, number>();
+  const products = new Set<string>();
   for (const entry of signal.entries) {
     const identity = canonicalIdentity(entry.productName, entry.unit);
     if (!identity) continue;
     if (!Number.isFinite(entry.quantity) || entry.quantity < 0) continue;
+    products.add(identity.productName);
     const key = identityKey(identity.productName, identity.unit);
     byKey.set(key, (byKey.get(key) ?? 0) + entry.quantity);
   }
-  return byKey;
+  return { complete: true, byKey, products };
+}
+
+function matchHouseStock(
+  index: ReturnType<typeof indexHouseStock>,
+  productName: string,
+  unit: string,
+): { quantity: number | null; absence: "no_match" | null } {
+  if (!index.complete) return { quantity: null, absence: "no_match" };
+  const key = identityKey(productName, unit);
+  if (index.byKey.has(key)) return { quantity: index.byKey.get(key) ?? 0, absence: null };
+  if (index.products.has(productName)) return { quantity: null, absence: "no_match" };
+  return { quantity: 0, absence: null };
 }
 
 function reportStockAbsence(
   signal: HouseStockSignal | undefined,
 ): Exclude<StockSignalAbsence, "no_match"> | null {
   if (!signal) return "no_snapshot";
-  if (signal.status === "available") return null;
+  if (signal.status === "available" || signal.status === "empty") return null;
   if (signal.status === "none") return "no_snapshot";
-  if (signal.status === "empty") return "snapshot_empty";
   if (signal.status === "conflict") return "snapshot_conflict";
   return "unavailable";
 }
@@ -517,11 +534,11 @@ export function buildPurchasePlanningReport(
     else cell.damaged += quantity;
   }
 
-  const stockByKey = houseStockByKey(input.houseStock);
+  const stockIndex = indexHouseStock(input.houseStock);
   const stockAbsence = reportStockAbsence(input.houseStock);
 
   const items: PurchasePlanningItem[] = [];
-  for (const [key, cell] of cells) {
+  for (const [, cell] of cells) {
     applyRoundEvidence(cell, input.roundReturnStates, incompleteReturnRounds);
 
     // Carried at the column's own numeric(10,3) resolution, so 45.9 − 35.4 is
@@ -543,10 +560,10 @@ export function buildPurchasePlanningReport(
     const estimatedSold = uncertain ? null : round3(withdrawn - good - damaged);
     const rate = estimatedSold === null ? null : (estimatedSold / withdrawn) * 100;
 
-    const matchedStock = stockByKey?.get(key);
-    const houseStockQuantity = matchedStock ?? null;
+    const matched = matchHouseStock(stockIndex, cell.productName, cell.unit);
+    const houseStockQuantity = matched.quantity;
     const itemStockAbsence: StockSignalAbsence | null = stockAbsence
-      ?? (houseStockQuantity === null ? "no_match" : null);
+      ?? matched.absence;
     // The house was counted AFTER the markets were supplied and BEFORE any
     // return came back, so these two are disjoint quantities of one product and
     // add up. Damaged return is excluded: it is not sellable stock. It is not

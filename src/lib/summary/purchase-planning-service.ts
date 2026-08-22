@@ -81,8 +81,8 @@ async function loadHouseStockSignal(
     const snapshot = await fetchAuthoritativeHouseStockItems(supabase, businessDate);
     if (!snapshot) return { status: "none" };
     const entries = houseStockEntries(snapshot.items);
-    // A snapshot that held nothing countable is NOT the same as no snapshot,
-    // and neither may read as "the house is empty".
+    // An accepted empty count is a complete house: nothing left at home.
+    // That is not the same as no snapshot, which stays unknown.
     if (entries.length === 0) return { status: "empty" };
     return { status: "available", entries };
   } catch (err) {

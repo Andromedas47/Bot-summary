@@ -679,7 +679,7 @@ describe("purchase planning — report ordering", () => {
 
     expect(report.items.map((i) => [i.productName, i.status])).toEqual([
       ["ลูกพลับ", "reduce"],
-      ["มะม่วงจิ้ว", "reduce"],
+      ["มะม่วงจิ๋ว", "reduce"],
       ["ส้มไต้หวัน", "strong"],
       ["ทุเรียน", "unknown"],
     ]);

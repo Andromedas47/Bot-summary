@@ -40,14 +40,17 @@ import {
 import { RE } from "@/lib/parsers/weigh-session/regex";
 import { logger } from "@/lib/logger";
 import { seedCentralPricesFromPersistedWithdrawals } from "@/lib/white-sheet/seed-from-withdrawal";
-import { runProduceFinalizeGate } from "@/lib/produce/entry-validation-gate";
+import { runProduceFinalizeGate, recordProduceValidationReview } from "@/lib/produce/entry-validation-gate";
 import { bindPlainTextRound } from "@/lib/produce/plain-text-round-binding";
 import {
   buildBlockingValidationReply,
+  buildPlainTextReviewValidationReply,
   buildPriceAdvisoryNotification,
-  buildUnconfirmedReviewReply,
 } from "@/lib/produce/entry-validation-message";
-import type { ProduceValidationAdvisory } from "@/lib/produce/entry-validation";
+import type {
+  ProduceValidationAdvisory,
+  ProduceValidationResult,
+} from "@/lib/produce/entry-validation";
 import { getRuntimeEnvironment } from "@/lib/runtime-environment";
 
 type Supabase = SupabaseClient<Database>;
@@ -362,6 +365,7 @@ export async function finalizePendingGeneration(
   let accountabilityRoundId = snapshot.accountability_round_id ?? null;
   let entryGateDetail: string | null = null;
   let entryGateAdvisories: ProduceValidationAdvisory[] = [];
+  let unconfirmedReview: ProduceValidationResult | null = null;
   if (validationErrors.length === 0 && !seed) {
     const binding = await bindPlainTextRound(
       supabase,
@@ -419,10 +423,74 @@ export async function finalizePendingGeneration(
     validationErrors.push(...gate.errors);
     entryGateDetail = gate.detail;
     entryGateAdvisories = gate.advisories;
+    unconfirmedReview = gate.unconfirmedReview;
   }
 
   const rawMessageId = await findCloseRawMessageId(supabase, snapshot);
   if (!rawMessageId) validationErrors.push("close raw message was not found");
+
+  if (unconfirmedReview && validationErrors.length === 0) {
+    try {
+      if (snapshot.line_user_id && snapshot.close_line_event_id) {
+        await recordProduceValidationReview(
+          supabase,
+          {
+            sessionKey: snapshot.session_key,
+            sessionGeneration: snapshot.session_generation,
+            accountabilityRoundId,
+            businessDate: parsed.date,
+            marketLabel: parsed.session_title,
+            staffLabel: parsed.staff_name,
+            lineUserId: snapshot.line_user_id,
+          },
+          unconfirmedReview,
+          snapshot.close_line_event_id,
+        );
+      }
+    } catch (error) {
+      log.error("post-boundary validation review could not be recorded", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    const hold = await service.holdValidationReview(
+      snapshot.session_key,
+      snapshot.session_generation,
+      snapshot.ingest_revision,
+    );
+    if (!hold.accepted && hold.reason === "stale_validation_snapshot") {
+      return {
+        status: "stale_snapshot",
+        current_revision: hold.current_revision,
+      };
+    }
+    if (!hold.accepted && hold.reason === "terminalized") {
+      return { status: "skipped", reason: "terminalized" };
+    }
+    if (!hold.accepted && hold.reason === "generation_conflict") {
+      return { status: "skipped", reason: "generation_conflict" };
+    }
+    if (!hold.accepted) {
+      return { status: "pending", reason: hold.reason ?? "hold_failed" };
+    }
+
+    const reviewMessage = entryGateDetail
+      ?? buildPlainTextReviewValidationReply(unconfirmedReview);
+    try {
+      await push(snapshot.source_id, reviewMessage);
+    } catch (error) {
+      log.error("post-boundary validation review push failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    log.info("produce finalization held for validation review", {
+      sessionKey: snapshot.session_key,
+      sessionGeneration: snapshot.session_generation,
+      ingestRevision: snapshot.ingest_revision,
+    });
+    return { status: "pending", reason: "awaiting_validation_review" };
+  }
 
   // Success notification is snapshotted before the authoritative RPC. For an
   // addition it reports batch and cumulative day totals and never claims the
@@ -779,6 +847,7 @@ async function runEntryGateForFinalization(
   errors: string[];
   detail: string | null;
   advisories: ProduceValidationAdvisory[];
+  unconfirmedReview: ProduceValidationResult | null;
 }> {
   let gate: Awaited<ReturnType<typeof runProduceFinalizeGate>>;
   try {
@@ -800,6 +869,7 @@ async function runEntryGateForFinalization(
       errors: [error instanceof Error ? error.message : "entry validation failed"],
       detail: null,
       advisories: [],
+      unconfirmedReview: null,
     };
   }
 
@@ -808,19 +878,22 @@ async function runEntryGateForFinalization(
       errors: gate.result.blocking.map((exception) => exception.kind),
       detail: buildBlockingValidationReply(gate.result),
       advisories: [],
+      unconfirmedReview: null,
     };
   }
   if (gate.decision === "review_presented") {
     return {
-      errors: ["entry validation review was never confirmed"],
-      detail: buildUnconfirmedReviewReply(gate.result),
+      errors: [],
+      detail: buildPlainTextReviewValidationReply(gate.result),
       advisories: [],
+      unconfirmedReview: gate.result,
     };
   }
   return {
     errors: [],
     detail: null,
     advisories: gate.result.advisories,
+    unconfirmedReview: null,
   };
 }
 
@@ -873,7 +946,10 @@ export async function finalizeDuePendingGenerations(
       const result = await finalizePendingGeneration(supabase, snapshot, push);
       if (result.status === "finalized") run.finalized += 1;
       else if (result.status === "duplicate") run.duplicate += 1;
-      else if (result.status === "pending" && result.reason === "awaiting_confirmation") {
+      else if (result.status === "pending" && (
+        result.reason === "awaiting_confirmation"
+        || result.reason === "awaiting_validation_review"
+      )) {
         run.awaitingConfirmation += 1;
       } else if (result.status === "pending") run.pending += 1;
       else if (result.status === "failed_closed") run.failedClosed += 1;

@@ -37,6 +37,9 @@ const MIGRATION = join(
 const CLEANUP_MIGRATION = join(
   ROOT, "supabase", "migrations", "20260818100000_produce_product_dictionary_cleanup.sql",
 );
+const MANGO_SPELLING_MIGRATION = join(
+  ROOT, "supabase", "migrations", "20260822180100_mango_canonical_spelling.sql",
+);
 const BOOTSTRAP = join(
   ROOT, "supabase", "tests", "produce_product_code_dictionary_bootstrap.sql",
 );
@@ -125,6 +128,7 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
 
     await apply(MIGRATION);
     await apply(CLEANUP_MIGRATION);
+    await apply(MANGO_SPELLING_MIGRATION);
   });
 
   afterAll(async () => {

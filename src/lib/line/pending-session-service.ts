@@ -34,6 +34,19 @@ export class PendingSessionClosedError extends Error {
   }
 }
 
+export class PendingSessionRevisionConflictError extends Error {
+  constructor(
+    sessionKey: string,
+    public readonly expectedRevision: number,
+    public readonly currentRevision: number | null,
+  ) {
+    super(
+      `pending session close rejected for ${sessionKey}: validated revision ${expectedRevision} is stale (current ${currentRevision ?? "unknown"})`,
+    );
+    this.name = "PendingSessionRevisionConflictError";
+  }
+}
+
 export interface PendingSession {
   id:                        string;
   session_key:               string;
@@ -492,6 +505,7 @@ export class PendingSessionService {
     markClose?:          boolean,
     expectedGeneration?: string,
     expectedItemCount?:  number,
+    expectedIngestRevision?: number | null,
   ): Promise<PendingSession> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data, error } = await (this.supabase as any).rpc("append_pending_session", {
@@ -503,17 +517,26 @@ export class PendingSessionService {
       p_mark_close:                   markClose       ?? false,
       p_expected_session_generation:  expectedGeneration ?? null,
       p_expected_item_count:          expectedItemCount  ?? null,
+      p_expected_ingest_revision:     expectedIngestRevision ?? null,
     });
     if (error) throw new Error(`pending session append failed: ${error.message}`);
     const result = data as {
       accepted: boolean;
       reason?: string;
+      current_revision?: number;
       session?: PendingSession;
     } | null;
     if (!result || !result.accepted) {
       const reason = result?.reason;
       if (reason === "generation_conflict" && expectedGeneration) {
         throw new PendingSessionGenerationConflictError(sessionKey, expectedGeneration);
+      }
+      if (reason === "stale_validation_snapshot") {
+        throw new PendingSessionRevisionConflictError(
+          sessionKey,
+          expectedIngestRevision ?? -1,
+          result?.current_revision ?? result?.session?.ingest_revision ?? null,
+        );
       }
       if (reason === "after_close_boundary") {
         const boundary = result?.session?.close_event_timestamp_ms ?? lineTimestampMs ?? 0;
@@ -529,6 +552,50 @@ export class PendingSessionService {
       throw new Error(`pending session not found for append: ${sessionKey}`);
     }
     return result.session as PendingSession;
+  }
+
+  async holdValidationReview(
+    sessionKey: string,
+    expectedGeneration: string,
+    expectedIngestRevision: number,
+  ): Promise<{
+    accepted: boolean;
+    reason?: string;
+    current_revision?: number;
+    session?: PendingSession;
+  }> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data, error } = await (this.supabase as any).rpc(
+      "hold_pending_validation_review",
+      {
+        p_session_key: sessionKey,
+        p_expected_session_generation: expectedGeneration,
+        p_expected_ingest_revision: expectedIngestRevision,
+      },
+    );
+    if (error) throw new Error(`pending validation hold failed: ${error.message}`);
+    return data as {
+      accepted: boolean;
+      reason?: string;
+      current_revision?: number;
+      session?: PendingSession;
+    };
+  }
+
+  async resumeCloseFinalization(
+    sessionKey: string,
+    expectedGeneration: string,
+  ): Promise<{ accepted: boolean; reason?: string; session?: PendingSession }> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data, error } = await (this.supabase as any).rpc(
+      "resume_pending_close_finalization",
+      {
+        p_session_key: sessionKey,
+        p_expected_session_generation: expectedGeneration,
+      },
+    );
+    if (error) throw new Error(`pending close resume failed: ${error.message}`);
+    return data as { accepted: boolean; reason?: string; session?: PendingSession };
   }
 
   /**

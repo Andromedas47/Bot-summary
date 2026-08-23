@@ -27,6 +27,10 @@ const CLEANUP_MIGRATION = join(
   HERE, "..", "..", "..", "..",
   "supabase", "migrations", "20260818100000_produce_product_dictionary_cleanup.sql",
 );
+const MANGO_SPELLING_MIGRATION = join(
+  HERE, "..", "..", "..", "..",
+  "supabase", "migrations", "20260822180100_mango_canonical_spelling.sql",
+);
 
 interface Row {
   code: string;
@@ -92,6 +96,11 @@ const APPLIED_MIGRATIONS: AppliedMigration[] = [
     file: CLEANUP_MIGRATION,
     insertAfterCode: "ม62",
     renames: { "ม54": "ไซมัส" }, // ไซมัส
+  },
+  {
+    file: MANGO_SPELLING_MIGRATION,
+    insertAfterCode: "ม63",
+    renames: { "ม63": "มะม่วงจิ๋ว" },
   },
 ];
 
@@ -291,7 +300,7 @@ describe("20260818100000 dictionary cleanup — ม54 correction and ม63–ม
   });
 
   const NEW_CODES: Array<[string, string]> = [
-    ["ม63", "มะม่วงจิ้ว"],
+    ["ม63", "มะม่วงจิ๋ว"],
     ["ม64", "ลูกพีชเล็ก"],
     ["ม65", "ลูกพีชใหญ่"],
     ["ม66", "ลูกไหนเขียว"],

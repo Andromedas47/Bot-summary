@@ -65,6 +65,12 @@ export const PRODUCT_ALIASES: Record<string, string> = {
   \u0E2D\u0E34\u0E19\u0E17\u0E1C\u0E32\u0E23\u0E31\u0E21: "\u0E2D\u0E34\u0E19\u0E17\u0E1C\u0E32\u0E25\u0E31\u0E21",
   \u0E2D\u0E34\u0E19\u0E17\u0E1C\u0E25\u0E31\u0E21: "\u0E2D\u0E34\u0E19\u0E17\u0E1C\u0E32\u0E25\u0E31\u0E21",
 
+  // \u2500\u2500 \u0E2163: \u0E21\u0E30\u0E21\u0E48\u0E27\u0E07\u0E08\u0E34\u0E49\u0E27 \u2192 \u0E21\u0E30\u0E21\u0E48\u0E27\u0E07\u0E08\u0E34\u0E4B\u0E27 (canonical spelling, 20260822180100) \u2500\u2500
+  // Exact mai-tho dictionary seeding. The dictionary row itself now uses
+  // \u0E21\u0E30\u0E21\u0E48\u0E27\u0E07\u0E08\u0E34\u0E4B\u0E27; this alias folds historical \u0E08\u0E34\u0E49\u0E27 keyings into
+  // the same reporting identity. Exact-match only.
+  "\u0E21\u0E30\u0E21\u0E48\u0E27\u0E07\u0E08\u0E34\u0E49\u0E27": "\u0E21\u0E30\u0E21\u0E48\u0E27\u0E07\u0E08\u0E34\u0E4B\u0E27",
+
   // \u2500\u2500 \u0E2154: \u0E44\u0E0A\u0E21\u0E31\u0E2A \u2192 \u0E44\u0E0B\u0E21\u0E31\u0E2A (dictionary spelling correction, 20260818100000) \u2500\u2500
   // Reviewed exact legacy spelling. \u0E2154 was seeded with the misspelling \u0E44\u0E0A\u0E21\u0E31\u0E2A;
   // the dictionary row itself was corrected to \u0E44\u0E0B\u0E21\u0E31\u0E2A in migration

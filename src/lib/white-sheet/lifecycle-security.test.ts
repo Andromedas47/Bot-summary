@@ -227,6 +227,8 @@ describe("lifecycle security hardening (0045)", () => {
       other: 0,
       other_note: null,
       actual_cash_submitted: 1,
+      white_sheet_sales: null,
+      owner_cash: null,
       created_at: "2026-07-24T00:00:00Z",
       updated_at: "2026-07-24T00:00:00Z",
       finalized_at: "2026-07-24T02:00:00Z",

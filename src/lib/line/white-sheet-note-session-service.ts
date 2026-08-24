@@ -13,6 +13,8 @@ const COLUMN_BY_FIELD_KEY = {
   bag: "bag",
   snack: "snack",
   actualCash: "actual_cash",
+  whiteSheetSales: "white_sheet_sales",
+  ownerCash: "owner_cash",
 } as const;
 
 /** Postgres unique_violation. Thrown by the partial one-open-per-source index. */
@@ -176,6 +178,11 @@ export class WhiteSheetNoteSessionService {
       || session.snack !== null
       || session.other_amount !== null
       || session.actual_cash !== null
+      // Loose null check: pre-Task-4 callers may construct a session object
+      // without these two keys at all (undefined) rather than explicit null —
+      // both mean "not entered".
+      || session.white_sheet_sales != null
+      || session.owner_cash != null
     );
   }
 

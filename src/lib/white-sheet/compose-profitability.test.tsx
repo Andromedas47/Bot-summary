@@ -99,6 +99,8 @@ const SUBMITTED_ENTRY: CashEntryRow = {
   other: 0,
   other_note: null,
   actual_cash_submitted: 450,
+  white_sheet_sales: null,
+  owner_cash: null,
   finalized_at: null,
   finalized_by: null,
   accountability_round_id: null,

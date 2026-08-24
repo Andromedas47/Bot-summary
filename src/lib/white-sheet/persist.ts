@@ -46,12 +46,26 @@ export type WhiteSheetCashEntryState =
       status: "submitted";
       expenses: WhiteSheetExpenses;
       actualCashSubmitted: number;
+      /**
+       * Task 4 (Daily Financial Settlement) inputs. NULL (or the field being
+       * absent entirely, for existing call sites constructed before Task 4)
+       * means not yet entered — never substitute 0. See
+       * src/lib/settlement/daily-financial-settlement.ts, which reports
+       * INCOMPLETE rather than a false "ปิดตรง" when either is missing.
+       * Optional rather than required so the many pre-existing White Sheet
+       * tests that build this state by hand keep compiling unchanged;
+       * loadWhiteSheetCashEntry (the only real producer) always sets both.
+       */
+      whiteSheetSales?: number | null;
+      ownerCash?: number | null;
       updatedAt: string;
     }
   | {
       status: "finalized";
       expenses: WhiteSheetExpenses;
       actualCashSubmitted: number;
+      whiteSheetSales?: number | null;
+      ownerCash?: number | null;
       updatedAt: string;
       finalizedAt: string;
       finalizedBy: string;
@@ -141,11 +155,15 @@ function toExpenses(row: CashEntryRow): WhiteSheetExpenses {
 }
 
 function toEntryState(row: CashEntryRow): WhiteSheetCashEntryState {
+  const whiteSheetSales = row.white_sheet_sales === null ? null : Number(row.white_sheet_sales);
+  const ownerCash = row.owner_cash === null ? null : Number(row.owner_cash);
   if (row.finalized_at) {
     return {
       status: "finalized",
       expenses: toExpenses(row),
       actualCashSubmitted: Number(row.actual_cash_submitted),
+      whiteSheetSales,
+      ownerCash,
       updatedAt: row.updated_at,
       finalizedAt: row.finalized_at,
       finalizedBy: row.finalized_by as string,
@@ -155,6 +173,8 @@ function toEntryState(row: CashEntryRow): WhiteSheetCashEntryState {
     status: "submitted",
     expenses: toExpenses(row),
     actualCashSubmitted: Number(row.actual_cash_submitted),
+    whiteSheetSales,
+    ownerCash,
     updatedAt: row.updated_at,
   };
 }
@@ -180,7 +200,7 @@ export async function loadWhiteSheetCashEntry(
   let query = supabase
     .from(TABLE)
     .select(
-      "labor, location_fee, bag, snack, other, other_note, actual_cash_submitted, updated_at, finalized_at, finalized_by",
+      "labor, location_fee, bag, snack, other, other_note, actual_cash_submitted, white_sheet_sales, owner_cash, updated_at, finalized_at, finalized_by",
     )
     .eq("source_id", sourceId)
     .eq("market_label_normalized", marketLabelNormalized)
@@ -246,7 +266,7 @@ export async function saveWhiteSheetCashEntry(
   }
 
   const SELECT_COLUMNS =
-    "labor, location_fee, bag, snack, other, other_note, actual_cash_submitted, updated_at, finalized_at, finalized_by";
+    "labor, location_fee, bag, snack, other, other_note, actual_cash_submitted, white_sheet_sales, owner_cash, updated_at, finalized_at, finalized_by";
   const writeValues = {
     labor,
     location_fee: locationFee,

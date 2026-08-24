@@ -665,6 +665,8 @@ export interface Database {
           other_amount:             number | null;
           other_note:               string | null;
           actual_cash:              number | null;
+          white_sheet_sales:        number | null;
+          owner_cash:               number | null;
           opened_by_line_user_id:   string | null;
           opened_line_event_id:     string;
           closed_by_line_user_id:   string | null;
@@ -688,6 +690,8 @@ export interface Database {
           other_amount?:            number | null;
           other_note?:              string | null;
           actual_cash?:             number | null;
+          white_sheet_sales?:       number | null;
+          owner_cash?:              number | null;
           opened_by_line_user_id?:  string | null;
           opened_line_event_id:     string;
           closed_by_line_user_id?:  string | null;
@@ -711,6 +715,8 @@ export interface Database {
           other_amount?:            number | null;
           other_note?:              string | null;
           actual_cash?:             number | null;
+          white_sheet_sales?:       number | null;
+          owner_cash?:              number | null;
           opened_by_line_user_id?:  string | null;
           opened_line_event_id?:    string;
           closed_by_line_user_id?:  string | null;
@@ -816,6 +822,8 @@ export interface Database {
           other:                   number;
           other_note:              string | null;
           actual_cash_submitted:   number;
+          white_sheet_sales:       number | null;
+          owner_cash:              number | null;
           created_at:              string;
           updated_at:              string;
           finalized_at:            string | null;
@@ -834,6 +842,8 @@ export interface Database {
           other?:                   number;
           other_note?:              string | null;
           actual_cash_submitted?:   number;
+          white_sheet_sales?:       number | null;
+          owner_cash?:              number | null;
           created_at?:              string;
           updated_at?:              string;
           finalized_at?:            string | null;
@@ -852,6 +862,8 @@ export interface Database {
           other?:                   number;
           other_note?:              string | null;
           actual_cash_submitted?:   number;
+          white_sheet_sales?:       number | null;
+          owner_cash?:              number | null;
           created_at?:              string;
           updated_at?:              string;
           finalized_at?:            string | null;

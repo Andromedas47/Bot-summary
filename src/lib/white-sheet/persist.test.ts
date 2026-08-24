@@ -49,6 +49,8 @@ function makeFakeSupabase(
         other: 0,
         other_note: null,
         actual_cash_submitted: 0,
+        white_sheet_sales: null,
+        owner_cash: null,
         created_at: "2026-07-24T00:00:00Z",
         updated_at: "2026-07-24T00:00:00Z",
         finalized_at: null,
@@ -291,6 +293,8 @@ describe("loadWhiteSheetCashEntry", () => {
         otherNote: "ค่าน้ำแข็ง",
       },
       actualCashSubmitted: 1000,
+      whiteSheetSales: null,
+      ownerCash: null,
       updatedAt: "2026-07-24T01:00:00Z",
     });
   });

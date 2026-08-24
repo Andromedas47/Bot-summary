@@ -699,4 +699,46 @@ describe("P1 sold-out by absence of return — presentation", () => {
     expect(text).not.toContain(SALES_NO_RETURN_ROW_LABEL);
     expect(text).not.toContain(SALES_SOLD_OUT_NO_RETURN_SUFFIX);
   });
+
+  test("an omitted product in a round with a return is not sold-out wording", () => {
+    const ROUND = "round-with-return";
+    const rows = [
+      row({
+        accountabilityRoundId: ROUND,
+        productName: "หมอนทอง",
+        quantity: 10,
+        transactionType: "เบิก",
+      }),
+      row({
+        accountabilityRoundId: ROUND,
+        productName: "มะม่วง",
+        quantity: 5,
+        transactionType: "เบิก",
+      }),
+      row({
+        accountabilityRoundId: ROUND,
+        productName: "หมอนทอง",
+        quantity: 2,
+        transactionType: "คืน",
+        sessionId: "session-return",
+      }),
+    ];
+    const built = report(rows, {
+      centralPrices: new Map([
+        [centralPriceMapKey("หมอนทอง", "โล"), 12_000],
+        [centralPriceMapKey("มะม่วง", "โล"), 8_000],
+      ]),
+      persistedReturnRounds: new Set([ROUND]),
+    });
+    const auto = buildSalesAutoBlocks(built).join("\n\n");
+    const manual = buildSalesSummaryBlocks(built).join("\n\n");
+
+    expect(auto).not.toContain(SALES_SOLD_OUT_NO_RETURN_LABEL);
+    expect(auto).toContain("มีรายการคืนของรอบนี้ แต่สินค้านี้ไม่ได้อยู่ในรายการคืน");
+    expect(auto).toContain("มะม่วง (กิโล) — มีรายการคืนของรอบนี้ แต่สินค้านี้ไม่ได้อยู่ในรายการคืน");
+    expect(manual).toContain("ขาย — (มีรายการคืนของรอบนี้ แต่สินค้านี้ไม่ได้อยู่ในรายการคืน)");
+    expect(auto).not.toContain("7e3717eb");
+    expect(auto).not.toContain(ROUND);
+    expect(manual).not.toContain(ROUND);
+  });
 });

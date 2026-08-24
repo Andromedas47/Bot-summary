@@ -116,6 +116,17 @@ export function roundsWithIncompleteReturn(
   );
 }
 
+/** Rounds that already have a persisted ชั่งคืน / คืนเสีย document. */
+export function roundsWithPersistedReturn(
+  statuses: readonly RoundReturnStatus[],
+): Set<string> {
+  return new Set(
+    statuses
+      .filter((row) => row.state === "persisted")
+      .map((row) => row.accountabilityRoundId),
+  );
+}
+
 interface ProduceRow {
   accountability_round_id: string | null;
   transaction_type: string;

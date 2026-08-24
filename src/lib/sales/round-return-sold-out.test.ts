@@ -145,4 +145,17 @@ describe("sold-out inference", () => {
     });
     expect(isSoldOutByAbsentReturn(report.markets[0]!.rows[0]!)).toBe(true);
   });
+
+  test("a persisted return that omitted this product is not sold out", () => {
+    const report = calculateSalesReport({
+      businessDate: "2026-08-10",
+      centralPrices: prices,
+      rows: soldOutRows,
+      persistedReturnRounds: new Set([LANNA]),
+    });
+    const identity = report.markets[0]!.rows[0]!;
+    expect(identity.status).toBe("QUANTITY_BLOCKED");
+    expect(identity.reasons).toContain("product_return_absent");
+    expect(isSoldOutByAbsentReturn(identity)).toBe(false);
+  });
 });

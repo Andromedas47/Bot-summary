@@ -332,6 +332,276 @@ describe("isSoldOutByAbsentReturn", () => {
   });
 });
 
+const COVERED_ROUND = "round-with-persisted-return";
+const MANGO_AND_DURIAN = prices([
+  ["หมอนทอง", "โล", 12_000],
+  ["มะม่วง", "โล", 8_000],
+]);
+
+describe("product-level return coverage", () => {
+  test("a whole round with no persisted return stays sold-out", () => {
+    const result = onlyRow(
+      build(
+        [row({ accountabilityRoundId: COVERED_ROUND, quantity: 10, transactionType: TX_WITHDRAW })],
+        { centralPrices: DURIAN_PRICE },
+      ),
+    );
+    expect(result.status).toBe("TRUSTED");
+    expect(result.soldQuantity).toBe(10);
+    expect(result.reasons).not.toContain("product_return_absent");
+    expect(isSoldOutByAbsentReturn(result)).toBe(true);
+  });
+
+  test("an omitted withdrawn product is not trusted sold-out when the round has a return", () => {
+    const report = build(
+      [
+        row({
+          accountabilityRoundId: COVERED_ROUND,
+          productName: "หมอนทอง",
+          quantity: 10,
+          transactionType: TX_WITHDRAW,
+        }),
+        row({
+          accountabilityRoundId: COVERED_ROUND,
+          productName: "มะม่วง",
+          quantity: 5,
+          transactionType: TX_WITHDRAW,
+        }),
+        row({
+          accountabilityRoundId: COVERED_ROUND,
+          productName: "หมอนทอง",
+          quantity: 2,
+          transactionType: TX_RETURN,
+          sessionId: "session-return",
+        }),
+      ],
+      {
+        centralPrices: MANGO_AND_DURIAN,
+        persistedReturnRounds: new Set([COVERED_ROUND]),
+      },
+    );
+
+    const rows = report.markets.flatMap((market) => market.rows);
+    const covered = rows.find((item) => item.productName === "หมอนทอง")!;
+    const omitted = rows.find((item) => item.productName === "มะม่วง")!;
+
+    expect(covered.status).toBe("TRUSTED");
+    expect(covered.soldQuantity).toBe(8);
+    expect(covered.expectedSalesSatang).toBe(96_000);
+    expect(isSoldOutByAbsentReturn(covered)).toBe(false);
+
+    expect(omitted.status).toBe("QUANTITY_BLOCKED");
+    expect(omitted.reasons).toContain("product_return_absent");
+    expect(omitted.soldQuantity).toBeNull();
+    expect(omitted.expectedSalesSatang).toBeNull();
+    expect(isSoldOutByAbsentReturn(omitted)).toBe(false);
+
+    expect(report.allMarkets.expectedSalesSatang).toBe(96_000);
+    expect(report.allMarkets.trustedRowCount).toBe(1);
+    expect(report.allMarkets.quantityBlockedRowCount).toBe(1);
+    expect(report.blocked.map((item) => item.productName)).toEqual(["มะม่วง"]);
+  });
+
+  test("good return only still calculates when the product is present", () => {
+    const result = onlyRow(
+      build(
+        [
+          row({ accountabilityRoundId: COVERED_ROUND, quantity: 10, transactionType: TX_WITHDRAW }),
+          row({
+            accountabilityRoundId: COVERED_ROUND,
+            quantity: 4,
+            transactionType: TX_RETURN,
+            sessionId: "session-return",
+          }),
+        ],
+        {
+          centralPrices: DURIAN_PRICE,
+          persistedReturnRounds: new Set([COVERED_ROUND]),
+        },
+      ),
+    );
+    expect(result.status).toBe("TRUSTED");
+    expect(result.soldQuantity).toBe(6);
+  });
+
+  test("damaged return only still calculates when the product is present", () => {
+    const result = onlyRow(
+      build(
+        [
+          row({ accountabilityRoundId: COVERED_ROUND, quantity: 10, transactionType: TX_WITHDRAW }),
+          row({
+            accountabilityRoundId: COVERED_ROUND,
+            quantity: 3,
+            transactionType: TX_DAMAGED,
+            sessionId: "session-damaged",
+          }),
+        ],
+        {
+          centralPrices: DURIAN_PRICE,
+          persistedReturnRounds: new Set([COVERED_ROUND]),
+        },
+      ),
+    );
+    expect(result.status).toBe("TRUSTED");
+    expect(result.soldQuantity).toBe(7);
+    expect(isSoldOutByAbsentReturn(result)).toBe(false);
+  });
+
+  test("good and damaged returns together still calculate", () => {
+    const result = onlyRow(
+      build(
+        [
+          row({ accountabilityRoundId: COVERED_ROUND, quantity: 10, transactionType: TX_WITHDRAW }),
+          row({
+            accountabilityRoundId: COVERED_ROUND,
+            quantity: 2,
+            transactionType: TX_RETURN,
+            sessionId: "session-return",
+          }),
+          row({
+            accountabilityRoundId: COVERED_ROUND,
+            quantity: 1,
+            transactionType: TX_DAMAGED,
+            sessionId: "session-damaged",
+          }),
+        ],
+        {
+          centralPrices: DURIAN_PRICE,
+          persistedReturnRounds: new Set([COVERED_ROUND]),
+        },
+      ),
+    );
+    expect(result.status).toBe("TRUSTED");
+    expect(result.soldQuantity).toBe(7);
+  });
+
+  test("an explicit recorded zero return stays evidence, not omission", () => {
+    const result = onlyRow(
+      build(
+        [
+          row({ accountabilityRoundId: COVERED_ROUND, quantity: 10, transactionType: TX_WITHDRAW }),
+          row({
+            accountabilityRoundId: COVERED_ROUND,
+            quantity: 0,
+            transactionType: TX_RETURN,
+            sessionId: "session-return",
+          }),
+        ],
+        {
+          centralPrices: DURIAN_PRICE,
+          persistedReturnRounds: new Set([COVERED_ROUND]),
+        },
+      ),
+    );
+    expect(result.status).toBe("TRUSTED");
+    expect(result.soldQuantity).toBe(10);
+    expect(result.reasons).not.toContain("product_return_absent");
+    expect(result.expectedSalesSatang).toBe(120_000);
+  });
+
+  test("an incomplete return still suppresses sold-out without inventing a sale", () => {
+    const result = onlyRow(
+      build(
+        [row({ accountabilityRoundId: COVERED_ROUND, quantity: 10, transactionType: TX_WITHDRAW })],
+        {
+          centralPrices: DURIAN_PRICE,
+          incompleteReturnRounds: new Set([COVERED_ROUND]),
+        },
+      ),
+    );
+    expect(result.status).toBe("TRUSTED");
+    expect(result.soldQuantity).toBe(10);
+    expect(result.returnEvidenceIncomplete).toBe(true);
+    expect(isSoldOutByAbsentReturn(result)).toBe(false);
+  });
+
+  test("price conflict plus omission stays quantity-blocked and value-blocked", () => {
+    const omitted = onlyRow(
+      build(
+        [row({ accountabilityRoundId: COVERED_ROUND, quantity: 10, transactionType: TX_WITHDRAW })],
+        {
+          centralPrices: DURIAN_PRICE,
+          persistedReturnRounds: new Set([COVERED_ROUND]),
+          priceConflicts: new Set([centralPriceMapKey("หมอนทอง", "โล")]),
+        },
+      ),
+    );
+    expect(omitted.status).toBe("QUANTITY_BLOCKED");
+    expect(omitted.reasons).toContain("product_return_absent");
+    expect(omitted.reasons).toContain("central_price_conflict");
+    expect(omitted.soldQuantity).toBeNull();
+    expect(omitted.expectedSalesSatang).toBeNull();
+    expect(isSoldOutByAbsentReturn(omitted)).toBe(false);
+  });
+
+  test("a persisted return on another round does not poison this round's sold-out", () => {
+    const result = onlyRow(
+      build(
+        [row({ accountabilityRoundId: "this-round", quantity: 10, transactionType: TX_WITHDRAW })],
+        {
+          centralPrices: DURIAN_PRICE,
+          persistedReturnRounds: new Set(["other-round"]),
+        },
+      ),
+    );
+    expect(result.status).toBe("TRUSTED");
+    expect(isSoldOutByAbsentReturn(result)).toBe(true);
+    expect(result.reasons).not.toContain("product_return_absent");
+  });
+
+  test("a legacy row with no round cannot be scoped by another round's return", () => {
+    const result = onlyRow(
+      build(
+        [row({ accountabilityRoundId: null, quantity: 10, transactionType: TX_WITHDRAW })],
+        {
+          centralPrices: DURIAN_PRICE,
+          persistedReturnRounds: new Set([COVERED_ROUND]),
+        },
+      ),
+    );
+    expect(result.reasons).not.toContain("product_return_absent");
+    expect(isSoldOutByAbsentReturn(result)).toBe(true);
+  });
+
+  test("an omitted unit of the same product is unsafe, not sold-out", () => {
+    const report = build(
+      [
+        row({
+          accountabilityRoundId: COVERED_ROUND,
+          quantity: 10,
+          unit: "โล",
+          transactionType: TX_WITHDRAW,
+        }),
+        row({
+          accountabilityRoundId: COVERED_ROUND,
+          quantity: 8,
+          unit: "ลูก",
+          transactionType: TX_WITHDRAW,
+        }),
+        row({
+          accountabilityRoundId: COVERED_ROUND,
+          quantity: 2,
+          unit: "โล",
+          transactionType: TX_RETURN,
+          sessionId: "session-return",
+        }),
+      ],
+      {
+        centralPrices: DURIAN_PRICE,
+        persistedReturnRounds: new Set([COVERED_ROUND]),
+      },
+    );
+    const rows = report.markets.flatMap((market) => market.rows);
+    const kilo = rows.find((item) => item.unit === "โล")!;
+    const piece = rows.find((item) => item.unit === "ลูก")!;
+    expect(kilo.status).toBe("TRUSTED");
+    expect(kilo.soldQuantity).toBe(8);
+    expect(piece.status).toBe("QUANTITY_BLOCKED");
+    expect(piece.reasons).toContain("product_return_absent");
+    expect(isSoldOutByAbsentReturn(piece)).toBe(false);
+  });
+});
+
 // ── Fail-closed quantity rules ──────────────────────────────────────────────
 
 describe("P1 quantity blocking — never assume", () => {

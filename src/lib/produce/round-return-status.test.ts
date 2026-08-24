@@ -8,6 +8,7 @@ import {
   hasCloserLine,
   pendingRowCanBeReturn,
   roundsWithIncompleteReturn,
+  roundsWithPersistedReturn,
   type RoundReturnEvidence,
   type RoundWithdrawal,
 } from "./round-return-status";
@@ -95,6 +96,7 @@ describe("round return classification", () => {
     );
     expect(statuses[0]!.state).toBe("persisted");
     expect(roundsWithIncompleteReturn(statuses)).toEqual(new Set());
+    expect(roundsWithPersistedReturn(statuses)).toEqual(new Set(["round-1"]));
   });
 
   test("evidence is attributed per round, never day-wide", () => {

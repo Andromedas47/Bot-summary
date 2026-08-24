@@ -596,6 +596,92 @@ describe("P1 pending-session lifecycle", () => {
     expect(report.markets[0].rows[0].returnEvidenceIncomplete).toBe(true);
   });
 
+  test("a persisted return that omitted a withdrawn product is not trusted sold-out", async () => {
+    const roundId = "round-return-coverage";
+    const report = await loadSalesReport(
+      fakeSupabase(
+        baseFixture({
+          produce: [
+            produceRow({
+              id: "w-a",
+              product_name: "หมอนทอง",
+              quantity: 10,
+              transaction_type: "เบิก",
+              accountability_round_id: roundId,
+            }),
+            produceRow({
+              id: "w-b",
+              product_name: "มะม่วง",
+              quantity: 5,
+              transaction_type: "เบิก",
+              accountability_round_id: roundId,
+            }),
+            produceRow({
+              id: "r-a",
+              product_name: "หมอนทอง",
+              quantity: 2,
+              transaction_type: "คืน",
+              base_transaction_type: "คืน",
+              accountability_round_id: roundId,
+            }),
+          ],
+          sessions: [{
+            id: "session-1",
+            total_items: 3,
+            parser_errors: null,
+            staff_name: "เสือ",
+            session_title: "ตลาดกี้",
+            session_date: DATE,
+            session_kind: "main",
+            accountability_round_id: roundId,
+            raw_message_id: "raw-1",
+            finalized_at: "2026-07-25T03:00:00.000Z",
+            voided_at: null,
+          }],
+          accountabilityRounds: [{
+            id: roundId,
+            seller_label: "เสือ",
+            market_label: "ตลาดกี้",
+            status: "open",
+          }],
+          centralPrices: [
+            {
+              product_key: "หมอนทอง",
+              unit_key: "โล",
+              business_date: DATE,
+              price_satang: 12_000,
+              set_by: "admin:je",
+              set_reason: null,
+              created_at: "2026-07-25T01:00:00.000Z",
+              updated_at: "2026-07-25T01:00:00.000Z",
+            },
+            {
+              product_key: "มะม่วง",
+              unit_key: "โล",
+              business_date: DATE,
+              price_satang: 8_000,
+              set_by: "admin:je",
+              set_reason: null,
+              created_at: "2026-07-25T01:00:00.000Z",
+              updated_at: "2026-07-25T01:00:00.000Z",
+            },
+          ],
+        }),
+      ),
+      DATE,
+    );
+
+    const rows = report.markets.flatMap((market) => market.rows);
+    const covered = rows.find((row) => row.productName === "หมอนทอง")!;
+    const omitted = rows.find((row) => row.productName === "มะม่วง")!;
+    expect(covered.status).toBe("TRUSTED");
+    expect(covered.soldQuantity).toBe(8);
+    expect(omitted.status).toBe("QUANTITY_BLOCKED");
+    expect(omitted.reasons).toContain("product_return_absent");
+    expect(omitted.soldQuantity).toBeNull();
+    expect(report.allMarkets.expectedSalesSatang).toBe(96_000);
+  });
+
   test("a failed_closed session whose round was retired is not an active problem", async () => {
     const report = await loadSalesReport(
       fakeSupabase(

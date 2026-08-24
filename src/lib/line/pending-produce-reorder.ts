@@ -3,6 +3,7 @@ import type { Database } from "@/types/database";
 import { logger } from "@/lib/logger";
 import { replyLineMessage } from "@/lib/line/reply";
 import { PendingSessionService } from "@/lib/line/pending-session-service";
+import { boundaryRejectReply, type RecoveryReason } from "@/lib/line/pending-produce-recovery";
 
 export const NEW_HEADER_REQUIRED_REPLY =
   "ไม่พบรายการที่เปิดอยู่ กรุณาพิมพ์หัวรายการใหม่ก่อนส่งรายการ";
@@ -14,6 +15,12 @@ export interface DeferredProduceSweepResult {
 }
 
 type Reply = (replyToken: string, text: string) => Promise<void>;
+
+function expiredRejectReason(status: string): RecoveryReason {
+  if (status === "rejected_after_close") return "after_close";
+  if (status === "rejected_orphan") return "orphan";
+  return "before_opener";
+}
 
 /**
  * Resolve the bounded reorder window before the close finalizer runs.
@@ -31,6 +38,10 @@ export async function processExpiredPendingProduceEvents(
     replied: 0,
     replyErrors: 0,
   };
+  const countByKey = new Map<string, number>();
+  for (const event of events) {
+    countByKey.set(event.session_key, (countByKey.get(event.session_key) ?? 0) + 1);
+  }
 
   for (const event of events) {
     logger.warn("deferred Produce item rejected after reorder window", {
@@ -51,7 +62,13 @@ export async function processExpiredPendingProduceEvents(
     });
     if (!event.reply_token) continue;
     try {
-      await reply(event.reply_token, NEW_HEADER_REQUIRED_REPLY);
+      await reply(
+        event.reply_token,
+        boundaryRejectReply(
+          countByKey.get(event.session_key) ?? 1,
+          expiredRejectReason(event.status),
+        ),
+      );
       result.replied += 1;
     } catch (error) {
       result.replyErrors += 1;

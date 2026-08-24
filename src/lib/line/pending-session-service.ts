@@ -78,6 +78,8 @@ export interface PendingSession {
    */
   close_refused_at?:                  string | null;
   close_refused_session_generation?:  string | null;
+  /** 0049: structured menu sessions are non-null; legacy/plain-text is NULL. */
+  entry_origin?:                      string | null;
 }
 
 export interface OpenPlainTextGenerationInput {
@@ -134,6 +136,23 @@ export interface ExpiredDeferredProduceEvent {
   close_line_timestamp_ms: number | null;
   received_at: string;
   resolved_at: string;
+}
+
+export interface RecoverableDeferredEventRow {
+  line_event_id: string;
+  raw_message_id: string;
+  session_key: string;
+  source_id: string;
+  line_user_id: string;
+  line_timestamp_ms: number;
+  raw_text: string;
+  status: "waiting" | "rejected_before_opener" | "rejected_after_close" | "rejected_orphan";
+  defer_reason: string;
+  session_generation: string | null;
+  opener_line_event_id: string | null;
+  close_line_event_id: string | null;
+  close_line_timestamp_ms: number | null;
+  expires_at: string | null;
 }
 
 export interface ConfirmFinalizationResult {
@@ -340,6 +359,96 @@ export class PendingSessionService {
     }
   }
 
+  async listRecoverableDeferredEvents(
+    sessionKey: string,
+  ): Promise<RecoverableDeferredEventRow[]> {
+    const { data, error } = await this.supabase
+      .from("pending_produce_deferred_events")
+      .select(
+        "line_event_id, raw_message_id, session_key, source_id, line_user_id, line_timestamp_ms, raw_text, status, defer_reason, session_generation, opener_line_event_id, close_line_event_id, close_line_timestamp_ms, expires_at",
+      )
+      .eq("session_key", sessionKey)
+      .eq("runtime_environment", getRuntimeEnvironment())
+      .in("status", [
+        "waiting",
+        "rejected_before_opener",
+        "rejected_after_close",
+        "rejected_orphan",
+      ]);
+    if (error) {
+      throw new Error(`recoverable Produce deferred lookup failed: ${error.message}`);
+    }
+    return (data ?? []) as RecoverableDeferredEventRow[];
+  }
+
+  async markDeferredEventsRecovered(
+    eventIds: string[],
+    sessionGeneration: string,
+  ): Promise<void> {
+    if (eventIds.length === 0) return;
+    const { error } = await this.supabase
+      .from("pending_produce_deferred_events")
+      .update({
+        status: "admitted",
+        defer_reason: "explicit_recovery",
+        session_generation: sessionGeneration,
+        resolved_at: new Date().toISOString(),
+      })
+      .in("line_event_id", eventIds)
+      .in("status", [
+        "waiting",
+        "rejected_before_opener",
+        "rejected_after_close",
+        "rejected_orphan",
+      ]);
+    if (error) {
+      throw new Error(`Produce deferred recovery mark failed: ${error.message}`);
+    }
+  }
+
+  async recordBoundaryRejectedProduceItem(input: {
+    rawMessageId: string;
+    sessionKey: string;
+    sourceId: string;
+    lineUserId: string;
+    lineEventId: string;
+    lineTimestampMs: number;
+    text: string;
+    replyToken: string | null;
+    status: "rejected_before_opener" | "rejected_after_close" | "rejected_orphan";
+    sessionGeneration: string | null;
+    closeLineEventId: string | null;
+    closeLineTimestampMs: number | null;
+  }): Promise<void> {
+    const now = new Date().toISOString();
+    const { error } = await this.supabase
+      .from("pending_produce_deferred_events")
+      .upsert(
+        {
+          line_event_id: input.lineEventId,
+          raw_message_id: input.rawMessageId,
+          session_key: input.sessionKey,
+          source_id: input.sourceId,
+          line_user_id: input.lineUserId,
+          line_timestamp_ms: input.lineTimestampMs,
+          raw_text: input.text,
+          reply_token: input.replyToken,
+          runtime_environment: getRuntimeEnvironment(),
+          status: input.status,
+          defer_reason: input.status,
+          session_generation: input.sessionGeneration,
+          close_line_event_id: input.closeLineEventId,
+          close_line_timestamp_ms: input.closeLineTimestampMs,
+          received_at: now,
+          resolved_at: now,
+        },
+        { onConflict: "line_event_id", ignoreDuplicates: true },
+      );
+    if (error) {
+      throw new Error(`rejected Produce evidence persist failed: ${error.message}`);
+    }
+  }
+
   async claimExpiredDeferredProduceEvents(
     limit = 25,
   ): Promise<ExpiredDeferredProduceEvent[]> {
@@ -510,6 +619,9 @@ export class PendingSessionService {
       reason?: string;
       session?: PendingSession;
     } | null;
+    if (result?.reason === "duplicate_event" && result.session) {
+      return result.session;
+    }
     if (!result || !result.accepted) {
       const reason = result?.reason;
       if (reason === "generation_conflict" && expectedGeneration) {
@@ -654,6 +766,21 @@ export class PendingSessionService {
       .order("line_event_id", { ascending: true });
 
     if (error) throw new Error(`pending session ingest load failed: ${error.message}`);
+    return (data ?? []) as Array<{ line_event_id: string; line_timestamp_ms: number; raw_text: string }>;
+  }
+
+  async loadGenerationIngestRows(
+    sessionKey: string,
+    sessionGeneration: string,
+  ): Promise<Array<{ line_event_id: string; line_timestamp_ms: number; raw_text: string }>> {
+    const { data, error } = await this.supabase
+      .from("pending_session_ingest")
+      .select("line_event_id, line_timestamp_ms, raw_text")
+      .eq("session_key", sessionKey)
+      .eq("session_generation", sessionGeneration)
+      .order("line_timestamp_ms", { ascending: true })
+      .order("line_event_id", { ascending: true });
+    if (error) throw new Error(`pending session generation ingest load failed: ${error.message}`);
     return (data ?? []) as Array<{ line_event_id: string; line_timestamp_ms: number; raw_text: string }>;
   }
 

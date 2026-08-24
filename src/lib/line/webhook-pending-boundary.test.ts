@@ -620,7 +620,8 @@ describe("produce pending-session generation boundary", () => {
     expect(pending.ingest_revision).toBe(revisionAfterClose);
     expect(db.rows("pending_session_ingest")).toHaveLength(ingestCountAfterClose);
     expect(db.rows("pending_session_admission")).toHaveLength(admissionCountAfterClose);
-    expect(replies.at(-1)).toContain("ไม่ถูกรวม");
+    expect(replies.at(-1)).toContain("กู้รายการล่าสุด");
+    expect(replies.at(-1)).toContain("ยังไม่ถูกบันทึก");
   });
 
   it("close request performs no produce writes in the webhook request", async () => {

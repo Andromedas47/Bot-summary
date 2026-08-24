@@ -101,6 +101,22 @@ export function buildMissingItemsMessage(
     : `ยังปิดรายการไม่ได้ ขาดหมายเลข ${numbers} ระบบจะรอรายการที่ส่งค้างอยู่`;
 }
 
+export function plainTextIngestDocument(
+  openerLineEventId: string | null | undefined,
+  ingestRows: Array<{ line_event_id: string; raw_text: string }>,
+): string {
+  if (!openerLineEventId) {
+    return ingestRows.map((row) => row.raw_text).join("\n");
+  }
+  const opener = ingestRows.find((row) => row.line_event_id === openerLineEventId);
+  if (!opener) {
+    return ingestRows.map((row) => row.raw_text).join("\n");
+  }
+  return [opener, ...ingestRows.filter((row) => row.line_event_id !== openerLineEventId)]
+    .map((row) => row.raw_text)
+    .join("\n");
+}
+
 function hasHeaderInLedger(session: PendingSession, rows: Array<{ raw_text: string }>): boolean {
   const normalizeHeader = (line: string) => line
     .replace(/^\d{1,2}[:.]\d{2}\s+\S+\s+/, "")
@@ -319,7 +335,10 @@ export async function finalizePendingGeneration(
         snapshot.accumulated_text,
       );
     } else if (hasHeaderInLedger(snapshot, ingestRows)) {
-      finalText = ingestRows.map((row) => row.raw_text).join("\n");
+      finalText = plainTextIngestDocument(
+        snapshot.plain_text_opened_line_event_id,
+        ingestRows,
+      );
     } else {
       finalText = await service.rebuildForFinalization(snapshot, closeTimestamp);
     }

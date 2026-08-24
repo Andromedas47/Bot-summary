@@ -498,9 +498,25 @@ describe("0049 — structured finalization path", () => {
       source.indexOf("} else if (hasHeaderInLedger("),
       source.indexOf("} catch (error) {"),
     );
-    expect(legacyBranch).toContain("ingestRows.map((row) => row.raw_text).join");
+    // The legacy/plain-text path now delegates ledger composition to the
+    // extracted plainTextIngestDocument helper (shared with กู้รายการล่าสุด
+    // recovery so both paths order the ledger identically). The contract
+    // this test protects is unchanged by that extraction: the legacy branch
+    // must never reach for the structured admitted-set machinery, and
+    // whatever it delegates to must still compose strictly from ingest
+    // rows' raw_text.
+    expect(legacyBranch).toContain("plainTextIngestDocument(");
     expect(legacyBranch).not.toContain("buildAdmittedStructuredText");
     expect(legacyBranch).not.toContain("loadAdmissionRows");
+
+    const helperStart = source.indexOf("export function plainTextIngestDocument(");
+    expect(helperStart).toBeGreaterThan(-1);
+    const helperEnd = source.indexOf("\nfunction hasHeaderInLedger(", helperStart);
+    expect(helperEnd).toBeGreaterThan(helperStart);
+    const helperBody = source.slice(helperStart, helperEnd);
+    expect(helperBody).toContain("ingestRows.map((row) => row.raw_text).join");
+    expect(helperBody).not.toContain("buildAdmittedStructuredText");
+    expect(helperBody).not.toContain("loadAdmissionRows");
   });
 
   it("seeds the parser instead of reconstructing a header", async () => {

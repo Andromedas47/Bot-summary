@@ -319,3 +319,72 @@ describe("loadPurchasePlanningReport — house stock wiring", () => {
     expect(report.items[0]!.status).not.toBe("strong");
   });
 });
+
+describe("loadPurchasePlanningReport — unattributable withdrawal wiring", () => {
+  const TARGET_MS = Date.parse("2026-08-21T06:00:00.000Z");
+  const OTHER_DAY_MS = Date.parse("2026-08-20T06:00:00.000Z");
+
+  test("an item-only rejected เบิก poisons only the named product", async () => {
+    const db = highSellingDay()
+      .seed("physical_inventory_snapshots", [snapshotRow()])
+      .seed("physical_inventory_items", [itemRow({ quantity: 10 })])
+      .seed("pending_produce_deferred_events", [{
+        raw_message_id: "raw-unbound-withdraw",
+        source_id: "Csource",
+        raw_text: "1.ทับทิม25บาท\n26ลูก",
+        line_timestamp_ms: TARGET_MS,
+        status: "rejected_after_close",
+      }]);
+
+    const report = await loadPurchasePlanningReport(client(db), BUSINESS_DATE);
+    const apple = report.items.find((item) => item.productName === "แอปเปิ้ล")!;
+    const pomegranate = report.items.find((item) => item.productName === "ทับทิม")!;
+
+    expect(report.unresolvedSessionCount).toBe(1);
+    expect(report.unsafeReportReason).toBeNull();
+    expect(apple.status).toBe("strong");
+    expect(apple.uncertaintyReasons).not.toContain("unattributable_withdrawal");
+    expect(pomegranate.status).toBe("unknown");
+    expect(pomegranate.uncertaintyReasons).toContain("unattributable_withdrawal");
+  });
+
+  test("an unresolved คืน does not mark products unattributable_withdrawal", async () => {
+    const db = highSellingDay()
+      .seed("physical_inventory_snapshots", [snapshotRow()])
+      .seed("physical_inventory_items", [itemRow({ quantity: 10 })])
+      .seed("pending_produce_deferred_events", [{
+        raw_message_id: "raw-unbound-return",
+        source_id: "Csource",
+        raw_text: ["โอม-ตลาด72 คืน 21/8/2569", "1.แอปเปิ้ล10บาท", "5ลูก", "จบรายการคืน"].join("\n"),
+        line_timestamp_ms: TARGET_MS,
+        status: "rejected_after_close",
+      }]);
+
+    const report = await loadPurchasePlanningReport(client(db), BUSINESS_DATE);
+
+    expect(report.unresolvedSessionCount).toBe(1);
+    expect(report.items[0]!.uncertaintyReasons).not.toContain("unattributable_withdrawal");
+    expect(report.items[0]!.status).not.toBe("unknown");
+  });
+
+  test("a rejected เบิก on another business date does not poison today's report", async () => {
+    const db = highSellingDay()
+      .seed("physical_inventory_snapshots", [snapshotRow()])
+      .seed("physical_inventory_items", [itemRow({ quantity: 10 })])
+      .seed("pending_produce_deferred_events", [{
+        raw_message_id: "raw-other-day",
+        source_id: "Csource",
+        raw_text: "1.ทับทิม25บาท\n26ลูก",
+        line_timestamp_ms: OTHER_DAY_MS,
+        status: "rejected_after_close",
+      }]);
+
+    const report = await loadPurchasePlanningReport(client(db), BUSINESS_DATE);
+
+    expect(report.unresolvedSessionCount).toBe(0);
+    expect(report.unsafeReportReason).toBeNull();
+    expect(report.items).toHaveLength(1);
+    expect(report.items[0]!.productName).toBe("แอปเปิ้ล");
+    expect(report.items[0]!.status).toBe("strong");
+  });
+});

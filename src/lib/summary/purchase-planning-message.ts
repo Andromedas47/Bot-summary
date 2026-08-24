@@ -50,6 +50,12 @@ const STATUS_SEQUENCE: readonly PurchaseStatus[] = ["strong", "surplus", "reduce
 export const PRICE_CONFLICT_FOOTER =
   "⚠️ บางรายการมีราคาขัดแย้ง แต่จำนวนยังใช้ประเมินได้";
 
+export const UNATTRIBUTABLE_WITHDRAWAL_SCOPED_NOTICE =
+  "⚠️ มีรายการเบิกที่ยังระบุรอบไม่ได้ สินค้าที่ได้รับผลจึงยังประเมินไม่ได้";
+
+export const UNATTRIBUTABLE_WITHDRAWAL_REPORT_NOTICE =
+  "⚠️ ยังประเมินการซื้อไม่ได้ เพราะมีรายการเบิกที่ระบุรอบหรือสินค้าไม่ได้";
+
 /**
  * The house-stock report's own display convention (โล is stored, กก. is read).
  * Kept identical so the two reports never name the same unit differently.
@@ -165,6 +171,15 @@ function packedNameBlocks(names: readonly string[]): string[] {
 function globalWarningBlocks(report: PurchasePlanningReport): string[] {
   const blocks: string[] = [];
   const unknownCount = report.items.filter((item) => item.status === "unknown").length;
+  const scopedUnattributable = report.items.some((item) =>
+    item.uncertaintyReasons.includes("unattributable_withdrawal"),
+  );
+
+  if (report.unsafeReportReason === "unattributable_withdrawal") {
+    blocks.push(UNATTRIBUTABLE_WITHDRAWAL_REPORT_NOTICE);
+  } else if (scopedUnattributable) {
+    blocks.push(UNATTRIBUTABLE_WITHDRAWAL_SCOPED_NOTICE);
+  }
 
   if (report.unresolvedSessionCount > 0) {
     const lines = [`⚠️ ข้อมูลไม่สมบูรณ์ ${report.unresolvedSessionCount} ชุด`];
@@ -216,6 +231,21 @@ export function buildPurchasePlanningBlocks(report: PurchasePlanningReport): str
     blocks.push(STATUS_HEADINGS.strong);
     blocks.push(EMPTY_GREEN_NOTICE);
     blocks.push(PURCHASE_PLANNING_EMPTY_NOTICE);
+    blocks.push(...globalWarningBlocks(report));
+    return blocks;
+  }
+
+  if (report.unsafeReportReason === "unattributable_withdrawal") {
+    blocks.push(STATUS_HEADINGS.strong);
+    blocks.push(EMPTY_GREEN_NOTICE);
+    const unknowns = sortForDisplay(
+      report.items.filter((item) => item.status === "unknown"),
+      "unknown",
+    );
+    if (unknowns.length > 0) {
+      blocks.push(`${STATUS_HEADINGS.unknown} ${unknowns.length} รายการ`);
+      blocks.push(...packedNameBlocks(unknowns.map((item) => productLabel(item, duplicateNames))));
+    }
     blocks.push(...globalWarningBlocks(report));
     return blocks;
   }

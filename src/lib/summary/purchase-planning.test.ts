@@ -56,6 +56,7 @@ function build(
     unreliableSessionIds: options.unreliableSessionIds,
     hasUnattributedIncompleteReturns: options.hasUnattributedIncompleteReturns,
     unresolvedSessionCount: options.unresolvedSessionCount,
+    unattributableWithdrawalScopes: options.unattributableWithdrawalScopes,
     houseStock: options.houseStock,
   });
 }
@@ -700,5 +701,190 @@ describe("purchase planning — report ordering", () => {
     });
 
     expect(report.items.map((i) => i.productName)).toEqual(["ข", "ก", "ค"]);
+  });
+});
+
+describe("purchase planning — unattributable withdrawal safety", () => {
+  test("a known product+unit becomes unknown and unrelated products stay ranked", () => {
+    const rows = [
+      ...cell(100, 80, 0),
+      ...cell(50, 5, 0, {
+        product_name: "ส้มไต้หวัน",
+        unit: "โล",
+        accountability_round_id: ROUND_B,
+      }),
+    ];
+    const report = build(rows, {
+      unresolvedSessionCount: 1,
+      houseStock: stock({ productName: "ส้มไต้หวัน", unit: "โล", quantity: 2 }),
+      unattributableWithdrawalScopes: [
+        { kind: "product_unit", productName: "แอปเปิ้ล", unit: "ลูก" },
+      ],
+    });
+
+    expect(report.unsafeReportReason).toBeNull();
+    expect(report.items.map((i) => [i.productName, i.status])).toEqual([
+      ["ส้มไต้หวัน", "strong"],
+      ["แอปเปิ้ล", "unknown"],
+    ]);
+    const apple = report.items.find((i) => i.productName === "แอปเปิ้ล")!;
+    expect(apple.uncertaintyReasons).toContain("unattributable_withdrawal");
+    expect(apple.estimatedSoldQuantity).toBeNull();
+    expect(apple.sellThroughRate).toBeNull();
+    expect(apple.band).toBeNull();
+  });
+
+  test("a known product with no reliable unit poisons every unit variant", () => {
+    const rows = [
+      ...cell(100, 80, 0, { unit: "ลูก" }),
+      ...cell(40, 30, 0, { unit: "โล", accountability_round_id: ROUND_B }),
+      ...cell(50, 5, 0, {
+        product_name: "ส้มไต้หวัน",
+        unit: "โล",
+        accountability_round_id: ROUND_B,
+      }),
+    ];
+    const report = build(rows, {
+      houseStock: stock({ productName: "ส้มไต้หวัน", unit: "โล", quantity: 2 }),
+      unattributableWithdrawalScopes: [{ kind: "product", productName: "แอปเปิ้ล" }],
+    });
+
+    expect(report.unsafeReportReason).toBeNull();
+    const apple = report.items.filter((i) => i.productName === "แอปเปิ้ล");
+    expect(apple).toHaveLength(2);
+    expect(apple.every((i) => i.status === "unknown")).toBe(true);
+    expect(apple.every((i) => i.uncertaintyReasons.includes("unattributable_withdrawal"))).toBe(true);
+    expect(report.items.find((i) => i.productName === "ส้มไต้หวัน")!.status).toBe("strong");
+  });
+
+  test("a completely unscopable เบิก fails the report closed", () => {
+    const rows = [
+      ...cell(100, 20, 0),
+      ...cell(50, 5, 0, {
+        product_name: "ส้มไต้หวัน",
+        unit: "โล",
+        accountability_round_id: ROUND_B,
+      }),
+    ];
+    const report = build(rows, {
+      houseStock: stock(
+        { productName: "แอปเปิ้ล", unit: "ลูก", quantity: 1 },
+        { productName: "ส้มไต้หวัน", unit: "โล", quantity: 2 },
+      ),
+      unattributableWithdrawalScopes: [{ kind: "report" }],
+    });
+
+    expect(report.unsafeReportReason).toBe("unattributable_withdrawal");
+    expect(report.items.every((i) => i.status === "unknown")).toBe(true);
+    expect(report.items.every((i) => i.uncertaintyReasons.includes("unattributable_withdrawal"))).toBe(true);
+    expect(report.items.every((i) => i.estimatedSoldQuantity === null)).toBe(true);
+    expect(report.items.some((i) => i.status === "strong")).toBe(false);
+    expect(report.items.some((i) => i.status === "surplus")).toBe(false);
+    expect(report.items.some((i) => i.status === "reduce")).toBe(false);
+  });
+
+  test("a bound เบิก with no persisted products for that round fails closed", () => {
+    const report = build(cell(100, 20, 0), {
+      houseStock: stock({ productName: "แอปเปิ้ล", unit: "ลูก", quantity: 1 }),
+      unattributableWithdrawalScopes: [{
+        kind: "round",
+        roundId: "33333333-3333-4333-8333-333333333333",
+      }],
+    });
+
+    expect(report.unsafeReportReason).toBe("unattributable_withdrawal");
+    expect(only(report).status).toBe("unknown");
+  });
+
+  test("a bound เบิก poisons only products withdrawn in that round", () => {
+    const rows = [
+      ...cell(100, 80, 0),
+      ...cell(50, 5, 0, {
+        product_name: "ส้มไต้หวัน",
+        unit: "โล",
+        accountability_round_id: ROUND_B,
+      }),
+    ];
+    const report = build(rows, {
+      houseStock: stock({ productName: "ส้มไต้หวัน", unit: "โล", quantity: 2 }),
+      unattributableWithdrawalScopes: [{ kind: "round", roundId: ROUND_A }],
+    });
+
+    expect(report.unsafeReportReason).toBeNull();
+    expect(report.items.map((i) => [i.productName, i.status])).toEqual([
+      ["ส้มไต้หวัน", "strong"],
+      ["แอปเปิ้ล", "unknown"],
+    ]);
+  });
+
+  test("product_return_absent is unchanged when no unattributable เบิก exists", () => {
+    const rows = [
+      row({ transaction_type: WITHDRAW, quantity: 100 }),
+      row({ product_name: "ส้มไต้หวัน", unit: "โล", transaction_type: WITHDRAW, quantity: 10 }),
+      row({ product_name: "ส้มไต้หวัน", unit: "โล", transaction_type: RETURN, quantity: 2 }),
+    ];
+    const apple = build(rows).items.find((i) => i.productName === "แอปเปิ้ล")!;
+
+    expect(apple.status).toBe("unknown");
+    expect(apple.uncertaintyReasons).toContain("product_return_absent");
+    expect(apple.uncertaintyReasons).not.toContain("unattributable_withdrawal");
+  });
+
+  test("price conflict remains advisory on a product the เบิก did not name", () => {
+    const rows: PurchaseProduceRow[] = [
+      row({ transaction_type: WITHDRAW, quantity: 89, price_per_unit: 5 }),
+      row({ transaction_type: WITHDRAW, quantity: 145, price_per_unit: 35 }),
+      row({ transaction_type: RETURN, quantity: 134, price_per_unit: 10 }),
+      row({ transaction_type: DAMAGED, quantity: 5, price_per_unit: 30 }),
+      ...cell(50, 5, 0, {
+        product_name: "ทับทิม",
+        unit: "ลูก",
+        accountability_round_id: ROUND_B,
+      }),
+    ];
+    const report = build(rows, {
+      houseStock: stock(
+        { productName: "แอปเปิ้ล", unit: "ลูก", quantity: 80 },
+        { productName: "ทับทิม", unit: "ลูก", quantity: 1 },
+      ),
+      unattributableWithdrawalScopes: [
+        { kind: "product_unit", productName: "ทับทิม", unit: "ลูก" },
+      ],
+    });
+
+    const apple = report.items.find((i) => i.productName === "แอปเปิ้ล")!;
+    expect(apple.priceConflict).toBe(true);
+    expect(apple.status).toBe("surplus");
+    expect(apple.estimatedSoldQuantity).toBe(95);
+    expect(apple.uncertaintyReasons).not.toContain("unattributable_withdrawal");
+    expect(report.items.find((i) => i.productName === "ทับทิม")!.status).toBe("unknown");
+  });
+
+  test("complete-house absence stays zero for an unaffected product", () => {
+    const report = build(cell(34, 10, 0, { product_name: "สับปะรด", unit: "ถุง" }), {
+      houseStock: stock({ productName: "ลูกพลับ", unit: "ลูก", quantity: 230 }),
+      unattributableWithdrawalScopes: [
+        { kind: "product_unit", productName: "ทับทิม", unit: "ลูก" },
+      ],
+    });
+    const pineapple = report.items.find((i) => i.productName === "สับปะรด")!;
+    expect(pineapple.houseStockQuantity).toBe(0);
+    expect(pineapple.nextDayGoodStockQuantity).toBe(10);
+    expect(pineapple.status).toBe("strong");
+    expect(report.items.find((i) => i.productName === "ทับทิม")!.status).toBe("unknown");
+  });
+
+  test("a named product that never persisted still appears as unknown", () => {
+    const report = build(cell(100, 80, 0), {
+      unattributableWithdrawalScopes: [
+        { kind: "product_unit", productName: "ทับทิม", unit: "ลูก" },
+      ],
+    });
+    expect(report.items.map((i) => [i.productName, i.status])).toEqual([
+      ["แอปเปิ้ล", "reduce"],
+      ["ทับทิม", "unknown"],
+    ]);
+    expect(report.items.find((i) => i.productName === "ทับทิม")!.uncertaintyReasons)
+      .toEqual(["unattributable_withdrawal"]);
   });
 });

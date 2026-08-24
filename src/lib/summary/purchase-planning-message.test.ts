@@ -19,6 +19,8 @@ import {
   PURCHASE_PLANNING_OVERFLOW_NOTICE,
   PURCHASE_PLANNING_TITLE,
   STATUS_HEADINGS,
+  UNATTRIBUTABLE_WITHDRAWAL_REPORT_NOTICE,
+  UNATTRIBUTABLE_WITHDRAWAL_SCOPED_NOTICE,
   WAITING_HOUSE_STOCK,
 } from "./purchase-planning-message";
 
@@ -50,6 +52,7 @@ function report(overrides: Partial<PurchasePlanningReport> = {}): PurchasePlanni
     businessDate: DATE,
     items: [item()],
     unresolvedSessionCount: 0,
+    unsafeReportReason: null,
     stockAbsence: null,
     unidentifiedRowCount: 0,
     ...overrides,
@@ -470,6 +473,61 @@ describe("purchase planning message — day-level warnings", () => {
     expect(text).not.toContain("⚠️ ข้อมูลไม่สมบูรณ์");
     expect(text).not.toContain("⚠️ ยังไม่มีข้อมูลสต๊อกในบ้าน");
     expect(text).not.toContain("ราคาขัดแย้ง");
+  });
+
+  test("a scoped unattributable เบิก names the affected products and not a UUID", () => {
+    const text = joined(report({
+      unresolvedSessionCount: 1,
+      items: [
+        item({
+          productName: "ทับทิม",
+          estimatedSoldQuantity: null,
+          sellThroughRate: null,
+          band: null,
+          status: "unknown",
+          uncertaintyReasons: ["unattributable_withdrawal"],
+          nextDayGoodStockQuantity: null,
+        }),
+        item({ status: "reduce", band: "low", sellThroughRate: 20, productName: "ลูกพลับ" }),
+      ],
+    }));
+    expect(text).toContain(UNATTRIBUTABLE_WITHDRAWAL_SCOPED_NOTICE);
+    expect(text).toContain("ทับทิม");
+    expect(text).toContain(STATUS_HEADINGS.reduce);
+    expect(text).toContain("ลูกพลับ — ขายออก 20%");
+    expect(text).not.toContain(UNATTRIBUTABLE_WITHDRAWAL_REPORT_NOTICE);
+    expect(text).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  });
+
+  test("an unscopable เบิก suppresses confident buy sections", () => {
+    const text = joined(report({
+      unresolvedSessionCount: 1,
+      unsafeReportReason: "unattributable_withdrawal",
+      items: [
+        item({
+          status: "unknown",
+          band: null,
+          sellThroughRate: null,
+          estimatedSoldQuantity: null,
+          uncertaintyReasons: ["unattributable_withdrawal"],
+          nextDayGoodStockQuantity: null,
+        }),
+        item({
+          productName: "ส้มไต้หวัน",
+          status: "strong",
+          band: "high",
+          sellThroughRate: 90,
+          nextDayGoodStockQuantity: 1,
+        }),
+      ],
+    }));
+    expect(text).toContain(UNATTRIBUTABLE_WITHDRAWAL_REPORT_NOTICE);
+    expect(text).toContain(STATUS_HEADINGS.strong);
+    expect(text).toContain(EMPTY_GREEN_NOTICE);
+    expect(text).not.toContain("ส้มไต้หวัน — ขายออก");
+    expect(text).not.toContain(STATUS_HEADINGS.surplus);
+    expect(text).not.toContain(STATUS_HEADINGS.reduce);
+    expect(text).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
   });
 });
 

@@ -494,6 +494,15 @@ export async function finalizePendingGeneration(
       marketLabel: parsed.session_title,
       canonicalLines: canonicalWithdrawalItemLines(parsed),
     }),
+    // Task 2 (20260825090000): forwarded verbatim to try_finalize_pending_generation.
+    // The RPC — not this file — decides whether the named predecessor may
+    // actually be superseded; this is only the pointer the operator UX
+    // (replacement-draft.ts) stamped on the draft before any item was appended.
+    replaces_produce_session_id: snapshot.replaces_produce_session_id ?? null,
+    replacement_actor_id: snapshot.line_user_id ?? null,
+    replacement_reason: snapshot.replaces_produce_session_id
+      ? "operator_correction_replacement"
+      : null,
   };
   // Named fields, not a spread of the parsed item. A WeighSessionItem also
   // carries lookup-only evidence that must never reach a produce row —

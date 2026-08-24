@@ -153,6 +153,8 @@ export interface RecoverableDeferredEventRow {
   close_line_event_id: string | null;
   close_line_timestamp_ms: number | null;
   expires_at: string | null;
+  /** Durable no-header-burst identity — see 20260825090000. NULL pre-migration. */
+  recovery_bundle_id: string | null;
 }
 
 export interface ConfirmFinalizationResult {
@@ -365,7 +367,7 @@ export class PendingSessionService {
     const { data, error } = await this.supabase
       .from("pending_produce_deferred_events")
       .select(
-        "line_event_id, raw_message_id, session_key, source_id, line_user_id, line_timestamp_ms, raw_text, status, defer_reason, session_generation, opener_line_event_id, close_line_event_id, close_line_timestamp_ms, expires_at",
+        "line_event_id, raw_message_id, session_key, source_id, line_user_id, line_timestamp_ms, raw_text, status, defer_reason, session_generation, opener_line_event_id, close_line_event_id, close_line_timestamp_ms, expires_at, recovery_bundle_id",
       )
       .eq("session_key", sessionKey)
       .eq("runtime_environment", getRuntimeEnvironment())
@@ -381,29 +383,38 @@ export class PendingSessionService {
     return (data ?? []) as RecoverableDeferredEventRow[];
   }
 
-  async markDeferredEventsRecovered(
-    eventIds: string[],
-    sessionGeneration: string,
-  ): Promise<void> {
-    if (eventIds.length === 0) return;
-    const { error } = await this.supabase
-      .from("pending_produce_deferred_events")
-      .update({
-        status: "admitted",
-        defer_reason: "explicit_recovery",
-        session_generation: sessionGeneration,
-        resolved_at: new Date().toISOString(),
-      })
-      .in("line_event_id", eventIds)
-      .in("status", [
-        "waiting",
-        "rejected_before_opener",
-        "rejected_after_close",
-        "rejected_orphan",
-      ]);
-    if (error) {
-      throw new Error(`Produce deferred recovery mark failed: ${error.message}`);
-    }
+  /**
+   * Explicit-recovery append for ONE deferred event. Wraps
+   * append_pending_session and the pending_produce_deferred_events status
+   * flip in a single RPC transaction (20260825090000), so a crash between
+   * "appended" and "marked admitted" is impossible — either both commit or
+   * neither does. This is what lets recoverLatestRejectedBundle mark each
+   * event's durable status right after its own append, instead of batching a
+   * mark at the end of the whole loop (the old shape that could leave
+   * already-appended rows permanently stuck at 'waiting'/'rejected_*').
+   */
+  async recoverDeferredEvent(
+    sessionKey: string,
+    lineEventId: string,
+    rawText: string,
+    replyToken: string | null,
+    lineTimestampMs: number,
+    expectedGeneration: string,
+  ): Promise<PendingSession> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data, error } = await (this.supabase as any).rpc(
+      "recover_pending_produce_deferred_event",
+      {
+        p_session_key:                 sessionKey,
+        p_line_event_id:               lineEventId,
+        p_raw_text:                    rawText,
+        p_reply_token:                 replyToken,
+        p_line_timestamp_ms:           lineTimestampMs,
+        p_expected_session_generation: expectedGeneration,
+      },
+    );
+    if (error) throw new Error(`Produce deferred recovery append failed: ${error.message}`);
+    return this.mapAppendRpcResult(sessionKey, data, expectedGeneration, lineTimestampMs);
   }
 
   async recordBoundaryRejectedProduceItem(input: {
@@ -614,6 +625,18 @@ export class PendingSessionService {
       p_expected_item_count:          expectedItemCount  ?? null,
     });
     if (error) throw new Error(`pending session append failed: ${error.message}`);
+    return this.mapAppendRpcResult(sessionKey, data, expectedGeneration, lineTimestampMs);
+  }
+
+  /** Shared by append() and recoverDeferredEvent() — both call an RPC that
+   * wraps append_pending_session and returns its {accepted, reason, session}
+   * shape directly. */
+  private mapAppendRpcResult(
+    sessionKey: string,
+    data: unknown,
+    expectedGeneration?: string,
+    lineTimestampMs?: number,
+  ): PendingSession {
     const result = data as {
       accepted: boolean;
       reason?: string;

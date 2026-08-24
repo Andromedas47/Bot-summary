@@ -341,6 +341,40 @@ class RecoveryDatabase {
     }
     if (name === "append_pending_session") return this.appendPending(args);
 
+    if (name === "recover_pending_produce_deferred_event") {
+      // Mirrors 20260825090000: append and the deferred-status flip happen
+      // together. The crash-injection point stays inside appendPending, so a
+      // simulated crash aborts BEFORE the status flip too — matching a real
+      // rolled-back Postgres transaction.
+      const appended = this.appendPending({
+        p_session_key: args.p_session_key,
+        p_new_text: args.p_raw_text,
+        p_reply_token: args.p_reply_token,
+        p_line_event_id: args.p_line_event_id,
+        p_line_timestamp_ms: args.p_line_timestamp_ms,
+        p_mark_close: false,
+        p_expected_session_generation: args.p_expected_session_generation,
+      });
+      const result = appended.data as { accepted?: boolean } | null;
+      if (result?.accepted) {
+        const deferredRow = this.deferred()
+          .find((row) => row.line_event_id === args.p_line_event_id);
+        if (
+          deferredRow
+          && ["waiting", "rejected_before_opener", "rejected_after_close", "rejected_orphan"]
+            .includes(String(deferredRow.status))
+        ) {
+          Object.assign(deferredRow, {
+            status: "admitted",
+            defer_reason: "explicit_recovery",
+            session_generation: args.p_expected_session_generation,
+            resolved_at: new Date().toISOString(),
+          });
+        }
+      }
+      return appended;
+    }
+
     if (name === "open_pending_plain_text_generation") {
       let pending = this.pending(String(args.p_session_key));
       if (
@@ -970,7 +1004,13 @@ describe("recovery idempotency", () => {
     expect(db.recoverable()).toHaveLength(0);
   });
 
-  it("finishes after a partial admitted mark without duplicating A/B", async () => {
+  it("marks each event admitted as it is recovered — no manual cleanup after a partial crash", async () => {
+    // Closes the known PR #82 limitation: a non-boundary error partway
+    // through recovery used to leave already-appended events' deferred rows
+    // permanently at 'waiting'/'rejected_*', which the finalization guard
+    // trigger reads as unresolved forever unless an operator hand-fixes the
+    // row. recoverDeferredEvent (20260825090000) commits the append and the
+    // status flip together, so this must already be true with NO manual fixup.
     const db = new RecoveryDatabase();
     seedDeferred(db, 4, "rejected_before_opener");
     const replies: string[] = [];
@@ -981,9 +1021,9 @@ describe("recovery idempotency", () => {
     const appended = db.rows("pending_session_ingest")
       .filter((row) => String(row.line_event_id).startsWith("rejected_before_opener-"));
     expect(appended).toHaveLength(2);
-    for (const row of db.deferred().slice(0, 2)) {
-      Object.assign(row, { status: "admitted", defer_reason: "explicit_recovery", resolved_at: new Date().toISOString() });
-    }
+    // No manual Object.assign here — the first two deferred rows must already
+    // read 'admitted' purely from the crashed recovery attempt.
+    expect(db.deferred().slice(0, 2).every((row) => row.status === "admitted")).toBe(true);
     expect(db.recoverable().map((row) => row.line_event_id)).toEqual([
       "rejected_before_opener-3",
       "rejected_before_opener-4",

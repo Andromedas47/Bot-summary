@@ -40,6 +40,7 @@ function event(overrides: Partial<RecoverableDeferredEvent> & Pick<
     close_line_event_id: null,
     close_line_timestamp_ms: null,
     expires_at: new Date(Date.now() + 30_000).toISOString(),
+    recovery_bundle_id: null,
     ...overrides,
   };
 }
@@ -177,6 +178,66 @@ describe("rejected Produce bundle clustering", () => {
     expect(selection.kind).toBe("ambiguous");
     expect(recoverCommandReply({ status: "ambiguous" }))
       .toBe(RECOVER_REFUSED_AMBIGUOUS_REPLY);
+  });
+
+  it("groups a genuine no-header burst by its durable recovery_bundle_id", () => {
+    const selection = selectRecoveryBundle([
+      event({
+        line_event_id: "burst-1",
+        status: "rejected_orphan",
+        line_timestamp_ms: 9_000,
+        recovery_bundle_id: "bundle-morning",
+      }),
+      event({
+        line_event_id: "burst-2",
+        status: "rejected_orphan",
+        line_timestamp_ms: 9_001,
+        recovery_bundle_id: "bundle-morning",
+      }),
+    ]);
+    expect(selection.kind).toBe("one");
+    expect(selection.kind === "one" && selection.bundle.key).toBe("orphan:bundle:bundle-morning");
+    expect(selection.kind === "one" && selection.bundle.recoveryBundleId).toBe("bundle-morning");
+    expect(selection.kind === "one" && selection.bundle.events.map((row) => row.line_event_id))
+      .toEqual(["burst-1", "burst-2"]);
+  });
+
+  it("never merges a 09:00 bundle and a 14:00 bundle sharing the same session", () => {
+    const morning = [
+      event({
+        line_event_id: "m1", status: "rejected_orphan",
+        line_timestamp_ms: 9_000, recovery_bundle_id: "bundle-am",
+      }),
+      event({
+        line_event_id: "m2", status: "rejected_orphan",
+        line_timestamp_ms: 9_001, recovery_bundle_id: "bundle-am",
+      }),
+    ];
+    const afternoon = [
+      event({
+        line_event_id: "a1", status: "rejected_orphan",
+        line_timestamp_ms: 14_000, recovery_bundle_id: "bundle-pm",
+      }),
+      event({
+        line_event_id: "a2", status: "rejected_orphan",
+        line_timestamp_ms: 14_001, recovery_bundle_id: "bundle-pm",
+      }),
+    ];
+    const bundles = clusterRecoverableEvents([...morning, ...afternoon]);
+    expect(bundles).toHaveLength(2);
+    expect(bundles.map((bundle) => bundle.key).sort()).toEqual([
+      "orphan:bundle:bundle-am",
+      "orphan:bundle:bundle-pm",
+    ]);
+    expect(selectRecoveryBundle([...morning, ...afternoon]).kind).toBe("ambiguous");
+  });
+
+  it("falls back to unkeyed when recovery_bundle_id is absent (pre-migration rows)", () => {
+    const selection = selectRecoveryBundle([
+      event({ line_event_id: "legacy-1", status: "rejected_orphan", line_timestamp_ms: 1 }),
+      event({ line_event_id: "legacy-2", status: "rejected_orphan", line_timestamp_ms: 2 }),
+    ]);
+    expect(selection.kind).toBe("unkeyed");
   });
 
   it("recovers a keyed orphan only by explicit command", () => {

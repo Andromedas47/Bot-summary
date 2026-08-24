@@ -57,8 +57,9 @@ export const dynamic = "force-dynamic";
  *   - Idempotent: a deterministic X-Line-Retry-Key per (date, target, part)
  *     means a repeated scheduler call cannot produce duplicate LINE messages.
  *   - Per-target isolation: one failing target never blocks the others.
- *   - Any failure returns 500 so the scheduler retries; already-delivered
- *     targets are protected by their retry keys.
+ *   - Any failure returns 500 for monitoring/manual recovery. pg_net does not
+ *     automatically retry HTTP failures; a same-date rerun is protected by
+ *     deterministic retry keys.
  *   - Shares the StockSummary model with the manual command — no second
  *     business calculation lives here.
  */

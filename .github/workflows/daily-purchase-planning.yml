@@ -1,0 +1,37 @@
+name: daily-purchase-planning
+
+# Automatic scheduling is owned by Supabase Cron at 08:15 Asia/Bangkok
+# (01:15 UTC), matching daily-stock-summary and daily-sales-summary.
+# GitHub Actions remains manual-only for debug and emergency runs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Optional business date override (YYYY-MM-DD). Leave blank for the previous business date."
+        required: false
+        type: string
+      debug:
+        description: "Preview messages without sending any LINE push."
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call daily-purchase-planning cron
+        run: |
+          URL="https://bot-summary.vercel.app/api/cron/daily-purchase-planning"
+          QUERY=""
+          if [ -n "${{ inputs.date }}" ]; then
+            QUERY="?date=${{ inputs.date }}"
+          fi
+          if [ "${{ inputs.debug }}" = "true" ]; then
+            if [ -n "$QUERY" ]; then QUERY="$QUERY&debug=1"; else QUERY="?debug=1"; fi
+          fi
+          curl -sf --max-time 60 \
+            -X GET \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "$URL$QUERY"

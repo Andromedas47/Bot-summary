@@ -294,7 +294,7 @@ describe("daily sales summary cron — failure behavior", () => {
     expect(pushCalls).toHaveLength(0);
   });
 
-  test("isolates a failing target and reports 500 so the scheduler retries", async () => {
+  test("isolates a failing target and reports 500 for monitoring", async () => {
     process.env.SALES_SUMMARY_LINE_TARGETS = "Cgood,Cbad";
     pushBehavior = (call) => {
       if (call.to === "Cbad") throw new Error("LINE push HTTP 429");

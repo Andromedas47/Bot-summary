@@ -117,8 +117,8 @@ export async function GET(req: NextRequest) {
   }
 
   // Per-target isolation: one failing push must not block the remaining
-  // targets. The deterministic retry key makes the eventual cron retry
-  // idempotent for targets that already received today's summary.
+  // targets. The deterministic retry key makes a manual rerun idempotent for
+  // targets that already received today's summary.
   let sentCount = 0;
   const failedSourceIds: string[] = [];
   for (const [sourceId, rows] of summariesBySource) {
@@ -147,8 +147,8 @@ export async function GET(req: NextRequest) {
       sent: sentCount,
       failed: failedSourceIds.length,
     });
-    // 500 so the cron scheduler retries; delivered targets are protected by
-    // the retry key and will not receive duplicates.
+    // Keep the partial failure observable. pg_net does not automatically retry
+    // HTTP failures; a manual rerun is protected by the retry key.
     return NextResponse.json(
       {
         ok: false,

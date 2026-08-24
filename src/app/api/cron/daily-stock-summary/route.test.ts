@@ -442,7 +442,7 @@ describe("daily stock summary cron — failure behavior", () => {
     expect(pushCalls).toHaveLength(0);
   });
 
-  test("isolates a failing target and reports 500 so the scheduler retries", async () => {
+  test("isolates a failing target and reports 500 for monitoring", async () => {
     produceResult = { data: produceRows(), error: null };
     process.env.STOCK_SUMMARY_LINE_TARGETS = "Cgood,Cbad";
     pushBehavior = (call) => {

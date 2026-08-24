@@ -82,6 +82,14 @@ export function houseStockSummaryRetryKey(
   return retryKey("daily-house-stock", businessDate, targetId, partIndex);
 }
 
+export function purchasePlanningRetryKey(
+  businessDate: string,
+  targetId: string,
+  partIndex: number,
+): string {
+  return retryKey("daily-purchase-planning", businessDate, targetId, partIndex);
+}
+
 export function houseStockImmediateRetryKey(
   sessionGeneration: string,
   partIndex: number,

@@ -10,17 +10,20 @@ import {
   type PurchasePlanningReport,
 } from "./purchase-planning";
 import {
+  buildIncompleteReasonBlock,
   buildPurchasePlanningBlocks,
   buildPurchasePlanningMessages,
+  CAUSE_HEADING,
   EMPTY_GREEN_NOTICE,
+  EMPTY_STATUS_NOTICE,
   formatSellThroughRate,
+  INCOMPLETE_DATA_SAFETY_NOTICE,
   PRICE_CONFLICT_FOOTER,
+  PRODUCT_RETURN_ABSENT_CAUSE,
   PURCHASE_PLANNING_EMPTY_NOTICE,
   PURCHASE_PLANNING_OVERFLOW_NOTICE,
   PURCHASE_PLANNING_TITLE,
   STATUS_HEADINGS,
-  UNATTRIBUTABLE_WITHDRAWAL_REPORT_NOTICE,
-  UNATTRIBUTABLE_WITHDRAWAL_SCOPED_NOTICE,
   WAITING_HOUSE_STOCK,
 } from "./purchase-planning-message";
 
@@ -87,7 +90,28 @@ describe("purchase planning message — compact operator UX", () => {
       items: [item({ status: "surplus", band: "medium" })],
     }));
     expect(text).toContain(STATUS_HEADINGS.strong);
+    expect(text).toContain("วันนี้ยังไม่มีสินค้าที่ควรซื้อเพิ่ม");
     expect(text).toContain(EMPTY_GREEN_NOTICE);
+    expect(text).not.toContain("ยังไม่มีรายการที่ยืนยันได้");
+  });
+
+  test("empty orange and red stay omitted and keep category-specific copy if shown", () => {
+    expect(EMPTY_STATUS_NOTICE.surplus).toBe("วันนี้ยังไม่มีสินค้าที่ต้องชะลอการซื้อ");
+    expect(EMPTY_STATUS_NOTICE.reduce).toBe("วันนี้ยังไม่มีสินค้าที่ควรลดการซื้อ");
+    const onlyGreen = joined(report({
+      items: [item({
+        status: "strong",
+        band: "high",
+        sellThroughRate: 82,
+        nextDayGoodStockQuantity: 4,
+        nextStockToSoldRatio: 0.1,
+      })],
+    }));
+    expect(onlyGreen).not.toContain(STATUS_HEADINGS.surplus);
+    expect(onlyGreen).not.toContain(STATUS_HEADINGS.reduce);
+    expect(onlyGreen).not.toContain(EMPTY_STATUS_NOTICE.surplus);
+    expect(onlyGreen).not.toContain(EMPTY_STATUS_NOTICE.reduce);
+    expect(onlyGreen).not.toContain("ยังไม่มีรายการที่ยืนยันได้");
   });
 
   test("an empty day still answers the buy question, then says there is no data", () => {
@@ -381,8 +405,10 @@ describe("purchase planning message — compact operator UX", () => {
     expect(text).toContain("ไซมัส, แตงไทย");
     expect(text.indexOf("สับปะรด")).toBeLessThan(text.indexOf("อะโวคาโด"));
     expect(text.indexOf("อะโวคาโด")).toBeLessThan(text.indexOf("ลองกอง"));
-    expect(text).toContain("⚠️ ข้อมูลไม่สมบูรณ์ 15 ชุด");
-    expect(text).toContain("รายการ ⚠️ ด้านบนจึงยังไม่ถูกใช้ตัดสินใจซื้อ");
+    expect(text).toContain(`${CAUSE_HEADING}\n• พบข้อมูลที่ไม่สมบูรณ์ 15 ชุด`);
+    expect(text).toContain(INCOMPLETE_DATA_SAFETY_NOTICE);
+    expect(text).not.toContain("⚠️ ข้อมูลไม่สมบูรณ์");
+    expect(text).not.toContain("รายการ ⚠️ ด้านบนจึงยังไม่ถูกใช้ตัดสินใจซื้อ");
     expect(text).not.toContain("เบิก ");
     expect(text).not.toContain("ขายประมาณ");
     expect(text).not.toContain("คืนดีจากตลาด");
@@ -432,10 +458,12 @@ describe("purchase planning message — day-level warnings", () => {
         nextDayGoodStockQuantity: null,
       })],
     }));
-    expect(text).toContain("⚠️ ข้อมูลไม่สมบูรณ์ 15 ชุด");
-    expect(text).toContain("รายการ ⚠️ ด้านบนจึงยังไม่ถูกใช้ตัดสินใจซื้อ");
+    expect(text).toContain(`${CAUSE_HEADING}\n• พบข้อมูลที่ไม่สมบูรณ์ 15 ชุด`);
+    expect(text).toContain(INCOMPLETE_DATA_SAFETY_NOTICE);
+    expect(text).not.toContain("⚠️ ข้อมูลไม่สมบูรณ์");
+    expect(text).not.toContain("รายการ ⚠️ ด้านบนจึงยังไม่ถูกใช้ตัดสินใจซื้อ");
     expect(text).not.toContain("ข้อมูลวันนี้ยังไม่ครบ");
-    expect(text.match(/ข้อมูลไม่สมบูรณ์ 15 ชุด/g)?.length).toBe(1);
+    expect(text.match(/พบข้อมูลที่ไม่สมบูรณ์ 15 ชุด/g)?.length).toBe(1);
   });
 
   test("a missing house snapshot is stated rather than assumed empty", () => {
@@ -464,6 +492,8 @@ describe("purchase planning message — day-level warnings", () => {
     expect(text).toContain(STATUS_HEADINGS.surplus);
     expect(text).toContain("แอปเปิ้ล — ขายออก 40.6%");
     expect(text).toContain(PRICE_CONFLICT_FOOTER);
+    expect(PRICE_CONFLICT_FOOTER.startsWith("ℹ️")).toBe(true);
+    expect(text).not.toContain("⚠️ บางรายการมีราคาขัดแย้ง");
     expect(text).not.toContain("⚠️ ราคาขัดแย้ง แต่จำนวนใช้ประเมินได้");
     expect(text.match(/ราคาขัดแย้ง/g)?.length).toBe(1);
   });
@@ -491,11 +521,14 @@ describe("purchase planning message — day-level warnings", () => {
         item({ status: "reduce", band: "low", sellThroughRate: 20, productName: "ลูกพลับ" }),
       ],
     }));
-    expect(text).toContain(UNATTRIBUTABLE_WITHDRAWAL_SCOPED_NOTICE);
     expect(text).toContain("ทับทิม");
     expect(text).toContain(STATUS_HEADINGS.reduce);
     expect(text).toContain("ลูกพลับ — ขายออก 20%");
-    expect(text).not.toContain(UNATTRIBUTABLE_WITHDRAWAL_REPORT_NOTICE);
+    expect(text).toContain(`${CAUSE_HEADING}\n• พบรายการเบิก 1 ชุดที่ยังระบุรอบไม่ได้`);
+    expect(text).toContain(INCOMPLETE_DATA_SAFETY_NOTICE);
+    expect(text).not.toContain("⚠️ มีรายการเบิกที่ยังระบุรอบไม่ได้");
+    expect(text).not.toContain("⚠️ ยังประเมินการซื้อไม่ได้ เพราะมีรายการเบิก");
+    expect(text).not.toContain("⚠️ ข้อมูลไม่สมบูรณ์");
     expect(text).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
   });
 
@@ -521,13 +554,109 @@ describe("purchase planning message — day-level warnings", () => {
         }),
       ],
     }));
-    expect(text).toContain(UNATTRIBUTABLE_WITHDRAWAL_REPORT_NOTICE);
+    expect(text).toContain(`${CAUSE_HEADING}\n• พบรายการเบิก 1 ชุดที่ยังระบุรอบไม่ได้`);
+    expect(text).toContain(INCOMPLETE_DATA_SAFETY_NOTICE);
     expect(text).toContain(STATUS_HEADINGS.strong);
     expect(text).toContain(EMPTY_GREEN_NOTICE);
     expect(text).not.toContain("ส้มไต้หวัน — ขายออก");
     expect(text).not.toContain(STATUS_HEADINGS.surplus);
     expect(text).not.toContain(STATUS_HEADINGS.reduce);
+    expect(text).not.toContain("⚠️ ยังประเมินการซื้อไม่ได้ เพราะมีรายการเบิก");
     expect(text).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  });
+});
+
+describe("purchase planning message — consolidated cause block", () => {
+  const unknown = (overrides: Partial<PurchasePlanningItem> = {}) => item({
+    productName: "ไซมัส",
+    estimatedSoldQuantity: null,
+    sellThroughRate: null,
+    band: null,
+    status: "unknown",
+    nextDayGoodStockQuantity: null,
+    ...overrides,
+  });
+
+  test("unattributable withdrawal prints a reason bullet with the session count", () => {
+    const text = joined(report({
+      unresolvedSessionCount: 1,
+      items: [unknown({ uncertaintyReasons: ["unattributable_withdrawal"] })],
+    }));
+    expect(text).toContain("• พบรายการเบิก 1 ชุดที่ยังระบุรอบไม่ได้");
+    expect(text.match(/พบรายการเบิก 1 ชุดที่ยังระบุรอบไม่ได้/g)?.length).toBe(1);
+    expect(text).not.toContain(PRODUCT_RETURN_ABSENT_CAUSE);
+  });
+
+  test("product_return_absent prints a return-omission bullet", () => {
+    const text = joined(report({
+      items: [unknown({ uncertaintyReasons: ["product_return_absent"] })],
+    }));
+    expect(text).toContain(`• ${PRODUCT_RETURN_ABSENT_CAUSE}`);
+    expect(text.match(new RegExp(PRODUCT_RETURN_ABSENT_CAUSE, "g"))?.length).toBe(1);
+    expect(text).not.toContain("พบรายการเบิก");
+  });
+
+  test("both causes appear exactly once, with the safety line", () => {
+    const text = joined(report({
+      unresolvedSessionCount: 1,
+      items: [unknown({
+        uncertaintyReasons: ["unattributable_withdrawal", "product_return_absent"],
+      })],
+    }));
+    expect(text).toContain(
+      [
+        CAUSE_HEADING,
+        "• พบรายการเบิก 1 ชุดที่ยังระบุรอบไม่ได้",
+        `• ${PRODUCT_RETURN_ABSENT_CAUSE}`,
+        `• ${INCOMPLETE_DATA_SAFETY_NOTICE}`,
+      ].join("\n"),
+    );
+    expect(text.match(/พบรายการเบิก 1 ชุดที่ยังระบุรอบไม่ได้/g)?.length).toBe(1);
+    expect(text.match(new RegExp(PRODUCT_RETURN_ABSENT_CAUSE, "g"))?.length).toBe(1);
+    expect(text).not.toContain("⚠️ ข้อมูลไม่สมบูรณ์");
+    expect(text).not.toContain("รายการ ⚠️ ด้านบนจึงยังไม่ถูกใช้ตัดสินใจซื้อ");
+  });
+
+  test("neither cause is invented when the metadata is absent", () => {
+    const r = report({
+      items: [unknown({ uncertaintyReasons: ["return_missing"] })],
+    });
+    const text = joined(r);
+    expect(text).not.toContain("พบรายการเบิก");
+    expect(text).not.toContain(PRODUCT_RETURN_ABSENT_CAUSE);
+    expect(text).not.toContain(CAUSE_HEADING);
+    expect(text).not.toContain(INCOMPLETE_DATA_SAFETY_NOTICE);
+    expect(buildIncompleteReasonBlock(r)).toBeNull();
+  });
+
+  test("the unknown heading and packed names stay unchanged", () => {
+    const text = joined(report({
+      unresolvedSessionCount: 1,
+      items: [
+        unknown({
+          productName: "ไซมัส",
+          uncertaintyReasons: ["unattributable_withdrawal", "product_return_absent"],
+        }),
+        unknown({
+          productName: "แตงไทย",
+          uncertaintyReasons: ["product_return_absent"],
+        }),
+      ],
+    }));
+    expect(text).toContain(`${STATUS_HEADINGS.unknown} 2 รายการ`);
+    expect(text).toContain("ไซมัส, แตงไทย");
+    expect(text).not.toContain("ขายออก ");
+  });
+
+  test("the safety explanation appears only with the incomplete reason block", () => {
+    const withBlock = joined(report({
+      unresolvedSessionCount: 1,
+      items: [unknown({ uncertaintyReasons: ["unattributable_withdrawal"] })],
+    }));
+    const withoutBlock = joined(report());
+    expect(withBlock).toContain(INCOMPLETE_DATA_SAFETY_NOTICE);
+    expect(withoutBlock).not.toContain(INCOMPLETE_DATA_SAFETY_NOTICE);
+    expect(withoutBlock).not.toContain(CAUSE_HEADING);
   });
 });
 
@@ -549,6 +678,53 @@ describe("purchase planning message — LINE limits", () => {
     }
     expect(messages[0]).toContain(PURCHASE_PLANNING_TITLE);
     expect(messages[messages.length - 1]).toContain(PURCHASE_PLANNING_OVERFLOW_NOTICE.trim());
+  });
+
+  test("a reason block remains readable when packed across chunk boundaries", () => {
+    const unknown = item({
+      productName: "ทับทิม",
+      estimatedSoldQuantity: null,
+      sellThroughRate: null,
+      band: null,
+      status: "unknown",
+      uncertaintyReasons: ["unattributable_withdrawal", "product_return_absent"],
+      nextDayGoodStockQuantity: null,
+    });
+    const bothCauses = report({
+      unresolvedSessionCount: 1,
+      items: [...manyItems(40), unknown],
+    });
+    const oneCause = report({
+      unresolvedSessionCount: 2,
+      items: manyItems(40),
+    });
+
+    for (const r of [bothCauses, oneCause]) {
+      const messages = buildPurchasePlanningMessages(r, { maxCodePoints: 180, maxMessages: 20 });
+      const text = messages.join("\n\n");
+      expect(text).toContain(CAUSE_HEADING);
+      expect(text).toContain(INCOMPLETE_DATA_SAFETY_NOTICE);
+      expect(text.indexOf(CAUSE_HEADING)).toBeLessThan(text.indexOf(INCOMPLETE_DATA_SAFETY_NOTICE));
+      for (const message of messages) {
+        expect(countCodePoints(message)).toBeLessThanOrEqual(180);
+      }
+    }
+
+    const bothText = buildPurchasePlanningMessages(bothCauses, {
+      maxCodePoints: 180,
+      maxMessages: 20,
+    }).join("\n\n");
+    expect(bothText).toContain("พบรายการเบิก 1 ชุดที่ยังระบุรอบไม่ได้");
+    expect(bothText).toContain(PRODUCT_RETURN_ABSENT_CAUSE);
+    expect(bothText).not.toContain("⚠️ ข้อมูลไม่สมบูรณ์");
+
+    const oneText = buildPurchasePlanningMessages(oneCause, {
+      maxCodePoints: 180,
+      maxMessages: 20,
+    }).join("\n\n");
+    expect(oneText).toContain("พบข้อมูลที่ไม่สมบูรณ์ 2 ชุด");
+    expect(oneText).not.toContain(PRODUCT_RETURN_ABSENT_CAUSE);
+    expect(oneText).not.toContain("พบรายการเบิก");
   });
 
   test("a report that fits is not truncated and splits no product block", () => {

@@ -32,7 +32,6 @@ import {
   buildBlockingValidationReply,
   buildReviewValidationReply,
 } from "@/lib/produce/entry-validation-message";
-import { withCancelActiveDraftHint } from "@/lib/produce/cancel-active-draft";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 import { bangkokBusinessDateNow } from "@/lib/business-date";
 import { produceCommandSourceFromIdentity } from "./session-opener";
@@ -220,10 +219,9 @@ export class GuidedSessionCaptureService {
       // document is still reported as a broken document rather than as a pile
       // of unmatched products.
       //
-      // This branch is guarded by `!current.closeRequested` and runs BEFORE
-      // close_produce_structured_session, so a refusal here provably leaves the
-      // draft in capture with no close boundary — the cancel hint is true.
-      const gate = await this.runEntryGate(current, input.lineEventId, true);
+      // This branch runs before the close boundary, so a validation refusal
+      // leaves the same draft open for targeted correction.
+      const gate = await this.runEntryGate(current, input.lineEventId);
       if (gate) return gate;
     }
 
@@ -299,10 +297,9 @@ export class GuidedSessionCaptureService {
     // recomputed here rather than trusted from the close preview.
     //
     // No cancel hint: the close boundary is already written by the time confirm
-    // is pressed, so guard 8 of cancel_active_pending_produce_draft would refuse
-    // with close_in_progress. Telling the operator to type ยกเลิกรายการ here
-    // would be an instruction that can only fail.
-    const gate = await this.runEntryGate(current, input.lineEventId, false);
+    // is pressed. Validation copy therefore stays focused on correcting the
+    // effective draft, never on abandoning it.
+    const gate = await this.runEntryGate(current, input.lineEventId);
     if (gate) return gate;
 
     const result = await this.commands.execute(
@@ -347,15 +344,6 @@ export class GuidedSessionCaptureService {
   private async runEntryGate(
     current: GuidedSessionSnapshot,
     lineEventId: string,
-    /**
-     * True ONLY where the caller can prove no close boundary has been written
-     * yet, so `ยกเลิกรายการ` would still be accepted by the RPC. requestClose
-     * runs before `close_produce_structured_session`, so it passes true;
-     * confirmFinalize runs after it, where guard 8 refuses with
-     * `close_in_progress` — offering the command there would tell the operator
-     * to type something that is guaranteed to fail.
-     */
-    draftStillCancellable: boolean,
   ): Promise<
     | ({ status: "validation_failed"; errors: string[]; detail: string } & GuidedSessionSnapshot)
     | ({ status: "review_required"; detail: string } & GuidedSessionSnapshot)
@@ -383,24 +371,18 @@ export class GuidedSessionCaptureService {
       };
     }
 
-    // The cancel hint is attached here rather than inside the shared reply
-    // builders — the deferred finalizer uses those on an already terminal
-    // generation — and only when the CALLER proved the draft is still
-    // cancellable. Both refusals leave the structured draft in capture, but
-    // only the pre-close caller can promise no close boundary exists.
-    const hint = (reply: string) => (draftStillCancellable ? withCancelActiveDraftHint(reply) : reply);
     if (gate.decision === "blocked") {
       return {
         status: "validation_failed",
         errors: gate.result.blocking.map((exception) => exception.kind),
-        detail: hint(buildBlockingValidationReply(gate.result)),
+        detail: buildBlockingValidationReply(gate.result),
         ...snapshot,
       };
     }
     if (gate.decision === "review_presented") {
       return {
         status: "review_required",
-        detail: hint(buildReviewValidationReply(gate.result)),
+        detail: buildReviewValidationReply(gate.result),
         ...snapshot,
       };
     }

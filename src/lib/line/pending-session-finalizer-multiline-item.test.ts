@@ -89,7 +89,11 @@ function ingestRows(messages: string[], generation = GENERATION): Row[] {
   }));
 }
 
-function snapshot(accumulatedText: string, generation = GENERATION): PendingSession {
+function snapshot(
+  accumulatedText: string,
+  generation = GENERATION,
+  messageCount = MESSAGES.length,
+): PendingSession {
   const now = new Date().toISOString();
   return {
     id: "pending-1",
@@ -102,7 +106,7 @@ function snapshot(accumulatedText: string, generation = GENERATION): PendingSess
     updated_at: now,
     session_generation: generation,
     // Bare close (no declared count) — matches the incident's จบรายการเบิก.
-    close_event_timestamp_ms: (MESSAGES.length + 1) * 1_000,
+    close_event_timestamp_ms: (messageCount + 1) * 1_000,
     close_requested_at: now,
     close_line_event_id: "close-event-1",
     close_finalize_started_at: null,
@@ -111,7 +115,7 @@ function snapshot(accumulatedText: string, generation = GENERATION): PendingSess
     close_deadline_at: now,
     close_session_generation: generation,
     expected_item_count: null,
-    ingest_revision: MESSAGES.length + 1,
+    ingest_revision: messageCount + 1,
     runtime_environment: "development",
   };
 }
@@ -183,5 +187,49 @@ describe("close barrier — pending events merged before validation (main sessio
     // it surfaces as an explicit validation error naming item 15.
     expect(errors.length).toBeGreaterThan(0);
     expect(errors.some((e) => e.includes("15") && e.includes("ปลาหวานงา"))).toBe(true);
+  });
+
+  it("keeps correction evidence append-only but finalizes only the corrected effective item", async () => {
+    const messages = [
+      "กี้-ตลาดทดสอบ เบิก 24/8/2569\n17. อะโวคาโด้ 80 บาท\n15 โล",
+      "แก้ข้อ 17",
+      "17. อะโวคาโด 75 บาท\n16 โล",
+    ];
+    const fixture = tables(messages);
+    const db = new FinalizerDouble(fixture);
+    const snap = snapshot(messages.join("\n"), GENERATION, messages.length);
+
+    const result = await finalizePendingGeneration(db as never, snap, async () => ({}));
+
+    expect(result.status).toBe("finalized");
+    expect(fixture.pending_session_ingest.map((row) => row.raw_text)).toEqual(messages);
+    const call = db.rpcCalls.find((entry) => entry.name === "try_finalize_pending_generation")!;
+    const items = call.args.p_items as Row[];
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      item_number: 17,
+      product_name: "อะโวคาโด",
+      price_per_unit: 75,
+      quantity: 16,
+      unit: "โล",
+    });
+  });
+
+  it("keeps removal evidence append-only and excludes the removed item from finalization", async () => {
+    const messages = [
+      "กี้-ตลาดทดสอบ เบิก 24/8/2569\n16. มังคุด 45 บาท\n2 โล\n17. อะโวคาโด 80 บาท\n4 โล",
+      "ลบข้อ 17",
+    ];
+    const fixture = tables(messages);
+    const db = new FinalizerDouble(fixture);
+    const snap = snapshot(messages.join("\n"), GENERATION, messages.length);
+
+    const result = await finalizePendingGeneration(db as never, snap, async () => ({}));
+
+    expect(result.status).toBe("finalized");
+    expect(fixture.pending_session_ingest.map((row) => row.raw_text)).toEqual(messages);
+    const call = db.rpcCalls.find((entry) => entry.name === "try_finalize_pending_generation")!;
+    const items = call.args.p_items as Row[];
+    expect(items.map((row) => row.item_number)).toEqual([16]);
   });
 });

@@ -16,6 +16,7 @@ import {
 import { RE } from "./regex";
 import { conversionFactor, isKnownUnit, normalizeUnitAlias, resolveUnitQuantity } from "./units";
 import type {
+  DraftItemAction,
   WeighSession,
   WeighSessionItem,
   TransactionType,
@@ -23,6 +24,7 @@ import type {
   BaseTransactionType,
 } from "./types";
 import type { WeighSessionSeed } from "./seed";
+import { parseDraftItemCommandLine } from "./draft-item-command";
 import {
   baseMainTransactionType,
   mainCloserCompatibility,
@@ -79,10 +81,104 @@ export function parseWeighSession(
 
   const items:       WeighSessionItem[]        = [];
   const parseErrors: string[]                  = [];
+  const draftItemActions: DraftItemAction[]    = [];
   let   pendingItem: Partial<WeighSessionItem> | null = null;
   // Raw source lines that built the current pendingItem — surfaced in the
   // "no price line" error below so the user can find and resend it.
   let   pendingItemLines: string[]              = [];
+  let activeCorrection: {
+    action: DraftItemAction;
+    targetIndex: number | null;
+    targetItem: WeighSessionItem | null;
+  } | null = null;
+
+  const failActiveCorrection = (detail: string) => {
+    if (!activeCorrection) {
+      parseErrors.push(detail);
+      return;
+    }
+    if (
+      activeCorrection.action.status !== "target_not_found"
+      && activeCorrection.action.status !== "ambiguous_target"
+    ) {
+      activeCorrection.action.status = "invalid_replacement";
+      activeCorrection.action.detail = detail;
+      parseErrors.push(`แก้ข้อ ${activeCorrection.action.item_number} ไม่สำเร็จ: ${detail}`);
+    }
+    activeCorrection = null;
+  };
+
+  const recordItemParseError = (detail: string) => {
+    if (activeCorrection) failActiveCorrection(detail);
+    else parseErrors.push(detail);
+  };
+
+  const commitParsedItem = (item: WeighSessionItem) => {
+    if (!activeCorrection) {
+      pushOrMergeItem(items, item);
+      return;
+    }
+
+    const correction = activeCorrection;
+    if (
+      correction.action.status === "target_not_found"
+      || correction.action.status === "ambiguous_target"
+    ) {
+      activeCorrection = null;
+      return;
+    }
+    if (
+      correction.targetIndex === null
+      || correction.targetItem === null
+      || item.item_number !== correction.action.item_number
+    ) {
+      failActiveCorrection(
+        `รายการใหม่ต้องใช้เลขข้อ ${correction.action.item_number}`,
+      );
+      return;
+    }
+    if (!hasValidQuantity(item)) {
+      failActiveCorrection("รายการใหม่ยังไม่มีจำนวนและหน่วยที่ใช้ได้");
+      return;
+    }
+    if (!item.unit || !isKnownUnit(item.unit)) {
+      failActiveCorrection(
+        `หน่วย “${item.unit}” ไม่ถูกต้อง รายการเดิมจึงยังอยู่`,
+      );
+      return;
+    }
+
+    const replacement: WeighSessionItem = {
+      ...item,
+      item_number: correction.action.item_number,
+      section: correction.targetItem.section,
+      transaction_type: correction.targetItem.transaction_type,
+    };
+    items[correction.targetIndex] = replacement;
+    correction.action.status = "applied";
+    correction.action.replacement_item = { ...replacement };
+    activeCorrection = null;
+  };
+
+  const closeCurrentPendingItem = () => {
+    if (!pendingItem?.product_name) {
+      pendingItem = null;
+      pendingItemLines = [];
+      return;
+    }
+    if (pendingItem.price_per_unit === undefined) {
+      recordItemParseError(
+        `item #${pendingItem.item_number} ${pendingItem.product_name} has no price line: `
+        + `"${pendingItemLines.join(" ")}"`,
+      );
+    } else {
+      const section = activeCorrection?.targetItem?.section ?? currentSection;
+      const txType = activeCorrection?.targetItem?.transaction_type ?? currentTxType;
+      commitParsedItem(finalize(pendingItem, section, txType));
+    }
+    pendingItem = null;
+    pendingItemLines = [];
+  };
 
   for (const line of lines) {
     const prefixMatch = line.match(RE.TIME_PREFIX);
@@ -114,11 +210,61 @@ export function parseWeighSession(
       if (m) date = parseBuddhistDate(m[1], m[2], m[3]);
     }
 
+    // ── Explicit same-draft item correction/removal ───────────────────────
+    const draftCommand = parseDraftItemCommandLine(content);
+    if (draftCommand) {
+      if (activeCorrection) {
+        if (pendingItem) closeCurrentPendingItem();
+        else failActiveCorrection("ยังไม่ได้ส่งรายการใหม่ให้ครบ");
+      } else {
+        closeCurrentPendingItem();
+      }
+
+      const matches = items
+        .map((item, index) => ({ item, index }))
+        .filter(({ item }) => item.item_number === draftCommand.itemNumber);
+      const status = matches.length === 0
+        ? "target_not_found"
+        : matches.length > 1
+          ? "ambiguous_target"
+          : draftCommand.kind === "remove"
+            ? "applied"
+            : "awaiting_replacement";
+      const action: DraftItemAction = {
+        kind: draftCommand.kind,
+        item_number: draftCommand.itemNumber,
+        status,
+        match_count: matches.length,
+        ...(matches.length === 1 ? { previous_item: { ...matches[0].item } } : {}),
+      };
+      draftItemActions.push(action);
+
+      if (matches.length === 0) {
+        parseErrors.push(`ไม่พบข้อ ${draftCommand.itemNumber} ในรายการที่กำลังกรอก`);
+      } else if (matches.length > 1) {
+        parseErrors.push(`เลขข้อ ${draftCommand.itemNumber} ซ้ำ จึงระบุรายการที่จะแก้ไม่ได้`);
+      }
+
+      if (draftCommand.kind === "remove") {
+        if (matches.length === 1) items.splice(matches[0].index, 1);
+      } else {
+        activeCorrection = {
+          action,
+          targetIndex: matches.length === 1 ? matches[0].index : null,
+          targetItem: matches.length === 1 ? { ...matches[0].item } : null,
+        };
+      }
+      continue;
+    }
+
     // ── Session end ────────────────────────────────────────────────────────
     if (RE.SESSION_END.test(content)) {
-      closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
-      pendingItem = null;
-      pendingItemLines = [];
+      if (pendingItem) closeCurrentPendingItem();
+      else if (activeCorrection?.action.status === "awaiting_replacement") {
+        failActiveCorrection("ยังไม่ได้ส่งรายการใหม่ให้ครบ");
+      } else {
+        activeCorrection = null;
+      }
       // Closer/opener discipline: an additional batch must close with its own
       // matching จบรายการ<type>เพิ่ม closer, and additional closers are invalid
       // for main sessions.
@@ -134,7 +280,7 @@ export function parseWeighSession(
       } else if (mainSessionType) {
         const compatibility = mainCloserCompatibility(mainSessionType, content);
         if (compatibility && !compatibility.compatible) {
-          parseErrors.push(
+          recordItemParseError(
             `wrong closer for main session (expected ${compatibility.expectedCloser}): "${line}"`,
           );
         }
@@ -227,13 +373,19 @@ export function parseWeighSession(
           // still needs a price (see the branches below).
           applyQuantity(pendingItem, parseFloat(qm[1]), qm[2]);
           if (pendingItem.basis_unit && pendingItem.unit !== pendingItem.basis_unit) {
-            parseErrors.push(
+            const wasCorrection = activeCorrection !== null;
+            recordItemParseError(
               `basis unit mismatch for item #${pendingItem.item_number} "${pendingItem.product_name}": ` +
               `basis is per ${pendingItem.basis_unit} but quantity line uses ${pendingItem.unit}`,
             );
+            if (wasCorrection) {
+              pendingItem = null;
+              pendingItemLines = [];
+              continue;
+            }
           }
           const finalizedItem = finalize(pendingItem, currentSection, currentTxType);
-          pushOrMergeItem(items, finalizedItem);
+          commitParsedItem(finalizedItem);
           pendingItem = null;
           pendingItemLines = [];
           continue;
@@ -243,14 +395,14 @@ export function parseWeighSession(
           // either a genuine orphan, or the pending item is still missing
           // its own price. Never silently misattributed onto the wrong item.
           if (pendingItem?.product_name) {
-            parseErrors.push(
+            recordItemParseError(
               `item #${pendingItem.item_number} ${pendingItem.product_name} is missing a price line ` +
               `before its quantity: "${line}"`,
             );
             pendingItem = null;
             pendingItemLines = [];
           } else {
-            parseErrors.push(`quantity with no preceding item: "${line}"`);
+            recordItemParseError(`quantity with no preceding item: "${line}"`);
           }
           continue;
         }
@@ -274,23 +426,19 @@ export function parseWeighSession(
       // error, which is what stops the round from taking on junk identity.
       const codeResolution = resolveItemLineProductCode(content);
       if (codeResolution.kind === "unknown") {
-        closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
-        pendingItem = null;
-        pendingItemLines = [];
-        parseErrors.push(unknownProductCodeError(codeResolution.code, line));
+        closeCurrentPendingItem();
+        recordItemParseError(unknownProductCodeError(codeResolution.code, line));
         continue;
       }
       const itemContent = codeResolution.content;
 
       const parsedItem = parseItemLine(itemContent, nextItemNumber(items, pendingItem));
       if (parsedItem === "orphan_basis") {
-        closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
-        pendingItem = null;
-        pendingItemLines = [];
-        parseErrors.push(`orphan basis line (no product name): "${line}"`);
+        closeCurrentPendingItem();
+        recordItemParseError(`orphan basis line (no product name): "${line}"`);
       } else if (parsedItem) {
         // A new single-line item header — with or without a LINE-export prefix.
-        closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
+        closeCurrentPendingItem();
         pendingItem = parsedItem;
         pendingItemLines = [line];
       } else {
@@ -300,7 +448,7 @@ export function parseWeighSession(
         // unit word qualifies (see units.ts).
         const nameOnly = itemContent.match(RE.ITEM_NAME_ONLY);
         if (nameOnly && !isKnownUnit(nameOnly[2].trim())) {
-          closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
+          closeCurrentPendingItem();
           pendingItem = {
             item_number:    parseInt(nameOnly[1], 10),
             product_name:   nameOnly[2].trim(),
@@ -315,13 +463,11 @@ export function parseWeighSession(
           pendingItemLines = [line];
         } else if (content.length > 0) {
           // Non-item bare line → section / transaction-type marker
-          closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
-          pendingItem = null;
-          pendingItemLines = [];
+          closeCurrentPendingItem();
           const nextTxType = detectTxType(content);
           if (nextTxType && sessionKind === "additional") {
             // An additional batch carries exactly one declared type end-to-end.
-            parseErrors.push(`section change not allowed in additional session: "${line}"`);
+            recordItemParseError(`section change not allowed in additional session: "${line}"`);
           } else if (nextTxType) {
             currentSection = content;
             currentTxType  = nextTxType;
@@ -330,7 +476,7 @@ export function parseWeighSession(
               mainSegmentClosed = false;
             }
           } else {
-            parseErrors.push(`unrecognized line: "${line}"`);
+            recordItemParseError(`unrecognized line: "${line}"`);
           }
         }
       }
@@ -338,8 +484,18 @@ export function parseWeighSession(
     }
   }
 
-  // Trailing pending item (missing session-end marker)
-  closePendingItem(items, parseErrors, pendingItem, pendingItemLines, currentSection, currentTxType);
+  // A correction may span LINE messages. End-of-document is not failure: the
+  // next raw message can complete the replacement. The old item remains the
+  // effective version until that happens.
+  if (activeCorrection?.action.status === "awaiting_replacement") {
+    const detail = pendingItem
+      ? "รอจำนวนและหน่วยของรายการใหม่"
+      : "รอรายการใหม่";
+    activeCorrection.action.detail = detail;
+    parseErrors.push(`แก้ข้อ ${activeCorrection.action.item_number}: ${detail}`);
+  } else if (!activeCorrection) {
+    closeCurrentPendingItem();
+  }
 
   return {
     // Additional sessions must carry an explicit date — never fall back to
@@ -353,6 +509,7 @@ export function parseWeighSession(
     declared_transaction_type: declaredTxType,
     items,
     parse_errors:     parseErrors,
+    draft_item_actions: draftItemActions,
   };
 }
 
@@ -441,25 +598,6 @@ export function buildWeighSessionValidationReply(session: WeighSession): string 
  * dropped or turned into a fake complete row — it becomes a parse error that
  * quotes its own source line(s) so the user can find and resend it.
  */
-function closePendingItem(
-  items:            WeighSessionItem[],
-  parseErrors:      string[],
-  pendingItem:       Partial<WeighSessionItem> | null,
-  pendingItemLines: string[],
-  section:          string,
-  txType:           TransactionType,
-): void {
-  if (!pendingItem?.product_name) return;
-  if (pendingItem.price_per_unit === undefined) {
-    parseErrors.push(
-      `item #${pendingItem.item_number} ${pendingItem.product_name} has no price line: ` +
-      `"${pendingItemLines.join(" ")}"`,
-    );
-    return;
-  }
-  pushOrMergeItem(items, finalize(pendingItem, section, txType));
-}
-
 function applyQuantity(
   item: Partial<WeighSessionItem>,
   quantity: number,

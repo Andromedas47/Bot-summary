@@ -81,13 +81,36 @@ function describe(exception: ProduceValidationException): string[] {
 function numberedBlocks(exceptions: ProduceValidationException[]): string[] {
   const listed = exceptions.slice(0, MAX_LISTED_EXCEPTIONS);
   const lines: string[] = [];
-  listed.forEach((exception, index) => {
+  listed.forEach((exception) => {
     const [head, ...rest] = describe(exception);
-    lines.push(`${index + 1}. ${head}`, ...rest);
+    const label = "itemNumber" in exception
+      ? `ข้อ ${exception.itemNumber} — ${head}`
+      : `• ${head}`;
+    lines.push(label, ...rest);
   });
   const hidden = exceptions.length - listed.length;
   if (hidden > 0) lines.push(`และอีก ${hidden} รายการ`);
   return lines;
+}
+
+function correctionGuidance(exceptions: ProduceValidationException[]): string[] {
+  const itemNumbers = [...new Set(
+    exceptions.flatMap((exception) =>
+      "itemNumber" in exception ? [exception.itemNumber] : []),
+  )];
+  if (itemNumbers.length === 1) {
+    return [
+      `ส่ง “แก้ข้อ ${itemNumbers[0]}”`,
+      `แล้วส่งข้อ ${itemNumbers[0]} ที่ถูกต้องใหม่ พร้อมราคาและจำนวน`,
+    ];
+  }
+  if (itemNumbers.length > 1) {
+    return [
+      `แก้ทีละข้อ: ${itemNumbers.map((number) => `“แก้ข้อ ${number}”`).join(", ")}`,
+      "หลังแต่ละคำสั่ง ส่งรายการข้อนั้นใหม่พร้อมราคาและจำนวน",
+    ];
+  }
+  return ["แก้เฉพาะรายการที่ทำให้ยอดเกิน แล้วปิดรายการอีกครั้ง"];
 }
 
 function renderPriceAdvisoryWarning(
@@ -184,11 +207,12 @@ export function buildPriceAdvisoryNotification(
 export function buildBlockingValidationReply(result: ProduceValidationResult): string {
   return [
     `⛔ พบ ${result.blocking.length} รายการที่ต้องแก้ไขก่อนจบรายการ`,
-    "ระบบยังไม่ได้บันทึกอะไร",
     "",
     ...numberedBlocks(result.blocking),
     "",
-    'กรุณาส่งบรรทัดที่ถูกต้องใหม่ แล้วกด "จบรายการ" อีกครั้ง',
+    "รายการอื่นยังอยู่ครบ ไม่ต้องยกเลิก",
+    ...correctionGuidance(result.blocking),
+    'แล้วส่งข้อความ "จบรายการ" อีกครั้ง',
   ].join("\n");
 }
 
@@ -200,9 +224,10 @@ function reviewHeadline(result: ProduceValidationResult): string {
  * An unapproved name is persisted exactly as typed once confirmed; a
  * suggestion is never applied on the operator's behalf.
  */
-function reviewGuidance(): string[] {
+function reviewGuidance(result: ProduceValidationResult): string[] {
   return [
-    "หากพิมพ์ผิด กรุณาแก้ชื่อสินค้าแล้วส่งรายการที่ถูกต้องใหม่",
+    "รายการอื่นยังอยู่ครบ ไม่ต้องยกเลิก",
+    ...correctionGuidance(result.reviews),
     "หากเป็นสินค้าใหม่จริง ระบบจะบันทึกชื่อตามที่ส่งมาทุกตัวอักษร",
   ];
 }
@@ -217,7 +242,7 @@ export function buildReviewValidationReply(result: ProduceValidationResult): str
     "",
     ...numberedBlocks(result.reviews),
     "",
-    ...reviewGuidance(),
+    ...reviewGuidance(result),
     'หากตรวจแล้วว่าถูกต้อง กด "ยืนยัน" เพื่อบันทึก',
   ].join("\n");
 }
@@ -237,7 +262,7 @@ export function buildPlainTextReviewValidationReply(
     "",
     ...numberedBlocks(result.reviews),
     "",
-    ...reviewGuidance(),
+    ...reviewGuidance(result),
     "หากตรวจแล้วว่าถูกต้อง ส่งข้อความจบรายการอีกครั้งเพื่อยืนยัน",
   ].join("\n");
 }

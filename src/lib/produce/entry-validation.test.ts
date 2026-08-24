@@ -434,16 +434,22 @@ describe("validation digest", () => {
 // ── Operator-facing text ──────────────────────────────────────────────────────
 
 describe("replies", () => {
-  it("reports the unit mismatch and its suggestion, and says nothing was saved", () => {
-    const result = bound(
-      session([item({ product_name: "มังคุด", quantity: 15.4, unit: "โลก", price_per_unit: 45, transaction_type: "คืน" })]),
-      master([{ product_name: "มังคุด", quantity: 15.9, price_per_unit: 45 }]),
-    );
+  it("reports the real printed item number and gives an explicit correction command", () => {
+    const parsed = session([
+      item({ product_name: "มังคุด", quantity: 15.4, unit: "โลก", price_per_unit: 45, transaction_type: "คืน" }),
+    ]);
+    parsed.items[0]!.item_number = 17;
+    const result = bound(parsed, master([
+      { product_name: "มังคุด", quantity: 15.9, price_per_unit: 45 },
+    ]));
     const reply = buildBlockingValidationReply(result);
     expect(reply).toContain("มังคุด");
     expect(reply).toContain("โลก");
     expect(reply).toContain("น่าจะเป็น: โล");
-    expect(reply).toContain("ระบบยังไม่ได้บันทึกอะไร");
+    expect(reply).toContain("ข้อ 17");
+    expect(reply).toContain("แก้ข้อ 17");
+    expect(reply).toContain("รายการอื่นยังอยู่ครบ");
+    expect(reply).not.toContain("ระบบยังไม่ได้บันทึกอะไร");
   });
 
   it("shows both withdrawal prices next to the entered one", () => {

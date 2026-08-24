@@ -47,6 +47,10 @@ import { buildSettlementTemplate } from "./settlement-command";
 import { buildWeighSessionSummary } from "@/lib/line/reply";
 import { buildWeighSessionValidationReply } from "@/lib/parsers/weigh-session/parser";
 import {
+  buildDraftItemActionReply,
+  latestDraftItemAction,
+} from "@/lib/parsers/weigh-session/draft-item-command";
+import {
   assertGuidedMenuMessageLimits,
   bindQuickReply,
   buildCancelledMessage,
@@ -270,13 +274,19 @@ export class GuidedMenuUxHandler {
    */
   async renderCaptureAcknowledgement(input: {
     identity: GuidedMenuIdentity;
+    preferDraftItemAction?: boolean;
   }): Promise<GuidedMenuUxResult | null> {
     const snapshot = await this.capture.snapshot(input.identity);
     if (snapshot.status !== "ok" || snapshot.closeRequested) return null;
     const controls = await this.buildCaptureStageControls(input.identity);
     if (!controls) return null;
+    const draftAction = input.preferDraftItemAction
+      ? latestDraftItemAction(snapshot.parsed)
+      : null;
     const hasParseErrors = snapshot.parsed.parse_errors.length > 0;
-    const ackBase = hasParseErrors
+    const ackBase = draftAction
+      ? buildPlainTextMessage(buildDraftItemActionReply(draftAction))
+      : hasParseErrors
       ? buildPlainTextMessage(
           [
             buildWeighSessionValidationReply(snapshot.parsed),

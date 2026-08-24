@@ -47,6 +47,11 @@ import {
   buildWeighSessionValidationReply,
 } from "@/lib/parsers/weigh-session/parser";
 import { RE } from "@/lib/parsers/weigh-session/regex";
+import {
+  buildDraftItemActionReply,
+  findDraftItemCommand,
+  latestDraftItemAction,
+} from "@/lib/parsers/weigh-session/draft-item-command";
 import { mainCloserRefusal } from "@/lib/parsers/weigh-session/main-closer";
 import {
   PendingSessionService,
@@ -140,7 +145,6 @@ import {
   CANCEL_ACTIVE_DRAFT_UNAVAILABLE_REPLY,
   cancelActiveProduceDraft,
   isExactCancelActiveDraftCommand,
-  withCancelActiveDraftHint,
 } from "@/lib/produce/cancel-active-draft";
 import { getRuntimeEnvironment } from "@/lib/runtime-environment";
 
@@ -686,7 +690,7 @@ export class WebhookService {
     const replyToken     = msgEvent.replyToken;
     const sourceId       = getSourceId(msgEvent.source);
     const lineUserId     = getUserId(msgEvent.source);
-
+    const draftItemCommand = findDraftItemCommand(text);
 
     if (text.trim().toLowerCase() === "test") {
       if (replyToken) await replyLineMessage(replyToken, "Bot รับข้อความได้แล้ว ✅");
@@ -1185,6 +1189,13 @@ export class WebhookService {
             || reordered.action === "rejected_orphan"
           ) {
             if (replyToken) await this.replyMessage(replyToken, NEW_HEADER_REQUIRED_REPLY);
+          } else if (draftItemCommand && reordered.session && replyToken) {
+            const action = latestDraftItemAction(
+              parseWeighSession(reordered.session.accumulated_text, bangkokToday()),
+            );
+            if (action) {
+              await this.replyMessage(replyToken, buildDraftItemActionReply(action));
+            }
           }
           return { eventId, eventType: event.type, status: "saved", parsed: false };
         } catch (reorderError) {
@@ -1343,6 +1354,15 @@ export class WebhookService {
           return { eventId, eventType: event.type, status: "saved", parsed: false };
         }
         const structured = pending as StructuredPendingSession;
+        if (draftItemCommand && structured.entry_origin == null && replyToken) {
+          const action = latestDraftItemAction(
+            parseWeighSession(updated.accumulated_text, bangkokToday()),
+          );
+          if (action) {
+            await this.replyMessage(replyToken, buildDraftItemActionReply(action));
+            return { eventId, eventType: event.type, status: "saved", parsed: false };
+          }
+        }
         if (structured.entry_origin === "structured_menu" && replyToken) {
           const identity = buildGuidedMenuIdentity({
             lineUserId: getUserId(msgEvent.source),
@@ -1353,6 +1373,7 @@ export class WebhookService {
           if (identity) {
             const ack = await this.guidedMenuHandler.renderCaptureAcknowledgement({
               identity,
+              preferDraftItemAction: draftItemCommand !== null,
             });
             if (ack) {
               await this.replyApiMessages(
@@ -1952,17 +1973,11 @@ export class WebhookService {
         parsed,
         eventId,
       );
-      // The hint is attached HERE and not inside the reply builders: those are
-      // shared with the deferred finalizer, where the generation is already
-      // terminal and telling the operator they can still cancel it would be a
-      // lie. Both of these refusals provably leave the draft in capture.
       if (decision.decision === "blocked") {
-        return withCancelActiveDraftHint(buildBlockingValidationReply(decision.result));
+        return buildBlockingValidationReply(decision.result);
       }
       if (decision.decision === "review_presented") {
-        return withCancelActiveDraftHint(
-          buildPlainTextReviewValidationReply(decision.result),
-        );
+        return buildPlainTextReviewValidationReply(decision.result);
       }
       return null;
     } catch (error) {

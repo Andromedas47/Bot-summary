@@ -19,9 +19,10 @@ import { centralPriceMapKey } from "@/lib/white-sheet/pricing";
  *   sold_quantity  = W − R − D          (withdrawal − good return − damaged return)
  *   expected_sales = sold_quantity × authoritative central selling price
  *
- * Absence of a return row means the corresponding return quantity is zero —
- * a withdrawal with no good-return row and no damaged-return row is a closed,
- * fully sold-out identity, not missing evidence.
+ * Absence of a return row means the corresponding return quantity is zero
+ * ONLY when the round has no persisted return document at all — a genuine
+ * whole-round sold-out day. When a return DID land for the round, a withdrawn
+ * product/unit missing from every return row is omitted evidence, not zero.
  *
  * FAIL CLOSED. Every rule below blocks rather than guesses:
  *   - a return with no withdrawal is not a negative sale
@@ -58,11 +59,16 @@ export type SalesBlockReason =
   | "unknown_transaction_type"
   | "market_unresolved"
   /**
-   * No longer produced by the calculator: absence of a return row now means
-   * the return quantity is zero, not missing evidence. Kept in the union (and
-   * in message.ts's REASON_LABELS) for type/API compatibility only.
+   * No longer produced by the calculator for a whole round with no return
+   * document: that case is sold-out by design. Kept in the union (and in
+   * message.ts's REASON_LABELS) for type/API compatibility only.
    */
   | "missing_return_evidence"
+  /**
+   * The round has a persisted return document, but this withdrawn product/unit
+   * is absent from every return row. Not sold-out, not a trusted quantity.
+   */
+  | "product_return_absent"
   | "return_without_withdrawal"
   | "returns_exceed_withdrawal"
   | "duplicate_main_session"
@@ -154,6 +160,12 @@ export interface SalesCalculationInput {
    * withdrawal really was issued — but they may never be called sold out.
    */
   incompleteReturnRounds?: ReadonlySet<string>;
+  /**
+   * Rounds that already have a persisted ชั่งคืน / คืนเสีย document. A
+   * withdrawn identity in one of these rounds that never appears in any
+   * return row is omitted, not sold out.
+   */
+  persistedReturnRounds?: ReadonlySet<string>;
 }
 
 /** One atomic market + product + unit result — the only place a number is computed. */
@@ -598,6 +610,7 @@ export function calculateSalesReport(input: SalesCalculationInput): SalesReport 
 
   const roundLabels = input.roundMarketLabels ?? new Map<string, string>();
   const incompleteRounds = input.incompleteReturnRounds ?? new Set<string>();
+  const persistedReturnRounds = input.persistedReturnRounds ?? new Set<string>();
 
   for (const row of input.rows) {
     const round = row.accountabilityRoundId?.trim() || null;
@@ -677,20 +690,31 @@ export function calculateSalesReport(input: SalesCalculationInput): SalesReport 
   const identityRows: SalesIdentityRow[] = aggregateList.map((aggregate) => {
     const reasons = new Set(aggregate.reasons);
 
-    // Quantity evidence rules. Absence of a return row means the corresponding
-    // return quantity is zero — a withdrawal alone is a closed, sold-out
-    // identity. A return with no withdrawal is never a negative sale, and
-    // returns that exceed the withdrawal are never a negative quantity.
+    // Quantity evidence rules. A whole round with no return document at all
+    // is sold-out by design. A round that DID persist a return, but left this
+    // withdrawn product/unit out of every return row, is omitted evidence —
+    // presence of a return row (including an explicit zero) is the coverage
+    // signal, never the aggregate quantity being zero.
     if (!aggregate.hasWithdrawal && (aggregate.hasGoodReturn || aggregate.hasDamaged)) {
       addReason(reasons, "return_without_withdrawal");
     }
     if (aggregate.goodReturn + aggregate.damaged > aggregate.withdrawn) {
       addReason(reasons, "returns_exceed_withdrawal");
     }
+    if (
+      aggregate.accountabilityRoundId !== null
+      && persistedReturnRounds.has(aggregate.accountabilityRoundId)
+      && aggregate.hasWithdrawal
+      && !aggregate.hasGoodReturn
+      && !aggregate.hasDamaged
+    ) {
+      addReason(reasons, "product_return_absent");
+    }
 
     const quantityBlocked = reasons.size > 0;
     const priceKey = centralPriceMapKey(aggregate.productName, aggregate.unit);
     const sold = aggregate.withdrawn - aggregate.goodReturn - aggregate.damaged;
+    const priceConflicted = priceConflicts.has(priceKey);
 
     let centralPriceSatang: number | null = null;
     let expectedSalesSatang: number | null = null;
@@ -698,7 +722,8 @@ export function calculateSalesReport(input: SalesCalculationInput): SalesReport 
 
     if (quantityBlocked) {
       status = "QUANTITY_BLOCKED";
-    } else if (priceConflicts.has(priceKey)) {
+      if (priceConflicted) addReason(reasons, "central_price_conflict");
+    } else if (priceConflicted) {
       addReason(reasons, "central_price_conflict");
       status = "VALUE_BLOCKED";
     } else {

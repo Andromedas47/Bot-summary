@@ -14,6 +14,7 @@ import { resolveCentralPricesForDate } from "@/lib/white-sheet/load";
 import {
   loadRoundReturnStatuses,
   roundsWithIncompleteReturn,
+  roundsWithPersistedReturn,
 } from "@/lib/produce/round-return-status";
 import {
   activeFailureIds,
@@ -1238,9 +1239,10 @@ export async function loadSalesReport(
     failures,
   );
 
-  // P2E round identity: the canonical market label for display, and the rounds
-  // whose ชั่งคืน is known to be unfinished. The second one is what stops a
-  // blocked return from being reported as a confident sold-out day.
+  // P2E round identity: the canonical market label for display, the rounds
+  // whose ชั่งคืน is unfinished, and the rounds that already have a persisted
+  // return. The last one is what stops a withdrawn product omitted from that
+  // return from being reported as a confident sold-out sale.
   const roundStatuses = await loadRoundReturnStatuses(supabase, businessDate);
 
   // QA scopes are dropped HERE, before the calculator sees them, so they can
@@ -1268,5 +1270,6 @@ export async function loadSalesReport(
       ...roundsWithIncompleteReturn(roundStatuses),
       ...activeIncompleteReturnRoundIds(failures.attempts, failures.classifications),
     ]),
+    persistedReturnRounds: roundsWithPersistedReturn(roundStatuses),
   });
 }

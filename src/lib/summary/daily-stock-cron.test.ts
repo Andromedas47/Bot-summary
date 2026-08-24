@@ -3,6 +3,7 @@ import {
   isIsoDate,
   parseStockSummaryTargets,
   previousBangkokBusinessDate,
+  purchasePlanningRetryKey,
   resolveStockSummaryDate,
   stockSummaryRetryKey,
 } from "./daily-stock-cron";
@@ -96,6 +97,20 @@ describe("stockSummaryRetryKey", () => {
     expect(stockSummaryRetryKey("2026-07-25", "Cabc", 0)).not.toBe(
       dailySummaryRetryKey("2026-07-25", "Cabc"),
     );
+  });
+});
+
+describe("purchasePlanningRetryKey", () => {
+  test("is a stable LINE UUID separated by date, target, chunk and report", () => {
+    const base = purchasePlanningRetryKey("2026-08-22", "Coperator", 0);
+    expect(base).toBe(purchasePlanningRetryKey("2026-08-22", "Coperator", 0));
+    expect(base).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(base).not.toBe(purchasePlanningRetryKey("2026-08-23", "Coperator", 0));
+    expect(base).not.toBe(purchasePlanningRetryKey("2026-08-22", "Cother", 0));
+    expect(base).not.toBe(purchasePlanningRetryKey("2026-08-22", "Coperator", 1));
+    expect(base).not.toBe(stockSummaryRetryKey("2026-08-22", "Coperator", 0));
   });
 });
 

@@ -46,8 +46,9 @@ export const dynamic = "force-dynamic";
  *     messages. A deliberate corrected resend passes ?revision=, which is the
  *     only way to obtain new keys for a day already delivered.
  *   - Per-target isolation: one failing target never blocks the others.
- *   - Any failure returns 500 so the scheduler retries; already-delivered
- *     targets are protected by their retry keys.
+ *   - Any failure returns 500 for monitoring/manual recovery. pg_net does not
+ *     automatically retry HTTP failures; a same-date rerun is protected by
+ *     deterministic retry keys.
  *   - ?debug=1 previews the exact messages without sending anything.
  *   - Shares the SalesReport model with the manual command — no second business
  *     calculation lives here.

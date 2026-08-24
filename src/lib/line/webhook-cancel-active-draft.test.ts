@@ -9,6 +9,7 @@
 import { describe, expect, it } from "bun:test";
 import { WebhookService } from "./webhook-service";
 import type { LineMessageEvent } from "./types";
+import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
 import {
   CANCEL_ACTIVE_DRAFT_COMMAND,
   CANCEL_ACTIVE_DRAFT_HINT,
@@ -516,7 +517,7 @@ describe("a redelivered cancel", () => {
 });
 
 describe("the cancel hint", () => {
-  it("is appended to a blocked validation reply, where the draft provably stays open", async () => {
+  it("is not the default recovery path for a blocked item validation", async () => {
     const db = new CancelDatabase(
       pendingRow([RETURN_HEADER, "1.มังคุด45บาท", "4โลก"].join("\n")),
       master([{}]),
@@ -525,9 +526,9 @@ describe("the cancel hint", () => {
     await build(db, replies).processEvents([textEvent("จบรายการชั่งคืน", "hint-1")], "dest");
 
     expect(replies[0]).toContain("⛔");
-    expect(replies[0]).toContain(CANCEL_ACTIVE_DRAFT_HINT);
-    expect(replies[0]!.endsWith(CANCEL_ACTIVE_DRAFT_HINT)).toBe(true);
-    // Still no close boundary: the hint does not change the gate's behaviour.
+    expect(replies[0]).toContain("แก้ข้อ 1");
+    expect(replies[0]).not.toContain(CANCEL_ACTIVE_DRAFT_HINT);
+    // Still no close boundary: the operator can correct the same draft.
     expect(db.pending!.close_event_timestamp_ms).toBeNull();
   });
 
@@ -567,5 +568,48 @@ describe("the cancel hint", () => {
     expect(withCancelActiveDraftHint("เนื้อความ"))
       .toBe(`เนื้อความ\n\n${CANCEL_ACTIVE_DRAFT_HINT}`);
     expect(CANCEL_ACTIVE_DRAFT_HINT).toContain(CANCEL_ACTIVE_DRAFT_COMMAND);
+  });
+});
+
+describe("same-draft correction replies", () => {
+  it("acknowledges an atomic correction and keeps one effective item", async () => {
+    const db = new CancelDatabase(pendingRow(WITHDRAWAL));
+    const replies: string[] = [];
+
+    await build(db, replies).processEvents([
+      textEvent("แก้ข้อ 1\n1.มังคุด40บาท\n12โล", "correction-1"),
+    ], "dest");
+
+    const parsed = parseWeighSession(String(db.pending!.accumulated_text));
+    expect(parsed.items).toHaveLength(1);
+    expect(parsed.items[0]).toMatchObject({ price_per_unit: 40, quantity: 12 });
+    expect(replies.at(-1)).toContain("✅ แก้ข้อ 1 แล้ว");
+    expect(replies.at(-1)).toContain("รายการอื่นยังอยู่ครบ");
+  });
+
+  it("acknowledges removal while retaining the rest of the draft", async () => {
+    const draft = [WITHDRAWAL, "2.ส้ม30บาท", "3โล"].join("\n");
+    const db = new CancelDatabase(pendingRow(draft));
+    const replies: string[] = [];
+
+    await build(db, replies).processEvents([textEvent("ลบข้อ 1", "remove-1")], "dest");
+
+    const parsed = parseWeighSession(String(db.pending!.accumulated_text));
+    expect(parsed.items.map((entry) => entry.item_number)).toEqual([2]);
+    expect(replies.at(-1)).toContain("✅ ลบข้อ 1 แล้ว");
+    expect(replies.at(-1)).toContain("รายการอื่นยังอยู่ครบ");
+  });
+
+  it("refuses an unknown correction target without changing the effective draft", async () => {
+    const db = new CancelDatabase(pendingRow(WITHDRAWAL));
+    const replies: string[] = [];
+
+    await build(db, replies).processEvents([textEvent("แก้ข้อ 17", "correction-missing")], "dest");
+
+    const parsed = parseWeighSession(String(db.pending!.accumulated_text));
+    expect(parsed.items).toHaveLength(1);
+    expect(parsed.items[0]?.item_number).toBe(1);
+    expect(replies.at(-1)).toContain("ไม่พบข้อ 17");
+    expect(replies.at(-1)).toContain("รายการเดิมยังไม่เปลี่ยนแปลง");
   });
 });

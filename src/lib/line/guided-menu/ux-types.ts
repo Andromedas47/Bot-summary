@@ -75,25 +75,18 @@ export const GUIDED_MENU_COPY = {
   ].join("\n"),
   /** 3B: nothing has been captured yet. */
   noCapturedItems: "ยังไม่มีรายการสินค้าที่บันทึกไว้",
-  /** 3B: correction is the existing parser contract — resend the item line. */
+  /** 3B: explicit correction never treats an ordinary repeated number as an edit. */
   correctionHint: [
-    "แก้ไขรายการ: ส่งบรรทัดเดิมใหม่พร้อมราคาที่ถูกต้อง",
-    "ระบบจะใช้ค่าล่าสุดของสินค้านั้น",
+    "แก้รายการ: ส่ง “แก้ข้อ <เลขข้อ>”",
+    "แล้วส่งรายการข้อนั้นใหม่พร้อมราคาและจำนวน",
+    "รายการอื่นยังอยู่ครบ ไม่ต้องยกเลิก",
   ].join("\n"),
   /**
    * 3B: dismissing the menu does NOT void an open round — it only closes the
    * controls, and the draft keeps capturing.
    *
-   * A cancel contract now exists (`ยกเลิกรายการ`, see
-   * src/lib/produce/cancel-active-draft.ts), but this screen cannot prove the
-   * draft is still cancellable: it is rendered off a snapshot that refuses only
-   * on `terminalized`, so a session that has already requested close reaches it
-   * too — and there the RPC would refuse with `close_in_progress`. It therefore
-   * makes NO claim either way, in either direction. The old line
-   * ("กรุณาแจ้งผู้ดูแล") is gone because it is now false, and the hint is not
-   * here because it is not provably true. Two true sentences beat a third that
-   * is conditionally false; the hint is attached only where the caller can
-   * prove no close boundary has been written.
+   * The intentional abandon command (`ยกเลิกรายการ`) still exists, but this
+   * recovery screen does not advertise abandoning the draft as a correction.
    */
   menuDismissedSessionOpen: [
     "ปิดเมนูแล้ว",
@@ -140,13 +133,13 @@ export const GUIDED_MENU_COPY = {
    */
   produceCloseValidationFailed: [
     "ยังจบรายการไม่ได้ ระบบอ่านรายการด้านล่างไม่ครบ",
-    "รายการยังเปิดอยู่ ยังไม่ได้บันทึกอะไร",
-    'กรุณาส่งบรรทัดที่ถูกต้องใหม่ แล้วกด "จบรายการ" อีกครั้ง',
+    "รายการยังเปิดอยู่ และรายการอื่นยังอยู่ครบ",
+    'กรุณาแก้เฉพาะข้อที่ผิด แล้วกด "จบรายการ" อีกครั้ง',
   ].join("\n"),
   /** 3B: the session cannot finalize — refused before any write. */
   produceValidationFailed: [
     "ยังยืนยันไม่ได้ ระบบยังอ่านรายการไม่ครบ",
-    "ยังไม่ได้บันทึกอะไร กรุณาแก้บรรทัดด้านล่างแล้วส่งใหม่",
+    "รายการอื่นยังอยู่ครบ กรุณาแก้เฉพาะข้อด้านล่าง",
   ].join("\n"),
   /** Ownership guard: every refusal states plainly that nothing was written. */
   ownershipNothingRecorded: "ระบบยังไม่ได้บันทึกอะไร",

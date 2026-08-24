@@ -4,6 +4,30 @@ export type SessionKind     = "main" | "additional";
 /** The three accounting base types; the only values stored for new items. */
 export type BaseTransactionType = "เบิก" | "คืน" | "คืนเสีย";
 
+export type DraftItemActionStatus =
+  | "awaiting_replacement"
+  | "applied"
+  | "target_not_found"
+  | "ambiguous_target"
+  | "invalid_replacement";
+
+/**
+ * One explicit operator edit reconstructed from the append-only draft text.
+ *
+ * This is parser metadata only. Finalization persists `items`, never these
+ * actions; keeping both the action and the original raw text makes the
+ * difference between audit history and the effective draft explicit.
+ */
+export interface DraftItemAction {
+  kind: "correct" | "remove";
+  item_number: number;
+  status: DraftItemActionStatus;
+  match_count: number;
+  previous_item?: WeighSessionItem;
+  replacement_item?: WeighSessionItem;
+  detail?: string;
+}
+
 export interface WeighSessionItem {
   item_number:      number;
   product_name:     string;
@@ -56,4 +80,6 @@ export interface WeighSession {
   declared_transaction_type: BaseTransactionType | null;
   items:            WeighSessionItem[];
   parse_errors:     string[];
+  /** Explicit same-draft edits found while replaying the raw document. */
+  draft_item_actions?: DraftItemAction[];
 }

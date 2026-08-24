@@ -292,6 +292,30 @@ describe("Hybrid Guided UX — capture and pre-open (B, C)", () => {
     ]);
   });
 
+  it("3b. explicit correction returns its truthful result with guided controls", async () => {
+    const db = new GuidedMenuFakeDatabase();
+    const handler = seed(db);
+    seedOpenRound(db, {
+      accumulated_text: `${ONE_ITEM_TEXT}\nแก้ข้อ 1\n1.ทุเรียน90บาท\n3โล`,
+    });
+
+    const ack = await handler.renderCaptureAcknowledgement({
+      identity: IDENTITY,
+      preferDraftItemAction: true,
+    });
+
+    expect(ack).not.toBeNull();
+    expect(ack!.result).toMatchObject({ item_count: 1, parse_error_count: 0 });
+    const text = (ack!.messages[0] as { text: string }).text;
+    expect(text).toContain("✅ แก้ข้อ 1 แล้ว");
+    expect(text).toContain("รายการอื่นยังอยู่ครบ");
+    expect(controlLabels(ack!.messages)).toEqual([
+      "ดูรายการ",
+      "จบรายการ",
+      "ออกจากเมนู",
+    ]);
+  });
+
   it("4. invalid item returns correction details + Quick Replies, no Flex", async () => {
     const db = new GuidedMenuFakeDatabase();
     const handler = seed(db);

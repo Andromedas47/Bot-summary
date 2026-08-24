@@ -179,11 +179,24 @@ describe.skipIf(!pgAvailable)("Produce Product Dictionary Cleanup on PostgreSQL 
     }
   });
 
-  test("matches PRODUCT_CODE_ENTRIES exactly, the whole table", async () => {
+  test("matches PRODUCT_CODE_ENTRIES exactly, up through this migration", async () => {
+    // This file is an isolated proof of migration 20260818100000 only: its
+    // beforeAll applies the base seed + this cleanup migration and
+    // deliberately does not apply 20260824090000 or any migration after it.
+    // PRODUCT_CODE_ENTRIES is the full current approved set, so codes owned
+    // by a later migration (ม72, from 20260824090000) are excluded from this
+    // comparison — the unscoped, full-table equality against
+    // PRODUCT_CODE_ENTRIES is proven in migration-product-code-dictionary.pg.test.ts,
+    // which composes every migration in order.
+    const CODES_FROM_LATER_MIGRATIONS = new Set(["ม72"]);
     const actual = JSON.parse(await scalar(
       "SELECT jsonb_object_agg(product_code, canonical_name)::text FROM public.produce_product_codes",
     )) as Record<string, string>;
-    const expected = Object.fromEntries(PRODUCT_CODE_ENTRIES.map((e) => [e.code, e.canonicalName]));
+    const expected = Object.fromEntries(
+      PRODUCT_CODE_ENTRIES
+        .filter((e) => !CODES_FROM_LATER_MIGRATIONS.has(e.code))
+        .map((e) => [e.code, e.canonicalName]),
+    );
     expect(actual).toEqual(expected);
   });
 

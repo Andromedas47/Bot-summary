@@ -100,6 +100,7 @@ export function pendingFailureAttempt(
         : null) ?? transactionKindFromText(row.accumulated_text),
     accountabilityRoundId: row.accountability_round_id ?? null,
     attemptedAtMs,
+    sourceText: row.accumulated_text ?? null,
   };
 }
 
@@ -125,6 +126,7 @@ export function rawMessageFailureAttempt(
     transactionKind: transactionKindFromText(row.raw_text),
     accountabilityRoundId: null,
     attemptedAtMs,
+    sourceText: row.raw_text,
   };
 }
 

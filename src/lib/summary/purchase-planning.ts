@@ -119,7 +119,25 @@ export type PurchaseUncertaintyReason =
   /** A quantity was null / non-finite / negative. */
   | "invalid_quantity"
   /** A transaction type outside the known set — it must block, never vanish. */
-  | "unknown_transaction_type";
+  | "unknown_transaction_type"
+  /**
+   * An unresolved เบิก whose seller/market/round cannot be proven, but whose
+   * product (and maybe unit) can. Never a confident 🟢/🟠/🔴 for that identity.
+   */
+  | "unattributable_withdrawal";
+
+/**
+ * Narrowest uncertainty an unresolved เบิก is allowed to impose.
+ *
+ * Built by collectUnattributableWithdrawalScopes; applied here. A report-level
+ * scope fails the whole day closed. A round/product scope must not leak onto
+ * unrelated identities.
+ */
+export type UnattributableWithdrawalScope =
+  | { kind: "report" }
+  | { kind: "round"; roundId: string }
+  | { kind: "product"; productName: string }
+  | { kind: "product_unit"; productName: string; unit: string };
 
 /** Why a product has no house-stock number to compare against. */
 export type StockSignalAbsence =
@@ -173,6 +191,11 @@ export interface PurchasePlanningReport {
   items: PurchasePlanningItem[];
   /** Produce documents for the date that never landed and cannot be attributed. */
   unresolvedSessionCount: number;
+  /**
+   * Set when an unresolved เบิก cannot be scoped to any product/unit/round.
+   * The formatter must not emit 🟢/🟠/🔴 as trustworthy in that state.
+   */
+  unsafeReportReason: "unattributable_withdrawal" | null;
   /** Report-level house-stock state; per-item "no_match" is separate. */
   stockAbsence: Exclude<StockSignalAbsence, "no_match"> | null;
   /** Rows dropped because they carried no usable product+unit identity at all. */
@@ -230,6 +253,12 @@ export interface PurchasePlanningInput {
    */
   hasUnattributedIncompleteReturns?: boolean;
   unresolvedSessionCount?: number;
+  /**
+   * Unresolved เบิก documents, already reduced to the narrowest identity
+   * they can prove. Empty means none of today's active เบิก failures need
+   * to move a recommendation.
+   */
+  unattributableWithdrawalScopes?: readonly UnattributableWithdrawalScope[];
   houseStock?: HouseStockSignal;
 }
 
@@ -478,6 +507,44 @@ function reportStockAbsence(
   return "unavailable";
 }
 
+function indexUnattributableScopes(
+  scopes: readonly UnattributableWithdrawalScope[],
+): {
+  reportUnsafe: boolean;
+  productUnits: Set<string>;
+  products: Set<string>;
+  rounds: Set<string>;
+} {
+  const productUnits = new Set<string>();
+  const products = new Set<string>();
+  const rounds = new Set<string>();
+  let reportUnsafe = false;
+  for (const scope of scopes) {
+    if (scope.kind === "report") reportUnsafe = true;
+    else if (scope.kind === "product_unit") {
+      productUnits.add(identityKey(scope.productName, scope.unit));
+    } else if (scope.kind === "product") {
+      products.add(scope.productName);
+    } else {
+      rounds.add(scope.roundId);
+    }
+  }
+  return { reportUnsafe, productUnits, products, rounds };
+}
+
+function cellHitByUnattributable(
+  cell: Cell,
+  index: ReturnType<typeof indexUnattributableScopes>,
+): boolean {
+  if (index.reportUnsafe) return true;
+  if (index.productUnits.has(identityKey(cell.productName, cell.unit))) return true;
+  if (index.products.has(cell.productName)) return true;
+  for (const roundId of cell.withdrawalRounds) {
+    if (roundId !== NO_ROUND && index.rounds.has(roundId)) return true;
+  }
+  return false;
+}
+
 export function buildPurchasePlanningReport(
   input: PurchasePlanningInput,
 ): PurchasePlanningReport {
@@ -536,6 +603,23 @@ export function buildPurchasePlanningReport(
 
   const stockIndex = indexHouseStock(input.houseStock);
   const stockAbsence = reportStockAbsence(input.houseStock);
+  const unattributable = indexUnattributableScopes(
+    input.unattributableWithdrawalScopes ?? [],
+  );
+  if (!unattributable.reportUnsafe) {
+    for (const roundId of unattributable.rounds) {
+      let matched = false;
+      for (const cell of cells.values()) {
+        if (cell.withdrawalRounds.has(roundId)) {
+          matched = true;
+          break;
+        }
+      }
+      // A bound เบิก whose round has no persisted product set cannot be
+      // narrowed. Poisoning nothing would leave the day looking complete.
+      if (!matched) unattributable.reportUnsafe = true;
+    }
+  }
 
   const items: PurchasePlanningItem[] = [];
   for (const [, cell] of cells) {
@@ -551,6 +635,9 @@ export function buildPurchasePlanningReport(
     if (!cell.sawWithdrawal || withdrawn <= 0) cell.reasons.add("no_withdrawal");
     if (good + damaged > withdrawn + QUANTITY_EPSILON) {
       cell.reasons.add("returns_exceed_withdrawal");
+    }
+    if (cellHitByUnattributable(cell, unattributable)) {
+      cell.reasons.add("unattributable_withdrawal");
     }
 
     const uncertain = cell.reasons.size > 0;
@@ -597,12 +684,42 @@ export function buildPurchasePlanningReport(
     });
   }
 
+  // A เบิก that named a product/unit the day never persisted still has to
+  // appear as unknown — omitting it would look like the product was never
+  // withdrawn.
+  if (!unattributable.reportUnsafe) {
+    for (const scope of input.unattributableWithdrawalScopes ?? []) {
+      if (scope.kind !== "product_unit") continue;
+      const key = identityKey(scope.productName, scope.unit);
+      if (cells.has(key)) continue;
+      const matched = matchHouseStock(stockIndex, scope.productName, scope.unit);
+      items.push({
+        productName: scope.productName,
+        unit: scope.unit,
+        withdrawnQuantity: 0,
+        goodReturnQuantity: 0,
+        damagedQuantity: 0,
+        estimatedSoldQuantity: null,
+        sellThroughRate: null,
+        band: null,
+        status: "unknown",
+        uncertaintyReasons: ["unattributable_withdrawal"],
+        houseStockQuantity: matched.quantity,
+        stockAbsence: stockAbsence ?? matched.absence,
+        nextDayGoodStockQuantity: matched.quantity === null ? null : round3(matched.quantity),
+        nextStockToSoldRatio: null,
+        priceConflict: false,
+      });
+    }
+  }
+
   items.sort(compareItems);
 
   return {
     businessDate: input.businessDate,
     items,
     unresolvedSessionCount: input.unresolvedSessionCount ?? 0,
+    unsafeReportReason: unattributable.reportUnsafe ? "unattributable_withdrawal" : null,
     stockAbsence,
     unidentifiedRowCount,
   };

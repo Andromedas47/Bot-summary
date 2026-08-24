@@ -61,6 +61,12 @@ export interface ProduceFailureAttempt {
   accountabilityRoundId: string | null;
   /** LINE event time of the attempt. Null makes ordering unprovable. */
   attemptedAtMs: number | null;
+  /**
+   * The document text, when the adapter still has it. Not an identity
+   * dimension and never used for supersession. Purchase Planning reads it to
+   * scope an unattributable เบิก to the products the text actually names.
+   */
+  sourceText?: string | null;
 }
 
 /** One produce document that actually landed — a candidate replacement. */

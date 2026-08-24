@@ -41,6 +41,7 @@ import {
   type HouseStockSignal,
   type PurchasePlanningReport,
 } from "@/lib/summary/purchase-planning";
+import { collectUnattributableWithdrawalScopes } from "@/lib/summary/unattributable-withdrawal";
 
 type Supabase = SupabaseClient<Database>;
 
@@ -209,6 +210,10 @@ export async function loadPurchasePlanningReport(
     // it also counts lost raw messages and deferred rejects, which is the
     // conservative direction for a purchasing decision.
     unresolvedSessionCount: failures.activeIds.size,
+    unattributableWithdrawalScopes: collectUnattributableWithdrawalScopes(
+      failures.attempts,
+      failures.classifications,
+    ),
     houseStock,
   });
 }

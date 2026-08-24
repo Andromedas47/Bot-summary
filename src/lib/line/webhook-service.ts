@@ -47,6 +47,7 @@ import {
   buildWeighSessionValidationReply,
 } from "@/lib/parsers/weigh-session/parser";
 import { RE } from "@/lib/parsers/weigh-session/regex";
+import { mainCloserRefusal } from "@/lib/parsers/weigh-session/main-closer";
 import {
   PendingSessionService,
   PendingSessionAfterCloseBoundaryError,
@@ -1036,6 +1037,22 @@ export class WebhookService {
         return { eventId, eventType: event.type, status: "saved", parsed: false };
       }
 
+      // A close-looking line is only a boundary when it belongs to this main
+      // session. Refuse before append/bind/close so the generation and its
+      // accumulated items remain byte-for-byte unchanged.
+      const closerRefusal = markClose
+        ? mainCloserRefusal(incomingHeader ? normalizedText : pending.accumulated_text, normalizedText)
+        : null;
+      if (closerRefusal) {
+        log.warn("cross-type main Produce closer refused", {
+          sessionKey,
+          sessionGeneration: pending.session_generation,
+          activeType: closerRefusal.activeType,
+        });
+        if (replyToken) await this.replyMessage(replyToken, closerRefusal.message);
+        return { eventId, eventType: event.type, status: "saved", parsed: false };
+      }
+
       if (
         incomingHeader
         && !pending.terminalized
@@ -1397,6 +1414,18 @@ export class WebhookService {
     // so creation and rotation always agree on what counts as a valid header.
     const incomingSessionHeader = findProduceSessionHeader(normalizedText);
     if (incomingSessionHeader !== null) {
+      const closerRefusal = hasSessionEnd(normalizedText)
+        ? mainCloserRefusal(normalizedText, normalizedText)
+        : null;
+      if (closerRefusal) {
+        log.warn("cross-type main Produce closer refused before session open", {
+          sessionKey,
+          activeType: closerRefusal.activeType,
+        });
+        if (replyToken) await this.replyMessage(replyToken, closerRefusal.message);
+        return { eventId, eventType: event.type, status: "saved", parsed: false };
+      }
+
       if (RE.ADDITIONAL_HEADER.test(incomingSessionHeader)) {
         // Additional batches never take the legacy direct parser/persist path —
         // even a pasted complete block goes through pending generation →

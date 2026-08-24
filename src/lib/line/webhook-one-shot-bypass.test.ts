@@ -457,7 +457,12 @@ describe("a pasted complete produce document cannot bypass P4A", () => {
     expect(payload.accountability_round_id).toBe(ROUND);
     expect(payload.validation_errors).toContain("unit_not_withdrawn");
 
-    // And the operator is told, in the gate's own words, that nothing was saved.
-    expect(pushes.at(-1)).toContain("ระบบยังไม่ได้บันทึกอะไร");
+    const reply = pushes.at(-1) ?? "";
+    expect(reply).toContain("รายการอื่นยังอยู่ครบ");
+    expect(reply).toContain("ไม่ต้องยกเลิก");
+    expect(reply).toContain("ข้อ 1");
+    expect(reply).toContain("แก้ข้อ 1");
+    expect(reply).not.toContain("ระบบยังไม่ได้บันทึกอะไร");
+    expect(reply).not.toContain("ยกเลิกรายการ");
   });
 });

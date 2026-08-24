@@ -317,7 +317,14 @@ describe("CASE N — a pasted coded document uses the PR #45 pipeline", () => {
     // The round WAS resolved — P4A is refusing, not the binding.
     expect(payload.accountability_round_id).toBe(ROUND);
     expect(payload.validation_errors).toContain("unit_not_withdrawn");
-    expect(pushes.at(-1)).toContain("ระบบยังไม่ได้บันทึกอะไร");
+
+    const reply = pushes.at(-1) ?? "";
+    expect(reply).toContain("รายการอื่นยังอยู่ครบ");
+    expect(reply).toContain("ไม่ต้องยกเลิก");
+    expect(reply).toContain("ข้อ 1");
+    expect(reply).toContain("แก้ข้อ 1");
+    expect(reply).not.toContain("ระบบยังไม่ได้บันทึกอะไร");
+    expect(reply).not.toContain("ยกเลิกรายการ");
   });
 
   it("matches a word-typed return against a code-typed withdrawal", async () => {

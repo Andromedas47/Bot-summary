@@ -60,7 +60,17 @@ import {
   PendingSessionGenerationConflictError,
   type PendingSession,
 } from "@/lib/line/pending-session-service";
-import { NEW_HEADER_REQUIRED_REPLY } from "@/lib/line/pending-produce-reorder";
+import {
+  boundaryRejectReply,
+  headerOpenedWithRetainedReply,
+  incompleteCloserReply,
+  isExactRecoverLatestCommand,
+  isIncompleteProduceCloser,
+  loadRecoverableSelection,
+  recoverCommandReply,
+  recoverLatestRejectedBundle,
+  type RecoveryReason,
+} from "@/lib/line/pending-produce-recovery";
 import type { StructuredPendingSession } from "@/lib/line/produce-session-commands";
 import { DailySummaryService } from "@/lib/line/daily-summary-service";
 import { SessionDedupService } from "@/lib/line/session-dedup-service";
@@ -236,8 +246,50 @@ const PRODUCE_ENTRY_GATE_UNAVAILABLE_REPLY = [
 const PRODUCE_CLOSE_PENDING_REPLY =
   "รับจบรายการแล้ว กำลังตรวจสอบรายการที่ยังส่งมาไม่ถึง กรุณารอสักครู่";
 
-const PRODUCE_AFTER_BOUNDARY_REPLY =
-  "รายการนี้ส่งหลังคำสั่งจบ จึงไม่ถูกรวมในรายการเดิม กรุณาเริ่มหัวรายการใหม่";
+async function rejectedBundleNotice(
+  service: PendingSessionService,
+  sessionKey: string,
+  fallback: RecoveryReason,
+): Promise<string> {
+  try {
+    const selection = await loadRecoverableSelection(service, sessionKey);
+    if (selection.kind === "one") {
+      return boundaryRejectReply(selection.bundle.events.length, selection.bundle.reason);
+    }
+  } catch (error) {
+    logger.warn("rejected Produce bundle lookup failed", {
+      sessionKey,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return boundaryRejectReply(1, fallback);
+}
+
+async function retainedBundleNotice(
+  service: PendingSessionService,
+  sessionKey: string,
+): Promise<string | null> {
+  try {
+    const selection = await loadRecoverableSelection(service, sessionKey);
+    if (selection.kind !== "one") return null;
+    return headerOpenedWithRetainedReply(
+      selection.bundle.events.length,
+      selection.bundle.reason,
+    );
+  } catch (error) {
+    logger.warn("retained Produce bundle lookup failed", {
+      sessionKey,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+function deferredRejectReason(action: string): RecoveryReason {
+  if (action === "rejected_after_close") return "after_close";
+  if (action === "rejected_orphan") return "orphan";
+  return "before_opener";
+}
 
 /** 0050: plain-text จบรายการ must not close a Guided/structured session. */
 export const STRUCTURED_TEXT_CLOSE_REFUSED_REPLY =
@@ -1002,6 +1054,35 @@ export class WebhookService {
         return { eventId, eventType: event.type, status: "saved", parsed: true };
       }
 
+      if (isExactRecoverLatestCommand(text)) {
+        const recovered = await recoverLatestRejectedBundle(
+          pendingService,
+          pending,
+          replyToken ?? null,
+        );
+        log.info("produce boundary recovery requested", {
+          sessionKey,
+          sessionGeneration: pending.session_generation,
+          status: recovered.status,
+          count: recovered.status === "recovered" ? recovered.count : 0,
+        });
+        if (replyToken) {
+          await this.replyMessage(replyToken, recoverCommandReply(recovered));
+        }
+        return { eventId, eventType: event.type, status: "saved", parsed: true };
+      }
+
+      if (isIncompleteProduceCloser(text)) {
+        log.info("incomplete Produce closer intercepted", { sessionKey, text });
+        if (replyToken) {
+          await this.replyMessage(
+            replyToken,
+            incompleteCloserReply(pending.accumulated_text),
+          );
+        }
+        return { eventId, eventType: event.type, status: "saved", parsed: false };
+      }
+
       let markClose = hasSessionEnd(normalizedText);
       const expectedItemCount = markClose
         ? parseExpectedItemCount(normalizedText)
@@ -1152,6 +1233,13 @@ export class WebhookService {
           }
           return { eventId, eventType: event.type, status: "saved", parsed: false };
         }
+        if (!markClose && replyToken) {
+          const notice = await retainedBundleNotice(pendingService, sessionKey);
+          if (notice) {
+            await this.replyMessage(replyToken, notice);
+            return { eventId, eventType: event.type, status: "saved", parsed: false };
+          }
+        }
       } else if (
         (pending as StructuredPendingSession).entry_origin == null
         && !incomingHeader
@@ -1187,8 +1275,18 @@ export class WebhookService {
             reordered.action === "rejected_before_opener"
             || reordered.action === "rejected_after_close"
             || reordered.action === "rejected_orphan"
+            || reordered.action === "deferred"
           ) {
-            if (replyToken) await this.replyMessage(replyToken, NEW_HEADER_REQUIRED_REPLY);
+            if (replyToken) {
+              await this.replyMessage(
+                replyToken,
+                await rejectedBundleNotice(
+                  pendingService,
+                  sessionKey,
+                  deferredRejectReason(reordered.action),
+                ),
+              );
+            }
           } else if (draftItemCommand && reordered.session && replyToken) {
             const action = latestDraftItemAction(
               parseWeighSession(reordered.session.accumulated_text, bangkokToday()),
@@ -1261,9 +1359,38 @@ export class WebhookService {
               lineTimestampMs: event.timestamp,
               closeEventTimestampMs: pending.close_event_timestamp_ms,
             });
+            if (typeof rawMessageId === "string" && lineUserId) {
+              try {
+                await pendingService.recordBoundaryRejectedProduceItem({
+                  rawMessageId,
+                  sessionKey,
+                  sourceId,
+                  lineUserId,
+                  lineEventId: eventId,
+                  lineTimestampMs: event.timestamp,
+                  text,
+                  replyToken: replyToken ?? null,
+                  status: "rejected_after_close",
+                  sessionGeneration: pending.session_generation,
+                  closeLineEventId: pending.close_line_event_id,
+                  closeLineTimestampMs: pending.close_event_timestamp_ms,
+                });
+              } catch (recordError) {
+                log.error("after-close rejected Produce evidence persist failed", {
+                  sessionKey,
+                  lineEventId: eventId,
+                  error: recordError instanceof Error
+                    ? recordError.message
+                    : String(recordError),
+                });
+              }
+            }
             if (replyToken) {
               try {
-                await this.replyMessage(replyToken, PRODUCE_AFTER_BOUNDARY_REPLY);
+                await this.replyMessage(
+                  replyToken,
+                  await rejectedBundleNotice(pendingService, sessionKey, "after_close"),
+                );
               } catch (replyError) {
                 log.error("after-boundary rejection reply failed", {
                   error: String(replyError),
@@ -1431,6 +1558,14 @@ export class WebhookService {
       return { eventId, eventType: event.type, status: "saved", parsed: true };
     }
 
+    if (isExactRecoverLatestCommand(text)) {
+      log.info("produce boundary recovery requested with no open header", { sessionKey });
+      if (replyToken) {
+        await this.replyMessage(replyToken, recoverCommandReply({ status: "no_header" }));
+      }
+      return { eventId, eventType: event.type, status: "saved", parsed: true };
+    }
+
     // Uses the same strict header predicate as rotation (findProduceSessionHeader)
     // so creation and rotation always agree on what counts as a valid header.
     const incomingSessionHeader = findProduceSessionHeader(normalizedText);
@@ -1523,6 +1658,10 @@ export class WebhookService {
           error: msg,
         };
       }
+      if (replyToken) {
+        const notice = await retainedBundleNotice(pendingService, sessionKey);
+        if (notice) await this.replyMessage(replyToken, notice);
+      }
       return { eventId, eventType: event.type, status: "saved", parsed: false };
     }
 
@@ -1552,9 +1691,16 @@ export class WebhookService {
           sessionKey,
           sessionGeneration: reordered.session_generation ?? null,
         });
-        if (reordered.action !== "deferred" && reordered.action !== "admitted"
+        if (reordered.action !== "admitted"
             && reordered.action !== "reconciled" && replyToken) {
-          await this.replyMessage(replyToken, NEW_HEADER_REQUIRED_REPLY);
+          await this.replyMessage(
+            replyToken,
+            await rejectedBundleNotice(
+              pendingService,
+              sessionKey,
+              deferredRejectReason(reordered.action),
+            ),
+          );
         }
         return { eventId, eventType: event.type, status: "saved", parsed: false };
       } catch (error) {

@@ -1233,6 +1233,45 @@ describe("production regression: seller-market header with ชั่งคืน
   });
 });
 
+describe("main-session closer compatibility", () => {
+  const parse = (type: string, closer: string) => parseWeighSession([
+    `ดำ-วัดตะกล่ำ ${type} 20/08/2569`,
+    "1.มังคุด45บาท",
+    "2โล",
+    closer,
+  ].join("\n"));
+
+  it.each([
+    ["เบิก", "จบรายการเบิก"],
+    ["ชั่งคืน", "จบรายการชั่งคืน"],
+    ["คืนเสีย", "จบรายการคืนเสีย"],
+    ["เบิก", "จบรายการชั่งเบิก"],
+    ["ชั่งคืน", "จบรายการคืน"],
+    ["เบิก", "จบรายการ"],
+    ["ชั่งคืน", "จบรายการ 1 รายการ"],
+  ])("accepts %s with the supported closer %s", (type, closer) => {
+    expect(parse(type, closer).parse_errors).toEqual([]);
+  });
+
+  it.each([
+    ["เบิก", "จบรายการชั่งคืน"],
+    ["ชั่งคืน", "จบรายการเบิก"],
+    ["ชั่งคืน", "จบรายการคืนเสีย"],
+    ["คืนเสีย", "จบรายการเบิก"],
+    ["คืนเสีย", "จบรายการชั่งคืน"],
+  ])("rejects %s with the cross-type closer %s", (type, closer) => {
+    expect(parse(type, closer).parse_errors.some((error) =>
+      error.includes("wrong closer for main session"),
+    )).toBe(true);
+  });
+
+  it("rejects an unsupported จบรายการ suffix", () => {
+    expect(parse("ชั่งคืน", "จบรายการอะไรก็ได้").parse_errors.some((error) =>
+      error.includes("wrong closer for main session"),
+    )).toBe(true);
+  });
+});
+
 describe("RE.ITEM", () => {
   it("matches item with dot separator", () => {
     const m = "1.หมอนทอง119บาท".match(RE.ITEM);

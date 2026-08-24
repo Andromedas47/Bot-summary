@@ -218,6 +218,31 @@ function build(db: PlainTextGateDatabase, replies: string[]) {
 const RETURN_HEADER = "ดำ-ราชพฤกษ์ ชั่งคืน 11/8/2569";
 
 describe("P4A on the plain-text close", () => {
+  it.each([
+    ["ดำ-ราชพฤกษ์ เบิก 11/8/2569", "จบรายการชั่งคืน", "รายการเบิก", "จบรายการเบิก"],
+    ["ดำ-ราชพฤกษ์ คืนเสีย 11/8/2569", "จบรายการเบิก", "รายการคืนเสีย", "จบรายการคืนเสีย"],
+    ["ดำ-ราชพฤกษ์ คืนเสีย 11/8/2569", "จบรายการชั่งคืน", "รายการคืนเสีย", "จบรายการคืนเสีย"],
+  ])("rejects %s with %s without touching pending state", async (
+    header,
+    closer,
+    activeLabel,
+    expectedCloser,
+  ) => {
+    const db = new PlainTextGateDatabase(
+      pendingRow([header, "1.มังคุด45บาท", "4โล"].join("\n")),
+      master([{}]),
+    );
+    const before = { ...db.pending };
+    const replies: string[] = [];
+
+    await build(db, replies).processEvents([textEvent(closer, `cross-${closer}`)], "dest");
+
+    expect(replies[0]).toContain(activeLabel);
+    expect(replies[0]).toContain(expectedCloser);
+    expect(db.pending).toEqual(before);
+    expect(db.closeRefusals).toEqual([]);
+  });
+
   it("blocks an unknown unit and leaves the session in capture", async () => {
     const db = new PlainTextGateDatabase(
       pendingRow([RETURN_HEADER, "1.มังคุด45บาท", "4โลก"].join("\n")),

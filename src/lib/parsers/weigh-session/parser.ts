@@ -23,6 +23,10 @@ import type {
   BaseTransactionType,
 } from "./types";
 import type { WeighSessionSeed } from "./seed";
+import {
+  baseMainTransactionType,
+  mainCloserCompatibility,
+} from "./main-closer";
 
 // Additional-batch header keyword → the base transaction type its items store.
 export const ADDITIONAL_TYPE_MAP: Record<string, BaseTransactionType> = {
@@ -69,6 +73,9 @@ export function parseWeighSession(
   let sessionKind: SessionKind       = seed?.session_kind ?? "main";
   let declaredTxType: BaseTransactionType | null = seed?.declared_transaction_type ?? null;
   let additionalOpener: string | null = seed?.additional_opener ?? null;
+  let mainSessionType: BaseTransactionType | null =
+    seeded && sessionKind === "main" ? baseMainTransactionType(currentTxType) : null;
+  let mainSegmentClosed = false;
 
   const items:       WeighSessionItem[]        = [];
   const parseErrors: string[]                  = [];
@@ -124,7 +131,15 @@ export function parseWeighSession(
         }
       } else if (additionalEnd) {
         parseErrors.push(`additional closer without an additional header: "${line}"`);
+      } else if (mainSessionType) {
+        const compatibility = mainCloserCompatibility(mainSessionType, content);
+        if (compatibility && !compatibility.compatible) {
+          parseErrors.push(
+            `wrong closer for main session (expected ${compatibility.expectedCloser}): "${line}"`,
+          );
+        }
       }
+      if (sessionKind === "main") mainSegmentClosed = true;
       currentSection = "main";
       continue;
     }
@@ -177,6 +192,7 @@ export function parseWeighSession(
         staffName    = smMatch[1].trim();
         sessionTitle = smMatch[2].trim();
         currentTxType = classifyTxType(smMatch[3] as TransactionType);
+        mainSessionType = baseMainTransactionType(currentTxType);
         state = "items";
         continue;
       }
@@ -185,6 +201,7 @@ export function parseWeighSession(
       if (RE.SESSION_START.test(content)) {
         sessionTitle  = content;
         currentTxType = classifyTxType(content);
+        mainSessionType = baseMainTransactionType(currentTxType);
         state         = "items";
       }
       continue;
@@ -308,6 +325,10 @@ export function parseWeighSession(
           } else if (nextTxType) {
             currentSection = content;
             currentTxType  = nextTxType;
+            if (mainSegmentClosed) {
+              mainSessionType = baseMainTransactionType(nextTxType);
+              mainSegmentClosed = false;
+            }
           } else {
             parseErrors.push(`unrecognized line: "${line}"`);
           }

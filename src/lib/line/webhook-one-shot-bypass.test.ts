@@ -246,6 +246,21 @@ class BypassDatabase {
       }
       return { data: null, error: null };
     }
+    if (name === "append_pending_session") {
+      if (!pending) return { data: { accepted: false, reason: "not_found" }, error: null };
+      pending.accumulated_text = `${pending.accumulated_text}\n${args.p_new_text}`;
+      pending.latest_reply_token = args.p_reply_token;
+      pending.ingest_revision = Number(pending.ingest_revision ?? 0) + 1;
+      if (args.p_mark_close) {
+        pending.close_event_timestamp_ms = args.p_line_timestamp_ms;
+        pending.close_requested_at = new Date().toISOString();
+        pending.close_line_event_id = args.p_line_event_id;
+        pending.close_session_generation = pending.session_generation;
+        pending.next_attempt_at = new Date().toISOString();
+        pending.close_deadline_at = new Date(Date.now() + 30_000).toISOString();
+      }
+      return { data: { accepted: true, reason: "appended", session: pending }, error: null };
+    }
     if (name === "try_finalize_pending_generation") {
       this.finalizeCalls.push(args);
       const payload = args.p_session as Row;
@@ -298,6 +313,56 @@ async function paste(db: BypassDatabase, document: string): Promise<string[]> {
 }
 
 describe("a pasted complete produce document cannot bypass P4A", () => {
+  it.each([
+    [RETURN_MATCHING.replace("จบรายการชั่งคืน", "จบรายการเบิก"), "จบรายการชั่งคืน"],
+    [RETURN_MATCHING.replace("จบรายการชั่งคืน", "จบรายการอะไรก็ได้"), "จบรายการชั่งคืน"],
+  ])("refuses an incompatible complete main document before opening pending", async (
+    document,
+    expectedCloser,
+  ) => {
+    const db = new BypassDatabase(MASTER);
+    const replies = await paste(db, document);
+
+    expect(replies[0]).toContain(expectedCloser);
+    expect(db.rows("pending_sessions")).toHaveLength(0);
+    expect(db.finalizeCalls).toHaveLength(0);
+    expect(db.rows("produce_sessions")).toHaveLength(0);
+  });
+
+  it("rejects a cross-type closer, then finalizes the same return generation once", async () => {
+    const db = new BypassDatabase(MASTER);
+    const replies: string[] = [];
+    const service = webhook(db, replies);
+    const returnBody = RETURN_MATCHING.split("\n").slice(0, -1).join("\n");
+
+    await service.processEvents([textEvent(returnBody)], "destination");
+    const generation = db.pending.session_generation;
+    const originalText = db.pending.accumulated_text;
+
+    await service.processEvents([textEvent("จบรายการเบิก")], "destination");
+
+    expect(replies.at(-1)).toContain("ตอนนี้กำลังบันทึกรายการชั่งคืน");
+    expect(replies.at(-1)).toContain("จบรายการชั่งคืน");
+    expect(db.pending.session_generation).toBe(generation);
+    expect(db.pending.accumulated_text).toBe(originalText);
+    expect(db.pending.close_event_timestamp_ms).toBeNull();
+    expect(db.rows("produce_sessions")).toHaveLength(0);
+    expect(db.rows("produce_transactions")).toHaveLength(MASTER.length);
+
+    await service.processEvents([textEvent("จบรายการชั่งคืน")], "destination");
+
+    expect(db.pending.session_generation).toBe(generation);
+    expect(db.pending.accumulated_text).toBe(`${originalText}\nจบรายการชั่งคืน`);
+    expect(db.pending.close_event_timestamp_ms).not.toBeNull();
+    const result = await finalizePendingGeneration(db as never, db.pending);
+    expect(result.status).toBe("finalized");
+    expect(db.finalizeCalls).toHaveLength(1);
+    expect(db.rows("produce_sessions")).toHaveLength(1);
+    expect(db.finalizeCalls[0].p_items).toMatchObject([
+      { product_name: "ปลาหวานแดง", quantity: 4, transaction_type: "คืน" },
+    ]);
+  });
+
   it("routes through pending generation instead of persisting directly", async () => {
     const db = new BypassDatabase();
 

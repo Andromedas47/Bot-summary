@@ -27,6 +27,10 @@ const CLEANUP_MIGRATION = join(
   HERE, "..", "..", "..", "..",
   "supabase", "migrations", "20260818100000_produce_product_dictionary_cleanup.sql",
 );
+const KAEO_KHAMIN_MIGRATION = join(
+  HERE, "..", "..", "..", "..",
+  "supabase", "migrations", "20260824090000_produce_product_dictionary_add_kaeo_khamin_mango.sql",
+);
 
 interface Row {
   code: string;
@@ -93,6 +97,10 @@ const APPLIED_MIGRATIONS: AppliedMigration[] = [
     insertAfterCode: "ม62",
     renames: { "ม54": "ไซมัส" }, // ไซมัส
   },
+  {
+    file: KAEO_KHAMIN_MIGRATION,
+    insertAfterCode: "ม71",
+  },
 ];
 
 /**
@@ -134,11 +142,11 @@ const moduleRows = (): Row[] =>
   }));
 
 describe("the approved dictionary is the source of truth", () => {
-  it("carries exactly the 262 approved codes", () => {
-    expect(PRODUCT_CODE_COUNT).toBe(262);
-    expect(PRODUCT_CODE_ENABLED_COUNT).toBe(262);
-    expect(PRODUCT_CODE_ENTRIES).toHaveLength(262);
-    expect(csvRows()).toHaveLength(262);
+  it("carries exactly the 263 approved codes", () => {
+    expect(PRODUCT_CODE_COUNT).toBe(263);
+    expect(PRODUCT_CODE_ENABLED_COUNT).toBe(263);
+    expect(PRODUCT_CODE_ENTRIES).toHaveLength(263);
+    expect(csvRows()).toHaveLength(263);
   });
 
   it("matches the CSV row for row, in the approved order and numbering", () => {
@@ -161,7 +169,7 @@ describe("the approved dictionary is the source of truth", () => {
       counts.set(entry.categoryCode, (counts.get(entry.categoryCode) ?? 0) + 1);
     }
     expect(Object.fromEntries(counts)).toEqual({
-      ม: 71, ผ: 118, ป: 36, ท: 26, ห: 4, พ: 7,
+      ม: 72, ผ: 118, ป: 36, ท: 26, ห: 4, พ: 7,
     });
   });
 
@@ -179,6 +187,7 @@ describe("real mappings from the approved CSV resolve", () => {
     ["ม54", "ไซมัส"],
     ["ม62", "แอปเปิ้ล"],
     ["ม68", "องุ่นคิมสัน"],
+    ["ม72", "มะม่วงแก้วขมิ้น"],
     ["ผ01", "ฝักกระเจี๊ยบ"],
     ["ผ07", "กระเทียมหัว"],
     ["ผ99", "ใบตั้งโอ๋"],
@@ -207,9 +216,9 @@ describe("real mappings from the approved CSV resolve", () => {
 });
 
 describe("unregistered codes do not resolve", () => {
-  // ม63-ม71 exist as of this extension, so ม72 — the code right past the new
-  // boundary — is the genuinely unissued example, not ม63 or ม69.
-  for (const code of ["ม99", "ม999", "ผ999", "ป99", "ท99", "ห99", "พ99", "ผ119", "ม72"]) {
+  // ม63-ม72 exist as of this extension, so ม73 — the code right past the new
+  // boundary — is the genuinely unissued example, not ม63, ม69 or ม72.
+  for (const code of ["ม99", "ม999", "ผ999", "ป99", "ท99", "ห99", "พ99", "ผ119", "ม73"]) {
     it(`${code} is unknown`, () => {
       expect(resolveProductCode(code)).toBeNull();
       expect(resolveItemLineProductCode(`${code} 50 บาท`)).toEqual({ kind: "unknown", code });
@@ -361,6 +370,61 @@ describe("dictionary cleanup extension — ม69–ม71 (ส้มแมนด�
     // Verified, not assumed: insertedRowsOf() re-parses the migration file's
     // own VALUES block with the same regex the base suite relies on, so a
     // formatting slip in the new ม69-ม71 rows would fail here.
+    expect(migrationRows()).toEqual(csvRows());
+  });
+});
+
+describe("dictionary extension 20260824090000 — ม72 (มะม่วงแก้วขมิ้น)", () => {
+  it("ม72 → มะม่วงแก้วขมิ้น", () => {
+    expect(resolveProductCode("ม72")).toBe("มะม่วงแก้วขมิ้น");
+  });
+
+  describe("independence — a distinct mango, not a merge of an existing one", () => {
+    it("the other mango codes it must never be confused with keep their own identities", () => {
+      expect(resolveProductCode("ม63")).toBe("มะม่วงจิ้ว");
+      expect(resolveProductCode("ม32")).toBe("มะม่วงงาช้าง");
+      expect(resolveProductCode("ม35")).toBe("มหาชนก");
+      expect(resolveProductCode("ม31")).toBe("มะม่วงเขียวมรกต");
+      expect(resolveProductCode("ม33")).toBe("มะม่วงน้ำดอกไม้");
+    });
+
+    it("ม72 resolves to a name distinct from every other mango code", () => {
+      const kaeoKhamin = resolveProductCode("ม72");
+      for (const code of ["ม63", "ม32", "ม35", "ม31", "ม33", "ม34"]) {
+        expect(resolveProductCode(code)).not.toBe(kaeoKhamin);
+      }
+    });
+  });
+
+  it("no alias silently folds มะม่วงแก้วขมิ้น into another mango", () => {
+    // PRODUCT_ALIASES (src/lib/summary/remaining-fruit.ts) affects business
+    // identity, not just report labels, and no repository or operator
+    // evidence supports folding มะม่วงแก้วขมิ้น into any other mango — so this
+    // migration deliberately adds none. This dictionary layer has no fuzzy
+    // matching of its own: resolveProductCode is exact-code lookup only.
+    expect(resolveProductCode("ม72")).toBe("มะม่วงแก้วขมิ้น");
+    expect(resolveProductCode("ม72")).not.toBe(resolveProductCode("ม63")); // มะม่วงจิ้ว
+    expect(resolveProductCode("ม72")).not.toBe(resolveProductCode("ม35")); // มหาชนก
+  });
+
+  it("no product code collision — ม72 appears exactly once in the full set", () => {
+    const codes = PRODUCT_CODE_ENTRIES.map((e) => e.code);
+    expect(new Set(codes).size).toBe(codes.length);
+    expect(codes.filter((c) => c === "ม72")).toHaveLength(1);
+  });
+
+  it("no pre-existing code changed by this extension", () => {
+    expect(resolveProductCode("ม01")).toBe("กล้วยไข่");
+    expect(resolveProductCode("ม54")).toBe("ไซมัส");
+    expect(resolveProductCode("ม62")).toBe("แอปเปิ้ล");
+    expect(resolveProductCode("ม71")).toBe("ลิ้นจี่");
+  });
+
+  it("the composed migration-parity check still holds with the new INSERT block", () => {
+    // migrationRows() replays every migration file's own VALUES block in
+    // order, including 20260824090000, and must still equal the approved CSV
+    // — proving the PostgreSQL-side representation (what a real database
+    // would end up with) matches the authoritative source.
     expect(migrationRows()).toEqual(csvRows());
   });
 });

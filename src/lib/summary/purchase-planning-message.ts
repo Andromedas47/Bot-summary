@@ -33,7 +33,14 @@ export const PURCHASE_PLANNING_OVERFLOW_NOTICE =
 export const PURCHASE_PLANNING_EMPTY_NOTICE =
   "ยังไม่มีข้อมูลเบิก/ชั่งคืนที่บันทึกสำเร็จสำหรับวันนี้";
 
-export const EMPTY_GREEN_NOTICE = "ยังไม่มีรายการที่ยืนยันได้";
+/** Category-specific empty copy. Only green is shown when empty today. */
+export const EMPTY_STATUS_NOTICE = {
+  strong: "วันนี้ยังไม่มีสินค้าที่ควรซื้อเพิ่ม",
+  surplus: "วันนี้ยังไม่มีสินค้าที่ต้องชะลอการซื้อ",
+  reduce: "วันนี้ยังไม่มีสินค้าที่ควรลดการซื้อ",
+} as const;
+
+export const EMPTY_GREEN_NOTICE = EMPTY_STATUS_NOTICE.strong;
 
 export const WAITING_HOUSE_STOCK = "รอสต๊อกในบ้าน";
 
@@ -48,13 +55,15 @@ export const STATUS_HEADINGS: Record<PurchaseStatus, string> = {
 const STATUS_SEQUENCE: readonly PurchaseStatus[] = ["strong", "surplus", "reduce", "unknown"];
 
 export const PRICE_CONFLICT_FOOTER =
-  "⚠️ บางรายการมีราคาขัดแย้ง แต่จำนวนยังใช้ประเมินได้";
+  "ℹ️ บางรายการมีราคาขัดแย้ง แต่จำนวนยังใช้ประเมินได้";
 
-export const UNATTRIBUTABLE_WITHDRAWAL_SCOPED_NOTICE =
-  "⚠️ มีรายการเบิกที่ยังระบุรอบไม่ได้ สินค้าที่ได้รับผลจึงยังประเมินไม่ได้";
+export const CAUSE_HEADING = "สาเหตุ:";
 
-export const UNATTRIBUTABLE_WITHDRAWAL_REPORT_NOTICE =
-  "⚠️ ยังประเมินการซื้อไม่ได้ เพราะมีรายการเบิกที่ระบุรอบหรือสินค้าไม่ได้";
+export const PRODUCT_RETURN_ABSENT_CAUSE =
+  "มีสินค้าบางรายการไม่พบในรายการคืนที่บันทึกไว้";
+
+export const INCOMPLETE_DATA_SAFETY_NOTICE =
+  "ระบบจะไม่นำสินค้าที่ข้อมูลยังไม่ครบไปใช้ตัดสินใจซื้อ";
 
 /**
  * The house-stock report's own display convention (โล is stored, กก. is read).
@@ -168,26 +177,51 @@ function packedNameBlocks(names: readonly string[]): string[] {
   return blocks;
 }
 
+function hasReason(
+  report: PurchasePlanningReport,
+  reason: PurchasePlanningItem["uncertaintyReasons"][number],
+): boolean {
+  return report.items.some((item) => item.uncertaintyReasons.includes(reason));
+}
+
+function unattributableWithdrawalCause(count: number): string {
+  if (count <= 0) return "พบรายการเบิกที่ยังระบุรอบไม่ได้";
+  return `พบรายการเบิก ${count} ชุดที่ยังระบุรอบไม่ได้`;
+}
+
+function incompleteDataCause(count: number): string {
+  return `พบข้อมูลที่ไม่สมบูรณ์ ${count} ชุด`;
+}
+
+/**
+ * One operator-facing cause block from existing report metadata only.
+ * A bullet is omitted when that cause did not occur.
+ */
+export function buildIncompleteReasonBlock(report: PurchasePlanningReport): string | null {
+  const bullets: string[] = [];
+  const unattributable =
+    report.unsafeReportReason === "unattributable_withdrawal"
+    || hasReason(report, "unattributable_withdrawal");
+
+  if (unattributable) {
+    bullets.push(unattributableWithdrawalCause(report.unresolvedSessionCount));
+  } else if (report.unresolvedSessionCount > 0) {
+    bullets.push(incompleteDataCause(report.unresolvedSessionCount));
+  }
+
+  if (hasReason(report, "product_return_absent")) {
+    bullets.push(PRODUCT_RETURN_ABSENT_CAUSE);
+  }
+
+  if (bullets.length === 0) return null;
+  bullets.push(INCOMPLETE_DATA_SAFETY_NOTICE);
+  return [CAUSE_HEADING, ...bullets.map((line) => `• ${line}`)].join("\n");
+}
+
 function globalWarningBlocks(report: PurchasePlanningReport): string[] {
   const blocks: string[] = [];
-  const unknownCount = report.items.filter((item) => item.status === "unknown").length;
-  const scopedUnattributable = report.items.some((item) =>
-    item.uncertaintyReasons.includes("unattributable_withdrawal"),
-  );
-
-  if (report.unsafeReportReason === "unattributable_withdrawal") {
-    blocks.push(UNATTRIBUTABLE_WITHDRAWAL_REPORT_NOTICE);
-  } else if (scopedUnattributable) {
-    blocks.push(UNATTRIBUTABLE_WITHDRAWAL_SCOPED_NOTICE);
-  }
-
-  if (report.unresolvedSessionCount > 0) {
-    const lines = [`⚠️ ข้อมูลไม่สมบูรณ์ ${report.unresolvedSessionCount} ชุด`];
-    if (unknownCount > 0) {
-      lines.push("รายการ ⚠️ ด้านบนจึงยังไม่ถูกใช้ตัดสินใจซื้อ");
-    }
-    blocks.push(lines.join("\n"));
-  }
+  const reasonBlock = buildIncompleteReasonBlock(report);
+  if (reasonBlock) blocks.push(reasonBlock);
 
   if (report.stockAbsence === "no_snapshot") {
     blocks.push("⚠️ ยังไม่มีข้อมูลสต๊อกในบ้านของวันนี้");

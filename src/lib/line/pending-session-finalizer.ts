@@ -494,7 +494,7 @@ export async function finalizePendingGeneration(
       marketLabel: parsed.session_title,
       canonicalLines: canonicalWithdrawalItemLines(parsed),
     }),
-    // Task 2 (20260825090000): forwarded verbatim to try_finalize_pending_generation.
+    // Task 2 (20260825091000): forwarded verbatim to try_finalize_pending_generation.
     // The RPC — not this file — decides whether the named predecessor may
     // actually be superseded; this is only the pointer the operator UX
     // (replacement-draft.ts) stamped on the draft before any item was appended.

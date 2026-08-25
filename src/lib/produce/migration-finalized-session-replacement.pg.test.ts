@@ -1,6 +1,6 @@
 /**
  * PostgreSQL 17 proof for finalized Produce replacement / void lineage
- * (Task 2, migration 20260825090000).
+ * (Task 2, migration 20260825091000).
  *
  * The property under test is atomicity: try_finalize_pending_generation must
  * insert the replacement session (+items) AND supersede its named predecessor
@@ -222,7 +222,7 @@ describe.skipIf(!pgAvailable)("finalized Produce session replacement lifecycle o
     await apply(join(ROOT, "supabase", "migrations", "20260815150000_produce_fingerprint_compatibility.sql"));
     await apply(join(ROOT, "supabase", "migrations", "20260817090100_produce_withdrawal_containment_guard.sql"));
     await apply(join(ROOT, "supabase", "migrations", "20260817090400_produce_historical_withdrawal_containment.sql"));
-    await apply(join(ROOT, "supabase", "migrations", "20260825090000_produce_finalized_session_replacement_lifecycle.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260825091000_produce_finalized_session_replacement_lifecycle.sql"));
   }, 120_000);
 
   afterAll(async () => {

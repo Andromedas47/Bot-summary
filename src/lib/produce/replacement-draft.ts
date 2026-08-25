@@ -24,7 +24,7 @@
  *   5. The operator now corrects with the EXISTING แก้ข้อ N / ลบข้อ N grammar
  *      (PR #81) and closes normally. Nothing downstream of that point is new:
  *      the ordinary finalizer runs, and try_finalize_pending_generation (see
- *      20260825090000) atomically supersedes the predecessor if and only if
+ *      20260825091000) atomically supersedes the predecessor if and only if
  *      the replacement itself finalizes successfully.
  *
  * ponytail: scoped to single-base-type sessions (a session is either all
@@ -42,6 +42,7 @@ import type { Database } from "@/types/database";
 import type { PendingSession } from "@/lib/line/pending-session-service";
 import { PendingSessionService } from "@/lib/line/pending-session-service";
 import { headerProvenance, type HeaderProvenance } from "@/lib/line/pending-produce-recovery";
+import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
 
 type Supabase = SupabaseClient<Database>;
 
@@ -51,14 +52,26 @@ export function isExactReplaceFinalizedSessionCommand(text: string): boolean {
   return text.trim() === REPLACE_FINALIZED_SESSION_COMMAND;
 }
 
-/** Only a still-empty, still-open plain-text draft may start a replacement. */
+/**
+ * Only a still-empty, still-open plain-text draft may start a replacement.
+ *
+ * "Still-empty" is enforced here, not just claimed: parseWeighSession is the
+ * same authoritative item-line parser the rest of this module already reuses
+ * for the seed round-trip (see buildReplacementSeedText's own callers), so a
+ * draft where the operator already typed item lines before sending the
+ * trigger phrase is refused BEFORE the predecessor's items get appended.
+ * Without this, the seeded lines land after the operator's stray lines in the
+ * same draft, producing duplicate item_numbers and a replacement that
+ * silently carries lines nobody asked to replay.
+ */
 export function canStartReplacementFrom(session: PendingSession | null): boolean {
   return Boolean(
     session
     && session.entry_origin == null
     && !session.terminalized
     && session.close_event_timestamp_ms == null
-    && session.replaces_produce_session_id == null,
+    && session.replaces_produce_session_id == null
+    && parseWeighSession(session.accumulated_text).items.length === 0,
   );
 }
 

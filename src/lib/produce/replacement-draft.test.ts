@@ -82,6 +82,24 @@ describe("canStartReplacementFrom", () => {
       canStartReplacementFrom(basePending({ replaces_produce_session_id: "predecessor-1" })),
     ).toBe(false);
   });
+
+  it("allows a header-only draft with no item lines typed yet", () => {
+    expect(
+      canStartReplacementFrom(basePending({ accumulated_text: "กี้-ตลาดทดสอบ เบิก 24/8/2569" })),
+    ).toBe(true);
+  });
+
+  it("refuses a draft where the operator already typed at least one item line", () => {
+    expect(
+      canStartReplacementFrom(basePending({
+        accumulated_text: [
+          "กี้-ตลาดทดสอบ เบิก 24/8/2569",
+          "1. มังคุด 45 บาท",
+          "10 โล",
+        ].join("\n"),
+      })),
+    ).toBe(false);
+  });
 });
 
 // ── seed rendering, roundtripped through the REAL parser ────────────────────

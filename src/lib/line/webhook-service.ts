@@ -312,6 +312,9 @@ const WHITE_SHEET_NOTE_FIELD_LABEL: Record<string, string> = {
   snack: "ค่าขนม",
   other: "ค่าอื่น",
   actualCash: "เงินสด",
+  // Task 4 (Daily Financial Settlement) — the two genuinely missing inputs.
+  whiteSheetSales: "ยอดขาย",
+  ownerCash: "เงินให้เจ้า",
 };
 
 const WHITE_SHEET_NOTE_NO_OPEN_SESSION_REPLY = "ยังไม่มีใบขาวมือที่เปิดอยู่";
@@ -349,6 +352,10 @@ function buildWhiteSheetNoteFieldLines(session: ManualWhiteSheetNoteSessionRow):
     );
   }
   if (session.actual_cash !== null) lines.push(`เงินสด: ${formatMoney(session.actual_cash)} บาท`);
+  if (session.white_sheet_sales != null) {
+    lines.push(`ยอดขาย: ${formatMoney(session.white_sheet_sales)} บาท`);
+  }
+  if (session.owner_cash != null) lines.push(`เงินให้เจ้า: ${formatMoney(session.owner_cash)} บาท`);
   return lines;
 }
 
@@ -361,7 +368,7 @@ function buildWhiteSheetNoteCanonicalSummary(
   cash: CashEntryForSummary,
 ): string {
   const otherNote = cash.other_note ? ` — ${cash.other_note}` : "";
-  return [
+  const lines = [
     "จบใบขาวมือแล้ว ✅",
     "",
     `ตลาด: ${marketLabel}`,
@@ -372,9 +379,17 @@ function buildWhiteSheetNoteCanonicalSummary(
     `ค่าขนม: ${formatMoney(Number(cash.snack))} บาท`,
     `ค่าอื่น: ${formatMoney(Number(cash.other))} บาท${otherNote}`,
     `เงินสด: ${formatMoney(Number(cash.actual_cash_submitted))} บาท`,
-    "",
-    "บันทึกข้อมูลใบขาวแล้ว",
-  ].join("\n");
+  ];
+  // Task 4 fields are nullable (not every close carries them yet) — shown
+  // only when actually entered, never rendered as a false zero.
+  if (cash.white_sheet_sales != null) {
+    lines.push(`ยอดขาย: ${formatMoney(Number(cash.white_sheet_sales))} บาท`);
+  }
+  if (cash.owner_cash != null) {
+    lines.push(`เงินให้เจ้า: ${formatMoney(Number(cash.owner_cash))} บาท`);
+  }
+  lines.push("", "บันทึกข้อมูลใบขาวแล้ว");
+  return lines.join("\n");
 }
 
 /** Reply for resuming an already-open session — must never claim closed/saved. */

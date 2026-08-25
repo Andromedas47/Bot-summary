@@ -256,7 +256,19 @@ describe("Production UAT field payload 5b869e9b", () => {
     expect(PRODUCTION_UAT_FIELD_PAYLOAD.includes("\r")).toBe(false);
     expect(PRODUCTION_UAT_FIELD_PAYLOAD.includes("\u00a0")).toBe(false);
     expect(PRODUCTION_UAT_FIELD_PAYLOAD.includes("\u200b")).toBe(false);
-    for (const label of Object.values(FIELD_LABELS)) {
+    // This fixture is a frozen historical production payload \u2014 it names only
+    // the six fields that existed when it was captured, so this checks that
+    // original subset rather than Object.values(FIELD_LABELS), which grew
+    // whiteSheetSales/ownerCash under Task 4 (Daily Financial Settlement).
+    const ORIGINAL_FIELD_LABELS: readonly string[] = [
+      FIELD_LABELS.labor,
+      FIELD_LABELS.locationFee,
+      FIELD_LABELS.bag,
+      FIELD_LABELS.snack,
+      FIELD_LABELS.other,
+      FIELD_LABELS.actualCash,
+    ];
+    for (const label of ORIGINAL_FIELD_LABELS) {
       expect(PRODUCTION_UAT_FIELD_PAYLOAD.includes(label)).toBe(true);
     }
     const codePoints = [...PRODUCTION_UAT_FIELD_PAYLOAD].map((ch) => ch.codePointAt(0)!);

@@ -19,6 +19,9 @@ const FIELD_LABEL_UTF8_HEX = {
   snack: "e0b884e0b988e0b8b2e0b882e0b899e0b8a1", // ค่าขนม
   other: "e0b884e0b988e0b8b2e0b8ade0b8b7e0b988e0b899", // ค่าอื่น
   actualCash: "e0b980e0b887e0b8b4e0b899e0b8aae0b894", // เงินสด
+  // Task 4 (Daily Financial Settlement) — the two genuinely missing inputs.
+  whiteSheetSales: "e0b8a2e0b8ade0b894e0b882e0b8b2e0b8a2", // ยอดขาย
+  ownerCash: "e0b980e0b887e0b8b4e0b899e0b983e0b8abe0b989e0b980e0b888e0b989e0b8b2", // เงินให้เจ้า
 } as const;
 
 function utf8FromHex(hex: string): string {
@@ -32,6 +35,8 @@ export const FIELD_LABELS = {
   snack: utf8FromHex(FIELD_LABEL_UTF8_HEX.snack),
   other: utf8FromHex(FIELD_LABEL_UTF8_HEX.other),
   actualCash: utf8FromHex(FIELD_LABEL_UTF8_HEX.actualCash),
+  whiteSheetSales: utf8FromHex(FIELD_LABEL_UTF8_HEX.whiteSheetSales),
+  ownerCash: utf8FromHex(FIELD_LABEL_UTF8_HEX.ownerCash),
 } as const;
 
 export type WhiteSheetNoteFieldKey =
@@ -40,7 +45,9 @@ export type WhiteSheetNoteFieldKey =
   | "bag"
   | "snack"
   | "other"
-  | "actualCash";
+  | "actualCash"
+  | "whiteSheetSales"
+  | "ownerCash";
 
 const FIELD_LABEL_ENTRIES: ReadonlyArray<{ key: WhiteSheetNoteFieldKey; label: string }> = (
   Object.keys(FIELD_LABELS) as WhiteSheetNoteFieldKey[]

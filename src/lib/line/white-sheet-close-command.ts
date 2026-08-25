@@ -8,6 +8,8 @@ const HEADER_RE =
   /^(.+?)\s+ปิดยอด\s+(\d{1,2}\/\d{1,2}\/(?:25)?\d{2})\s*$/;
 
 const FIELD_LABELS = {
+  whiteSheetSales: "ยอดขาย",
+  ownerCash: "เงินให้เจ้า",
   labor: "ค่าแรง",
   locationFee: "ค่าที่",
   bag: "ค่าถุง",
@@ -17,7 +19,7 @@ const FIELD_LABELS = {
 } as const;
 
 const FIELD_LINE_RE =
-  /^(ค่าแรง|ค่าที่|ค่าถุง|ค่าขนม|ค่าอื่น|เงินสด)\s+(.+?)\s*$/;
+  /^(ยอดขาย|เงินให้เจ้า|ค่าแรง|ค่าที่|ค่าถุง|ค่าขนม|ค่าอื่น|เงินสด)\s+(.+?)\s*$/;
 
 const CLOSE_LINE = "จบปิดยอด";
 
@@ -34,6 +36,9 @@ export interface WhiteSheetCloseCommand {
   marketLabel: string;
   marketLabelNormalized: string;
   businessDate: string;
+  /** Required Financial Settlement inputs; explicit 0 is a real value. */
+  whiteSheetSales: number;
+  ownerCash: number;
   /** `undefined` = omitted; number (including 0) = explicitly supplied. */
   labor: number | undefined;
   locationFee: number | undefined;
@@ -135,6 +140,8 @@ export function parseWhiteSheetCloseCommand(text: string): WhiteSheetCloseParseR
   let headerLine: string | null = null;
 
   const labor: number[] = [];
+  const whiteSheetSales: number[] = [];
+  const ownerCash: number[] = [];
   const locationFee: number[] = [];
   const bag: number[] = [];
   const snack: number[] = [];
@@ -197,6 +204,12 @@ export function parseWhiteSheetCloseCommand(text: string): WhiteSheetCloseParseR
     }
 
     switch (label) {
+      case FIELD_LABELS.whiteSheetSales:
+        whiteSheetSales.push(amount);
+        break;
+      case FIELD_LABELS.ownerCash:
+        ownerCash.push(amount);
+        break;
       case FIELD_LABELS.labor:
         labor.push(amount);
         break;
@@ -258,6 +271,8 @@ export function parseWhiteSheetCloseCommand(text: string): WhiteSheetCloseParseR
   };
 
   for (const check of [
+    dup("ยอดขาย", whiteSheetSales),
+    dup("เงินให้เจ้า", ownerCash),
     dup("ค่าแรง", labor),
     dup("ค่าที่", locationFee),
     dup("ค่าถุง", bag),
@@ -266,6 +281,21 @@ export function parseWhiteSheetCloseCommand(text: string): WhiteSheetCloseParseR
     dup("เงินสด", actualCash),
   ]) {
     if (check) return check;
+  }
+
+  const missingFinancialFields = [
+    ...(whiteSheetSales.length === 0 ? ["ยอดขาย"] : []),
+    ...(ownerCash.length === 0 ? ["เงินให้เจ้า"] : []),
+  ];
+  if (missingFinancialFields.length > 0) {
+    return {
+      kind: "invalid",
+      message: [
+        "ยังปิดยอดไม่ได้",
+        "กรุณากรอก:",
+        ...missingFinancialFields.map((field) => `• ${field}`),
+      ].join("\n"),
+    };
   }
 
   if (actualCash.length === 0) {
@@ -281,6 +311,8 @@ export function parseWhiteSheetCloseCommand(text: string): WhiteSheetCloseParseR
       marketLabel: marketLabelNormalized,
       marketLabelNormalized,
       businessDate,
+      whiteSheetSales: whiteSheetSales[0],
+      ownerCash: ownerCash[0],
       labor: labor[0],
       locationFee: locationFee[0],
       bag: bag[0],

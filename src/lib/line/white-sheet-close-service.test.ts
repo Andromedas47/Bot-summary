@@ -16,6 +16,7 @@ import {
   PENDING_REFERENCE_VERIFIED_TRANSFER_WARNING,
 } from "@/lib/white-sheet/warnings";
 import { stubManualSlipTables } from "@/lib/white-sheet/test-manual-slip-db";
+import { getDailyFinancialSettlement } from "@/lib/settlement/daily-financial-settlement";
 
 type CashEntryRow = Database["public"]["Tables"]["digital_white_sheet_cash_entries"]["Row"];
 
@@ -253,6 +254,15 @@ function makeCloseDatabase(options?: {
           },
         };
       }
+      if (table === "transfer_reconciliations") {
+        const builder = {
+          select: () => builder,
+          eq: () => builder,
+          is: () => builder,
+          maybeSingle: async () => ({ data: null, error: null }),
+        };
+        return builder;
+      }
       if (table === "digital_white_sheet_cash_entries") {
         type Filter = { op: "eq" | "is"; column: string; value: unknown };
         const matches = (row: CashEntryRow, filters: Filter[]) =>
@@ -403,6 +413,8 @@ function mustParse(text: string) {
 
 const MATCHED_CLOSE = [
   `${MARKET_GEE} ปิดยอด 24/07/2569`,
+  "ยอดขาย 286",
+  "เงินให้เจ้า 0",
   "ค่าแรง 30",
   "ค่าที่ 20",
   "ค่าถุง 5",
@@ -434,12 +446,25 @@ describe("processWhiteSheetCloseCommand", () => {
     expect(text).toContain("เงินสดที่ควรส่ง 16.00 บาท");
     expect(text).toContain("เงินสดที่ส่งจริง 16.00 บาท");
     expect(text).toContain("✅ ยอดตรง");
+
+    const financial = await getDailyFinancialSettlement(supabase, {
+      sourceId: SOURCE_ID,
+      marketLabelNormalized: MARKET_GEE,
+      businessDate: BUSINESS_DATE,
+    });
+    expect(financial).toMatchObject({
+      status: "CLOSED_MATCHED",
+      whiteSheetSales: 286,
+      ownerCash: 0,
+      actualCash: 16,
+      difference: 0,
+    });
   });
 
   it("M. unknown market fails closed with zero persistence", async () => {
     const { supabase, cashEntries } = makeCloseDatabase();
     const command = mustParse(
-      "กี้ ปิดยอด 24/07/2569\nเงินสด 16\nจบปิดยอด",
+      "กี้ ปิดยอด 24/07/2569\nยอดขาย 286\nเงินให้เจ้า 0\nเงินสด 16\nจบปิดยอด",
     );
 
     const outcome = await processWhiteSheetCloseCommand(supabase, {
@@ -459,7 +484,7 @@ describe("processWhiteSheetCloseCommand", () => {
     await processWhiteSheetCloseCommand(supabase, {
       sourceId: SOURCE_ID,
       command: mustParse(
-        `${MARKET_GEE} ปิดยอด 24/07/2569\nเงินสด 1000\nจบปิดยอด`,
+        `${MARKET_GEE} ปิดยอด 24/07/2569\nยอดขาย 1000\nเงินให้เจ้า 10\nเงินสด 1000\nจบปิดยอด`,
       ),
     });
     expect(cashEntries.size).toBe(1);
@@ -468,13 +493,15 @@ describe("processWhiteSheetCloseCommand", () => {
     const second = await processWhiteSheetCloseCommand(supabase, {
       sourceId: SOURCE_ID,
       command: mustParse(
-        `${MARKET_GEE} ปิดยอด 24/07/2569\nเงินสด 1100\nจบปิดยอด`,
+        `${MARKET_GEE} ปิดยอด 24/07/2569\nยอดขาย 1100\nเงินให้เจ้า 20\nเงินสด 1100\nจบปิดยอด`,
       ),
     });
 
     expect(cashEntries.size).toBe(1);
     expect([...cashEntries.values()][0].id).toBe(firstId);
     expect([...cashEntries.values()][0].actual_cash_submitted).toBe(1100);
+    expect([...cashEntries.values()][0].white_sheet_sales).toBe(1100);
+    expect([...cashEntries.values()][0].owner_cash).toBe(20);
     expect(second.replyMessages.join("\n")).toContain("เงินสดที่ส่งจริง 1,100.00 บาท");
   });
 
@@ -483,7 +510,7 @@ describe("processWhiteSheetCloseCommand", () => {
     await processWhiteSheetCloseCommand(supabase, {
       sourceId: SOURCE_ID,
       command: mustParse(
-        `${MARKET_GEE} ปิดยอด 24/07/2569\nเงินสด 16\nจบปิดยอด`,
+        `${MARKET_GEE} ปิดยอด 24/07/2569\nยอดขาย 0\nเงินให้เจ้า 0\nเงินสด 16\nจบปิดยอด`,
       ),
     });
     const row = [...cashEntries.values()][0];
@@ -494,6 +521,50 @@ describe("processWhiteSheetCloseCommand", () => {
     expect(row.other).toBe(0);
     expect(row.other_note).toBeNull();
     expect(row.actual_cash_submitted).toBe(16);
+    expect(row.white_sheet_sales).toBe(0);
+    expect(row.owner_cash).toBe(0);
+    expect(row.labor_entered).toBe(false);
+    expect(row.location_fee_entered).toBe(false);
+    expect(row.bag_entered).toBe(false);
+    expect(row.snack_entered).toBe(false);
+    expect(row.other_entered).toBe(false);
+    expect(row.actual_cash_submitted_entered).toBe(true);
+  });
+
+  it("normal all-zero lines persist as genuine entered zeros", async () => {
+    const { supabase, cashEntries } = makeCloseDatabase();
+    await processWhiteSheetCloseCommand(supabase, {
+      sourceId: SOURCE_ID,
+      command: mustParse([
+        `${MARKET_GEE} ปิดยอด 24/07/2569`,
+        "ยอดขาย 0",
+        "เงินให้เจ้า 0",
+        "ค่าแรง 0",
+        "ค่าที่ 0",
+        "ค่าถุง 0",
+        "ค่าขนม 0",
+        "ค่าอื่น 0",
+        "เงินสด 0",
+        "จบปิดยอด",
+      ].join("\n")),
+    });
+
+    expect([...cashEntries.values()][0]).toMatchObject({
+      white_sheet_sales: 0,
+      owner_cash: 0,
+      labor: 0,
+      location_fee: 0,
+      bag: 0,
+      snack: 0,
+      other: 0,
+      actual_cash_submitted: 0,
+      labor_entered: true,
+      location_fee_entered: true,
+      bag_entered: true,
+      snack_entered: true,
+      other_entered: true,
+      actual_cash_submitted_entered: true,
+    });
   });
 
   it("B. cash-only resubmission preserves all expenses and otherNote", async () => {
@@ -506,7 +577,7 @@ describe("processWhiteSheetCloseCommand", () => {
     const outcome = await processWhiteSheetCloseCommand(supabase, {
       sourceId: SOURCE_ID,
       command: mustParse(
-        `${MARKET_GEE} ปิดยอด 24/07/2569\nเงินสด 20\nจบปิดยอด`,
+        `${MARKET_GEE} ปิดยอด 24/07/2569\nยอดขาย 286\nเงินให้เจ้า 0\nเงินสด 20\nจบปิดยอด`,
       ),
     });
 
@@ -541,7 +612,7 @@ describe("processWhiteSheetCloseCommand", () => {
     await processWhiteSheetCloseCommand(supabase, {
       sourceId: SOURCE_ID,
       command: mustParse(
-        `${MARKET_GEE} ปิดยอด 24/07/2569\nค่าแรง 0\nเงินสด 46\nจบปิดยอด`,
+        `${MARKET_GEE} ปิดยอด 24/07/2569\nยอดขาย 286\nเงินให้เจ้า 0\nค่าแรง 0\nเงินสด 46\nจบปิดยอด`,
       ),
     });
 
@@ -552,6 +623,7 @@ describe("processWhiteSheetCloseCommand", () => {
     expect(row.snack).toBe(5);
     expect(row.other).toBe(10);
     expect(row.actual_cash_submitted).toBe(46);
+    expect(row.labor_entered).toBe(true);
   });
 
   it("D. omitting ค่าอื่น preserves other amount and note", async () => {
@@ -561,6 +633,8 @@ describe("processWhiteSheetCloseCommand", () => {
       command: mustParse(
         [
           `${MARKET_GEE} ปิดยอด 24/07/2569`,
+          "ยอดขาย 286",
+          "เงินให้เจ้า 0",
           "ค่าแรง 30",
           "ค่าที่ 20",
           "ค่าถุง 5",
@@ -575,7 +649,7 @@ describe("processWhiteSheetCloseCommand", () => {
     await processWhiteSheetCloseCommand(supabase, {
       sourceId: SOURCE_ID,
       command: mustParse(
-        `${MARKET_GEE} ปิดยอด 24/07/2569\nเงินสด 16\nจบปิดยอด`,
+        `${MARKET_GEE} ปิดยอด 24/07/2569\nยอดขาย 286\nเงินให้เจ้า 0\nเงินสด 16\nจบปิดยอด`,
       ),
     });
 
@@ -591,6 +665,8 @@ describe("processWhiteSheetCloseCommand", () => {
       command: mustParse(
         [
           `${MARKET_GEE} ปิดยอด 24/07/2569`,
+          "ยอดขาย 286",
+          "เงินให้เจ้า 0",
           "ค่าอื่น 10 ค่าน้ำแข็ง",
           "เงินสด 16",
           "จบปิดยอด",
@@ -601,7 +677,7 @@ describe("processWhiteSheetCloseCommand", () => {
     await processWhiteSheetCloseCommand(supabase, {
       sourceId: SOURCE_ID,
       command: mustParse(
-        `${MARKET_GEE} ปิดยอด 24/07/2569\nค่าอื่น 0\nเงินสด 16\nจบปิดยอด`,
+        `${MARKET_GEE} ปิดยอด 24/07/2569\nยอดขาย 286\nเงินให้เจ้า 0\nค่าอื่น 0\nเงินสด 16\nจบปิดยอด`,
       ),
     });
 
@@ -617,6 +693,8 @@ describe("processWhiteSheetCloseCommand", () => {
       command: mustParse(
         [
           `${MARKET_GEE} ปิดยอด 24/07/2569`,
+          "ยอดขาย 286",
+          "เงินให้เจ้า 0",
           "ค่าอื่น 10 ค่าน้ำแข็ง",
           "เงินสด 16",
           "จบปิดยอด",
@@ -637,7 +715,7 @@ describe("processWhiteSheetCloseCommand", () => {
     const outcome = await processWhiteSheetCloseCommand(supabase, {
       sourceId: SOURCE_ID,
       command: mustParse(
-        `${MARKET_GEE} ปิดยอด 24/07/2569\nค่าแรง 0\nเงินสด 9999\nจบปิดยอด`,
+        `${MARKET_GEE} ปิดยอด 24/07/2569\nยอดขาย 9999\nเงินให้เจ้า 0\nค่าแรง 0\nเงินสด 9999\nจบปิดยอด`,
       ),
     });
 
@@ -661,12 +739,14 @@ describe("processWhiteSheetCloseCommand", () => {
       updatedAt: "2026-07-24T00:00:00Z",
     };
     const cashOnly = mustParse(
-      `${MARKET_GEE} ปิดยอด 24/07/2569\nเงินสด 20\nจบปิดยอด`,
+      `${MARKET_GEE} ปิดยอด 24/07/2569\nยอดขาย 286\nเงินให้เจ้า 0\nเงินสด 20\nจบปิดยอด`,
     );
     expect(mergeWhiteSheetCloseInput(SOURCE_ID, cashOnly, submitted)).toEqual({
       sourceId: SOURCE_ID,
       marketLabelNormalized: MARKET_GEE,
       businessDate: BUSINESS_DATE,
+      whiteSheetSales: 286,
+      ownerCash: 0,
       labor: 30,
       locationFee: 20,
       bag: 5,
@@ -674,10 +754,16 @@ describe("processWhiteSheetCloseCommand", () => {
       other: 10,
       otherNote: "ค่าน้ำแข็ง",
       actualCashSubmitted: 20,
+      laborEntered: false,
+      locationFeeEntered: false,
+      bagEntered: false,
+      snackEntered: false,
+      otherEntered: false,
+      actualCashEntered: true,
     });
 
     const zeroLabor = mustParse(
-      `${MARKET_GEE} ปิดยอด 24/07/2569\nค่าแรง 0\nเงินสด 20\nจบปิดยอด`,
+      `${MARKET_GEE} ปิดยอด 24/07/2569\nยอดขาย 286\nเงินให้เจ้า 0\nค่าแรง 0\nเงินสด 20\nจบปิดยอด`,
     );
     expect(mergeWhiteSheetCloseInput(SOURCE_ID, zeroLabor, submitted).labor).toBe(0);
     expect(mergeWhiteSheetCloseInput(SOURCE_ID, zeroLabor, submitted).locationFee).toBe(20);
@@ -704,7 +790,7 @@ describe("processWhiteSheetCloseCommand", () => {
     const outcome = await processWhiteSheetCloseCommand(supabase, {
       sourceId: SOURCE_ID,
       command: mustParse(
-        `${MARKET_GEE} ปิดยอด 24/07/2569\nเงินสด 9999\nจบปิดยอด`,
+        `${MARKET_GEE} ปิดยอด 24/07/2569\nยอดขาย 9999\nเงินให้เจ้า 0\nเงินสด 9999\nจบปิดยอด`,
       ),
     });
 
@@ -722,7 +808,7 @@ describe("processWhiteSheetCloseCommand", () => {
     await processWhiteSheetCloseCommand(supabase, {
       sourceId: SOURCE_ID,
       command: mustParse(
-        `${MARKET_GEE} ปิดยอด 24/07/2569\nเงินสด 16\nจบปิดยอด`,
+        `${MARKET_GEE} ปิดยอด 24/07/2569\nยอดขาย 286\nเงินให้เจ้า 0\nเงินสด 16\nจบปิดยอด`,
       ),
     });
     expect(cashEntries.size).toBe(1);
@@ -737,7 +823,7 @@ describe("processWhiteSheetCloseCommand", () => {
     await processWhiteSheetCloseCommand(supabase, {
       sourceId: SOURCE_ID,
       command: mustParse(
-        `${MARKET_NOI} ปิดยอด 24/07/2569\nเงินสด 50\nจบปิดยอด`,
+        `${MARKET_NOI} ปิดยอด 24/07/2569\nยอดขาย 50\nเงินให้เจ้า 0\nเงินสด 50\nจบปิดยอด`,
       ),
     });
 

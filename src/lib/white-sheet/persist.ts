@@ -4,6 +4,8 @@ import type { WhiteSheetExpenses } from "./types";
 
 type Supabase = SupabaseClient<Database>;
 type CashEntryRow = Database["public"]["Tables"]["digital_white_sheet_cash_entries"]["Row"];
+type CashEntryInsert = Database["public"]["Tables"]["digital_white_sheet_cash_entries"]["Insert"];
+type CashEntryUpdate = Database["public"]["Tables"]["digital_white_sheet_cash_entries"]["Update"];
 
 const TABLE = "digital_white_sheet_cash_entries" as const;
 const OTHER_NOTE_MAX_LENGTH = 1000;
@@ -95,6 +97,9 @@ export type WhiteSheetCashEntryState =
     };
 
 export interface WhiteSheetCashEntryInput extends WhiteSheetCashEntryIdentity {
+  /** Undefined leaves an existing value unchanged and inserts SQL NULL. */
+  whiteSheetSales?: number;
+  ownerCash?: number;
   labor: number;
   locationFee: number;
   bag: number;
@@ -102,6 +107,13 @@ export interface WhiteSheetCashEntryInput extends WhiteSheetCashEntryIdentity {
   other: number;
   otherNote?: string | null;
   actualCashSubmitted: number;
+  /** Undefined preserves the pre-provenance full-form writer behavior (true). */
+  laborEntered?: boolean;
+  locationFeeEntered?: boolean;
+  bagEntered?: boolean;
+  snackEntered?: boolean;
+  otherEntered?: boolean;
+  actualCashEntered?: boolean;
 }
 
 function requireIdentityField(value: string, field: string): string {
@@ -284,6 +296,12 @@ export async function saveWhiteSheetCashEntry(
   const accountabilityRoundId = requireAccountabilityRoundId(rawInput.accountabilityRoundId);
 
   const labor = requireMoney(rawInput.labor, "labor");
+  const whiteSheetSales = rawInput.whiteSheetSales === undefined
+    ? undefined
+    : requireMoney(rawInput.whiteSheetSales, "whiteSheetSales");
+  const ownerCash = rawInput.ownerCash === undefined
+    ? undefined
+    : requireMoney(rawInput.ownerCash, "ownerCash");
   const locationFee = requireMoney(rawInput.locationFee, "locationFee");
   const bag = requireMoney(rawInput.bag, "bag");
   const snack = requireMoney(rawInput.snack, "snack");
@@ -310,27 +328,41 @@ export async function saveWhiteSheetCashEntry(
 
   const SELECT_COLUMNS =
     "labor, location_fee, bag, snack, other, other_note, actual_cash_submitted, white_sheet_sales, owner_cash, labor_entered, location_fee_entered, bag_entered, snack_entered, other_entered, actual_cash_submitted_entered, updated_at, finalized_at, finalized_by";
-  // This "digital" submission path always supplies real values for all six
-  // fields at once (WhiteSheetCashEntryInput requires them, never optional),
-  // so every field it writes is unambiguously entered — see the
-  // labor_entered family of columns added in migration 20260825092000,
-  // whose false state is reserved for the ใบขาวมือ RPC's partial-close path.
-  const writeValues = {
-    labor,
-    location_fee: locationFee,
-    bag,
-    snack,
-    other,
-    other_note: otherNote,
-    actual_cash_submitted: actualCashSubmitted,
-    labor_entered: true,
-    location_fee_entered: true,
-    bag_entered: true,
-    snack_entered: true,
-    other_entered: true,
-    actual_cash_submitted_entered: true,
+  const updateValues: CashEntryUpdate = {
     updated_at: new Date().toISOString(),
   };
+  if (whiteSheetSales !== undefined) updateValues.white_sheet_sales = whiteSheetSales;
+  if (ownerCash !== undefined) updateValues.owner_cash = ownerCash;
+
+  // false means this submission omitted the line. Leave both its amount and
+  // flag untouched on UPDATE so a stale omission cannot overwrite a newer
+  // explicit value while leaving entered=true. Undefined keeps compatibility
+  // with pre-provenance callers, whose complete forms are treated as entered.
+  if (rawInput.laborEntered !== false) {
+    updateValues.labor = labor;
+    updateValues.labor_entered = true;
+  }
+  if (rawInput.locationFeeEntered !== false) {
+    updateValues.location_fee = locationFee;
+    updateValues.location_fee_entered = true;
+  }
+  if (rawInput.bagEntered !== false) {
+    updateValues.bag = bag;
+    updateValues.bag_entered = true;
+  }
+  if (rawInput.snackEntered !== false) {
+    updateValues.snack = snack;
+    updateValues.snack_entered = true;
+  }
+  if (rawInput.otherEntered !== false) {
+    updateValues.other = other;
+    updateValues.other_note = otherNote;
+    updateValues.other_entered = true;
+  }
+  if (rawInput.actualCashEntered !== false) {
+    updateValues.actual_cash_submitted = actualCashSubmitted;
+    updateValues.actual_cash_submitted_entered = true;
+  }
 
   if (existing) {
     // Atomic guard: the UPDATE only matches while finalized_at is still NULL
@@ -338,7 +370,7 @@ export async function saveWhiteSheetCashEntry(
     // succeed — one of them loses.
     const { data, error } = await supabase
       .from(TABLE)
-      .update(writeValues)
+      .update(updateValues)
       .eq("id", existing.id)
       .is("finalized_at", null)
       .select(SELECT_COLUMNS)
@@ -355,15 +387,32 @@ export async function saveWhiteSheetCashEntry(
     return toEntryState(data as CashEntryRow);
   }
 
+  const insertValues: CashEntryInsert = {
+    source_id: sourceId,
+    market_label_normalized: marketLabelNormalized,
+    business_date: businessDate,
+    accountability_round_id: accountabilityRoundId ?? null,
+    ...updateValues,
+    labor,
+    location_fee: locationFee,
+    bag,
+    snack,
+    other,
+    other_note: otherNote,
+    actual_cash_submitted: actualCashSubmitted,
+    white_sheet_sales: whiteSheetSales ?? null,
+    owner_cash: ownerCash ?? null,
+    labor_entered: rawInput.laborEntered ?? true,
+    location_fee_entered: rawInput.locationFeeEntered ?? true,
+    bag_entered: rawInput.bagEntered ?? true,
+    snack_entered: rawInput.snackEntered ?? true,
+    other_entered: rawInput.otherEntered ?? true,
+    actual_cash_submitted_entered: rawInput.actualCashEntered ?? true,
+  };
+
   const { data, error } = await supabase
     .from(TABLE)
-    .insert({
-      source_id: sourceId,
-      market_label_normalized: marketLabelNormalized,
-      business_date: businessDate,
-      accountability_round_id: accountabilityRoundId ?? null,
-      ...writeValues,
-    })
+    .insert(insertValues)
     .select(SELECT_COLUMNS)
     .single();
 

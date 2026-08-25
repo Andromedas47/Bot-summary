@@ -276,7 +276,7 @@ export function thaiDateFromIso(iso: string): string | null {
  * parseWhiteSheetCloseCommand already accepts:
  *
  *   <market> ปิดยอด <DD/MM/BBBB>
- *   ค่าแรง / ค่าที่ / ค่าถุง / ค่าขนม / ค่าอื่น / เงินสด
+ *   ยอดขาย / เงินให้เจ้า / ค่าแรง / ค่าที่ / ค่าถุง / ค่าขนม / ค่าอื่น / เงินสด
  *   จบปิดยอด
  *
  * No field is invented and no second parser exists — the operator edits the
@@ -296,6 +296,8 @@ export function buildWhiteSheetTemplate(
   if (!thaiDate) return null;
   const template = [
     `${context.marketLabel} ปิดยอด ${thaiDate}`,
+    "ยอดขาย 0",
+    "เงินให้เจ้า 0",
     "ค่าแรง 0",
     "ค่าที่ 0",
     "ค่าถุง 0",

@@ -429,6 +429,66 @@ const VALID_SAVE_INPUT = {
 };
 
 describe("saveWhiteSheetCashEntry", () => {
+  it("persists Financial Settlement zeros and exact per-field provenance", async () => {
+    const { database } = makeFakeSupabase();
+    const result = await saveWhiteSheetCashEntry(database, {
+      ...VALID_SAVE_INPUT,
+      whiteSheetSales: 0,
+      ownerCash: 0,
+      labor: 0,
+      locationFee: 0,
+      bag: 0,
+      snack: 0,
+      other: 0,
+      actualCashSubmitted: 0,
+      laborEntered: true,
+      locationFeeEntered: false,
+      bagEntered: true,
+      snackEntered: false,
+      otherEntered: true,
+      actualCashEntered: true,
+    });
+
+    expect(result).toMatchObject({
+      status: "submitted",
+      whiteSheetSales: 0,
+      ownerCash: 0,
+      laborEntered: true,
+      locationFeeEntered: false,
+      bagEntered: true,
+      snackEntered: false,
+      otherEntered: true,
+      actualCashEntered: true,
+    });
+  });
+
+  it("preserves omitted new values and never changes entered provenance true back to false", async () => {
+    const { database } = makeFakeSupabase();
+    await saveWhiteSheetCashEntry(database, {
+      ...VALID_SAVE_INPUT,
+      whiteSheetSales: 5560,
+      ownerCash: 320,
+      laborEntered: true,
+      locationFeeEntered: false,
+    });
+
+    const corrected = await saveWhiteSheetCashEntry(database, {
+      ...VALID_SAVE_INPUT,
+      labor: 0,
+      laborEntered: false,
+      locationFeeEntered: true,
+    });
+
+    expect(corrected).toMatchObject({
+      status: "submitted",
+      whiteSheetSales: 5560,
+      ownerCash: 320,
+      expenses: { labor: 100 },
+      laborEntered: true,
+      locationFeeEntered: true,
+    });
+  });
+
   it("upserts and returns the submitted state", async () => {
     const { database } = makeFakeSupabase();
     const result = await saveWhiteSheetCashEntry(database, VALID_SAVE_INPUT);

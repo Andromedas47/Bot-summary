@@ -203,6 +203,8 @@ describe("Slice 3C — the template is the existing command", () => {
     expect(parsed.command.marketLabelNormalized).toBe("วัดทุ่งลานนา");
     expect(parsed.command.businessDate).toBe("2026-07-29");
     // Every operator field is present and explicitly zero, not omitted.
+    expect(parsed.command.whiteSheetSales).toBe(0);
+    expect(parsed.command.ownerCash).toBe(0);
     expect(parsed.command.labor).toBe(0);
     expect(parsed.command.locationFee).toBe(0);
     expect(parsed.command.bag).toBe(0);
@@ -213,6 +215,8 @@ describe("Slice 3C — the template is the existing command", () => {
 
   it("accepts the template after the operator edits the numbers", () => {
     const edited = body(buildWhiteSheetTemplate(CONTEXT)!)
+      .replace("ยอดขาย 0", "ยอดขาย 5,560.50")
+      .replace("เงินให้เจ้า 0", "เงินให้เจ้า 320")
       .replace("ค่าแรง 0", "ค่าแรง 350")
       .replace("ค่าที่ 0", "ค่าที่ 120")
       .replace("เงินสด 0", "เงินสด 4,850.50");
@@ -220,6 +224,8 @@ describe("Slice 3C — the template is the existing command", () => {
     const parsed = parseWhiteSheetCloseCommandFromMessage(edited);
     expect(parsed.kind).toBe("ok");
     if (parsed.kind !== "ok") throw new Error("expected ok");
+    expect(parsed.command.whiteSheetSales).toBe(5560.5);
+    expect(parsed.command.ownerCash).toBe(320);
     expect(parsed.command.labor).toBe(350);
     expect(parsed.command.locationFee).toBe(120);
     expect(parsed.command.actualCashSubmitted).toBe(4850.5);
@@ -377,6 +383,8 @@ describe("Slice 3C — the journey guard on submission", () => {
     marketLabel: "วัดทุ่งลานนา",
     marketLabelNormalized: "วัดทุ่งลานนา",
     businessDate: "2026-07-29",
+    whiteSheetSales: 0,
+    ownerCash: 0,
     labor: 0,
     locationFee: 0,
     bag: 0,

@@ -50,7 +50,9 @@ function isFinalizedPersistenceError(error: unknown): boolean {
  * - Resubmission (submitted): omitted expenses preserve persisted values;
  *   explicit values (including 0) replace. Explicit ค่าอื่น replaces both
  *   amount and note (ค่าอื่น 0 with no note clears a stale otherNote).
- * - เงินสด is always required and always replaces actualCashSubmitted.
+ * - ยอดขาย, เงินให้เจ้า, and เงินสด are always required and replace their
+ *   persisted values. Each expense provenance flag records whether its line
+ *   was present; saveWhiteSheetCashEntry keeps true sticky on resubmission.
  */
 export function mergeWhiteSheetCloseInput(
   sourceId: string,
@@ -69,6 +71,8 @@ export function mergeWhiteSheetCloseInput(
     const other = command.other;
     return {
       ...identity,
+      whiteSheetSales: command.whiteSheetSales,
+      ownerCash: command.ownerCash,
       labor: command.labor ?? 0,
       locationFee: command.locationFee ?? 0,
       bag: command.bag ?? 0,
@@ -76,6 +80,12 @@ export function mergeWhiteSheetCloseInput(
       other: other?.amount ?? 0,
       otherNote: other?.note ?? null,
       actualCashSubmitted: command.actualCashSubmitted,
+      laborEntered: command.labor !== undefined,
+      locationFeeEntered: command.locationFee !== undefined,
+      bagEntered: command.bag !== undefined,
+      snackEntered: command.snack !== undefined,
+      otherEntered: command.other !== undefined,
+      actualCashEntered: true,
     };
   }
 
@@ -95,6 +105,8 @@ export function mergeWhiteSheetCloseInput(
 
   return {
     ...identity,
+    whiteSheetSales: command.whiteSheetSales,
+    ownerCash: command.ownerCash,
     labor: command.labor ?? prior.labor,
     locationFee: command.locationFee ?? prior.locationFee,
     bag: command.bag ?? prior.bag,
@@ -102,6 +114,12 @@ export function mergeWhiteSheetCloseInput(
     other: other.amount,
     otherNote: other.note,
     actualCashSubmitted: command.actualCashSubmitted,
+    laborEntered: command.labor !== undefined,
+    locationFeeEntered: command.locationFee !== undefined,
+    bagEntered: command.bag !== undefined,
+    snackEntered: command.snack !== undefined,
+    otherEntered: command.other !== undefined,
+    actualCashEntered: true,
   };
 }
 

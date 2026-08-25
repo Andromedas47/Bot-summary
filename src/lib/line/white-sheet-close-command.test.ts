@@ -6,6 +6,8 @@ import {
 
 const VALID_FULL = [
   "ตลาดกี้ ปิดยอด 24/07/2569",
+  "ยอดขาย 5,560.50",
+  "เงินให้เจ้า 320",
   "ค่าแรง 300",
   "ค่าที่ 200",
   "ค่าถุง 50",
@@ -43,6 +45,8 @@ describe("parseWhiteSheetCloseCommand", () => {
       marketLabel: "ตลาดกี้",
       marketLabelNormalized: "ตลาดกี้",
       businessDate: "2026-07-24",
+      whiteSheetSales: 5560.5,
+      ownerCash: 320,
       labor: 300,
       locationFee: 200,
       bag: 50,
@@ -54,7 +58,7 @@ describe("parseWhiteSheetCloseCommand", () => {
 
   it("B. accepts Buddhist-year dates", () => {
     const result = parseWhiteSheetCloseCommand(
-      "ตลาดกี้ ปิดยอด 24/07/2569\nเงินสด 100\nจบปิดยอด",
+      "ตลาดกี้ ปิดยอด 24/07/2569\nยอดขาย 100\nเงินให้เจ้า 0\nเงินสด 100\nจบปิดยอด",
     );
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") return;
@@ -63,7 +67,7 @@ describe("parseWhiteSheetCloseCommand", () => {
 
   it("C. accepts comma amounts", () => {
     const result = parseWhiteSheetCloseCommand(
-      "ตลาดกี้ ปิดยอด 24/07/2569\nเงินสด 1,250\nจบปิดยอด",
+      "ตลาดกี้ ปิดยอด 24/07/2569\nยอดขาย 1,250\nเงินให้เจ้า 0\nเงินสด 1,250\nจบปิดยอด",
     );
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") return;
@@ -72,7 +76,7 @@ describe("parseWhiteSheetCloseCommand", () => {
 
   it("D. accepts decimal amounts", () => {
     const result = parseWhiteSheetCloseCommand(
-      "ตลาดกี้ ปิดยอด 24/07/2569\nเงินสด 1250.50\nจบปิดยอด",
+      "ตลาดกี้ ปิดยอด 24/07/2569\nยอดขาย 1250.50\nเงินให้เจ้า 0\nเงินสด 1250.50\nจบปิดยอด",
     );
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") return;
@@ -81,7 +85,7 @@ describe("parseWhiteSheetCloseCommand", () => {
 
   it("E. captures ค่าอื่น note as explicit other payload", () => {
     const result = parseWhiteSheetCloseCommand(
-      "ตลาดกี้ ปิดยอด 24/07/2569\nค่าอื่น 100 ค่าน้ำแข็ง\nเงินสด 10\nจบปิดยอด",
+      "ตลาดกี้ ปิดยอด 24/07/2569\nยอดขาย 100\nเงินให้เจ้า 0\nค่าอื่น 100 ค่าน้ำแข็ง\nเงินสด 10\nจบปิดยอด",
     );
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") return;
@@ -90,7 +94,7 @@ describe("parseWhiteSheetCloseCommand", () => {
 
   it("F. omitted optional expenses stay undefined (not silently zeroed)", () => {
     const result = parseWhiteSheetCloseCommand(
-      "ตลาดกี้ ปิดยอด 24/07/2569\nเงินสด 16\nจบปิดยอด",
+      "ตลาดกี้ ปิดยอด 24/07/2569\nยอดขาย 100\nเงินให้เจ้า 0\nเงินสด 16\nจบปิดยอด",
     );
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") return;
@@ -104,22 +108,52 @@ describe("parseWhiteSheetCloseCommand", () => {
 
   it("distinguishes explicit zero from omitted expense fields", () => {
     const result = parseWhiteSheetCloseCommand(
-      "ตลาดกี้ ปิดยอด 24/07/2569\nค่าแรง 0\nค่าอื่น 0\nเงินสด 16\nจบปิดยอด",
+      "ตลาดกี้ ปิดยอด 24/07/2569\nยอดขาย 0\nเงินให้เจ้า 0\nค่าแรง 0\nค่าอื่น 0\nเงินสด 16\nจบปิดยอด",
     );
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") return;
     expect(result.command.labor).toBe(0);
+    expect(result.command.whiteSheetSales).toBe(0);
+    expect(result.command.ownerCash).toBe(0);
     expect(result.command.locationFee).toBeUndefined();
     expect(result.command.other).toEqual({ amount: 0, note: null });
   });
 
   it("G. rejects missing เงินสด", () => {
     const result = parseWhiteSheetCloseCommand(
-      "ตลาดกี้ ปิดยอด 24/07/2569\nค่าแรง 10\nจบปิดยอด",
+      "ตลาดกี้ ปิดยอด 24/07/2569\nยอดขาย 100\nเงินให้เจ้า 0\nค่าแรง 10\nจบปิดยอด",
     );
     expect(result.kind).toBe("invalid");
     if (result.kind !== "invalid") return;
     expect(result.message).toContain("เงินสด");
+  });
+
+  it("rejects a legacy retransmission missing both new required fields", () => {
+    const result = parseWhiteSheetCloseCommand(
+      "ตลาดกี้ ปิดยอด 24/07/2569\nเงินสด 100\nจบปิดยอด",
+    );
+    expect(result).toEqual({
+      kind: "invalid",
+      message: "ยังปิดยอดไม่ได้\nกรุณากรอก:\n• ยอดขาย\n• เงินให้เจ้า",
+    });
+  });
+
+  it("lists only the missing required financial field", () => {
+    const missingOwner = parseWhiteSheetCloseCommand(
+      "ตลาดกี้ ปิดยอด 24/07/2569\nยอดขาย 100\nเงินสด 100\nจบปิดยอด",
+    );
+    expect(missingOwner).toEqual({
+      kind: "invalid",
+      message: "ยังปิดยอดไม่ได้\nกรุณากรอก:\n• เงินให้เจ้า",
+    });
+
+    const missingSales = parseWhiteSheetCloseCommand(
+      "ตลาดกี้ ปิดยอด 24/07/2569\nเงินให้เจ้า 0\nเงินสด 100\nจบปิดยอด",
+    );
+    expect(missingSales).toEqual({
+      kind: "invalid",
+      message: "ยังปิดยอดไม่ได้\nกรุณากรอก:\n• ยอดขาย",
+    });
   });
 
   it("H. rejects missing จบปิดยอด", () => {
@@ -177,6 +211,8 @@ describe("parseWhiteSheetCloseCommand", () => {
   it("strips LINE export transcript prefixes", () => {
     const text = [
       "10:15 ผู้ขาย ตลาดกี้ ปิดยอด 24/07/2569",
+      "10:15 ผู้ขาย ยอดขาย 1,250.50",
+      "10:15 ผู้ขาย เงินให้เจ้า 0",
       "10:15 ผู้ขาย เงินสด 1,250.50",
       "10:15 ผู้ขาย จบปิดยอด",
     ].join("\n");

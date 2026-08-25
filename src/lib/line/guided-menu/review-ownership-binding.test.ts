@@ -137,6 +137,8 @@ const COMMAND: WhiteSheetCloseCommand = {
   marketLabel: MARKET,
   marketLabelNormalized: MARKET,
   businessDate: DATE,
+  whiteSheetSales: 0,
+  ownerCash: 0,
   labor: 0,
   locationFee: 0,
   bag: 0,

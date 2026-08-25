@@ -16,13 +16,14 @@
  * mints a second product identity, and the mistake only surfaces later when the
  * return is typed correctly and P4A refuses it as product_not_withdrawn.
  *
- * Everything in this module produces SUGGESTIONS. A near match is never proof
- * of identity — เขียวมรกต and เขียวมรกตเก่า are one token apart and are
- * different goods. Nothing here rewrites a product name, and no caller may.
+ * Reviewed deterministic aliases resolve before dictionary lookup. Everything
+ * else in this module produces SUGGESTIONS. A near match is never proof of
+ * identity — เขียวมรกต and เขียวมรกตเก่า are one token apart and are different
+ * goods. Raw operator evidence is not rewritten.
  */
 
 import { boundedEditDistance } from "@/lib/parsers/weigh-session/units";
-import { PRODUCT_ALIASES } from "@/lib/summary/remaining-fruit";
+import { normalizeProductName, PRODUCT_ALIASES } from "@/lib/summary/remaining-fruit";
 import { PRODUCT_CODE_ENTRIES } from "./product-code/dictionary";
 
 export interface ProductVocabularySuggestion {
@@ -44,10 +45,8 @@ const MAX_TYPO_DISTANCE = 2;
 const MIN_SHARED_RUN = 4;
 
 /**
- * Mechanical only: NFC and whitespace. Deliberately not
- * `normalizeProductName` — that applies the reporting alias map, and applying
- * it here would make the guard silently accept the very alias spellings it
- * exists to surface.
+ * Basic text normalization only. Alias normalization is a separate explicit
+ * step in resolveApprovedProductName, before the canonical dictionary lookup.
  */
 function mechanical(name: string): string {
   return name.normalize("NFC").replace(/\s+/g, " ").trim();
@@ -66,14 +65,30 @@ const CODE_BY_CANONICAL_NAME: ReadonlyMap<string, string> = new Map(
     .reverse(), // first code wins if two rows ever share a canonical name
 );
 
-/** True when the operator typed an approved spelling exactly. */
-export function isApprovedProductName(name: string): boolean {
-  return CODE_BY_CANONICAL_NAME.has(mechanical(name));
+export interface ApprovedProductResolution {
+  readonly productCode: string;
+  readonly canonicalName: string;
 }
 
-/** The code an approved spelling belongs to, or null. */
+/** Deterministic alias normalization followed by exact canonical lookup. */
+export function resolveApprovedProductName(name: string): ApprovedProductResolution | null {
+  const enteredName = mechanical(name);
+  const exactCode = CODE_BY_CANONICAL_NAME.get(enteredName);
+  if (exactCode) return { productCode: exactCode, canonicalName: enteredName };
+
+  const canonicalName = mechanical(normalizeProductName(enteredName));
+  const productCode = CODE_BY_CANONICAL_NAME.get(canonicalName);
+  return productCode ? { productCode, canonicalName } : null;
+}
+
+/** True when the name or a reviewed deterministic alias resolves. */
+export function isApprovedProductName(name: string): boolean {
+  return resolveApprovedProductName(name) !== null;
+}
+
+/** The code a canonical spelling or reviewed deterministic alias belongs to. */
 export function approvedProductCode(name: string): string | null {
-  return CODE_BY_CANONICAL_NAME.get(mechanical(name)) ?? null;
+  return resolveApprovedProductName(name)?.productCode ?? null;
 }
 
 /**
@@ -99,11 +114,8 @@ function longestSharedRun(a: string, b: string): number {
 }
 
 /**
- * The reviewed alias map is *reporting* canonicalization. It is read here as
- * evidence — a spelling the business has already confirmed means a particular
- * product — and never as a resolution: the operator still sees the canonical
- * spelling and still has to act, so the withdrawal master stops accumulating
- * one more variant of a product that already has an approved name.
+ * Direct suggestion calls still rank a reviewed alias first. Normal validation
+ * resolves it before reaching suggestions.
  */
 function reviewedAliasTarget(name: string): string | null {
   const target = PRODUCT_ALIASES[name];

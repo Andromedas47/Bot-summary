@@ -612,6 +612,18 @@ describe("PRODUCT_ALIASES — ม54 dictionary spelling correction (202608181000
   });
 });
 
+describe("PRODUCT_ALIASES — สาลี spelling", () => {
+  test("the unmarked spelling is the same product as canonical สาลี่", () => {
+    expect(normalizeProductName("สาลี")).toBe("สาลี่");
+  });
+
+  test("canonical and distinct pear names are not changed", () => {
+    expect(normalizeProductName("สาลี่")).toBe("สาลี่");
+    expect(normalizeProductName("สาลี่หอม")).toBe("สาลี่หอม");
+    expect(normalizeProductName("สาลี่น้ำผึ้ง")).toBe("สาลี่น้ำผึ้ง");
+  });
+});
+
 describe("PRODUCT_ALIASES — เขียวมรกต shop-floor short form (ม31)", () => {
   // Required by the alias map's own rule: every entry gets a regression test.
   // เขียวมรกต is the shop-floor short form of the existing ม31 canonical name

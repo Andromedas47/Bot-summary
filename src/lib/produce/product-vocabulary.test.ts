@@ -13,6 +13,7 @@ import { PRODUCT_CODE_ENTRIES } from "./product-code/dictionary";
 import {
   approvedProductCode,
   isApprovedProductName,
+  resolveApprovedProductName,
   suggestDictionaryProducts,
 } from "./product-vocabulary";
 import {
@@ -88,15 +89,15 @@ describe("approved vocabulary", () => {
     }
   });
 
-  it("normalizes whitespace and NFC only — never spelling", () => {
+  it("normalizes basic text and reviewed deterministic aliases", () => {
     expect(isApprovedProductName("  มะม่วงเขียวมรกต  ")).toBe(true);
     expect(isApprovedProductName("เครื่องต้มยำ")).toBe(true);
     expect(isApprovedProductName("เครื่อง   ต้มยำ")).toBe(false);
     expect(isApprovedProductName("ปลาหมึก แผ่น")).toBe(false);
-    // อะโวคาโด้ has a reviewed REPORTING alias to อะโวคาโด. That does not make
-    // it an approved spelling — resolving it here is exactly the silent
-    // acceptance this guard exists to stop.
-    expect(isApprovedProductName("อะโวคาโด้")).toBe(false);
+    expect(resolveApprovedProductName("อะโวคาโด้")).toEqual({
+      productCode: "ม59",
+      canonicalName: "อะโวคาโด",
+    });
   });
 
   it("suggests nothing for a product that is already approved", () => {
@@ -126,24 +127,27 @@ describe("Production 2026-08-15 withdrawal spellings", () => {
     });
   });
 
-  it("CASE B — เขียวมรกต (ดำ / วัดตะกล่ำ) suggests the full name without mapping to it", () => {
+  it("CASE B — เขียวมรกต (ดำ / วัดตะกล่ำ) resolves through its reviewed alias", () => {
     expect(suggestedNames("เขียวมรกต")).toContain("มะม่วงเขียวมรกต");
-    const result = withdraw("เขียวมรกต");
-    expect(result.status).toBe("review_required");
-    // Suggestion is not identity: the entered name is untouched everywhere.
-    expect(vocabulary(result)[0]).toMatchObject({ productName: "เขียวมรกต" });
+    expect(resolveApprovedProductName("เขียวมรกต")).toEqual({
+      productCode: "ม31",
+      canonicalName: "มะม่วงเขียวมรกต",
+    });
+    expect(withdraw("เขียวมรกต").status).toBe("clean");
   });
 
-  it("CASE C — สับปรด suggests สับปะรด", () => {
+  it("CASE C — สับปรด suggests สับปะรด but stays unresolved without a canonical target", () => {
     expect(suggestedNames("สับปรด")[0]).toBe("สับปะรด");
+    expect(withdraw("สับปรด").status).toBe("review_required");
   });
 
-  it("CASE D — ไชมัส suggests ไซมัส (reviewed alias, tier 0, after 20260818100000)", () => {
-    // ไซมัส is ม54's corrected canonical spelling as of 20260818100000, so the
-    // direction inverts: the legacy misspelling ไชมัส is the unapproved input,
-    // and it carries a reviewed PRODUCT_ALIASES entry to ไซมัส — the strongest
-    // evidence tier suggestDictionaryProducts has.
+  it("CASE D — ไชมัส resolves to ไซมัส (reviewed alias, after 20260818100000)", () => {
     expect(suggestedNames("ไชมัส")[0]).toBe("ไซมัส");
+    expect(resolveApprovedProductName("ไชมัส")).toEqual({
+      productCode: "ม54",
+      canonicalName: "ไซมัส",
+    });
+    expect(withdraw("ไชมัส").status).toBe("clean");
   });
 
   it("CASE E — อินทผรัม suggests อินทผลัม", () => {
@@ -213,14 +217,16 @@ describe("Production 2026-08-15 withdrawal spellings", () => {
     });
   });
 
-  it("อะโวคาโด้ — the reviewed alias is shown as the canonical spelling, not applied", () => {
+  it("อะโวคาโด้ — the reviewed alias resolves without a vocabulary review", () => {
     expect(suggestDictionaryProducts("อะโวคาโด้")[0]).toEqual({
       productCode: "ม59",
       canonicalName: "อะโวคาโด",
     });
-    expect(vocabulary(withdraw("อะโวคาโด้"))[0]).toMatchObject({
-      productName: "อะโวคาโด้",
+    expect(resolveApprovedProductName("อะโวคาโด้")).toEqual({
+      productCode: "ม59",
+      canonicalName: "อะโวคาโด",
     });
+    expect(withdraw("อะโวคาโด้").status).toBe("clean");
   });
 });
 
@@ -351,11 +357,9 @@ describe("20260818100000 dictionary cleanup — ม54 correction and ม63–ม
     });
   });
 
-  it("the legacy alias spelling ไชมัส is NOT itself an approved dictionary spelling", () => {
-    // PRODUCT_ALIASES rewrites ไชมัส → ไซมัส for REPORTING identity only; the
-    // Vocabulary Guard does not consult PRODUCT_ALIASES, so the raw legacy
-    // spelling is still unapproved — same shape as อะโวคาโด้ above.
-    expect(isApprovedProductName("ไชมัส")).toBe(false);
+  it("the legacy alias spelling ไชมัส resolves to corrected ม54", () => {
+    expect(isApprovedProductName("ไชมัส")).toBe(true);
+    expect(approvedProductCode("ไชมัส")).toBe("ม54");
   });
 });
 
@@ -366,13 +370,80 @@ describe("dictionary cleanup extension — ม69–ม71 and the เขียว
     }
   });
 
-  it("เขียวมรกต is NOT itself an approved dictionary spelling", () => {
-    // PRODUCT_ALIASES rewrites เขียวมรกต → มะม่วงเขียวมรกต for REPORTING identity
-    // only; the Vocabulary Guard does not consult PRODUCT_ALIASES, so an alias
-    // source spelling is never itself an approved dictionary spelling — same
-    // shape as อะโวคาโด้ and ไชมัส above. This asserts the true current
-    // behavior of isApprovedProductName, not a desired change.
-    expect(isApprovedProductName("เขียวมรกต")).toBe(false);
+  it("เขียวมรกต resolves to canonical ม31", () => {
+    expect(isApprovedProductName("เขียวมรกต")).toBe(true);
+    expect(approvedProductCode("เขียวมรกต")).toBe("ม31");
+  });
+});
+
+describe("deterministic product-name aliases", () => {
+  it.each([
+    ["อะโวคาโด้", "อะโวคาโด", "ม59"],
+    ["ไชมัส", "ไซมัส", "ม54"],
+    ["สาลี", "สาลี่", "ม50"],
+  ])("%s resolves to canonical %s / %s without review", (alias, canonicalName, productCode) => {
+    expect(resolveApprovedProductName(alias)).toEqual({ productCode, canonicalName });
+    expect(approvedProductCode(alias)).toBe(approvedProductCode(canonicalName));
+    expect(withdraw(alias).status).toBe("clean");
+  });
+
+  it("keeps canonical spelling unchanged", () => {
+    expect(resolveApprovedProductName("อะโวคาโด")).toEqual({
+      productCode: "ม59",
+      canonicalName: "อะโวคาโด",
+    });
+  });
+
+  it("keeps ambiguous, unknown, and distinct mango products safe", () => {
+    expect(resolveApprovedProductName("มะม่วง")).toBeNull();
+    expect(withdraw("มะม่วง").status).toBe("review_required");
+    expect(withdraw("สินค้าXYZ").status).toBe("review_required");
+    expect(resolveApprovedProductName("มะม่วงจิ้ว")).toEqual({
+      productCode: "ม63",
+      canonicalName: "มะม่วงจิ้ว",
+    });
+    expect(resolveApprovedProductName("มะม่วงแก้วขมิ้น")).toEqual({
+      productCode: "ม72",
+      canonicalName: "มะม่วงแก้วขมิ้น",
+    });
+    expect(approvedProductCode("มะม่วงจิ้ว")).not.toBe(approvedProductCode("มะม่วงแก้วขมิ้น"));
+  });
+
+  it("preserves full multiline session data and reviews only unresolved names", () => {
+    const parsed = parseWeighSession([
+      "ดำ-วัดตะกล่ำ เบิก 24/8/2569",
+      "1.อะโวคาโด้70บาท", "3โล",
+      "2.อะโวคาโด80บาท", "2โล",
+      "3.ไชมัส60บาท", "1โล",
+      "4.สาลี10บาท", "6ลูก",
+      "5.มะม่วงจิ้ว35บาท", "2โล",
+      "6.มะม่วงแก้วขมิ้น40บาท", "1โล",
+      "7.ผลไม้ต่างดาว99บาท", "1โล",
+      "8.มะม่วง20บาท", "1โล",
+      "9.อะโวคาโด้80บาท", "4โล",
+      "จบรายการเบิก",
+    ].join("\n"));
+
+    expect(parsed.items.map((entry) => entry.item_number)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(parsed.items[0]).toMatchObject({
+      product_name: "อะโวคาโด้",
+      price_per_unit: 70,
+      quantity: 3,
+      unit: "โล",
+    });
+    expect(parsed.items[8]).toMatchObject({
+      product_name: "อะโวคาโด้",
+      price_per_unit: 80,
+      quantity: 4,
+      unit: "โล",
+    });
+
+    const result = validateProduceEntry({ parsed, roundRows: [], roundBound: true });
+    expect(result.status).toBe("review_required");
+    expect(vocabulary(result).map((exception) => exception.productName)).toEqual([
+      "ผลไม้ต่างดาว",
+      "มะม่วง",
+    ]);
   });
 });
 

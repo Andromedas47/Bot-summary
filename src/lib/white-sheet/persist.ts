@@ -58,6 +58,23 @@ export type WhiteSheetCashEntryState =
        */
       whiteSheetSales?: number | null;
       ownerCash?: number | null;
+      /**
+       * Task 4 fix: per-field provenance for the ใบขาวมือ partial-close flow
+       * (see close_manual_white_sheet_note_session in migration
+       * 20260825092000). false means the corresponding NOT NULL/DEFAULT 0
+       * money column is a placeholder, never a real operator-entered zero.
+       * Optional and defaulting to "entered" (true) when absent — same
+       * reasoning as whiteSheetSales/ownerCash above — so pre-existing hand
+       * built call sites keep compiling, and rows from any other writer
+       * (e.g. saveWhiteSheetCashEntry, which always supplies real values for
+       * all six fields) are correctly treated as fully entered.
+       */
+      laborEntered?: boolean;
+      locationFeeEntered?: boolean;
+      bagEntered?: boolean;
+      snackEntered?: boolean;
+      otherEntered?: boolean;
+      actualCashEntered?: boolean;
       updatedAt: string;
     }
   | {
@@ -66,6 +83,12 @@ export type WhiteSheetCashEntryState =
       actualCashSubmitted: number;
       whiteSheetSales?: number | null;
       ownerCash?: number | null;
+      laborEntered?: boolean;
+      locationFeeEntered?: boolean;
+      bagEntered?: boolean;
+      snackEntered?: boolean;
+      otherEntered?: boolean;
+      actualCashEntered?: boolean;
       updatedAt: string;
       finalizedAt: string;
       finalizedBy: string;
@@ -154,9 +177,27 @@ function toExpenses(row: CashEntryRow): WhiteSheetExpenses {
   };
 }
 
+/**
+ * `?? true` treats an absent flag (a row from before this migration ran, or
+ * a fixture built by hand without the new columns) as "entered" — the same
+ * fallback as the column's own DEFAULT true. Never used to invent a missing
+ * flag as false; only ever widens toward the pre-existing behavior.
+ */
+function enteredFlag(value: boolean | undefined): boolean {
+  return value ?? true;
+}
+
 function toEntryState(row: CashEntryRow): WhiteSheetCashEntryState {
   const whiteSheetSales = row.white_sheet_sales === null ? null : Number(row.white_sheet_sales);
   const ownerCash = row.owner_cash === null ? null : Number(row.owner_cash);
+  const enteredFlags = {
+    laborEntered: enteredFlag(row.labor_entered),
+    locationFeeEntered: enteredFlag(row.location_fee_entered),
+    bagEntered: enteredFlag(row.bag_entered),
+    snackEntered: enteredFlag(row.snack_entered),
+    otherEntered: enteredFlag(row.other_entered),
+    actualCashEntered: enteredFlag(row.actual_cash_submitted_entered),
+  };
   if (row.finalized_at) {
     return {
       status: "finalized",
@@ -164,6 +205,7 @@ function toEntryState(row: CashEntryRow): WhiteSheetCashEntryState {
       actualCashSubmitted: Number(row.actual_cash_submitted),
       whiteSheetSales,
       ownerCash,
+      ...enteredFlags,
       updatedAt: row.updated_at,
       finalizedAt: row.finalized_at,
       finalizedBy: row.finalized_by as string,
@@ -175,6 +217,7 @@ function toEntryState(row: CashEntryRow): WhiteSheetCashEntryState {
     actualCashSubmitted: Number(row.actual_cash_submitted),
     whiteSheetSales,
     ownerCash,
+    ...enteredFlags,
     updatedAt: row.updated_at,
   };
 }
@@ -200,7 +243,7 @@ export async function loadWhiteSheetCashEntry(
   let query = supabase
     .from(TABLE)
     .select(
-      "labor, location_fee, bag, snack, other, other_note, actual_cash_submitted, white_sheet_sales, owner_cash, updated_at, finalized_at, finalized_by",
+      "labor, location_fee, bag, snack, other, other_note, actual_cash_submitted, white_sheet_sales, owner_cash, labor_entered, location_fee_entered, bag_entered, snack_entered, other_entered, actual_cash_submitted_entered, updated_at, finalized_at, finalized_by",
     )
     .eq("source_id", sourceId)
     .eq("market_label_normalized", marketLabelNormalized)
@@ -266,7 +309,12 @@ export async function saveWhiteSheetCashEntry(
   }
 
   const SELECT_COLUMNS =
-    "labor, location_fee, bag, snack, other, other_note, actual_cash_submitted, white_sheet_sales, owner_cash, updated_at, finalized_at, finalized_by";
+    "labor, location_fee, bag, snack, other, other_note, actual_cash_submitted, white_sheet_sales, owner_cash, labor_entered, location_fee_entered, bag_entered, snack_entered, other_entered, actual_cash_submitted_entered, updated_at, finalized_at, finalized_by";
+  // This "digital" submission path always supplies real values for all six
+  // fields at once (WhiteSheetCashEntryInput requires them, never optional),
+  // so every field it writes is unambiguously entered — see the
+  // labor_entered family of columns added in migration 20260825092000,
+  // whose false state is reserved for the ใบขาวมือ RPC's partial-close path.
   const writeValues = {
     labor,
     location_fee: locationFee,
@@ -275,6 +323,12 @@ export async function saveWhiteSheetCashEntry(
     other,
     other_note: otherNote,
     actual_cash_submitted: actualCashSubmitted,
+    labor_entered: true,
+    location_fee_entered: true,
+    bag_entered: true,
+    snack_entered: true,
+    other_entered: true,
+    actual_cash_submitted_entered: true,
     updated_at: new Date().toISOString(),
   };
 

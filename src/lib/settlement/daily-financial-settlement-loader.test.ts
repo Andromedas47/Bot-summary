@@ -143,6 +143,50 @@ describe("getDailyFinancialSettlement — INCOMPLETE / uncertainty", () => {
     expect(result.missingInputs).toEqual(["white_sheet_sales", "owner_cash"]);
   });
 
+  it("REGRESSION (reviewer scenario): only ยอดขาย + เงินให้เจ้า entered, actual_cash/labor/expenses never sent — never CLOSED_MATCHED", async () => {
+    // Models exactly what close_manual_white_sheet_note_session (0059 +
+    // 20260825092000) persists when an operator sends only
+    // "ยอดขาย 28632" and "เงินให้เจ้า 1500" then types "จบใบขาวมือ" without
+    // ever sending เงินสด (actual cash) or ค่าแรง/ค่าที่/ถุง/ขนม/อื่นๆ
+    // (labor/expenses): those NOT NULL DEFAULT 0 columns get COALESCEd to a
+    // placeholder 0, but the *_entered flags stay false. transferTotal below
+    // (27132) is chosen so that, under the pre-fix code that read every
+    // placeholder 0 as a submitted value, 28632 - 27132 - 1500 - 0 - 0 = 0
+    // would have produced a false CLOSED_MATCHED ("เงินปิดตรง") for a day
+    // whose cash was never actually counted.
+    const db = new FakeDatabase();
+    seedCashEntry(db, "2026-08-27", {
+      white_sheet_sales: 28632,
+      owner_cash: 1500,
+      // labor/location_fee/bag/snack/other/actual_cash_submitted are left at
+      // their seedCashEntry placeholder 0 — never entered.
+      labor_entered: false,
+      location_fee_entered: false,
+      bag_entered: false,
+      snack_entered: false,
+      other_entered: false,
+      actual_cash_submitted_entered: false,
+    });
+    db.seed("manual_slip_sessions", [
+      { id: "sess-27", source_id: SOURCE_ID, business_date: "2026-08-27", status: "closed", market_label: MARKET },
+    ]);
+    db.seed("manual_slip_entries", [{ session_id: "sess-27", amount: 27132 }]);
+
+    const result = await getDailyFinancialSettlement(client(db), {
+      sourceId: SOURCE_ID,
+      marketLabelNormalized: MARKET,
+      businessDate: "2026-08-27",
+    });
+
+    expect(result.status).toBe("INCOMPLETE");
+    expect(result.status).not.toBe("CLOSED_MATCHED");
+    expect(result.expectedCash).toBeNull();
+    expect(result.difference).toBeNull();
+    expect(result.missingInputs).toEqual(["expenses", "wages", "actual_cash"]);
+    expect(result.whiteSheetSales).toBe(28632);
+    expect(result.ownerCash).toBe(1500);
+  });
+
   it("no transfer_reconciliations row yet is reported as uncertainty, not a block", async () => {
     const db = new FakeDatabase();
     seedCashEntry(db, "2026-08-25", {

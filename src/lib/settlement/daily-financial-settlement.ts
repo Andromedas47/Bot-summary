@@ -195,6 +195,18 @@ function expensesTotalExcludingLabor(expenses: {
 /**
  * Maps the reused White Sheet cash-entry state onto formula inputs.
  * `not_submitted` means every input is missing — never a false zero.
+ *
+ * labor/location_fee/bag/snack/other/actual_cash_submitted are NOT NULL
+ * DEFAULT 0 columns (see migration 0038) — a never-entered field and a
+ * genuine entered zero are otherwise indistinguishable once persisted. The
+ * ใบขาวมือ partial-close RPC (0059 + 20260825092000) can leave any of them
+ * at their placeholder 0 while still successfully closing (partial close is
+ * intentional — see hasAnyValue in white-sheet-note-session-service.ts), so
+ * this function must consult the *_entered provenance flags rather than the
+ * amount to decide whether wages/expenses/actualCash are really known.
+ * Every flag defaults to true when absent (row predates the flags, or was
+ * written by the "digital" saveWhiteSheetCashEntry path, which always
+ * supplies real values) — see enteredFlag in persist.ts.
  */
 function inputsFromCashEntry(
   entry: WhiteSheetCashEntryState,
@@ -211,12 +223,20 @@ function inputsFromCashEntry(
       actualCash: null,
     };
   }
+  // Fail safe: expensesTotal is a single sum of four columns, so if ANY of
+  // them was never entered the combined total is unknown, not "the other
+  // three plus an implicit zero" — report the whole bucket missing.
+  const expensesEntered =
+    (entry.locationFeeEntered ?? true)
+    && (entry.bagEntered ?? true)
+    && (entry.snackEntered ?? true)
+    && (entry.otherEntered ?? true);
   return {
     whiteSheetSales: entry.whiteSheetSales ?? null,
     ownerCash: entry.ownerCash ?? null,
-    expensesTotal: expensesTotalExcludingLabor(entry.expenses),
-    wagesTotal: entry.expenses.labor,
-    actualCash: entry.actualCashSubmitted,
+    expensesTotal: expensesEntered ? expensesTotalExcludingLabor(entry.expenses) : null,
+    wagesTotal: (entry.laborEntered ?? true) ? entry.expenses.labor : null,
+    actualCash: (entry.actualCashEntered ?? true) ? entry.actualCashSubmitted : null,
   };
 }
 
@@ -324,7 +344,6 @@ export interface GetDailyFinancialSettlementOptions {
    * evidence naming a different market.
    */
   knownMarkets?: ReadonlySet<string>;
-  /** ponytail: produce cross-check attach point — see attachProduceCrossCheck below. */
   produceCrossCheck?: ProduceCrossCheck;
 }
 

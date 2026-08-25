@@ -35,6 +35,59 @@ COMMENT ON COLUMN public.digital_white_sheet_cash_entries.white_sheet_sales IS
 COMMENT ON COLUMN public.digital_white_sheet_cash_entries.owner_cash IS
   'เงินให้เจ้า — cash handed directly to the owner. NULL = not yet entered.';
 
+-- labor/location_fee/bag/snack/other/actual_cash_submitted are NOT NULL
+-- DEFAULT 0 in Production (0038) and already hold live data — left untouched
+-- here on purpose (a bigger blast radius than this fix warrants). That means
+-- once close_manual_white_sheet_note_session COALESCEs a never-entered
+-- session field to 0 on the first INSERT, the money column alone can no
+-- longer distinguish "operator entered 0" from "operator never sent this
+-- field" (see the module doc in
+-- src/lib/settlement/daily-financial-settlement.ts). The ใบขาวมือ close flow
+-- deliberately allows closing with only SOME fields sent — it only refuses a
+-- close with ZERO fields at all (see hasAnyValue in
+-- src/lib/line/white-sheet-note-session-service.ts and the "empty" guard
+-- below, both unchanged) — so tightening the gate to require every field
+-- would reject closes that succeed today and is not done here.
+--
+-- Fix: track, per money field, whether it was EVER explicitly entered by an
+-- operator through this RPC, as its own boolean column — never inferred
+-- from the amount. DEFAULT true so every already-existing row (production
+-- data written before this migration, and any row written by the unrelated
+-- "digital" saveWhiteSheetCashEntry path in src/lib/white-sheet/persist.ts,
+-- which always supplies real values for all six fields at once) is treated
+-- as fully entered, matching current behavior exactly — this is the only
+-- reason the two historical fixture days keep closing CLOSED_MATCHED. Only
+-- rows touched by close_manual_white_sheet_note_session ever see one of
+-- these flip to false, and only for a field whose session value was NULL.
+-- Once true, a flag never goes back to false (OR-accumulated in the DO
+-- UPDATE below) — you cannot "un-enter" a value, and a later close on the
+-- same identity that again leaves the field NULL must not erase provenance
+-- a previous close already established.
+ALTER TABLE public.digital_white_sheet_cash_entries
+  ADD COLUMN labor_entered                 boolean NOT NULL DEFAULT true,
+  ADD COLUMN location_fee_entered          boolean NOT NULL DEFAULT true,
+  ADD COLUMN bag_entered                   boolean NOT NULL DEFAULT true,
+  ADD COLUMN snack_entered                 boolean NOT NULL DEFAULT true,
+  ADD COLUMN other_entered                 boolean NOT NULL DEFAULT true,
+  ADD COLUMN actual_cash_submitted_entered boolean NOT NULL DEFAULT true;
+
+COMMENT ON COLUMN public.digital_white_sheet_cash_entries.labor_entered IS
+  'true iff labor was ever explicitly sent by an operator through the '
+  'ใบขาวมือ close RPC. false means the NOT NULL/DEFAULT 0 value in labor is '
+  'a placeholder, never a real zero — see inputsFromCashEntry in '
+  'src/lib/settlement/daily-financial-settlement.ts, which reports wages as '
+  'a missing input instead of treating the placeholder 0 as entered.';
+COMMENT ON COLUMN public.digital_white_sheet_cash_entries.location_fee_entered IS
+  'Same contract as labor_entered, for location_fee.';
+COMMENT ON COLUMN public.digital_white_sheet_cash_entries.bag_entered IS
+  'Same contract as labor_entered, for bag.';
+COMMENT ON COLUMN public.digital_white_sheet_cash_entries.snack_entered IS
+  'Same contract as labor_entered, for snack.';
+COMMENT ON COLUMN public.digital_white_sheet_cash_entries.other_entered IS
+  'Same contract as labor_entered, for other.';
+COMMENT ON COLUMN public.digital_white_sheet_cash_entries.actual_cash_submitted_entered IS
+  'Same contract as labor_entered, for actual_cash_submitted.';
+
 ALTER TABLE public.manual_white_sheet_note_sessions
   ADD COLUMN white_sheet_sales numeric(12,2),
   ADD COLUMN owner_cash        numeric(12,2);
@@ -128,13 +181,18 @@ BEGIN
   INSERT INTO public.digital_white_sheet_cash_entries (
     source_id, market_label_normalized, business_date,
     labor, location_fee, bag, snack, other, other_note, actual_cash_submitted,
-    white_sheet_sales, owner_cash
+    white_sheet_sales, owner_cash,
+    labor_entered, location_fee_entered, bag_entered, snack_entered, other_entered,
+    actual_cash_submitted_entered
   ) VALUES (
     v_session.source_id, v_session.market_label_normalized, v_session.business_date,
     COALESCE(v_session.labor, 0), COALESCE(v_session.location_fee, 0), COALESCE(v_session.bag, 0),
     COALESCE(v_session.snack, 0), COALESCE(v_session.other_amount, 0), v_session.other_note,
     COALESCE(v_session.actual_cash, 0),
-    v_session.white_sheet_sales, v_session.owner_cash
+    v_session.white_sheet_sales, v_session.owner_cash,
+    v_session.labor IS NOT NULL, v_session.location_fee IS NOT NULL, v_session.bag IS NOT NULL,
+    v_session.snack IS NOT NULL, v_session.other_amount IS NOT NULL,
+    v_session.actual_cash IS NOT NULL
   )
   ON CONFLICT (source_id, market_label_normalized, business_date)
   DO UPDATE SET
@@ -156,6 +214,16 @@ BEGIN
               THEN v_session.white_sheet_sales ELSE digital_white_sheet_cash_entries.white_sheet_sales END,
     owner_cash = CASE WHEN v_session.owner_cash IS NOT NULL
               THEN v_session.owner_cash ELSE digital_white_sheet_cash_entries.owner_cash END,
+    -- Entered flags only ever accumulate (OR) — never erased by a later
+    -- close that leaves the field NULL again.
+    labor_entered = digital_white_sheet_cash_entries.labor_entered OR (v_session.labor IS NOT NULL),
+    location_fee_entered = digital_white_sheet_cash_entries.location_fee_entered
+              OR (v_session.location_fee IS NOT NULL),
+    bag_entered = digital_white_sheet_cash_entries.bag_entered OR (v_session.bag IS NOT NULL),
+    snack_entered = digital_white_sheet_cash_entries.snack_entered OR (v_session.snack IS NOT NULL),
+    other_entered = digital_white_sheet_cash_entries.other_entered OR (v_session.other_amount IS NOT NULL),
+    actual_cash_submitted_entered = digital_white_sheet_cash_entries.actual_cash_submitted_entered
+              OR (v_session.actual_cash IS NOT NULL),
     updated_at = now()
   RETURNING * INTO v_cash;
 

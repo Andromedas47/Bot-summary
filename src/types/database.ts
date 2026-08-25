@@ -824,6 +824,12 @@ export interface Database {
           actual_cash_submitted:   number;
           white_sheet_sales:       number | null;
           owner_cash:              number | null;
+          labor_entered:                 boolean;
+          location_fee_entered:          boolean;
+          bag_entered:                   boolean;
+          snack_entered:                 boolean;
+          other_entered:                 boolean;
+          actual_cash_submitted_entered: boolean;
           created_at:              string;
           updated_at:              string;
           finalized_at:            string | null;
@@ -844,6 +850,12 @@ export interface Database {
           actual_cash_submitted?:   number;
           white_sheet_sales?:       number | null;
           owner_cash?:              number | null;
+          labor_entered?:                 boolean;
+          location_fee_entered?:          boolean;
+          bag_entered?:                   boolean;
+          snack_entered?:                 boolean;
+          other_entered?:                 boolean;
+          actual_cash_submitted_entered?: boolean;
           created_at?:              string;
           updated_at?:              string;
           finalized_at?:            string | null;
@@ -864,6 +876,12 @@ export interface Database {
           actual_cash_submitted?:   number;
           white_sheet_sales?:       number | null;
           owner_cash?:              number | null;
+          labor_entered?:                 boolean;
+          location_fee_entered?:          boolean;
+          bag_entered?:                   boolean;
+          snack_entered?:                 boolean;
+          other_entered?:                 boolean;
+          actual_cash_submitted_entered?: boolean;
           created_at?:              string;
           updated_at?:              string;
           finalized_at?:            string | null;

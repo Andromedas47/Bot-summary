@@ -157,6 +157,7 @@ export interface Database {
           received_at: string;
           expires_at: string;
           resolved_at: string | null;
+          recovery_bundle_id: string | null;
         };
         Insert: {
           line_event_id: string;
@@ -179,6 +180,7 @@ export interface Database {
           received_at?: string;
           expires_at?: string;
           resolved_at?: string | null;
+          recovery_bundle_id?: string | null;
         };
         Update: {
           status?: "waiting" | "admitted" | "rejected_orphan"
@@ -190,6 +192,7 @@ export interface Database {
           close_line_event_id?: string | null;
           close_line_timestamp_ms?: number | null;
           resolved_at?: string | null;
+          recovery_bundle_id?: string | null;
         };
         Relationships: [];
       };

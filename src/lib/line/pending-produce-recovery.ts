@@ -57,6 +57,10 @@ export interface RecoveryBundle {
   closeLineEventId: string | null;
   openerLineEventId: string | null;
   sessionGeneration: string | null;
+  /** Durable no-header-burst identity (20260825090000). Null when the bundle
+   * was keyed some other way (waiting / before_opener / after_close / a
+   * pre-migration orphan row). */
+  recoveryBundleId: string | null;
   events: RecoverableDeferredEvent[];
 }
 
@@ -124,6 +128,12 @@ export function durableRecoveryBundleKey(event: RecoverableDeferredEvent): strin
   if (event.close_line_event_id) return `orphan:close:${event.close_line_event_id}`;
   if (event.opener_line_event_id) return `orphan:opener:${event.opener_line_event_id}`;
   if (event.session_generation) return `orphan:gen:${event.session_generation}`;
+  // A genuine no-header burst never materializes a session, opener, or close
+  // — the only durable identity it ever gets is the recovery_bundle_id
+  // assigned at defer time (20260825090000). Without it (pre-migration rows,
+  // or a bundle whose DB column is somehow unset) this stays unkeyed by
+  // design rather than guessed from timestamps.
+  if (event.recovery_bundle_id) return `orphan:bundle:${event.recovery_bundle_id}`;
   return null;
 }
 
@@ -152,6 +162,7 @@ export function clusterRecoverableEvents(
       closeLineEventId: event.close_line_event_id,
       openerLineEventId: event.opener_line_event_id,
       sessionGeneration: event.session_generation,
+      recoveryBundleId: event.recovery_bundle_id,
       events: [event],
     });
   }
@@ -427,13 +438,18 @@ export async function recoverLatestRejectedBundle(
     const recoveredIds: string[] = [];
     for (const event of bundle.events) {
       try {
-        updated = await service.append(
+        // recoverDeferredEvent commits the append AND the deferred-status
+        // flip to 'admitted' in one transaction (20260825090000). There is no
+        // window where this specific event is durably appended but its
+        // pending_produce_deferred_events row still reads 'waiting' /
+        // 'rejected_*' — a crash on the NEXT event leaves every event up to
+        // here fully converged, with nothing for an operator to clean up.
+        updated = await service.recoverDeferredEvent(
           session.session_key,
+          event.line_event_id,
           event.raw_text,
           replyToken,
-          event.line_event_id,
           event.line_timestamp_ms,
-          false,
           session.session_generation,
         );
         recoveredIds.push(event.line_event_id);
@@ -442,19 +458,12 @@ export async function recoverLatestRejectedBundle(
           error instanceof PendingSessionAfterCloseBoundaryError
           || error instanceof PendingSessionClosedError
         ) {
-          if (recoveredIds.length > 0) {
-            await service.markDeferredEventsRecovered(
-              recoveredIds,
-              session.session_generation,
-            );
-          }
+          // Every event recovered so far is already durably marked admitted
+          // (see above) — nothing further to batch-mark before returning.
           return { status: "closed" };
         }
         throw error;
       }
-    }
-    if (recoveredIds.length > 0) {
-      await service.markDeferredEventsRecovered(recoveredIds, session.session_generation);
     }
     return { status: "recovered", count: recoveredIds.length, session: updated };
   });

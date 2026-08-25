@@ -1,0 +1,150 @@
+/**
+ * The one and only way to produce a MorningBriefReport from the database.
+ *
+ * Read-only, and reuses every source rather than reinventing it:
+ *   loadPurchasePlanningReport   the SAME business-wide Purchase Planning
+ *                                classification the on-demand `สรุปสินค้าขายดี`
+ *                                command uses (purchase-planning-service.ts).
+ *                                Counts are tallied from it, never recomputed.
+ *   getDailyFinancialSettlement  Task 4's exported service contract, called
+ *                                once per (source, market) active that day.
+ *                                This module never imports or reimplements
+ *                                computeDailyFinancialSettlement.
+ *   fetchSalesProduceRows        the same already-paginated produce rows
+ *                                loadPurchasePlanningReport itself fetches,
+ *                                used ONLY to discover which (source, market)
+ *                                pairs were active — never to compute a
+ *                                business figure.
+ *
+ * ponytail: fetchSalesProduceRows is queried a second time here because
+ * loadPurchasePlanningReport does not expose the rows it already fetched
+ * internally. Fine at today's data volume (one paginated read per morning
+ * run). Upgrade path if this ever needs to avoid the duplicate read: change
+ * loadPurchasePlanningReport to accept pre-fetched rows and pass the same
+ * array to both call sites — a signature change to a file this task does not
+ * own, so deliberately left as a follow-up rather than done here.
+ */
+
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Database } from "@/types/database";
+import { logger } from "@/lib/logger";
+import { fetchSalesProduceRows } from "@/lib/sales/load";
+import { normalizedMarketLabel } from "@/lib/market";
+import { isQaMarketLabel } from "@/lib/sales/qa-scopes";
+import { loadPurchasePlanningReport } from "@/lib/summary/purchase-planning-service";
+import {
+  getDailyFinancialSettlement,
+  type DailyFinancialSettlementIdentity,
+} from "@/lib/settlement/daily-financial-settlement";
+import {
+  summarizePurchasePlanningCounts,
+  NULL_ACTIONABLE_ISSUE_SOURCE,
+  type ActionableIssueCountSource,
+  type MorningBriefFinancialEntry,
+  type MorningBriefReport,
+} from "@/lib/summary/morning-brief";
+
+type Supabase = SupabaseClient<Database>;
+
+/** Same chunk size purchase-planning-service.ts uses for the identical raw_messages lookup. */
+const SOURCE_LOOKUP_CHUNK = 500;
+
+interface SourceMarketPair {
+  sourceId: string;
+  marketLabelNormalized: string;
+}
+
+/**
+ * Every (source, market) pair with produce activity on the date, in the same
+ * canonicalized / QA-filtered identity space Purchase Planning uses (see
+ * normalizedMarketLabel / isQaMarketLabel in purchase-planning.ts) so the
+ * brief can never name a market the rest of the system treats as test data.
+ */
+async function resolveActiveSourceMarkets(
+  supabase: Supabase,
+  businessDate: string,
+): Promise<SourceMarketPair[]> {
+  const rows = await fetchSalesProduceRows(supabase, businessDate);
+  const rawMessageIds = [...new Set(rows.map((row) => row.raw_message_id))];
+  if (rawMessageIds.length === 0) return [];
+
+  const sourceByRawMessageId = new Map<string, string>();
+  for (let offset = 0; offset < rawMessageIds.length; offset += SOURCE_LOOKUP_CHUNK) {
+    const chunk = rawMessageIds.slice(offset, offset + SOURCE_LOOKUP_CHUNK);
+    const { data, error } = await supabase
+      .from("raw_messages")
+      .select("id, source_id")
+      .in("id", chunk);
+    if (error) throw new Error(`morning brief source lookup failed: ${error.message}`);
+    for (const row of data ?? []) {
+      if (row.source_id) sourceByRawMessageId.set(row.id, row.source_id);
+    }
+  }
+
+  const seen = new Set<string>();
+  const pairs: SourceMarketPair[] = [];
+  for (const row of rows) {
+    const sourceId = sourceByRawMessageId.get(row.raw_message_id);
+    if (!sourceId) continue;
+    const market = normalizedMarketLabel(row.market_name);
+    if (!market || isQaMarketLabel(market)) continue;
+    const key = `${sourceId}\u0000${market}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    pairs.push({ sourceId, marketLabelNormalized: market });
+  }
+  return pairs.sort(
+    (a, b) =>
+      a.sourceId.localeCompare(b.sourceId) ||
+      a.marketLabelNormalized.localeCompare(b.marketLabelNormalized, "th"),
+  );
+}
+
+export interface LoadMorningBriefOptions {
+  /** Defaults to NULL_ACTIONABLE_ISSUE_SOURCE — see morning-brief.ts. */
+  issueSource?: ActionableIssueCountSource;
+}
+
+export async function loadMorningBriefReport(
+  supabase: Supabase,
+  businessDate: string,
+  options: LoadMorningBriefOptions = {},
+): Promise<MorningBriefReport> {
+  const issueSource = options.issueSource ?? NULL_ACTIONABLE_ISSUE_SOURCE;
+
+  const [purchasePlanningReport, activePairs, issues] = await Promise.all([
+    loadPurchasePlanningReport(supabase, businessDate),
+    resolveActiveSourceMarkets(supabase, businessDate),
+    issueSource.load(supabase, businessDate),
+  ]);
+
+  const financial: MorningBriefFinancialEntry[] = [];
+  for (const pair of activePairs) {
+    const identity: DailyFinancialSettlementIdentity = {
+      sourceId: pair.sourceId,
+      marketLabelNormalized: pair.marketLabelNormalized,
+      businessDate,
+    };
+    try {
+      const result = await getDailyFinancialSettlement(supabase, identity);
+      financial.push({ marketLabelNormalized: pair.marketLabelNormalized, result });
+    } catch (error) {
+      // One market's settlement failing to load must not blank out the whole
+      // brief — Purchase Planning and every other market still render. Logged
+      // loudly; the brief's own financial section simply omits this market.
+      logger.error("morning brief financial settlement load failed", {
+        businessDate,
+        sourceId: pair.sourceId,
+        market: pair.marketLabelNormalized,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return {
+    businessDate,
+    purchaseCounts: summarizePurchasePlanningCounts(purchasePlanningReport),
+    financial,
+    issues,
+  };
+}

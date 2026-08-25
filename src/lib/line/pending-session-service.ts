@@ -80,6 +80,12 @@ export interface PendingSession {
   close_refused_session_generation?:  string | null;
   /** 0049: structured menu sessions are non-null; legacy/plain-text is NULL. */
   entry_origin?:                      string | null;
+  /**
+   * Task 2 (20260825091000): the finalized produce_sessions.id this draft is
+   * meant to supersede once IT finalizes successfully. NULL for every
+   * ordinary session. See src/lib/produce/replacement-draft.ts.
+   */
+  replaces_produce_session_id?:       string | null;
 }
 
 export interface OpenPlainTextGenerationInput {

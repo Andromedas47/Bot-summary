@@ -72,6 +72,11 @@ import {
   type RecoveryReason,
 } from "@/lib/line/pending-produce-recovery";
 import type { StructuredPendingSession } from "@/lib/line/produce-session-commands";
+import {
+  isExactReplaceFinalizedSessionCommand,
+  replacementDraftCommandReply,
+  startFinalizedSessionReplacementDraft,
+} from "@/lib/produce/replacement-draft";
 import { DailySummaryService } from "@/lib/line/daily-summary-service";
 import { SessionDedupService } from "@/lib/line/session-dedup-service";
 import {
@@ -1072,6 +1077,31 @@ export class WebhookService {
         return { eventId, eventType: event.type, status: "saved", parsed: true };
       }
 
+      // ── Task 2: explicit replacement of an already-finalized session ─────
+      //
+      // Same shape as the two branches above: requires an existing, still-
+      // empty pending draft (the operator's normal header open), matched here
+      // ONLY against exact business identity — see replacement-draft.ts for
+      // why an ambiguous or absent match refuses rather than guesses.
+      if (isExactReplaceFinalizedSessionCommand(text)) {
+        const started = await startFinalizedSessionReplacementDraft(
+          this.supabase,
+          pendingService,
+          pending,
+          event.timestamp,
+        );
+        log.info("produce finalized session replacement requested", {
+          sessionKey,
+          sessionGeneration: pending.session_generation,
+          status: started.status,
+          predecessorSessionId: started.status === "started" ? started.predecessorSessionId : null,
+        });
+        if (replyToken) {
+          await this.replyMessage(replyToken, replacementDraftCommandReply(started));
+        }
+        return { eventId, eventType: event.type, status: "saved", parsed: true };
+      }
+
       if (isIncompleteProduceCloser(text)) {
         log.info("incomplete Produce closer intercepted", { sessionKey, text });
         if (replyToken) {
@@ -1562,6 +1592,14 @@ export class WebhookService {
       log.info("produce boundary recovery requested with no open header", { sessionKey });
       if (replyToken) {
         await this.replyMessage(replyToken, recoverCommandReply({ status: "no_header" }));
+      }
+      return { eventId, eventType: event.type, status: "saved", parsed: true };
+    }
+
+    if (isExactReplaceFinalizedSessionCommand(text)) {
+      log.info("produce finalized session replacement requested with no open header", { sessionKey });
+      if (replyToken) {
+        await this.replyMessage(replyToken, replacementDraftCommandReply({ status: "no_header" }));
       }
       return { eventId, eventType: event.type, status: "saved", parsed: true };
     }

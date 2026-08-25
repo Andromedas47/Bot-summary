@@ -98,6 +98,19 @@ export function houseStockImmediateRetryKey(
 }
 
 /**
+ * Own namespace ("daily-morning-brief") — distinct from every sibling above,
+ * so a business date + target that already received (say) the Stock summary
+ * cannot collide with, or be mistaken for, its Morning Brief delivery.
+ */
+export function morningBriefRetryKey(
+  businessDate: string,
+  targetId: string,
+  partIndex: number,
+): string {
+  return retryKey("daily-morning-brief", businessDate, targetId, partIndex);
+}
+
+/**
  * Parse the configured LINE targets. Blank/duplicate entries are dropped.
  * An unset or empty variable yields [] — the route then does nothing, which is
  * how automatic delivery stays inactive until the business supplies real IDs.

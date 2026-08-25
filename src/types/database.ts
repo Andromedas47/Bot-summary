@@ -1912,6 +1912,62 @@ export interface Database {
         Update: never;
         Relationships: [];
       };
+
+      // ─── Data Quality Inbox (migration 20260825120000) ──────────────────
+      data_quality_issues: {
+        Row: {
+          id:                string;
+          issue_key:         string;
+          category:          string;
+          severity:          "CRITICAL" | "ACTION_REQUIRED" | "ADVISORY";
+          business_date:     string;
+          affected_refs:     Json;
+          summary_th:        string;
+          technical_context: Json;
+          status:            "OPEN" | "RESOLVED" | "IGNORED";
+          first_seen:        string;
+          last_seen:         string;
+          resolved_at:       string | null;
+          resolved_by:       string | null;
+          resolution_note:   string | null;
+          created_at:        string;
+        };
+        Insert: {
+          id?:                string;
+          issue_key:          string;
+          category:           string;
+          severity:           "CRITICAL" | "ACTION_REQUIRED" | "ADVISORY";
+          business_date:      string;
+          affected_refs?:     Json;
+          summary_th:         string;
+          technical_context?: Json;
+          status?:            "OPEN" | "RESOLVED" | "IGNORED";
+          first_seen?:        string;
+          last_seen?:         string;
+          resolved_at?:       string | null;
+          resolved_by?:       string | null;
+          resolution_note?:   string | null;
+          created_at?:        string;
+        };
+        Update: {
+          id?:                string;
+          issue_key?:         string;
+          category?:          string;
+          severity?:          "CRITICAL" | "ACTION_REQUIRED" | "ADVISORY";
+          business_date?:     string;
+          affected_refs?:     Json;
+          summary_th?:        string;
+          technical_context?: Json;
+          status?:            "OPEN" | "RESOLVED" | "IGNORED";
+          first_seen?:        string;
+          last_seen?:         string;
+          resolved_at?:       string | null;
+          resolved_by?:       string | null;
+          resolution_note?:   string | null;
+          created_at?:        string;
+        };
+        Relationships: [];
+      };
     };
     Views: {
       produce_transactions: {
@@ -2641,4 +2697,5 @@ export type PhysicalInventoryItemRow       = Database["public"]["Tables"]["physi
 export type PurchaseReceiptRow             = Database["public"]["Tables"]["purchase_receipts"]["Row"];
 export type PurchaseReceiptItemRow         = Database["public"]["Tables"]["purchase_receipt_items"]["Row"];
 export type PurchaseReceiptLifecycleEventRow = Database["public"]["Tables"]["purchase_receipt_lifecycle_events"]["Row"];
+export type DataQualityIssueDbRow            = Database["public"]["Tables"]["data_quality_issues"]["Row"];
 export type PurchaseReceiptDocumentNamespaceRow = Database["public"]["Tables"]["purchase_receipt_document_namespaces"]["Row"];

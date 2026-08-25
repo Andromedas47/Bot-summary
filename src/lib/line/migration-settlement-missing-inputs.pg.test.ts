@@ -251,6 +251,19 @@ describe.skipIf(!pgAvailable)("20260825092000 settlement_missing_inputs on real 
     ).toBe("true,true,true,true,true,true");
   });
 
+  test("BOUNDARY: a genuine ค่าแรง 0 (labor NOT NULL, value 0) sets labor=0 AND labor_entered=true — proves IS NOT NULL, not truthiness", async () => {
+    // The case that distinguishes "operator entered 0" from "operator never
+    // entered this": labor = 0 is NOT NULL, so the close must (a) not treat
+    // the session as empty just because 0 is falsy, and (b) record
+    // labor_entered = true, not false. A regression to a truthy/COALESCE-style
+    // check would either reject this close as empty or read the 0 back as
+    // never-entered — either way, this test would catch it.
+    const id = await insertSession({ source_id: "'S-zero-wage'", labor: "0" });
+    const result = json(await scalar(closeRpcSql(id, "S-zero-wage")));
+    expect(result.outcome).toBe("closed");
+    expect(await cashRow("S-zero-wage", "labor || ',' || labor_entered")).toBe("0.00,true");
+  });
+
   // ── INSERT vs ON CONFLICT DO UPDATE, and OR-accumulation across closes ──────
 
   test("second close on the same identity supplying a previously-missing field flips only that flag to true", async () => {

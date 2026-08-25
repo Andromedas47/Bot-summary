@@ -109,6 +109,41 @@ describe("getDailyFinancialSettlement — historical fixtures via the real table
   });
 });
 
+describe("getDailyFinancialSettlement — genuine zero in a provenance-gated field", () => {
+  it("ค่าแรง 0 (labor genuinely entered as zero) is a normal close, not a missing input", async () => {
+    // Distinguishes "operator entered 0" from "operator never entered this":
+    // labor_entered: true is the flag the ใบขาวมือ close RPC sets from
+    // labor IS NOT NULL, not from labor being truthy. If inputsFromCashEntry
+    // ever regressed to reading the amount instead of the flag, a genuine
+    // zero wage would look identical to the placeholder 0 written for a
+    // never-entered field and wrongly report "wages" as missing.
+    const db = new FakeDatabase();
+    seedCashEntry(db, "2026-08-28", {
+      labor: 0,
+      labor_entered: true,
+      location_fee: 100,
+      bag: 50,
+      snack: 50,
+      other: 0,
+      actual_cash_submitted: 800,
+      white_sheet_sales: 1000,
+      owner_cash: 0,
+    });
+
+    const result = await getDailyFinancialSettlement(client(db), {
+      sourceId: SOURCE_ID,
+      marketLabelNormalized: MARKET,
+      businessDate: "2026-08-28",
+    });
+
+    expect(result.status).not.toBe("INCOMPLETE");
+    expect(["CLOSED_MATCHED", "CLOSED_DIFFERENCE"]).toContain(result.status);
+    expect(result.wagesTotal).toBe(0);
+    expect(result.wagesTotal).not.toBeNull();
+    expect(result.missingInputs).not.toContain("wages");
+  });
+});
+
 describe("getDailyFinancialSettlement — INCOMPLETE / uncertainty", () => {
   it("no cash entry row at all reports INCOMPLETE, never CLOSED_MATCHED", async () => {
     const db = new FakeDatabase();

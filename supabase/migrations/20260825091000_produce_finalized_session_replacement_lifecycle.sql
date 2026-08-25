@@ -1004,7 +1004,7 @@ $fn$;
 COMMENT ON FUNCTION public.try_finalize_pending_generation(
   text, uuid, text, integer, text, text, jsonb, jsonb, text[]
 ) IS
-  'Sole accounting authority for a plain-text produce generation. Signature unchanged since 20260817090100. Adds one atomic capability (20260825090000): when p_session->>''replaces_produce_session_id'' names a live, identity-matching predecessor, that predecessor is voided and pointed at the new session in the SAME transaction that inserts it — no state where both count, no state where neither does. Every earlier guard (duplicate/idempotency/containment/compatibility) still runs first and still refuses the whole finalize before either write happens.';
+  'Sole accounting authority for a plain-text produce generation. Signature unchanged since 20260817090100. Adds one atomic capability (20260825091000): when p_session->>''replaces_produce_session_id'' names a live, identity-matching predecessor, that predecessor is voided and pointed at the new session in the SAME transaction that inserts it — no state where both count, no state where neither does. Every earlier guard (duplicate/idempotency/containment/compatibility) still runs first and still refuses the whole finalize before either write happens.';
 
 REVOKE ALL ON FUNCTION public.try_finalize_pending_generation(
   text, uuid, text, integer, text, text, jsonb, jsonb, text[]

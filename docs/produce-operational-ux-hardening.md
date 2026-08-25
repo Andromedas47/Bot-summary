@@ -74,8 +74,8 @@ Dictionary maintenance stays a separate administrative action.
 Three deterministic signals, strongest first. No model, no embedding, no network
 call.
 
-1. **Reviewed alias.** `PRODUCT_ALIASES` already knows `อะโวคาโด้ → อะโวคาโด`.
-   That is read as *evidence*, never as a resolution — see below.
+1. **Reviewed alias.** If PRODUCT_ALIASES maps the input to an enabled canonical
+   dictionary name, intake resolves it exactly before validation.
 2. **Bounded edit distance ≤ 2.** Covers `มะม่วงเขียวรกต`, `สับปรด`, `ไซมัส`,
    `อินทผรัม`, `อินมผรัม`.
 3. **Longest shared character run**, at least 4 characters and at least half of
@@ -87,25 +87,25 @@ Measuring that run against the *entered* name rather than the shorter of the two
 is deliberate: a five-character head word shared with `ฝรั่ง` is not evidence
 that `ฝรั่งสายพันธุ์ใหม่` was meant to be `ฝรั่ง`.
 
-At most three candidates, and an empty list is a legitimate answer. Nothing is
-ever auto-selected. `เขียวมรกต` and `เขียวมรกตเก่า` are one token apart and are
-different goods; `ปลาอินทรีย์`/`ปลาอินทรี` and `หมึกกระตอย`/`ปลาหมึกกะตอย` are
-suggested and explicitly **not** mapped, because the business has not confirmed
-they are the same item.
+At most three candidates, and an empty list is a legitimate answer. Fuzzy
+candidates are never auto-selected. เขียวมรกตเก่า, ปลาอินทรีย์/ปลาอินทรี,
+and หมึกกระตอย/ปลาหมึกกะตอย remain suggestions because the business has not
+confirmed they are the same item.
 
 ### The reviewed alias contract
 
-`PRODUCT_ALIASES` is *reporting* canonicalization. It is not promoted to
-withdrawal-intake authority. The policy, stated once:
+PRODUCT_ALIASES is shared identity canonicalization. Intake first preserves an
+exact enabled dictionary spelling, then applies an exact reviewed alias and
+accepts it only when the target is itself an enabled canonical dictionary name.
+The policy:
 
-> At intake an alias spelling is **shown**, not **applied**.
+> Exact reviewed alias to canonical dictionary item: apply. Fuzzy or unresolved
+> candidate: show only.
 
-`อะโวคาโด้` is therefore not silently accepted merely because reporting knows how
-to fold it — the operator sees `ม59 — อะโวคาโด` and decides. Reporting continues
-to fold both spellings, and P4A return matching continues to use
-`normalizeProductName` exactly as before, so nothing downstream changes. What
-changes is that the withdrawal master stops accumulating one more spelling of a
-product that already has an approved name.
+อะโวคาโด้ → อะโวคาโด, ไชมัส → ไซมัส, and สาลี → สาลี่ therefore resolve
+without review. Raw LINE and parsed-item evidence remains unchanged. Ambiguous
+มะม่วง and genuinely unknown names still use the existing review/suggestion
+flow.
 
 ### Where it lives
 

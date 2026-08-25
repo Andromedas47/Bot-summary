@@ -215,6 +215,30 @@ describe("close barrier — pending events merged before validation (main sessio
     });
   });
 
+  it("finalizes a deterministic alias without a review and preserves raw evidence", async () => {
+    const messages = [
+      "กี้-ตลาดทดสอบ เบิก 24/8/2569\n1. อะโวคาโด้ 70 บาท\n3 โล",
+    ];
+    const fixture = tables(messages);
+    const db = new FinalizerDouble(fixture);
+    const snap = snapshot(messages.join("\n"), GENERATION, messages.length);
+
+    const result = await finalizePendingGeneration(db as never, snap, async () => ({}));
+
+    expect(result.status).toBe("finalized");
+    expect(fixture.pending_session_ingest[0]?.raw_text).toBe(messages[0]);
+    expect(fixture.produce_entry_validation_reviews).toEqual([]);
+    const call = db.rpcCalls.find((entry) => entry.name === "try_finalize_pending_generation")!;
+    expect(call.args.p_items).toEqual([
+      expect.objectContaining({
+        product_name: "อะโวคาโด้",
+        price_per_unit: 70,
+        quantity: 3,
+        unit: "โล",
+      }),
+    ]);
+  });
+
   it("keeps removal evidence append-only and excludes the removed item from finalization", async () => {
     const messages = [
       "กี้-ตลาดทดสอบ เบิก 24/8/2569\n16. มังคุด 45 บาท\n2 โล\n17. อะโวคาโด 80 บาท\n4 โล",

@@ -87,6 +87,11 @@ export const PRODUCT_ALIASES: Record<string, string> = {
   // whole map rather than one word.
   \u0E44\u0E0A\u0E21\u0E31\u0E2A: "\u0E44\u0E0B\u0E21\u0E31\u0E2A",
 
+  // สาลี → สาลี่ (ม50). Production audit, 2026-08-25: 53 uses of สาลี,
+  // always unit ลูก and prices 6/7/10/12 — all also used by canonical สาลี่.
+  // Exact spelling only; สาลี่หอม and สาลี่น้ำผึ้ง remain separate products.
+  \u0E2A\u0E32\u0E25\u0E35: "\u0E2A\u0E32\u0E25\u0E35\u0E48",
+
   // \u2500\u2500 \u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15 \u2192 \u0E21\u0E30\u0E21\u0E48\u0E27\u0E07\u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15 (\u0E2131 shop-floor short form) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   // Business-confirmed same product: \u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15 is the shop-floor short form of
   // the existing dictionary canonical name \u0E21\u0E30\u0E21\u0E48\u0E27\u0E07\u0E40\u0E02\u0E35\u0E22\u0E27\u0E21\u0E23\u0E01\u0E15 (\u0E2131), not a second

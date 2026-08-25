@@ -10,9 +10,9 @@
  *
  * Three things it deliberately does NOT do:
  *
- *  - it never rewrites the operator's text. Product canonicalization is
- *    reporting-only (see remaining-fruit.ts) and stays that way; an unknown
- *    unit is reported, never converted;
+ *  - it never rewrites the operator's text. Reviewed deterministic product
+ *    aliases resolve as canonical identity before dictionary validation (see
+ *    product-vocabulary.ts); an unknown unit is reported, never converted;
  *  - it never merges two products because their names look alike. Fuzzy
  *    distance produces a SUGGESTION for a human, never a match — เขียวมรกต and
  *    เขียวมรกตเก่า are one character apart and are different goods;

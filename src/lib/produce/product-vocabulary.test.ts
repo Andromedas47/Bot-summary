@@ -316,13 +316,14 @@ describe("guard scope", () => {
     );
     expect(vocabulary(result)).toHaveLength(3);
     const reply = buildReviewValidationReply(result);
-    expect(reply).toContain("⚠️ พบ 3 ชื่อสินค้าที่ไม่ตรงกับรายการมาตรฐาน");
+    expect(reply).toContain("⚠️ พบ 3 ชื่อสินค้าที่ต้องตรวจสอบ");
     expect(reply.indexOf("มะม่วงเขียวรกต")).toBeLessThan(
       reply.indexOf("ฝรั่งสายพันธุ์ใหม่ของสวนลุงมี"),
     );
     expect(reply).toContain("ม31 — มะม่วงเขียวมรกต");
     expect(reply).toContain("ไม่พบชื่อใกล้เคียงในรายการมาตรฐาน");
-    expect(reply).toContain("หากเป็นสินค้าใหม่จริง");
+    expect(reply).toContain("✅ ถ้าชื่อเหล่านี้ถูกต้องและต้องการบันทึกตามที่พิมพ์");
+    expect(reply).toContain("✏️ ถ้าต้องการแก้ชื่อ");
   });
 });
 

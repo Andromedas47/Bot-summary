@@ -78,8 +78,11 @@ function describe(exception: ProduceValidationException): string[] {
   }
 }
 
-function numberedBlocks(exceptions: ProduceValidationException[]): string[] {
-  const listed = exceptions.slice(0, MAX_LISTED_EXCEPTIONS);
+function numberedBlocks(
+  exceptions: ProduceValidationException[],
+  maxListed = MAX_LISTED_EXCEPTIONS,
+): string[] {
+  const listed = exceptions.slice(0, maxListed);
   const lines: string[] = [];
   listed.forEach((exception) => {
     const [head, ...rest] = describe(exception);
@@ -217,34 +220,75 @@ export function buildBlockingValidationReply(result: ProduceValidationResult): s
 }
 
 function reviewHeadline(result: ProduceValidationResult): string {
-  return `⚠️ พบ ${result.reviews.length} ชื่อสินค้าที่ไม่ตรงกับรายการมาตรฐาน`;
+  return `⚠️ พบ ${result.reviews.length} ชื่อสินค้าที่ต้องตรวจสอบ`;
 }
 
-/**
- * An unapproved name is persisted exactly as typed once confirmed; a
- * suggestion is never applied on the operator's behalf.
- */
-function reviewGuidance(result: ProduceValidationResult): string[] {
+function reviewCorrectionGuidance(result: ProduceValidationResult): string[] {
+  const itemNumbers = [...new Set(result.reviews.map((review) => review.itemNumber))];
+  if (itemNumbers.length === 1) {
+    return [
+      `ส่ง “แก้ข้อ ${itemNumbers[0]}”`,
+      `แล้วส่งข้อ ${itemNumbers[0]} ใหม่ พร้อมราคาและจำนวน`,
+    ];
+  }
   return [
-    "รายการอื่นยังอยู่ครบ ไม่ต้องยกเลิก",
-    ...correctionGuidance(result.reviews),
-    "หากเป็นสินค้าใหม่จริง ระบบจะบันทึกชื่อตามที่ส่งมาทุกตัวอักษร",
+    "ส่งคำสั่ง “แก้ข้อ <เลขข้อ>” ทีละข้อ",
+    "แล้วส่งข้อนั้นใหม่ พร้อมราคาและจำนวน",
   ];
+}
+
+function reviewActionBlock(
+  result: ProduceValidationResult,
+  confirmationInstruction: string,
+): string[] {
+  const subject = result.reviews.length === 1 ? "ชื่อนี้" : "ชื่อเหล่านี้";
+  return [
+    `✅ ถ้า${subject}ถูกต้องและต้องการบันทึกตามที่พิมพ์`,
+    confirmationInstruction,
+    "",
+    "✏️ ถ้าต้องการแก้ชื่อ",
+    ...reviewCorrectionGuidance(result),
+    "",
+    "รายการอื่นยังอยู่ครบ ไม่ต้องเริ่มใหม่",
+  ];
+}
+
+function buildReviewReplyWithinBudget(
+  result: ProduceValidationResult,
+  confirmationInstruction: string,
+  maxCodePoints: number,
+): string {
+  const actionBlock = reviewActionBlock(result, confirmationInstruction);
+  for (
+    let listed = Math.min(result.reviews.length, MAX_LISTED_EXCEPTIONS);
+    listed >= 0;
+    listed -= 1
+  ) {
+    const reply = [
+      reviewHeadline(result),
+      "",
+      ...numberedBlocks(result.reviews, listed),
+      "",
+      ...actionBlock,
+    ].join("\n");
+    if (countCodePoints(reply) <= maxCodePoints) return reply;
+  }
+  throw new Error("product review actions cannot fit within the LINE text limit");
 }
 
 /**
  * A withdrawal product name outside the approved dictionary needs one human
  * confirmation before finalization.
  */
-export function buildReviewValidationReply(result: ProduceValidationResult): string {
-  return [
-    reviewHeadline(result),
-    "",
-    ...numberedBlocks(result.reviews),
-    "",
-    ...reviewGuidance(result),
-    'หากตรวจแล้วว่าถูกต้อง กด "ยืนยัน" เพื่อบันทึก',
-  ].join("\n");
+export function buildReviewValidationReply(
+  result: ProduceValidationResult,
+  maxCodePoints = LINE_TEXT_MESSAGE_HARD_MAX_CODE_POINTS,
+): string {
+  return buildReviewReplyWithinBudget(
+    result,
+    'กด “ยืนยัน” เพื่อบันทึกและจบรายการ',
+    maxCodePoints,
+  );
 }
 
 /**
@@ -256,15 +300,14 @@ export function buildReviewValidationReply(result: ProduceValidationResult): str
  */
 export function buildPlainTextReviewValidationReply(
   result: ProduceValidationResult,
+  closeCommand: string,
+  maxCodePoints = LINE_TEXT_MESSAGE_HARD_MAX_CODE_POINTS,
 ): string {
-  return [
-    reviewHeadline(result),
-    "",
-    ...numberedBlocks(result.reviews),
-    "",
-    ...reviewGuidance(result),
-    "หากตรวจแล้วว่าถูกต้อง ส่งข้อความจบรายการอีกครั้งเพื่อยืนยัน",
-  ].join("\n");
+  return buildReviewReplyWithinBudget(
+    result,
+    `ส่ง “${closeCommand.trim()}” อีกครั้ง`,
+    maxCodePoints,
+  );
 }
 
 /** One-line form for a session held because its review was never acknowledged. */

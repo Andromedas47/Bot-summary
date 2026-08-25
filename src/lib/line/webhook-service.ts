@@ -2123,7 +2123,7 @@ export class WebhookService {
         return buildBlockingValidationReply(decision.result);
       }
       if (decision.decision === "review_presented") {
-        return buildPlainTextReviewValidationReply(decision.result);
+        return buildPlainTextReviewValidationReply(decision.result, closeText);
       }
       return null;
     } catch (error) {

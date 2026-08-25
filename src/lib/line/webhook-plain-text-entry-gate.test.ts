@@ -373,6 +373,34 @@ describe("P4A on the plain-text close", () => {
     // P1-B: a close that DID schedule is never stamped as refused.
     expect(db.closeRefusals).toEqual([]);
   });
+
+  it("shows the exact close CTA, then finalizes the unchanged name on second close", async () => {
+    const db = new PlainTextGateDatabase(
+      pendingRow([
+        "ดำ-ราชพฤกษ์ เบิก 11/8/2569",
+        "4.มะม่วง20บาท",
+        "1โล",
+      ].join("\n")),
+      [],
+    );
+    const replies: string[] = [];
+    const service = build(db, replies);
+
+    await service.processEvents([textEvent("จบรายการเบิก", "review-close-1")], "dest");
+
+    expect(replies.at(-1)).toContain("✅ ถ้าชื่อนี้ถูกต้องและต้องการบันทึกตามที่พิมพ์");
+    expect(replies.at(-1)).toContain("ส่ง “จบรายการเบิก” อีกครั้ง");
+    expect(replies.at(-1)).toContain("ส่ง “แก้ข้อ 4”");
+    expect(db.pending.close_line_event_id).toBeNull();
+    expect(db.reviews).toHaveLength(1);
+    expect(db.reviews[0]?.confirmed_at).toBeNull();
+
+    await service.processEvents([textEvent("จบรายการเบิก", "review-close-2")], "dest");
+
+    expect(replies.at(-1)).toBe(PRODUCE_CLOSE_PENDING_REPLY);
+    expect(db.pending.close_line_event_id).toBe("review-close-2");
+    expect(db.reviews[0]?.confirmed_at).not.toBeNull();
+  });
 });
 
 /**

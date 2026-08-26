@@ -127,6 +127,7 @@ import { processWhiteSheetCloseCommand } from "@/lib/line/white-sheet-close-serv
 import { isPhysicalInventoryLineGroupAllowed } from "@/lib/physical-inventory/config";
 import {
   classifyPhysicalInventoryStandaloneIntent,
+  isExplicitEmptyHouseStockDeclaration,
   isPricedPhysicalInventoryHeaderText,
   isRecognizedPhysicalInventoryItemBlock,
   matchesPhysicalInventoryCloseLine,
@@ -198,7 +199,7 @@ type PhysicalInventoryFinalizer = (params: {
 type PhysicalInventorySessionGateway = Pick<
   PhysicalInventorySessionService,
   "findOpenSession" | "openSession" | "registerIngest"
-> & Partial<Pick<PhysicalInventorySessionService, "closeOpenEvent">>;
+> & Partial<Pick<PhysicalInventorySessionService, "closeOpenEvent" | "listIngestTexts">>;
 
 const BATCH_FIRST_IMAGE_REPLY = [
   "รับรูปหลักฐานแล้วครับ",
@@ -242,6 +243,26 @@ function buildPhysicalInventoryItemParseFailureReply(sequence: number | null): s
     "รายการยังเปิดอยู่",
   ].join("\n");
 }
+
+function buildHouseStockExplicitEmptyAck(businessDate: string | null): string {
+  const date = businessDate ? formatPhysicalInventoryBusinessDate(businessDate) : null;
+  return [
+    "รับทราบ ✅",
+    date ? `วันที่ ${date} ไม่มีผลไม้คงเหลือในบ้าน` : "ไม่มีผลไม้คงเหลือในบ้าน",
+    `ส่ง "จบ" เพื่อบันทึก`,
+  ].join("\n");
+}
+
+const HOUSE_STOCK_EMPTY_THEN_ITEM_REPLY = [
+  "⚠️ รายการนี้ถูกระบุว่าไม่มีผลไม้คงเหลือแล้ว",
+  "หากมีสินค้า กรุณายกเลิกรายการและเริ่มใหม่",
+].join("\n");
+
+const HOUSE_STOCK_ITEM_THEN_EMPTY_REPLY = [
+  "⚠️ รายการนี้มีสินค้าอยู่แล้ว",
+  "ไม่สามารถระบุว่าไม่มีผลไม้คงเหลือได้",
+  "หากต้องการเริ่มใหม่ กรุณายกเลิกรายการและเริ่มใหม่",
+].join("\n");
 
 const PRODUCE_ENTRY_GATE_UNAVAILABLE_REPLY = [
   "⛔ ระบบตรวจสอบรายการไม่สำเร็จ จึงยังไม่บันทึก",
@@ -1889,15 +1910,22 @@ export class WebhookService {
 
         if (replyToken && opened.opened && !opened.idempotent && !closesInline) {
           const businessDate = parsed.businessDate ?? opened.session.business_date;
-          const displayDate = businessDate
-            ? formatPhysicalInventoryBusinessDate(businessDate)
-            : null;
-          await this.replyMessage(
-            replyToken,
-            displayDate
-              ? `เริ่มบันทึกสต๊อกผลไม้คงเหลือวันที่ ${displayDate} แล้ว`
-              : "เริ่มรายการแล้ว แต่ไม่พบวันที่ที่ถูกต้อง กรุณาตรวจสอบวันที่ก่อนปิดรายการ",
-          );
+          if (
+            parsed.explicitEmpty
+            && isPricedPhysicalInventoryHeaderText(parsed.headerText)
+          ) {
+            await this.replyMessage(replyToken, buildHouseStockExplicitEmptyAck(businessDate));
+          } else {
+            const displayDate = businessDate
+              ? formatPhysicalInventoryBusinessDate(businessDate)
+              : null;
+            await this.replyMessage(
+              replyToken,
+              displayDate
+                ? `เริ่มบันทึกสต๊อกผลไม้คงเหลือวันที่ ${displayDate} แล้ว`
+                : "เริ่มรายการแล้ว แต่ไม่พบวันที่ที่ถูกต้อง กรุณาตรวจสอบวันที่ก่อนปิดรายการ",
+            );
+          }
         }
 
         if (closesInline) {
@@ -1948,13 +1976,11 @@ export class WebhookService {
     const usesPricedParser = session.parser_version === HOUSE_STOCK_PRICED_PARSER_VERSION;
     const parseOptions = { requireUnitPrice: usesPricedParser };
     const close = matchesPhysicalInventoryCloseLine(text);
-    // Mirrors the guard inside isRecognizedPhysicalInventoryItemBlock: an
-    // unpriced session must never treat Produce selling-price text as a P2A
-    // attempt, even to report a parse failure.
     const skipUnpricedSellingPriceText =
       !usesPricedParser && /บาท/u.test(text.normalize("NFC"));
+    const emptyDeclaration = usesPricedParser && isExplicitEmptyHouseStockDeclaration(text);
     const item = !close && !skipUnpricedSellingPriceText
-      && isRecognizedPhysicalInventoryItemBlock(text, parseOptions);
+      && (emptyDeclaration || isRecognizedPhysicalInventoryItemBlock(text, parseOptions));
 
     if (!close && !item) {
       const attempt = skipUnpricedSellingPriceText
@@ -1990,6 +2016,31 @@ export class WebhookService {
       return { eventId, eventType, status: "saved", parsed: false };
     }
 
+    if (!close && service.listIngestTexts) {
+      const prior = parsePhysicalInventoryDocument(
+        (await service.listIngestTexts(session.id)).join("\n"),
+        parseOptions,
+      );
+      const priorHasItems = prior.items.some(
+        (it) =>
+          it.resolutionStatus === "ACCEPTED_NORMALIZED"
+          || it.resolutionStatus === "ACCEPTED_RAW",
+      );
+      const contradictory = emptyDeclaration
+        ? priorHasItems
+        : prior.explicitEmpty;
+      if (contradictory) {
+        await this.markRawMessageProcessed(rawMessageId, log);
+        if (replyToken) {
+          await this.replyMessage(
+            replyToken,
+            emptyDeclaration ? HOUSE_STOCK_ITEM_THEN_EMPTY_REPLY : HOUSE_STOCK_EMPTY_THEN_ITEM_REPLY,
+          );
+        }
+        return { eventId, eventType, status: "saved", parsed: false };
+      }
+    }
+
     try {
       const admitted = await service.registerIngest({
         sessionId: session.id,
@@ -2005,6 +2056,15 @@ export class WebhookService {
       // marker is deliberately held until the terminal LINE push is accepted;
       // that gives the recovery worker a durable delivery checkpoint.
       if (!close) await this.markRawMessageProcessed(rawMessageId, log);
+
+      if (emptyDeclaration && replyToken) {
+        const businessDate = session.business_date;
+        try {
+          await this.replyMessage(replyToken, buildHouseStockExplicitEmptyAck(businessDate));
+        } catch (e) {
+          log.error("physical inventory explicit-empty ack failed", { error: String(e) });
+        }
+      }
 
       if (close) {
         this.scheduleBackgroundTask(async () => {

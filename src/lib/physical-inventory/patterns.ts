@@ -17,6 +17,16 @@ export const PHYSICAL_INVENTORY_PRICED_HEADERS = [
 ] as const;
 
 /**
+ * Explicit "nothing left at home" declarations. Exact NFC match after
+ * stripping an optional leading item number / punctuation / whitespace.
+ * Deliberately not aliases of ไม่มี / หมด / 0 / ศูนย์.
+ */
+export const PHYSICAL_INVENTORY_EXPLICIT_EMPTY_DECLARATIONS = [
+  "ไม่มีผลไม้เหลือ",
+  "ไม่มีของเหลือ",
+] as const;
+
+/**
  * Close lines recognized only when a Physical Stock session is already open.
  * Bare "จบ" is intentionally included for in-session use — callers must gate.
  */

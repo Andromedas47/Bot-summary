@@ -336,6 +336,11 @@ function makePhysicalInventoryGateway() {
       }
       return session;
     },
+    async listIngestTexts(sessionId: string) {
+      return ingests
+        .filter((ingest) => ingest.sessionId === sessionId)
+        .map((ingest) => ingest.rawText);
+    },
     _sessions: sessions,
     _ingests: ingests,
   };
@@ -1131,6 +1136,81 @@ describe("P2A Slice C webhook routing", () => {
       expect(ctx.replies).toHaveLength(1);
       expect(ctx.gateway._sessions[0]?.status).toBe("open");
       expect(results.every((r) => r.parsed !== true)).toBe(true);
+    });
+
+    test("explicit empty declaration is acknowledged and admitted, not price-parsed", async () => {
+      const ctx = service();
+      await ctx.webhook.processEvents([
+        textEvent("ผลไม้คงเหลือในบ้าน\n26/8/69"),
+      ], "destination");
+      await ctx.webhook.processEvents([
+        textEvent("1ไม่มีผลไม้เหลือ"),
+      ], "destination");
+
+      expect(ctx.gateway._ingests.map((row) => row.kind)).toEqual(["header", "item"]);
+      expect(ctx.gateway._sessions[0]?.status).toBe("open");
+      const ack = ctx.replies.at(-1)!;
+      expect(ack).toContain("รับทราบ");
+      expect(ack).toContain("ไม่มีผลไม้คงเหลือในบ้าน");
+      expect(ack).toContain("จบ");
+      expect(ack).not.toContain("อ่านรูปแบบราคาไม่สำเร็จ");
+      expect(ctx.finalized).toHaveLength(0);
+    });
+
+    test("จบ after explicit empty schedules finalize; จบ without it still closes", async () => {
+      const withEmpty = service();
+      await withEmpty.webhook.processEvents([
+        textEvent("ผลไม้คงเหลือในบ้าน\n26/8/69"),
+        textEvent("ไม่มีผลไม้เหลือ"),
+        textEvent("จบ"),
+      ], "destination");
+      expect(withEmpty.gateway._sessions[0]?.status).toBe("closing");
+      expect(withEmpty.scheduled).toHaveLength(1);
+
+      const withoutEmpty = service();
+      await withoutEmpty.webhook.processEvents([
+        textEvent("ผลไม้คงเหลือในบ้าน\n26/8/69"),
+        textEvent("จบ"),
+      ], "destination");
+      expect(withoutEmpty.gateway._sessions[0]?.status).toBe("closing");
+      expect(withoutEmpty.scheduled).toHaveLength(1);
+    });
+
+    test("product then explicit empty is rejected as contradictory", async () => {
+      const ctx = service();
+      await ctx.webhook.processEvents([
+        textEvent("ผลไม้คงเหลือในบ้าน\n26/8/69"),
+        textEvent("1สาลี่10บาท\n20ลูก"),
+        textEvent("ไม่มีผลไม้เหลือ"),
+      ], "destination");
+      expect(ctx.gateway._ingests.filter((row) => row.kind === "item")).toHaveLength(1);
+      expect(ctx.gateway._ingests.filter((row) => row.rawText.includes("ไม่มีผลไม้เหลือ"))).toHaveLength(0);
+      expect(ctx.replies.at(-1)).toContain("มีสินค้าอยู่แล้ว");
+      expect(ctx.gateway._sessions[0]?.status).toBe("open");
+    });
+
+    test("explicit empty then product is rejected as contradictory", async () => {
+      const ctx = service();
+      await ctx.webhook.processEvents([
+        textEvent("ผลไม้คงเหลือในบ้าน\n26/8/69"),
+        textEvent("ไม่มีผลไม้เหลือ"),
+        textEvent("1สาลี่10บาท\n20ลูก"),
+      ], "destination");
+      expect(ctx.gateway._ingests.filter((row) => row.kind === "item")).toHaveLength(1);
+      expect(ctx.gateway._ingests[1]?.rawText).toBe("ไม่มีผลไม้เหลือ");
+      expect(ctx.replies.at(-1)).toContain("ไม่มีผลไม้คงเหลือแล้ว");
+      expect(ctx.gateway._sessions[0]?.status).toBe("open");
+    });
+
+    test("dangerous aliases are not captured as empty stock", async () => {
+      const ctx = service();
+      await ctx.webhook.processEvents([
+        textEvent("ผลไม้คงเหลือในบ้าน\n26/8/69"),
+      ], "destination");
+      for (const alias of ["ไม่มี", "หมด", "0", "ศูนย์"]) {
+        await ctx.webhook.processEvents([textEvent(alias)], "destination");
+      }
+      expect(ctx.gateway._ingests.filter((row) => row.kind === "item")).toHaveLength(0);
     });
   });
 });

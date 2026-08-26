@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   acceptedPhysicalInventoryItems,
   classifyPhysicalInventoryStandaloneIntent,
+  isExplicitEmptyHouseStockDeclaration,
   isRecognizedPhysicalInventoryItemBlock,
   isPhysicalInventorySessionClose,
   matchesPhysicalInventoryCloseLine,
@@ -359,5 +360,91 @@ describe("session-gated Physical Inventory item routing", () => {
   test("rejects a compact manual-slip amount and ordinary numeric chat", () => {
     expect(isRecognizedPhysicalInventoryItemBlock("1.90")).toBe(false);
     expect(isRecognizedPhysicalInventoryItemBlock("123")).toBe(false);
+  });
+});
+
+describe("priced House Stock explicit empty declaration", () => {
+  const priced = { requireUnitPrice: true } as const;
+
+  test("exact declaration and numbered operator forms", () => {
+    const forms = [
+      "ไม่มีผลไม้เหลือ",
+      "ไม่มีของเหลือ",
+      "1ไม่มีผลไม้เหลือ",
+      "1.ไม่มีผลไม้เหลือ",
+      "1 ไม่มีผลไม้เหลือ",
+      "1 ไม่มีของเหลือ",
+    ];
+    for (const form of forms) {
+      const parsed = parsePhysicalInventoryDocument(
+        `ผลไม้คงเหลือในบ้าน\n26/8/69\n${form}\nจบ`,
+        priced,
+      );
+      expect(parsed.explicitEmpty).toBe(true);
+      expect(parsed.items).toHaveLength(0);
+      expect(parsed.businessDate).toBe("2026-08-26");
+      expect(parsed.closeText).toBe("จบ");
+      expect(parsed.errors).toHaveLength(0);
+      expect(
+        parsed.items.some((item) => item.rawProductDescription === form),
+      ).toBe(false);
+      expect(isRecognizedPhysicalInventoryItemBlock(form, priced)).toBe(true);
+    }
+  });
+
+  test("does not fuzzy-match dangerous aliases", () => {
+    for (const form of ["ไม่มี", "หมด", "0", "ศูนย์", "ไม่มีผลไม้"]) {
+      expect(isExplicitEmptyHouseStockDeclaration(form)).toBe(false);
+      const parsed = parsePhysicalInventoryDocument(
+        `ผลไม้คงเหลือในบ้าน\n26/8/69\n${form}\nจบ`,
+        priced,
+      );
+      expect(parsed.explicitEmpty).toBe(false);
+    }
+  });
+
+  test("unpriced Physical Inventory does not treat the phrase as empty stock", () => {
+    const parsed = parsePhysicalInventoryDocument(
+      `สตอกผลไม้คงเหลือ\n26/8/69\nไม่มีผลไม้เหลือ\nจบ`,
+    );
+    expect(parsed.explicitEmpty).toBe(false);
+    expect(isRecognizedPhysicalInventoryItemBlock("ไม่มีผลไม้เหลือ")).toBe(false);
+  });
+
+  test("unpriced header stays non-empty even if the priced parser flag is on", () => {
+    const parsed = parsePhysicalInventoryDocument(
+      `สตอกผลไม้คงเหลือ\n26/8/69\nไม่มีผลไม้เหลือ\nจบ`,
+      priced,
+    );
+    expect(parsed.headerText).toBe("สตอกผลไม้คงเหลือ");
+    expect(parsed.explicitEmpty).toBe(false);
+  });
+
+  test("product then empty is a contradiction", () => {
+    const parsed = parsePhysicalInventoryDocument(
+      "ผลไม้คงเหลือในบ้าน\n26/8/69\n1สาลี่10บาท\n20ลูก\nไม่มีผลไม้เหลือ\nจบ",
+      priced,
+    );
+    expect(parsed.errors.some((error) => error.code === "explicit_empty_conflict")).toBe(true);
+    expect(parsed.items.length).toBeGreaterThan(0);
+  });
+
+  test("empty then product is a contradiction", () => {
+    const parsed = parsePhysicalInventoryDocument(
+      "ผลไม้คงเหลือในบ้าน\n26/8/69\nไม่มีผลไม้เหลือ\n1สาลี่10บาท\n20ลูก\nจบ",
+      priced,
+    );
+    expect(parsed.explicitEmpty).toBe(true);
+    expect(parsed.errors.some((error) => error.code === "explicit_empty_conflict")).toBe(true);
+    expect(parsed.items.some((item) => item.resolutionStatus !== "REJECTED")).toBe(false);
+  });
+
+  test("header-only close is not an explicit empty snapshot", () => {
+    const parsed = parsePhysicalInventoryDocument(
+      "ผลไม้คงเหลือในบ้าน\n26/8/69\nจบ",
+      priced,
+    );
+    expect(parsed.explicitEmpty).toBe(false);
+    expect(parsed.items).toHaveLength(0);
   });
 });

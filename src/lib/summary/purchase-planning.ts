@@ -192,6 +192,12 @@ export interface PurchasePlanningReport {
   /** Produce documents for the date that never landed and cannot be attributed. */
   unresolvedSessionCount: number;
   /**
+   * The same unresolved documents split by their declared transaction type.
+   * Presentation must use these counts instead of relabelling the day-wide
+   * total as one transaction type.
+   */
+  unresolvedSessionCounts: UnresolvedProduceSessionCounts;
+  /**
    * Set when an unresolved เบิก cannot be scoped to any product/unit/round.
    * The formatter must not emit 🟢/🟠/🔴 as trustworthy in that state.
    */
@@ -200,6 +206,13 @@ export interface PurchasePlanningReport {
   stockAbsence: Exclude<StockSignalAbsence, "no_match"> | null;
   /** Rows dropped because they carried no usable product+unit identity at all. */
   unidentifiedRowCount: number;
+}
+
+export interface UnresolvedProduceSessionCounts {
+  withdrawal: number;
+  goodReturn: number;
+  damagedReturn: number;
+  unknown: number;
 }
 
 /** The produce_transactions columns this report reads. */
@@ -253,6 +266,7 @@ export interface PurchasePlanningInput {
    */
   hasUnattributedIncompleteReturns?: boolean;
   unresolvedSessionCount?: number;
+  unresolvedSessionCounts?: UnresolvedProduceSessionCounts;
   /**
    * Unresolved เบิก documents, already reduced to the narrowest identity
    * they can prove. Empty means none of today's active เบิก failures need
@@ -719,6 +733,12 @@ export function buildPurchasePlanningReport(
     businessDate: input.businessDate,
     items,
     unresolvedSessionCount: input.unresolvedSessionCount ?? 0,
+    unresolvedSessionCounts: input.unresolvedSessionCounts ?? {
+      withdrawal: 0,
+      goodReturn: 0,
+      damagedReturn: 0,
+      unknown: 0,
+    },
     unsafeReportReason: unattributable.reportUnsafe ? "unattributable_withdrawal" : null,
     stockAbsence,
     unidentifiedRowCount,

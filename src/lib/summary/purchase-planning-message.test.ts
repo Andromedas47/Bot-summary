@@ -55,6 +55,12 @@ function report(overrides: Partial<PurchasePlanningReport> = {}): PurchasePlanni
     businessDate: DATE,
     items: [item()],
     unresolvedSessionCount: 0,
+    unresolvedSessionCounts: {
+      withdrawal: 0,
+      goodReturn: 0,
+      damagedReturn: 0,
+      unknown: 0,
+    },
     unsafeReportReason: null,
     stockAbsence: null,
     unidentifiedRowCount: 0,
@@ -585,6 +591,40 @@ describe("purchase planning message — consolidated cause block", () => {
     expect(text).toContain("• พบรายการเบิก 1 ชุดที่ยังระบุรอบไม่ได้");
     expect(text.match(/พบรายการเบิก 1 ชุดที่ยังระบุรอบไม่ได้/g)?.length).toBe(1);
     expect(text).not.toContain(PRODUCT_RETURN_ABSENT_CAUSE);
+  });
+
+  test("one withdrawal and one failed return are explained as their own types", () => {
+    const text = joined(report({
+      unresolvedSessionCount: 2,
+      unresolvedSessionCounts: {
+        withdrawal: 1,
+        goodReturn: 1,
+        damagedReturn: 0,
+        unknown: 0,
+      },
+      items: [unknown({ uncertaintyReasons: ["unattributable_withdrawal"] })],
+    }));
+
+    expect(text).toContain("• พบรายการเบิก 1 ชุดที่ยังระบุรอบไม่ได้");
+    expect(text).toContain("• พบรายการชั่งคืน 1 ชุดที่ยังบันทึกไม่สำเร็จ");
+    expect(text).not.toContain("พบรายการเบิก 2 ชุด");
+    expect(text).not.toContain("พบข้อมูลที่ไม่สมบูรณ์ 2 ชุด");
+  });
+
+  test("damaged-return and unknown failures keep their own labels", () => {
+    const text = joined(report({
+      unresolvedSessionCount: 2,
+      unresolvedSessionCounts: {
+        withdrawal: 0,
+        goodReturn: 0,
+        damagedReturn: 1,
+        unknown: 1,
+      },
+    }));
+
+    expect(text).toContain("• พบรายการคืนเสีย 1 ชุดที่ยังบันทึกไม่สำเร็จ");
+    expect(text).toContain("• พบข้อมูล Produce 1 ชุดที่ยังระบุประเภทรายการไม่ได้");
+    expect(text).not.toContain("พบรายการเบิก");
   });
 
   test("product_return_absent prints a return-omission bullet", () => {

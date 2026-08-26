@@ -1,12 +1,13 @@
 /**
  * Data Quality Inbox — stable identity, lifecycle, and the one upsert path.
  *
- * Every decision here is a PURE function (buildIssueKey / planUpsert /
- * planResolve / planIgnore) so the dedup, reopen, resolve and ignore rules are
- * unit-testable without a database — the same shape as
- * src/lib/produce/daily-close-preflight.ts elsewhere in this repo. The async
- * functions at the bottom are thin: read the current row (if any), hand it to
- * the pure planner, write back exactly what the plan says.
+ * Stable identity and operator status patches are pure functions. The scan
+ * lifecycle itself lives in one PostgreSQL function and is exercised against
+ * PostgreSQL, avoiding a read/write planner that could race or drift from the
+ * database behavior. The async functions below are thin database boundaries.
+ * Recurring scans use one PostgreSQL RPC so the whole candidate set commits or
+ * rolls back as one transaction and first-insert races converge through
+ * issue_key's UNIQUE constraint.
  *
  * LIFECYCLE
  *   OPEN      the default. A recurring scan just refreshes last_seen/details.
@@ -26,8 +27,8 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Database } from "@/types/database";
-import { severityForCategory } from "./severity";
+import type { Database, Json } from "@/types/database";
+import { severityForCategory, type PersistedDataQualitySeverity } from "./severity";
 import type { DataQualityActor, DataQualityIssueCandidate, DataQualityIssueRow } from "./types";
 
 type Supabase = SupabaseClient<Database>;
@@ -48,76 +49,6 @@ export function buildIssueKey(
 
 function normalizedRefs(entityRefs: readonly string[]): string[] {
   return [...new Set(entityRefs.map((r) => r.trim()).filter((r) => r.length > 0))].sort();
-}
-
-export type UpsertPlan =
-  /** The category maps to NORMAL — no user-facing notification, nothing written. */
-  | { op: "skip_normal_severity"; issueKey: string }
-  | { op: "insert"; issueKey: string; row: Omit<DataQualityIssueRow, "id"> }
-  | { op: "update_open"; issueKey: string; patch: Partial<DataQualityIssueRow> }
-  | { op: "reopen"; issueKey: string; patch: Partial<DataQualityIssueRow> }
-  | { op: "touch_ignored"; issueKey: string; patch: Partial<DataQualityIssueRow> };
-
-/** Pure: given the current row (or null) and a fresh candidate, decide what to write. */
-export function planUpsert(
-  existing: DataQualityIssueRow | null,
-  candidate: DataQualityIssueCandidate,
-  nowIso: string,
-): UpsertPlan {
-  const issueKey = buildIssueKey(candidate.category, candidate.businessDate, candidate.entityRefs);
-  const severity = severityForCategory(candidate.category);
-
-  if (severity === "NORMAL") {
-    return { op: "skip_normal_severity", issueKey };
-  }
-
-  const refreshed = {
-    severity,
-    business_date: candidate.businessDate,
-    affected_refs: normalizedRefs(candidate.entityRefs),
-    summary_th: candidate.summaryTh,
-    technical_context: candidate.technicalContext ?? {},
-    last_seen: nowIso,
-  };
-
-  if (!existing) {
-    return {
-      op: "insert",
-      issueKey,
-      row: {
-        issue_key: issueKey,
-        category: candidate.category,
-        first_seen: nowIso,
-        resolved_at: null,
-        resolved_by: null,
-        resolution_note: null,
-        created_at: nowIso,
-        status: "OPEN",
-        ...refreshed,
-      },
-    };
-  }
-
-  if (existing.status === "OPEN") {
-    return { op: "update_open", issueKey, patch: refreshed };
-  }
-
-  if (existing.status === "RESOLVED") {
-    return {
-      op: "reopen",
-      issueKey,
-      patch: {
-        ...refreshed,
-        status: "OPEN",
-        resolved_at: null,
-        resolved_by: null,
-        resolution_note: null,
-      },
-    };
-  }
-
-  // IGNORED — suppressed but still tracked (see module doc).
-  return { op: "touch_ignored", issueKey, patch: { last_seen: nowIso } };
 }
 
 export interface ResolutionPatch {
@@ -172,54 +103,64 @@ export function toIssueRow(raw: Database["public"]["Tables"]["data_quality_issue
   };
 }
 
-export async function fetchIssueByKey(supabase: Supabase, issueKey: string): Promise<DataQualityIssueRow | null> {
-  const { data, error } = await supabase
-    .from("data_quality_issues")
-    .select("*")
-    .eq("issue_key", issueKey)
-    .maybeSingle();
-  if (error) throw new Error(`data_quality_issues lookup failed: ${error.message}`);
-  return data ? toIssueRow(data) : null;
+interface AtomicUpsertPayload {
+  issue_key: string;
+  category: string;
+  severity: PersistedDataQualitySeverity;
+  business_date: string;
+  affected_refs: string[];
+  summary_th: string;
+  technical_context: Record<string, unknown>;
 }
 
-export interface UpsertResult {
-  plan: UpsertPlan;
-  row: DataQualityIssueRow | null;
+/** Pure payload preparation. Duplicate candidate identities collapse before
+ * the RPC because PostgreSQL intentionally rejects affecting one conflict row
+ * twice in a single INSERT statement. */
+export function prepareAtomicUpsertPayload(
+  candidates: readonly DataQualityIssueCandidate[],
+): AtomicUpsertPayload[] {
+  const byIssueKey = new Map<string, AtomicUpsertPayload>();
+
+  for (const candidate of candidates) {
+    const severity = severityForCategory(candidate.category);
+    if (severity === "NORMAL") continue;
+
+    const issueKey = buildIssueKey(candidate.category, candidate.businessDate, candidate.entityRefs);
+    byIssueKey.set(issueKey, {
+      issue_key: issueKey,
+      category: candidate.category,
+      severity,
+      business_date: candidate.businessDate,
+      affected_refs: normalizedRefs(candidate.entityRefs),
+      summary_th: candidate.summaryTh,
+      technical_context: candidate.technicalContext ?? {},
+    });
+  }
+
+  return [...byIssueKey.values()];
 }
 
-/** Upsert one candidate. Idempotent: calling this twice for the same
- *  candidate on the same day produces exactly one row (see inbox.test.ts). */
-export async function upsertDataQualityIssue(
+/** Persist one complete scan atomically. The SQL function uses INSERT ... ON
+ * CONFLICT for race-safe dedup and applies the reviewed lifecycle under the
+ * row lock: RESOLVED reopens; IGNORED only advances last_seen. */
+export async function upsertDataQualityIssuesAtomically(
   supabase: Supabase,
-  candidate: DataQualityIssueCandidate,
+  candidates: readonly DataQualityIssueCandidate[],
   nowIso: string = new Date().toISOString(),
-): Promise<UpsertResult> {
-  const issueKey = buildIssueKey(candidate.category, candidate.businessDate, candidate.entityRefs);
-  const current = await fetchIssueByKey(supabase, issueKey);
-  const plan = planUpsert(current, candidate, nowIso);
+): Promise<DataQualityIssueRow[]> {
+  const payload = prepareAtomicUpsertPayload(candidates);
+  if (payload.length === 0) return [];
 
-  if (plan.op === "skip_normal_severity") {
-    return { plan, row: null };
-  }
+  const { data, error } = await supabase.rpc("upsert_data_quality_issues", {
+    p_candidates: payload as unknown as Json,
+    p_seen_at: nowIso,
+  });
+  if (error) throw new Error(`data_quality_issues atomic upsert failed: ${error.message}`);
+  if (!Array.isArray(data)) throw new Error("data_quality_issues atomic upsert returned invalid data");
 
-  if (plan.op === "insert") {
-    const { data, error } = await supabase
-      .from("data_quality_issues")
-      .insert(plan.row as Database["public"]["Tables"]["data_quality_issues"]["Insert"])
-      .select("*")
-      .single();
-    if (error) throw new Error(`data_quality_issues insert failed: ${error.message}`);
-    return { plan, row: toIssueRow(data) };
-  }
-
-  const { data, error } = await supabase
-    .from("data_quality_issues")
-    .update(plan.patch as Database["public"]["Tables"]["data_quality_issues"]["Update"])
-    .eq("issue_key", issueKey)
-    .select("*")
-    .single();
-  if (error) throw new Error(`data_quality_issues update failed: ${error.message}`);
-  return { plan, row: toIssueRow(data) };
+  return data.map((row) => toIssueRow(
+    row as Database["public"]["Tables"]["data_quality_issues"]["Row"],
+  ));
 }
 
 async function applyPatch(

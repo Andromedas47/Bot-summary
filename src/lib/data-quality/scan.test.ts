@@ -102,50 +102,11 @@ describe("scanDataQualityIssues — full wiring", () => {
   it("assembles candidates from every source and upserts each exactly once", async () => {
     const { scanDataQualityIssues } = await import("./scan");
 
-    type Row = Record<string, unknown>;
-    const store: Row[] = [];
-    let nextId = 1;
+    const rpcCalls: Array<Record<string, unknown>> = [];
     const fakeSupabase = {
-      from() {
-        return {
-          select() {
-            return {
-              eq(_c: string, value: string) {
-                return {
-                  async maybeSingle() {
-                    return { data: store.find((r) => r.issue_key === value) ?? null, error: null };
-                  },
-                };
-              },
-            };
-          },
-          insert(row: Row) {
-            return {
-              select: () => ({
-                async single() {
-                  const saved = { id: `row-${nextId++}`, ...row };
-                  store.push(saved);
-                  return { data: saved, error: null };
-                },
-              }),
-            };
-          },
-          update(patch: Row) {
-            return {
-              eq(_c: string, value: string) {
-                return {
-                  select: () => ({
-                    async single() {
-                      const idx = store.findIndex((r) => r.issue_key === value);
-                      store[idx] = { ...store[idx], ...patch };
-                      return { data: store[idx], error: null };
-                    },
-                  }),
-                };
-              },
-            };
-          },
-        };
+      async rpc(_name: string, args: Record<string, unknown>) {
+        rpcCalls.push(args);
+        return { data: [], error: null };
       },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any;
@@ -167,8 +128,10 @@ describe("scanDataQualityIssues — full wiring", () => {
 
     // 1 produce candidate + 1 reconciliation candidate + 1 settlement candidate.
     expect(result.candidateCount).toBe(3);
-    expect(store).toHaveLength(3);
-    expect(store.map((r) => r.category).sort()).toEqual(
+    expect(rpcCalls).toHaveLength(1);
+    const payload = rpcCalls[0].p_candidates as Array<Record<string, unknown>>;
+    expect(payload).toHaveLength(3);
+    expect(payload.map((r) => r.category).sort()).toEqual(
       [
         "produce_no_return",
         "financial_reconciliation_mismatch",

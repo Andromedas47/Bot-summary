@@ -3,10 +3,10 @@
  *
  * Gathers candidates from every wired source (produce preflight, financial
  * reconciliation, and the not-yet-built Financial Settlement port), then
- * upserts each through inbox.ts. Called by the nightly cron
- * (src/app/api/cron/data-quality-scan/route.ts) and safe to call again for
- * the same business date any number of times — see inbox.ts for the
- * dedup/reopen/ignore rules that make repeated scans idempotent.
+ * persists the complete set through inbox.ts. Exposed by the authenticated,
+ * cron-compatible route at src/app/api/cron/data-quality-scan/route.ts;
+ * scheduling is intentionally not activated. Safe to call again for the same
+ * business date — see inbox.ts for the idempotent lifecycle contract.
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -20,9 +20,9 @@ import {
   type FinancialSettlementPort,
   type FinancialSettlementSignal,
 } from "./adapters/financial-settlement-port";
-import { upsertDataQualityIssue, type UpsertResult } from "./inbox";
+import { upsertDataQualityIssuesAtomically } from "./inbox";
 import type { DataQualityCategory } from "./severity";
-import type { DataQualityIssueCandidate } from "./types";
+import type { DataQualityIssueCandidate, DataQualityIssueRow } from "./types";
 
 type Supabase = SupabaseClient<Database>;
 
@@ -60,7 +60,7 @@ export interface ScanDataQualityIssuesOptions {
 export interface ScanDataQualityIssuesResult {
   businessDate: string;
   candidateCount: number;
-  upserts: UpsertResult[];
+  upserts: DataQualityIssueRow[];
 }
 
 export async function scanDataQualityIssues(
@@ -69,6 +69,10 @@ export async function scanDataQualityIssues(
   options: ScanDataQualityIssuesOptions = {},
 ): Promise<ScanDataQualityIssuesResult> {
   const settlementPort = options.financialSettlementPort ?? noopFinancialSettlementPort;
+  // The occurrence time is captured before discovery. If an operator resolves
+  // or ignores an issue while the scan is loading, the older observation must
+  // not overwrite that newer human decision when the RPC eventually commits.
+  const observedAt = new Date().toISOString();
 
   const [preflight, reconciliation, settlementSignals] = await Promise.all([
     runDailyClosePreflight(supabase, businessDate),
@@ -82,10 +86,7 @@ export async function scanDataQualityIssues(
     ...financialSettlementSignalsToCandidates(settlementSignals),
   ];
 
-  const upserts: UpsertResult[] = [];
-  for (const candidate of candidates) {
-    upserts.push(await upsertDataQualityIssue(supabase, candidate));
-  }
+  const upserts = await upsertDataQualityIssuesAtomically(supabase, candidates, observedAt);
 
   return { businessDate, candidateCount: candidates.length, upserts };
 }

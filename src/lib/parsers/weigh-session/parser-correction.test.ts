@@ -4,7 +4,10 @@ import {
   getWeighSessionFinalizationErrors,
   parseWeighSession,
 } from "./parser";
-import { latestDraftItemAction } from "./draft-item-command";
+import {
+  buildDraftItemActionReply,
+  latestDraftItemAction,
+} from "./draft-item-command";
 
 const HEADER = "กี้-ตลาดทดสอบ เบิก 24/8/2569";
 const CLOSE = "จบรายการเบิก";
@@ -145,7 +148,13 @@ describe("explicit same-draft item correction", () => {
     expect(parsed.items).toHaveLength(2);
     expect(parsed.items.map((row) => row.product_name)).toEqual(["มังคุด", "ส้ม"]);
     expect(parsed.parse_errors.join("\n")).toContain("เลขข้อ 17 ซ้ำ");
-    expect(latestDraftItemAction(parsed)?.status).toBe("ambiguous_target");
+    const action = latestDraftItemAction(parsed);
+    expect(action?.status).toBe("ambiguous_target");
+    expect(buildDraftItemActionReply(action!)).toBe([
+      "⚠️ พบเลขข้อ 17 ซ้ำ 2 รายการ",
+      "กรุณาแก้เลขข้อให้ไม่ซ้ำก่อน",
+      "รายการอื่นยังอยู่ครบ ไม่ต้องยกเลิก",
+    ].join("\n"));
   });
 
   it("refuses an unknown target and leaves the draft unchanged", () => {

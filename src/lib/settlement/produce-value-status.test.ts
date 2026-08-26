@@ -12,6 +12,7 @@ function preflight(
     marketName: string;
     status: PreflightRoundStatus;
   }>,
+  integrityIssues: DailyClosePreflightResult["integrityIssues"] = [],
 ): DailyClosePreflightResult {
   return {
     businessDate: "2026-08-24",
@@ -32,7 +33,7 @@ function preflight(
     rounds: rounds.map((round) => ({ ...round, blockers: [], warnings: [] })),
     pricingConflicts: [],
     supersededFailures: [],
-    integrityIssues: [],
+    integrityIssues,
   };
 }
 
@@ -75,6 +76,51 @@ describe("settlement Produce value confidence", () => {
       },
     ]), IDENTITY, 4);
     expect(result).toBe("complete");
+  });
+
+  it("blocks an exact duplicate integrity issue on the matched ready round", () => {
+    const result = settlementProduceValueStatus(preflight([{
+      ...IDENTITY,
+      accountabilityRoundId: "round-a",
+      status: "ready",
+    }], [{
+      code: "exact_duplicate_withdrawal",
+      severity: "blocker",
+      message: "duplicate",
+      accountabilityRoundId: "round-a",
+      staffName: "ป้อม",
+      marketName: "วัดทุ่งลานนา2",
+    }]), IDENTITY, 6);
+    expect(result).toBe("blocked");
+  });
+
+  it("does not leak another market's integrity blocker into the matched round", () => {
+    const result = settlementProduceValueStatus(preflight([{
+      ...IDENTITY,
+      accountabilityRoundId: "round-a",
+      status: "ready",
+    }], [{
+      code: "exact_duplicate_withdrawal",
+      severity: "blocker",
+      message: "duplicate elsewhere",
+      accountabilityRoundId: "round-b",
+      staffName: "ดา",
+      marketName: "ตลาดอื่น",
+    }]), IDENTITY, 4);
+    expect(result).toBe("complete");
+  });
+
+  it("keeps a truly unattributed active failure fail-closed", () => {
+    const result = settlementProduceValueStatus(preflight([{
+      ...IDENTITY,
+      accountabilityRoundId: "round-a",
+      status: "ready",
+    }], [{
+      code: "active_failed_produce_session",
+      severity: "blocker",
+      message: "unattributed",
+    }]), IDENTITY, 4);
+    expect(result).toBe("blocked");
   });
 
   it("fails closed when rows cannot be matched to exactly one trusted round", () => {

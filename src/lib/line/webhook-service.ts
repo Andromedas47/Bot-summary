@@ -794,7 +794,7 @@ export class WebhookService {
     if (isExactGuidedCloseTrigger(text)) {
       const guidedCloseKey = getPendingSessionKey(msgEvent.source);
       if (guidedCloseKey !== null) {
-        const guidedCloseLookup = await new PendingSessionService(this.supabase).lookup(
+        const guidedCloseLookup = await new PendingSessionService(this.supabase).lookupActive(
           guidedCloseKey,
         );
         if (
@@ -820,7 +820,7 @@ export class WebhookService {
     if (isExactGuidedCancelTrigger(text)) {
       const guidedCancelKey = getPendingSessionKey(msgEvent.source);
       if (guidedCancelKey !== null) {
-        const guidedCancelLookup = await new PendingSessionService(this.supabase).lookup(
+        const guidedCancelLookup = await new PendingSessionService(this.supabase).lookupActive(
           guidedCancelKey,
         );
         if (
@@ -1012,14 +1012,16 @@ export class WebhookService {
     const sessionKey = pendingSessionKey;
 
     const pendingService = new PendingSessionService(this.supabase);
-    const lookup = await pendingService.lookup(sessionKey);
+    const lookup = await pendingService.lookupActive(sessionKey);
     const pending = lookup.session;
     const expired = pending ? pendingService.isExpired(pending) : false;
     log.info("pending session lookup completed", {
       sessionKey,
-      sessionFound: Boolean(pending),
+      sessionFound: lookup.reason === "found" || lookup.reason === "terminalized",
       reason: lookup.reason,
-      sessionStatus: pending ? (expired ? "stale_active" : "active") : null,
+      sessionStatus: pending
+        ? (expired ? "stale_active" : "active")
+        : lookup.reason === "terminalized" ? "terminalized" : null,
       expiresAt: pending ? pendingService.expiresAt(pending) : null,
       error: lookup.error,
     });

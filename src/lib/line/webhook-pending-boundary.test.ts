@@ -696,6 +696,13 @@ describe("remaining fruit command routing", () => {
 describe("white sheet close command routing", () => {
   const CLOSE_TEXT = [
     "ตลาดกี้ ปิดยอด 24/07/2569",
+    "ยอดขาย 100",
+    "เงินให้เจ้า 0",
+    "ค่าแรง 0",
+    "ค่าที่ 0",
+    "ค่าถุง 0",
+    "ค่าขนม 0",
+    "ค่าอื่น 0",
     "เงินสด 100",
     "จบปิดยอด",
   ].join("\n");
@@ -767,6 +774,13 @@ describe("white sheet close command routing", () => {
     const webhook = service(db, replies);
     const exported = [
       "10:15 ผู้ขาย ตลาดกี้ ปิดยอด 24/07/2569",
+      "10:15 ผู้ขาย ยอดขาย 100",
+      "10:15 ผู้ขาย เงินให้เจ้า 0",
+      "10:15 ผู้ขาย ค่าแรง 0",
+      "10:15 ผู้ขาย ค่าที่ 0",
+      "10:15 ผู้ขาย ค่าถุง 0",
+      "10:15 ผู้ขาย ค่าขนม 0",
+      "10:15 ผู้ขาย ค่าอื่น 0",
       "10:15 ผู้ขาย เงินสด 100",
       "10:15 ผู้ขาย จบปิดยอด",
     ].join("\n");
@@ -784,18 +798,20 @@ describe("white sheet close command routing", () => {
     expect(reply).toContain("✅ ยอดตรง");
   });
 
-  it("validation errors stay on the close path (no pending append)", async () => {
+  it("incomplete closes stay on the close path and persist no cash entry", async () => {
     const original = "โอม-พาซิโอ้ผลไม้ เบิก 30/06/2569";
     const db = new BoundaryDatabase(pendingSession(original));
     const replies: string[] = [];
     const webhook = service(db, replies);
 
     await webhook.processEvents(
-      [textEvent("ตลาดกี้ ปิดยอด 24/07/2569\nเงินสด abc\nจบปิดยอด", 2_000, "bad-close")],
+      [textEvent("ตลาดกี้ ปิดยอด 24/07/2569\nเงินสด 100\nจบปิดยอด", 2_000, "bad-close")],
       "destination",
     );
 
     expect(db.appendCalls).toBe(0);
-    expect(replies[0]).toContain("จำนวนเงินไม่ถูกต้อง");
+    expect(db.rows("digital_white_sheet_cash_entries")).toHaveLength(0);
+    expect(replies[0]).toContain("ยอดขาย");
+    expect(replies[0]).toContain("เงินให้เจ้า");
   });
 });

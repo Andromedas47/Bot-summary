@@ -386,13 +386,19 @@ export class PhysicalInventorySessionService {
     finalizedIngestRevision?: number | null;
     finalizedIngestHash?: string | null;
   }> {
+    const hasBlockingParseError = params.parsed.errors.some((e) =>
+      ["missing_header", "missing_or_invalid_date", "explicit_empty_conflict"].includes(e.code),
+    );
+    const explicitEmptyOk =
+      params.parsed.explicitEmpty === true
+      && params.parsed.items.length === 0
+      && Boolean(params.parsed.businessDate)
+      && !hasBlockingParseError;
     const failClosed =
       params.failClosed === true ||
       !params.parsed.businessDate ||
-      params.parsed.items.length === 0 ||
-      params.parsed.errors.some((e) =>
-        ["missing_header", "missing_or_invalid_date"].includes(e.code),
-      );
+      hasBlockingParseError ||
+      (params.parsed.items.length === 0 && !explicitEmptyOk);
 
     const { data, error } = await this.supabase.rpc("finalize_physical_inventory_session", {
       p_session_id: params.sessionId,
@@ -409,9 +415,11 @@ export class PhysicalInventorySessionService {
           params.parsed.errors[0]?.code ??
           (!params.parsed.businessDate
             ? "missing_or_invalid_date"
-            : params.parsed.items.length === 0
-              ? "no_items"
-              : "failed_closed")
+            : hasBlockingParseError
+              ? params.parsed.errors[0]?.code ?? "failed_closed"
+              : params.parsed.items.length === 0
+                ? "no_items"
+                : "failed_closed")
         : null,
     });
 

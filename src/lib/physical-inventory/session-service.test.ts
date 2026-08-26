@@ -447,7 +447,10 @@ function makePhysicalInventoryDb(opts?: { nowMs?: number }) {
     }
 
     const items = (args.p_items as Row[]) ?? [];
-    if (!args.p_business_date || !items.length) {
+    if (!args.p_business_date) {
+      return { data: null, error: { message: "business_date_required" } };
+    }
+    if (!Array.isArray(args.p_items)) {
       return { data: null, error: { message: "items_required" } };
     }
     let accNorm = 0;
@@ -936,6 +939,122 @@ describe("PhysicalInventorySessionService — Slice B hardening", () => {
     expect(sql).toContain("UNIQUE (line_event_id)");
     expect(PHYSICAL_INVENTORY_VOID_SUPERSEDE_SLICE).toBe("E");
     expect(PHYSICAL_INVENTORY_CLOSE_QUIET_MS).toBe(8_000);
+    const emptySql = readFileSync(
+      "supabase/migrations/20260826150000_house_stock_explicit_empty.sql",
+      "utf8",
+    );
+    expect(emptySql).toContain("CHECK (item_count >= 0)");
+    expect(emptySql).toContain("jsonb_typeof(p_items) <> 'array'");
+  });
+
+  test("explicit empty house stock finalizes a snapshot with zero item rows", async () => {
+    const db = makePhysicalInventoryDb();
+    const svc = new PhysicalInventorySessionService(db);
+    const opened = await svc.openSession({
+      sourceType: "group",
+      sourceId: "G-empty",
+      senderLineUserId: "U-empty",
+      openedLineEventId: "h-empty",
+      lineTimestampMs: 1_000,
+      rawText: "ผลไม้คงเหลือในบ้าน\n26/8/69",
+      businessDate: "2026-08-26",
+      parserVersion: "house-stock-priced-1.0.0",
+    });
+    await svc.registerIngest({
+      sessionId: opened.session.id,
+      expectedGeneration: opened.session.session_generation,
+      lineEventId: "empty-decl",
+      lineTimestampMs: 2_000,
+      kind: "item",
+      rawText: "1ไม่มีผลไม้เหลือ",
+    });
+    await svc.registerIngest({
+      sessionId: opened.session.id,
+      expectedGeneration: opened.session.session_generation,
+      lineEventId: "close-empty",
+      lineTimestampMs: 3_000,
+      kind: "close",
+      rawText: "จบ",
+    });
+    db.advanceMs(PHYSICAL_INVENTORY_CLOSE_QUIET_MS + 1);
+    const cand = await svc.getFinalizeCandidate({
+      sessionId: opened.session.id,
+      expectedGeneration: opened.session.session_generation,
+    });
+    const parsed = parsePhysicalInventoryDocument(
+      cand.ingests.map((ingest) => ingest.raw_text).join("\n"),
+      { requireUnitPrice: true },
+    );
+    expect(parsed.explicitEmpty).toBe(true);
+    expect(parsed.items).toHaveLength(0);
+    const fin = await svc.finalize({
+      sessionId: opened.session.id,
+      expectedGeneration: opened.session.session_generation,
+      expectedIngestRevision: cand.ingestRevision,
+      expectedIngestHash: cand.ingestSetHash,
+      parsed,
+    });
+    expect(fin.status).toBe("finalized");
+    expect(fin.idempotent).toBe(false);
+    expect(await svc.listSnapshotItems(fin.snapshotId!)).toHaveLength(0);
+    expect(db._count("physical_inventory_snapshots")).toBe(1);
+    expect(db._count("physical_inventory_items")).toBe(0);
+    const snap = await svc.getSnapshot(fin.snapshotId!);
+    expect(snap?.item_count).toBe(0);
+    expect(snap?.business_date).toBe("2026-08-26");
+
+    const retry = await svc.finalize({
+      sessionId: opened.session.id,
+      expectedGeneration: opened.session.session_generation,
+      expectedIngestRevision: cand.ingestRevision,
+      expectedIngestHash: cand.ingestSetHash,
+      parsed,
+    });
+    expect(retry).toMatchObject({ status: "finalized", idempotent: true });
+    expect(db._count("physical_inventory_snapshots")).toBe(1);
+    expect(db._count("physical_inventory_items")).toBe(0);
+  });
+
+  test("priced close with no items and no empty declaration still fails closed", async () => {
+    const db = makePhysicalInventoryDb();
+    const svc = new PhysicalInventorySessionService(db);
+    const opened = await svc.openSession({
+      sourceType: "group",
+      sourceId: "G-no-items",
+      senderLineUserId: "U-no-items",
+      openedLineEventId: "h-none",
+      lineTimestampMs: 1_000,
+      rawText: "ผลไม้คงเหลือในบ้าน\n26/8/69",
+      businessDate: "2026-08-26",
+      parserVersion: "house-stock-priced-1.0.0",
+    });
+    await svc.registerIngest({
+      sessionId: opened.session.id,
+      expectedGeneration: opened.session.session_generation,
+      lineEventId: "close-none",
+      lineTimestampMs: 2_000,
+      kind: "close",
+      rawText: "จบ",
+    });
+    db.advanceMs(PHYSICAL_INVENTORY_CLOSE_QUIET_MS + 1);
+    const cand = await svc.getFinalizeCandidate({
+      sessionId: opened.session.id,
+      expectedGeneration: opened.session.session_generation,
+    });
+    const fin = await svc.finalize({
+      sessionId: opened.session.id,
+      expectedGeneration: opened.session.session_generation,
+      expectedIngestRevision: cand.ingestRevision,
+      expectedIngestHash: cand.ingestSetHash,
+      parsed: parsePhysicalInventoryDocument(
+        cand.ingests.map((ingest) => ingest.raw_text).join("\n"),
+        { requireUnitPrice: true },
+      ),
+    });
+    expect(fin.status).toBe("failed_closed");
+    expect(fin.failReason).toBe("no_items");
+    expect(db._count("physical_inventory_snapshots")).toBe(0);
+    expect(db._count("physical_inventory_items")).toBe(0);
   });
 
   test("generation mismatch", async () => {

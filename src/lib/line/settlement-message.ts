@@ -2,6 +2,7 @@ import { formatThaiDate } from "@/lib/date";
 import { displayMarketName } from "@/lib/market";
 import type { SettlementTotals, TransactionTotals } from "@/lib/summary/transactions";
 import type { ReconciliationResult } from "@/lib/reconciliation";
+import type { SettlementProduceValueStatus } from "@/lib/settlement/produce-value-status";
 
 function fmt(n: number): string {
   return n.toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -12,6 +13,7 @@ export interface SettlementLineMessageInput {
   staffName: string;
   marketName: string;
   transactions: TransactionTotals;
+  produceValueStatus: SettlementProduceValueStatus;
   settlement: SettlementTotals;
   notes?: string;
 }
@@ -32,7 +34,7 @@ export function buildSettlementLineMessage(input: SettlementLineMessageInput): s
     "",
     `${title} — ${formatThaiDate(input.date)}`,
     "",
-    `ยอดขายสุทธิที่คำนวณได้: ${fmt(input.transactions.ยอดส่ง)} บาท`,
+    ...buildProduceValueLines(input.transactions, input.produceValueStatus),
     `เงินโอน: ${fmt(input.settlement.ยอดโอน)} บาท`,
     `เงินสด: ${fmt(input.settlement.เงินสด)} บาท`,
     `ค่าใช้จ่าย: ${fmt(input.settlement.ค่าใช้จ่าย)} บาท`,
@@ -54,6 +56,7 @@ export interface FinalSettlementMessageInput {
   staffName:      string;
   marketName:     string;
   transactions:   TransactionTotals;
+  produceValueStatus: SettlementProduceValueStatus;
   settlement:     SettlementTotals;
   reconciliation: ReconciliationResult;
   notes?:         string;
@@ -84,7 +87,7 @@ export function buildFinalSettlementMessage(input: FinalSettlementMessageInput):
     "",
     `${title} — ${formatThaiDate(input.date)}`,
     "",
-    `ยอดขายสุทธิที่คำนวณได้: ${fmt(input.transactions.ยอดส่ง)} บาท`,
+    ...buildProduceValueLines(input.transactions, input.produceValueStatus),
     `เงินโอน: ${fmt(s.ยอดโอน)} บาท`,
     `เงินสด: ${fmt(s.เงินสด)} บาท`,
     `ค่าใช้จ่าย: ${fmt(s.ค่าใช้จ่าย)} บาท`,
@@ -106,4 +109,26 @@ export function buildFinalSettlementMessage(input: FinalSettlementMessageInput):
   }
 
   return lines.join("\n");
+}
+
+function buildProduceValueLines(
+  transactions: TransactionTotals,
+  status: SettlementProduceValueStatus,
+): string[] {
+  if (status !== "complete") {
+    return [
+      "ยอดเบิก: ⚠️ ยังยืนยันไม่ได้",
+      "ยอดชั่งคืน: ⚠️ ยังยืนยันไม่ได้",
+      "ยอดคืนเสีย: ⚠️ ยังยืนยันไม่ได้",
+      "",
+      "ยอดขายสุทธิที่คำนวณได้: ⚠️ ยังยืนยันไม่ได้",
+    ];
+  }
+  return [
+    `ยอดเบิก: ${fmt(transactions.เบิก)} บาท`,
+    `ยอดชั่งคืน: ${fmt(transactions.คืน)} บาท`,
+    `ยอดคืนเสีย: ${fmt(transactions.คืนเสีย)} บาท`,
+    "",
+    `ยอดขายสุทธิที่คำนวณได้: ${fmt(transactions.ยอดส่ง)} บาท`,
+  ];
 }

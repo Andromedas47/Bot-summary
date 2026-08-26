@@ -18,9 +18,13 @@ import {
 } from "@/lib/summary/transactions";
 import { displayMarketName } from "@/lib/market";
 import { logger } from "@/lib/logger";
+import {
+  loadSettlementProduceValueStatus,
+} from "@/lib/settlement/produce-value-status";
 
 type Supabase = SupabaseClient<Database>;
 type PushFn   = (to: string, text: string, retryKey?: string) => Promise<unknown>;
+type ProduceStatusLoader = typeof loadSettlementProduceValueStatus;
 
 const defaultPush: PushFn = pushLineMessage;
 
@@ -58,7 +62,11 @@ async function computeTransactionTotals(
   }
 
   const filtered = staff_name ? base.eq("staff_name", staff_name) : base;
-  const { data } = await filtered.in("transaction_type", KNOWN_TX_TYPES as unknown as string[]);
+  const { data, error } = await filtered.in(
+    "transaction_type",
+    KNOWN_TX_TYPES as unknown as string[],
+  );
+  if (error) throw new Error(`produce transaction query failed: ${error.message}`);
 
   const marketLabel = displayMarketName(market_name, "");
   const rows = (data ?? []).filter((row) => {
@@ -76,7 +84,7 @@ async function computeTransactionTotals(
       total_amount:     (row.total_amount as number) ?? 0,
     });
   }
-  return totals;
+  return { totals, effectiveRowCount: rows.length };
 }
 
 // ── Main export ───────────────────────────────────────────────────────────────
@@ -87,6 +95,7 @@ export async function tryFinalizeSettlement(
   businessDate: string,
   push:         PushFn = defaultPush,
   accountabilityRoundId?: string | null,
+  loadProduceStatus: ProduceStatusLoader = loadSettlementProduceValueStatus,
 ): Promise<FinalizeSettlementResult> {
   const log = logger.child({ fn: "tryFinalizeSettlement", sourceId, businessDate });
   const now = new Date().toISOString();
@@ -293,13 +302,36 @@ export async function tryFinalizeSettlement(
   }
 
   // ── 7. Build combined message ──────────────────────────────────────────────
-  const transactions = await computeTransactionTotals(
-    supabase,
-    businessDate,
-    entry.staff_name  ?? "",
-    entry.market_name ?? "",
-    accountabilityRoundId,
-  );
+  let transactions: ReturnType<typeof emptyTransactionTotals>;
+  let produceValueStatus: Awaited<ReturnType<ProduceStatusLoader>>;
+  try {
+    const produce = await computeTransactionTotals(
+      supabase,
+      businessDate,
+      entry.staff_name  ?? "",
+      entry.market_name ?? "",
+      accountabilityRoundId,
+    );
+    transactions = produce.totals;
+    produceValueStatus = await loadProduceStatus(
+      supabase,
+      businessDate,
+      {
+        accountabilityRoundId,
+        staffName: entry.staff_name ?? "",
+        marketName: entry.market_name ?? "",
+      },
+      produce.effectiveRowCount,
+    );
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    await supabase
+      .from("settlement_finalizations")
+      .update({ status: "failed", last_error: reason, updated_at: now })
+      .eq("id", claimedRow.id);
+    log.error("Produce value verification failed", { reason });
+    return "failed";
+  }
 
   const settlement = calculateSettlementTotals({
     ยอดส่ง:        transactions.ยอดส่ง,
@@ -314,6 +346,7 @@ export async function tryFinalizeSettlement(
     staffName:      entry.staff_name   ?? "",
     marketName:     entry.market_name  ?? "",
     transactions,
+    produceValueStatus,
     settlement,
     reconciliation: reconcileResult.result,
     notes:          entry.notes        ?? "",

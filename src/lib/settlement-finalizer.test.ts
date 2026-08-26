@@ -1,6 +1,24 @@
 import { describe, expect, it } from "bun:test";
-import { tryFinalizeSettlement } from "./settlement-finalizer";
+import { tryFinalizeSettlement as tryFinalizeSettlementImpl } from "./settlement-finalizer";
 import { buildFinalSettlementMessage } from "./line/settlement-message";
+
+type FinalizeArgs = Parameters<typeof tryFinalizeSettlementImpl>;
+function tryFinalizeSettlement(
+  supabase: FinalizeArgs[0],
+  sourceId: FinalizeArgs[1],
+  businessDate: FinalizeArgs[2],
+  push?: FinalizeArgs[3],
+  accountabilityRoundId?: FinalizeArgs[4],
+) {
+  return tryFinalizeSettlementImpl(
+    supabase,
+    sourceId,
+    businessDate,
+    push,
+    accountabilityRoundId,
+    async () => "complete",
+  );
+}
 
 // ── Stub helpers ──────────────────────────────────────────────────────────────
 
@@ -500,6 +518,7 @@ describe("buildFinalSettlementMessage — content", () => {
     staffName:  "มีน",
     marketName: "วัดทุ่ง",
     transactions: { เบิก: 10000, คืน: 1000, คืนเสีย: 500, ยอดส่ง: 8500 },
+    produceValueStatus: "complete" as const,
     settlement: {
       ยอดโอน:           3000,
       เงินสด:           4000,
@@ -525,6 +544,9 @@ describe("buildFinalSettlementMessage — content", () => {
     expect(msg).toContain("รายการส่งเงิน ✅ (ยืนยันแล้ว)");
     expect(msg).toContain("มีน — วัดทุ่ง");
     expect(msg).toContain("ยอดขายสุทธิที่คำนวณได้: 8,500.00 บาท");
+    expect(msg).toContain("ยอดเบิก: 10,000.00 บาท");
+    expect(msg).toContain("ยอดชั่งคืน: 1,000.00 บาท");
+    expect(msg).toContain("ยอดคืนเสีย: 500.00 บาท");
     expect(msg).toContain("เงินโอน: 3,000.00 บาท");
     expect(msg).toContain("เงินสด: 4,000.00 บาท");
     expect(msg).toContain("ค่าใช้จ่าย: 200.00 บาท");

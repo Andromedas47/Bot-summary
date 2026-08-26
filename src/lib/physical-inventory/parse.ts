@@ -11,6 +11,7 @@ import { isKnownUnit, normalizeUnitAlias } from "@/lib/parsers/weigh-session/uni
 import { roundHalfUp, toMilliQuantity } from "@/lib/sales/calculate";
 import {
   isPhysicalInventoryHeaderLine,
+  isPricedPhysicalInventoryHeaderText,
   matchesPhysicalInventoryCloseLine,
 } from "./classify";
 import {
@@ -30,7 +31,10 @@ export {
   isPricedPhysicalInventoryHeaderText,
   matchesPhysicalInventoryCloseLine,
 } from "./classify";
-import { PHYSICAL_INVENTORY_HEADERS } from "./patterns";
+import {
+  PHYSICAL_INVENTORY_EXPLICIT_EMPTY_DECLARATIONS,
+  PHYSICAL_INVENTORY_HEADERS,
+} from "./patterns";
 export * from "./types";
 export * from "./patterns";
 
@@ -267,6 +271,18 @@ function computeBundleUnitPriceSatang(
 }
 
 /**
+ * Exact empty-house declaration for priced House Stock.
+ * Strips only an optional leading item number / . ) / whitespace.
+ */
+export function isExplicitEmptyHouseStockDeclaration(text: string): boolean {
+  const collapsed = nfcCollapse(text);
+  if (!collapsed) return false;
+  const stripped = collapsed.replace(/^\d+(?!\d)(?:[.)])?\s*/u, "");
+  return (PHYSICAL_INVENTORY_EXPLICIT_EMPTY_DECLARATIONS as readonly string[])
+    .includes(stripped);
+}
+
+/**
  * Parse a complete Physical Stock multi-line document (header + date + items + close).
  * Deleted/unsent LINE content is unknowable — never inferred or reconstructed.
  */
@@ -277,6 +293,7 @@ export function parsePhysicalInventoryDocument(
   const errors: PhysicalInventoryParseIssue[] = [];
   const warnings: PhysicalInventoryParseIssue[] = [];
   const items: PhysicalInventoryParsedItem[] = [];
+  let explicitEmpty = false;
 
   const rawLines = text.split(/\r?\n/);
   const lines = rawLines.map((l) => l.trimEnd()).map((l) => l.trim());
@@ -391,6 +408,40 @@ export function parsePhysicalInventoryDocument(
       }
       // Non-qty line while open → incomplete previous; fall through to re-parse
       flushIncomplete("missing_quantity");
+    }
+
+    if (
+      options.requireUnitPrice
+      && (headerText === null || isPricedPhysicalInventoryHeaderText(headerText))
+      && isExplicitEmptyHouseStockDeclaration(collapsed)
+    ) {
+      if (items.length > 0 || explicitEmpty) {
+        pushIssue(
+          errors,
+          "explicit_empty_conflict",
+          "Explicit empty declaration conflicts with inventory items",
+          collapsed,
+        );
+      } else {
+        explicitEmpty = true;
+        pushIssue(
+          warnings,
+          "explicit_empty",
+          "Operator declared no remaining house stock",
+          collapsed,
+        );
+      }
+      continue;
+    }
+
+    if (explicitEmpty) {
+      pushIssue(
+        errors,
+        "explicit_empty_conflict",
+        "Explicit empty declaration conflicts with inventory items",
+        collapsed,
+      );
+      continue;
     }
 
     const indexed = INDEXED_LINE.exec(collapsed);
@@ -535,6 +586,7 @@ export function parsePhysicalInventoryDocument(
     headerText,
     closeText,
     items,
+    explicitEmpty,
     errors,
     warnings,
   };
@@ -560,8 +612,13 @@ export function isRecognizedPhysicalInventoryItemBlock(
   const hasUnrecognizedLine = parsed.warnings.some(
     (warning) => warning.code === "unrecognized_line",
   );
+  const hasEmptyConflict = parsed.errors.some(
+    (error) => error.code === "explicit_empty_conflict",
+  );
 
-  return hasAcceptedObservation && !hasUnrecognizedLine;
+  return (hasAcceptedObservation || parsed.explicitEmpty)
+    && !hasUnrecognizedLine
+    && !hasEmptyConflict;
 }
 
 export interface PhysicalInventoryBundlePricingBasis {

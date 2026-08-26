@@ -77,7 +77,9 @@ export function buildPhysicalInventoryFailedMessage(reason: string | null): stri
       ? "ไม่พบหัวรายการสต๊อก"
       : reason === "no_items"
         ? "ไม่พบรายการผลไม้ที่บันทึกได้"
-        : "ข้อมูลรายการไม่สมบูรณ์";
+        : reason === "explicit_empty_conflict"
+          ? "ระบุว่าไม่มีผลไม้คงเหลือและมีสินค้าในรายการเดียวกัน"
+          : "ข้อมูลรายการไม่สมบูรณ์";
   return `ปิดรายการสต๊อกผลไม้ไม่สำเร็จ: ${detail} กรุณาเริ่มรายการใหม่และตรวจสอบข้อมูลอีกครั้ง`;
 }
 
@@ -207,6 +209,16 @@ export async function finalizePhysicalInventorySession(
     });
     const hasInvalidPricedItem = priced
       && parsed.items.some((item) => item.resolutionStatus === "REJECTED");
+    const emptyConflict = parsed.errors.some((error) => error.code === "explicit_empty_conflict");
+    const emptyWithoutDeclaration = parsed.items.length === 0 && !parsed.explicitEmpty;
+    const failClosed = hasInvalidPricedItem || emptyConflict || emptyWithoutDeclaration;
+    const failReason = hasInvalidPricedItem
+      ? "invalid_items"
+      : emptyConflict
+        ? "explicit_empty_conflict"
+        : emptyWithoutDeclaration
+          ? "no_items"
+          : undefined;
 
     try {
       const result = await service.finalize({
@@ -215,8 +227,8 @@ export async function finalizePhysicalInventorySession(
         expectedIngestRevision: candidate.ingestRevision,
         expectedIngestHash: candidate.ingestSetHash,
         parsed,
-        failClosed: hasInvalidPricedItem,
-        failReason: hasInvalidPricedItem ? "invalid_items" : undefined,
+        failClosed,
+        failReason,
       });
       const terminal = await service.getSession(candidate.sessionId);
       if (terminal) await deliverTerminalMessage(supabase, terminal, push, service);

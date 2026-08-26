@@ -33,6 +33,12 @@ const PRICED_MIGRATION = join(
   "migrations",
   "20260803122757_priced_house_stock.sql",
 );
+const EMPTY_SNAPSHOT_MIGRATION = join(
+  REPO_ROOT,
+  "supabase",
+  "migrations",
+  "20260826150000_house_stock_explicit_empty.sql",
+);
 const HARDENING = join(REPO_ROOT, "supabase", "tests", "p2a_0047_hardening.sql");
 
 type PsqlResult = { code: number; stdout: string; stderr: string };
@@ -165,6 +171,7 @@ describe.skipIf(!pgAvailable)("P2A migration 0047 PostgreSQL hardening", () => {
       expect(existsSync(BOOTSTRAP)).toBe(true);
       expect(existsSync(MIGRATION)).toBe(true);
       expect(existsSync(PRICED_MIGRATION)).toBe(true);
+      expect(existsSync(EMPTY_SNAPSHOT_MIGRATION)).toBe(true);
       expect(existsSync(HARDENING)).toBe(true);
 
       const create = await runPsql(psqlPath, [
@@ -246,6 +253,15 @@ describe.skipIf(!pgAvailable)("P2A migration 0047 PostgreSQL hardening", () => {
         { database: dbName },
       );
       expect(priced.code, `priced migration failed:\n${priced.stderr}\n${priced.stdout}`).toBe(0);
+      const emptySnap = await runPsql(
+        psqlPath,
+        ["-v", "ON_ERROR_STOP=1", "-d", dbName, "-f", EMPTY_SNAPSHOT_MIGRATION],
+        { database: dbName },
+      );
+      expect(
+        emptySnap.code,
+        `explicit-empty migration failed:\n${emptySnap.stderr}\n${emptySnap.stdout}`,
+      ).toBe(0);
       ready = true;
       console.info("P2A 0047 hardening: PASS (real PostgreSQL)");
     },
@@ -322,6 +338,87 @@ describe.skipIf(!pgAvailable)("P2A migration 0047 PostgreSQL hardening", () => {
           'EXECUTE'
         )::text`,
       )).toBe("false");
+    },
+    { timeout: 60_000 },
+  );
+
+  test(
+    "priced explicit empty snapshot persists with zero items and retry is idempotent",
+    async () => {
+      expect(ready).toBe(true);
+      const tag = randomBytes(3).toString("hex");
+      const event = `evt-empty-${tag}`;
+      const opened = await psqlJson(
+        psqlPath,
+        dbName,
+        `SELECT public.open_physical_inventory_session(
+          'group', ${sqlLiteral(`G-empty-${tag}`)}, ${sqlLiteral(`U-empty-${tag}`)},
+          ${sqlLiteral(event)}, 1000, 'ผลไม้คงเหลือในบ้าน\n26/8/69', NULL, NULL,
+          '2026-08-26', 'house-stock-priced-1.0.0'
+        )::text`,
+      );
+      const sid = String(opened.session_id);
+      const gen = String(opened.session_generation);
+      await psqlJson(
+        psqlPath,
+        dbName,
+        `SELECT public.admit_physical_inventory_event(
+          ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid,
+          ${sqlLiteral(`${event}-item`)}, 2000, 'item', '1ไม่มีผลไม้เหลือ', NULL, NULL
+        )::text`,
+      );
+      await psqlJson(
+        psqlPath,
+        dbName,
+        `SELECT public.admit_physical_inventory_event(
+          ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid,
+          ${sqlLiteral(`${event}-close`)}, 3000, 'close', 'จบ', NULL, NULL
+        )::text`,
+      );
+      await psqlScalar(psqlPath, dbName, "SELECT pg_sleep(8.1)::text");
+      const candidate = await psqlJson(
+        psqlPath,
+        dbName,
+        `SELECT public.get_physical_inventory_finalize_candidate(
+          ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid
+        )::text`,
+      );
+      const finalizeSql = `SELECT public.finalize_physical_inventory_session(
+        ${sqlLiteral(sid)}::uuid, ${sqlLiteral(gen)}::uuid,
+        ${Number(candidate.ingest_revision)}, ${sqlLiteral(String(candidate.ingest_set_hash))},
+        '2026-08-26', 'house-stock-priced-1.0.0',
+        '[{"code":"explicit_empty"}]'::jsonb, '[]'::jsonb, false, NULL
+      )::text`;
+      const finalized = await psqlJson(psqlPath, dbName, finalizeSql);
+      expect(finalized.status).toBe("finalized");
+      expect(Number(finalized.item_count)).toBe(0);
+      expect(await psqlScalar(
+        psqlPath,
+        dbName,
+        `SELECT item_count::text FROM public.physical_inventory_snapshots
+         WHERE id = ${sqlLiteral(String(finalized.snapshot_id))}::uuid`,
+      )).toBe("0");
+      expect(await psqlScalar(
+        psqlPath,
+        dbName,
+        `SELECT count(*)::text FROM public.physical_inventory_items
+         WHERE snapshot_id = ${sqlLiteral(String(finalized.snapshot_id))}::uuid`,
+      )).toBe("0");
+      expect(await psqlScalar(
+        psqlPath,
+        dbName,
+        `SELECT count(*)::text FROM public.physical_inventory_items
+         WHERE raw_product_description = 'ไม่มีผลไม้เหลือ'`,
+      )).toBe("0");
+      const retry = await psqlJson(psqlPath, dbName, finalizeSql);
+      expect(retry.idempotent).toBe(true);
+      expect(retry.snapshot_id).toBe(finalized.snapshot_id);
+      expect(await psqlScalar(
+        psqlPath,
+        dbName,
+        `SELECT count(*)::text FROM public.physical_inventory_snapshots
+         WHERE session_id = ${sqlLiteral(sid)}::uuid`,
+      )).toBe("1");
     },
     { timeout: 60_000 },
   );

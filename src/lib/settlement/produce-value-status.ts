@@ -7,12 +7,57 @@ import type {
   PreflightIssue,
   PreflightRound,
 } from "@/lib/produce/daily-close-preflight";
+import type { ProduceBucketPresence } from "@/lib/summary/transactions";
 
 export type SettlementProduceValueStatus =
   | "complete"
   | "partial"
   | "blocked"
   | "missing";
+
+export type ProduceComponentAvailability = "known" | "unknown";
+
+export interface ProduceComponentProvenance {
+  withdrawal: ProduceComponentAvailability;
+  goodReturn: ProduceComponentAvailability;
+  damagedReturn: ProduceComponentAvailability;
+  net: ProduceComponentAvailability;
+}
+
+const ALL_KNOWN: ProduceComponentProvenance = {
+  withdrawal: "known",
+  goodReturn: "known",
+  damagedReturn: "known",
+  net: "known",
+};
+
+const ALL_UNKNOWN: ProduceComponentProvenance = {
+  withdrawal: "unknown",
+  goodReturn: "unknown",
+  damagedReturn: "unknown",
+  net: "unknown",
+};
+
+/**
+ * Component-level availability. COMPLETE certifies missing buckets as known
+ * zero. PARTIAL/BLOCKED only treat a bucket as known when effective rows exist.
+ * Never infer known-ness from a numeric 0.
+ */
+export function produceComponentProvenance(
+  status: SettlementProduceValueStatus,
+  presence: ProduceBucketPresence,
+): ProduceComponentProvenance {
+  if (status === "complete") return ALL_KNOWN;
+  if (status === "missing") return ALL_UNKNOWN;
+  const withdrawal = presence.เบิก ? "known" : "unknown";
+  const goodReturn = presence.คืน ? "known" : "unknown";
+  const damagedReturn = presence.คืนเสีย ? "known" : "unknown";
+  const net =
+    withdrawal === "known" && goodReturn === "known" && damagedReturn === "known"
+      ? "known"
+      : "unknown";
+  return { withdrawal, goodReturn, damagedReturn, net };
+}
 
 export interface SettlementProduceIdentity {
   accountabilityRoundId?: string | null;

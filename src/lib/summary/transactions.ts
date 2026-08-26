@@ -16,6 +16,13 @@ export interface TransactionTotals {
   ยอดส่ง: number;
 }
 
+/** Whether effective persisted rows exist for each Produce bucket. Distinct from a numeric 0. */
+export interface ProduceBucketPresence {
+  เบิก: boolean;
+  คืน: boolean;
+  คืนเสีย: boolean;
+}
+
 export interface SettlementTotals {
   ยอดโอน: number;
   เงินสด: number;
@@ -28,6 +35,10 @@ export interface SettlementTotals {
 
 export function emptyTransactionTotals(): TransactionTotals {
   return { เบิก: 0, คืน: 0, คืนเสีย: 0, ยอดส่ง: 0 };
+}
+
+export function emptyProduceBucketPresence(): ProduceBucketPresence {
+  return { เบิก: false, คืน: false, คืนเสีย: false };
 }
 
 export function transactionBucket(type: string): TransactionBucket | null {
@@ -63,6 +74,24 @@ export function addTransactionAmount<T extends TransactionTotals>(
   totals[bucket] += row.total_amount ?? 0;
   totals.ยอดส่ง = calculateYodSong(totals);
   return totals;
+}
+
+/** Sum trusted Produce rows and record which buckets actually had evidence. */
+export function summarizeProduceTransactionRows(
+  rows: readonly TransactionAmountRow[],
+): {
+  totals: TransactionTotals;
+  presence: ProduceBucketPresence;
+  effectiveRowCount: number;
+} {
+  const totals = emptyTransactionTotals();
+  const presence = emptyProduceBucketPresence();
+  for (const row of rows) {
+    const bucket = transactionBucket(row.transaction_type);
+    if (bucket) presence[bucket] = true;
+    addTransactionAmount(totals, row);
+  }
+  return { totals, presence, effectiveRowCount: rows.length };
 }
 
 export function calculateYodSong({

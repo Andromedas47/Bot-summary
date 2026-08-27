@@ -84,6 +84,8 @@ function candidateFromIssue(
       accountabilityRoundId: issue.accountabilityRoundId ?? null,
       staffName: issue.staffName ?? null,
       marketName: issue.marketName ?? null,
+      sourceId: issue.sourceId ?? null,
+      sourceMarketScope: issue.sourceMarketScope ?? null,
     },
   };
 }

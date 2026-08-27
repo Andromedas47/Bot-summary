@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type {
   DailyClosePreflightResult,
+  PreflightIssue,
   PreflightRoundStatus,
 } from "@/lib/produce/daily-close-preflight";
 import { settlementProduceValueStatus, produceComponentProvenance } from "./produce-value-status";
@@ -112,6 +113,72 @@ describe("settlement Produce value confidence", () => {
       marketName: "ตลาดอื่น",
     }]), IDENTITY, 4);
     expect(result).toBe("complete");
+  });
+
+  it("scopes an unparsed failure to the markets its own LINE source ran", () => {
+    // Production 2026-08-25: raw:4490f89d ("แก้ไข 4 / แตงไทย") carries no staff,
+    // market or round, but its source column is ป้อม's group, which opened only
+    // วัดทุ่งลานนา2 that day. จ้า / ทรัพพันย์ is a different group entirely.
+    const groupScoped: PreflightIssue = {
+      code: "active_failed_produce_session",
+      severity: "blocker",
+      message: "unparsed, group owned",
+      sourceId: "C9e43ef85ecb8167cf93b0d3a9e7781eb",
+      sourceMarketScope: ["วัดทุ่งลานนา2"],
+      evidenceIds: ["raw:4490f89d"],
+    };
+
+    const otherMarket = { staffName: "จ้า", marketName: "ทรัพพันย์" };
+    expect(settlementProduceValueStatus(
+      preflight([
+        { ...otherMarket, accountabilityRoundId: "round-jaa", status: "ready" },
+      ], [{ ...groupScoped }]),
+      { ...otherMarket, accountabilityRoundId: "round-jaa" },
+      4,
+    )).toBe("complete");
+
+    const ownMarket = { staffName: "ป้อม", marketName: "วัดทุ่งลานนา2" };
+    expect(settlementProduceValueStatus(
+      preflight([
+        { ...ownMarket, accountabilityRoundId: "round-pom", status: "ready" },
+      ], [{ ...groupScoped }]),
+      { ...ownMarket, accountabilityRoundId: "round-pom" },
+      4,
+    )).toBe("blocked");
+  });
+
+  it("keeps a source-scoped failure fail-closed for an unrecognisable market", () => {
+    // An empty market identity is not proof the evidence belongs elsewhere.
+    const identity = { accountabilityRoundId: "round-x", staffName: "ป้อม", marketName: "เบิก" };
+    expect(settlementProduceValueStatus(
+      preflight([{ ...identity, status: "ready" }], [{
+        code: "active_failed_produce_session",
+        severity: "blocker",
+        message: "unparsed, group owned",
+        sourceId: "C9e43ef85ecb8167cf93b0d3a9e7781eb",
+        sourceMarketScope: ["วัดทุ่งลานนา2"],
+      }]),
+      identity,
+      4,
+    )).toBe("blocked");
+  });
+
+  it("matches a source scope through the reviewed market alias registry", () => {
+    const identity = {
+      accountabilityRoundId: "round-alias",
+      staffName: "ป้อม",
+      marketName: "ตลาดทุ่งลานนา",
+    };
+    expect(settlementProduceValueStatus(
+      preflight([{ ...identity, status: "ready" }], [{
+        code: "active_failed_produce_session",
+        severity: "blocker",
+        message: "unparsed, group owned",
+        sourceMarketScope: ["วัดทุ่งลานนา"],
+      }]),
+      identity,
+      4,
+    )).toBe("blocked");
   });
 
   it("keeps a truly unattributed active failure fail-closed", () => {

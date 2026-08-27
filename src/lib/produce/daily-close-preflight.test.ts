@@ -72,6 +72,19 @@ function attempt(overrides: Partial<ProduceFailureAttempt> = {}): ProduceFailure
   };
 }
 
+function openRound(overrides: Partial<PreflightRoundRecord> = {}): PreflightRoundRecord {
+  return {
+    accountabilityRoundId: "round-8",
+    sourceId: "group:C1",
+    ownerLineUserId: "U1",
+    staffName: "จิ๋ว",
+    marketName: "เลียบด่วน",
+    status: "open",
+    transactionCount: 5,
+    ...overrides,
+  };
+}
+
 function input(overrides: Partial<DailyClosePreflightInput> = {}): DailyClosePreflightInput {
   return {
     businessDate: DATE,
@@ -446,6 +459,83 @@ describe("daily close preflight", () => {
     expect(result.status).toBe("blocked");
     expect(result.integrityIssues[0].code).toBe("active_failed_produce_session");
     expect(result.integrityIssues[0].evidenceIds).toEqual(["attempt-1"]);
+    // Nothing on the date proves what group:C1 works, so it stays day-wide.
+    expect(result.integrityIssues[0].sourceMarketScope).toBeUndefined();
+  });
+
+  test("an unclaimable failure is scoped to the markets its own source ran", () => {
+    const attempts = [attempt({ accountabilityRoundId: null, marketLabel: null, staffLabel: null })];
+    const result = buildDailyClosePreflight(
+      input({
+        failureAttempts: attempts,
+        failureClassifications: classifyProduceFailures(attempts, []),
+        openRounds: [
+          openRound({ sourceId: "group:C1", marketName: "ตลาดทุ่งลานนา" }),
+          openRound({
+            accountabilityRoundId: "round-9",
+            sourceId: "group:C2",
+            marketName: "ทรัพพันย์",
+            staffName: "จ้า",
+          }),
+        ],
+      }),
+    );
+
+    const [issue] = result.integrityIssues;
+    expect(issue.code).toBe("active_failed_produce_session");
+    expect(issue.sourceId).toBe("group:C1");
+    // Canonical identity, not the raw label — the same one settlement compares.
+    expect(issue.sourceMarketScope).toEqual(["วัดทุ่งลานนา"]);
+    expect(result.status).toBe("blocked");
+  });
+
+  test("each source gets its own issue rather than one merged day-wide scope", () => {
+    const attempts = [
+      attempt({ attemptId: "a-1", accountabilityRoundId: null, marketLabel: null, sourceId: "group:C1" }),
+      attempt({ attemptId: "a-2", accountabilityRoundId: null, marketLabel: null, sourceId: "group:C2" }),
+      attempt({ attemptId: "a-3", accountabilityRoundId: null, marketLabel: null, sourceId: null }),
+    ];
+    const result = buildDailyClosePreflight(
+      input({
+        failureAttempts: attempts,
+        failureClassifications: classifyProduceFailures(attempts, []),
+        openRounds: [
+          openRound({ sourceId: "group:C1", marketName: "เลียบด่วน" }),
+          openRound({ accountabilityRoundId: "round-9", sourceId: "group:C2", marketName: "วัดตะกล่ำ" }),
+        ],
+      }),
+    );
+
+    expect(result.integrityIssues.map((row) => [row.sourceId, row.sourceMarketScope])).toEqual([
+      // The unowned attempt sorts first and carries no scope: still day-wide.
+      [null, undefined],
+      ["group:C1", ["เลียบด่วน"]],
+      ["group:C2", ["วัดตะกล่ำ"]],
+    ]);
+  });
+
+  test("a source running several markets is scoped to all of them, never fewer", () => {
+    const attempts = [attempt({ accountabilityRoundId: null, marketLabel: null })];
+    const result = buildDailyClosePreflight(
+      input({
+        failureAttempts: attempts,
+        failureClassifications: classifyProduceFailures(attempts, []),
+        openRounds: [
+          openRound({ sourceId: "group:C1", marketName: "เลียบด่วน" }),
+          openRound({ accountabilityRoundId: "round-9", sourceId: "group:C1", marketName: "วัดตะกล่ำ" }),
+          // A retired round still proves the group worked that market today.
+          openRound({
+            accountabilityRoundId: "round-10",
+            sourceId: "group:C1",
+            marketName: "ราชพฤกษ์",
+            status: "cancelled",
+          }),
+        ],
+      }),
+    );
+
+    expect(result.integrityIssues[0].sourceMarketScope)
+      .toEqual(["ราชพฤกษ์", "วัดตะกล่ำ", "เลียบด่วน"]);
   });
 
   test("a retired round makes its failure abandoned, not active", () => {

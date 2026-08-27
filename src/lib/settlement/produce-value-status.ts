@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/database";
-import { displayMarketName } from "@/lib/market";
+import { canonicalMarketLabel, displayMarketName } from "@/lib/market";
 import { runDailyClosePreflight } from "@/lib/produce/preflight-service";
 import type {
   DailyClosePreflightResult,
@@ -107,6 +107,15 @@ function integrityIssueAffectsRound(
     return !issue.staffName || sameText(issue.staffName, identity.staffName);
   }
   if (issue.staffName) return sameText(issue.staffName, identity.staffName);
+  // No parsed identity, but the evidence's own LINE source is a column the
+  // preflight already resolved to the markets that group ran today. A refused
+  // document from group A cannot belong to a market group A never worked, so
+  // it must not block one. An unrecognisable market on this side is not proof
+  // of exclusion and falls through to the day-wide rule below.
+  const market = canonicalMarketLabel(identity.marketName);
+  if (issue.sourceMarketScope && issue.sourceMarketScope.length > 0 && market) {
+    return issue.sourceMarketScope.includes(market);
+  }
   // Truly unattributed active failures can belong to any round and therefore
   // retain the preflight's intentional day-wide fail-closed behavior.
   return true;

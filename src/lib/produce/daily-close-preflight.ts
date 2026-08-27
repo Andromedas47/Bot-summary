@@ -23,7 +23,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { logger } from "@/lib/logger";
 import { isQaMarketLabel } from "@/lib/sales/qa-scopes";
-import { normalizedMarketLabel } from "@/lib/market";
+import { canonicalMarketLabel, normalizedMarketLabel } from "@/lib/market";
 import {
   centralPriceKey,
   centralPriceMapKey,
@@ -95,6 +95,19 @@ export interface PreflightIssue {
    * explainable rather than a number nobody can reconcile.
    */
   evidenceIds?: string[];
+  /**
+   * The LINE source (group) that owns the evidence, read from the record's own
+   * `source_id` column. Never parsed out of message text, so a sender cannot
+   * type their way into another group's scope.
+   */
+  sourceId?: string | null;
+  /**
+   * The canonical markets this issue can belong to when it has no parsed
+   * identity of its own, derived from the accountability rounds the SAME
+   * source opened on this date. Absent means no scope was provable and the
+   * issue keeps day-wide fail-closed behaviour.
+   */
+  sourceMarketScope?: string[];
 }
 
 export type PreflightRoundStatus = "ready" | "partial" | "blocked";
@@ -419,6 +432,40 @@ function duplicateAnomalyIssues(
   });
 }
 
+/**
+ * The canonical markets each LINE source ran on this date.
+ *
+ * `accountability_rounds` is the only place the system itself records which
+ * group operates which market — both columns are written by the round-opening
+ * workflow, never by the text of the document being judged. Cancelled rounds
+ * are deliberately included: a retired round still proves the group was
+ * working that market, and widening the scope only ever fails closed.
+ */
+function marketScopeBySource(
+  openRounds: readonly PreflightRoundRecord[],
+): Map<string, Set<string>> {
+  const bySource = new Map<string, Set<string>>();
+  for (const round of openRounds) {
+    const source = (round.sourceId ?? "").trim();
+    const market = canonicalMarketLabel(round.marketName);
+    if (!source || !market) continue;
+    bySource.set(source, (bySource.get(source) ?? new Set<string>()).add(market));
+  }
+  return bySource;
+}
+
+/** Unattributed attempts grouped by their owning source, in a stable order. */
+function attemptsBySource(
+  attempts: readonly ProduceFailureAttempt[],
+): Array<[string, ProduceFailureAttempt[]]> {
+  const bySource = new Map<string, ProduceFailureAttempt[]>();
+  for (const attempt of attempts) {
+    const source = (attempt.sourceId ?? "").trim();
+    bySource.set(source, [...(bySource.get(source) ?? []), attempt]);
+  }
+  return [...bySource].sort(([left], [right]) => left.localeCompare(right));
+}
+
 export function buildDailyClosePreflight(
   input: DailyClosePreflightInput,
 ): DailyClosePreflightResult {
@@ -485,16 +532,26 @@ export function buildDailyClosePreflight(
     ...duplicateAnomalyIssues(input.duplicateAnomalies ?? []),
   ];
 
-  // A refused document no round can claim could belong to ANY market, so it is
-  // reported at day level rather than being attached to a round it might not
-  // belong to. It is still an active failure and still blocks.
-  if (unattributedActive.length > 0) {
+  // A refused document no round can claim is reported at day level rather than
+  // attached to a round it might not belong to. It is still an active failure
+  // and still blocks — but only as widely as its own evidence allows. The
+  // document's LINE source is a column, and when that group opened rounds on
+  // this date the failure cannot belong outside those markets. A source the
+  // date's rounds do not know stays unscoped and blocks the whole day.
+  const scopeBySource = marketScopeBySource(input.openRounds);
+  for (const [sourceId, attempts] of attemptsBySource(unattributedActive)) {
+    const scope = [...(scopeBySource.get(sourceId) ?? [])].sort();
     integrityIssues.push(
       issue(
         "active_failed_produce_session",
         "blocker",
-        `มีรายการที่บันทึกไม่สำเร็จและระบุรอบไม่ได้ ${unattributedActive.length} ชุด`,
-        { evidenceIds: unattributedActive.map((attempt) => attempt.attemptId) },
+        `มีรายการที่บันทึกไม่สำเร็จและระบุรอบไม่ได้ ${attempts.length} ชุด`
+        + (scope.length > 0 ? ` — กลุ่มนี้เปิดรอบที่ ${scope.join(" / ")}` : ""),
+        {
+          evidenceIds: attempts.map((attempt) => attempt.attemptId),
+          sourceId: sourceId || null,
+          ...(scope.length > 0 ? { sourceMarketScope: scope } : {}),
+        },
       ),
     );
   }

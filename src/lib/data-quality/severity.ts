@@ -25,8 +25,8 @@
  *                    severity.test.ts "price advisory never escalates").
  *   NORMAL           produces NO user-facing notification at all. A category
  *                    mapped to NORMAL is never written to the inbox table —
- *                    see inbox.ts `planUpsert`, which turns a NORMAL
- *                    candidate into a no-op before anything is persisted.
+ *                    see inbox.ts `prepareAtomicUpsertPayload`, which omits a
+ *                    NORMAL candidate before anything is persisted.
  */
 
 export type DataQualitySeverity = "CRITICAL" | "ACTION_REQUIRED" | "ADVISORY" | "NORMAL";

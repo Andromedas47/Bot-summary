@@ -2083,6 +2083,13 @@ export interface Database {
       };
     };
     Functions: {
+      upsert_data_quality_issues: {
+        Args: {
+          p_candidates: Json;
+          p_seen_at: string;
+        };
+        Returns: Json;
+      };
       cancel_duplicate_plain_text_round: {
         Args: {
           p_session_key: string;

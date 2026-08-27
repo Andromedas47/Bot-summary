@@ -12,7 +12,8 @@ function isIsoDate(value: string): boolean {
 }
 
 /**
- * Data Quality Inbox — nightly scan. Idempotent: re-running for a date that
+ * Data Quality Inbox — cron-compatible scan (no schedule is activated here).
+ * Idempotent: re-running for a date that
  * already has issues on file only refreshes last_seen / reopens / touches
  * IGNORED rows — see src/lib/data-quality/inbox.ts. Safe to re-run, safe to
  * backfill via ?date=.

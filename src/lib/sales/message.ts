@@ -98,7 +98,7 @@ const REASON_LABELS: Record<SalesBlockReason, string> = {
   unknown_transaction_type: "ประเภทรายการไม่รู้จัก",
   market_unresolved: "ระบุตลาดไม่ได้",
   missing_return_evidence: "ยังไม่มีข้อมูลชั่งคืน",
-  product_return_absent: "มีรายการคืนของรอบนี้ แต่สินค้านี้ไม่ได้อยู่ในรายการคืน",
+  product_return_absent: "รอบนี้มีรายการชั่งคืน แต่ไม่พบสินค้านี้ในรายการชั่งคืน",
   return_without_withdrawal: "มีคืนแต่ไม่มีเบิก",
   returns_exceed_withdrawal: "คืน+เสีย มากกว่าเบิก",
   duplicate_main_session: "มีชุดหลักซ้ำในวันเดียวกัน",

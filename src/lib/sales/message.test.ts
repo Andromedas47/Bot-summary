@@ -734,9 +734,9 @@ describe("P1 sold-out by absence of return — presentation", () => {
     const manual = buildSalesSummaryBlocks(built).join("\n\n");
 
     expect(auto).not.toContain(SALES_SOLD_OUT_NO_RETURN_LABEL);
-    expect(auto).toContain("มีรายการคืนของรอบนี้ แต่สินค้านี้ไม่ได้อยู่ในรายการคืน");
-    expect(auto).toContain("มะม่วง (กิโล) — มีรายการคืนของรอบนี้ แต่สินค้านี้ไม่ได้อยู่ในรายการคืน");
-    expect(manual).toContain("ขาย — (มีรายการคืนของรอบนี้ แต่สินค้านี้ไม่ได้อยู่ในรายการคืน)");
+    expect(auto).toContain("รอบนี้มีรายการชั่งคืน แต่ไม่พบสินค้านี้ในรายการชั่งคืน");
+    expect(auto).toContain("มะม่วง (กิโล) — รอบนี้มีรายการชั่งคืน แต่ไม่พบสินค้านี้ในรายการชั่งคืน");
+    expect(manual).toContain("ขาย — (รอบนี้มีรายการชั่งคืน แต่ไม่พบสินค้านี้ในรายการชั่งคืน)");
     expect(auto).not.toContain("7e3717eb");
     expect(auto).not.toContain(ROUND);
     expect(manual).not.toContain(ROUND);

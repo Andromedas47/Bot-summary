@@ -539,6 +539,91 @@ describe("P2A Slice C finalizer", () => {
       expect(pushes[0]).toContain("รายการที่ 2");
       expect(pushes[0]).not.toContain("รายการที่ 1:");
     });
+
+    test("explicit empty declaration finalizes a zero-item snapshot", async () => {
+      const db = rawMessageDb();
+      const gateway = pricedGatewayFor([
+        "ผลไม้คงเหลือในบ้าน\n26/8/69",
+        "1ไม่มีผลไม้เหลือ",
+        "จบ",
+      ]);
+      const pushes: string[] = [];
+      const result = await finalizePhysicalInventorySession(
+        db as never,
+        { sessionId: PRICED_SESSION_ID, expectedGeneration: PRICED_GENERATION },
+        async (_to, text) => pushes.push(text),
+        gateway as never,
+      );
+      expect(result.status).toBe("finalized");
+      expect(await gateway.getSnapshot()).toMatchObject({ item_count: 0 });
+      expect(await gateway.listSnapshotItems()).toHaveLength(0);
+      const reply = pushes.join("\n");
+      expect(reply).toContain("ไม่มีผลไม้คงเหลือ");
+      expect(reply).toContain("รวมมูลค่า 0.00 บาท");
+      expect(reply).not.toContain("ยังไม่มีการบันทึก");
+    });
+
+    test("จบ without an explicit empty declaration still fails closed", async () => {
+      const db = rawMessageDb();
+      const gateway = pricedGatewayFor([
+        "ผลไม้คงเหลือในบ้าน\n26/8/69",
+        "จบ",
+      ]);
+      const pushes: string[] = [];
+      const result = await finalizePhysicalInventorySession(
+        db as never,
+        { sessionId: PRICED_SESSION_ID, expectedGeneration: PRICED_GENERATION },
+        async (_to, text) => pushes.push(text),
+        gateway as never,
+      );
+      expect(result.status).toBe("failed_closed");
+      expect(await gateway.getSnapshot()).toBeNull();
+      expect(pushes[0]).toContain("ไม่พบรายการผลไม้ที่บันทึกได้");
+    });
+
+    test("product plus empty declaration fail-closes with no snapshot", async () => {
+      const db = rawMessageDb();
+      const gateway = pricedGatewayFor([
+        "ผลไม้คงเหลือในบ้าน\n26/8/69",
+        "1สาลี่10บาท\n20ลูก",
+        "ไม่มีผลไม้เหลือ",
+        "จบ",
+      ]);
+      const pushes: string[] = [];
+      const result = await finalizePhysicalInventorySession(
+        db as never,
+        { sessionId: PRICED_SESSION_ID, expectedGeneration: PRICED_GENERATION },
+        async (_to, text) => pushes.push(text),
+        gateway as never,
+      );
+      expect(result.status).toBe("failed_closed");
+      expect(await gateway.getSnapshot()).toBeNull();
+    });
+
+    test("retry of a finalized empty snapshot is idempotent", async () => {
+      const db = rawMessageDb();
+      const gateway = pricedGatewayFor([
+        "ผลไม้คงเหลือในบ้าน\n26/8/69",
+        "ไม่มีผลไม้เหลือ",
+        "จบ",
+      ]);
+      const pushes: string[] = [];
+      const first = await finalizePhysicalInventorySession(
+        db as never,
+        { sessionId: PRICED_SESSION_ID, expectedGeneration: PRICED_GENERATION },
+        async (_to, text) => pushes.push(text),
+        gateway as never,
+      );
+      const second = await finalizePhysicalInventorySession(
+        db as never,
+        { sessionId: PRICED_SESSION_ID, expectedGeneration: PRICED_GENERATION },
+        async (_to, text) => pushes.push(text),
+        gateway as never,
+      );
+      expect(first.status).toBe("finalized");
+      expect(second).toMatchObject({ status: "finalized", idempotent: true });
+      expect(pushes).toHaveLength(1);
+    });
   });
 
   test("reply builders distinguish rejected observations", () => {

@@ -1,6 +1,7 @@
 export {
   parsePhysicalInventoryDocument,
   isRecognizedPhysicalInventoryItemBlock,
+  isExplicitEmptyHouseStockDeclaration,
   acceptedPhysicalInventoryItems,
 } from "./parse";
 export * from "./types";

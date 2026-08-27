@@ -455,7 +455,8 @@ describe("pending produce session — sender identity isolation (Release A)", ()
     expect(itemOnlyResult.parsed).toBe(false);
     expect(db.rows("pending_sessions")).toHaveLength(1);
     expect(db.rows("pending_sessions")[0].accumulated_text).not.toContain("ทุเรียน");
-    expect(replies.get("u1-retry")?.[0]).toContain("รายการเดิม");
+    expect(db.rows("pending_sessions")[0].terminalized).toBe(true);
+    expect(replies.get("u1-retry")?.[0] ?? "").not.toContain("รายการเดิม");
   });
 
   it("a valid header after a failed generation creates a clean generation with no old error/text", async () => {

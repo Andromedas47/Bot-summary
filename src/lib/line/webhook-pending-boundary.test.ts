@@ -6,6 +6,7 @@ import {
 } from "./webhook-service";
 import type { LineMessageEvent } from "./types";
 import { REMAINING_STOCK_REPORT_TITLE } from "@/lib/summary/remaining-fruit";
+import { isPhysicalInventoryLineGroupAllowed } from "@/lib/physical-inventory/config";
 
 type Row = Record<string, unknown>;
 type QueryMode = "select" | "insert" | "update" | "delete" | "upsert";
@@ -813,5 +814,217 @@ describe("white sheet close command routing", () => {
     expect(db.rows("digital_white_sheet_cash_entries")).toHaveLength(0);
     expect(replies[0]).toContain("ยอดขาย");
     expect(replies[0]).toContain("เงินให้เจ้า");
+  });
+});
+
+const STALE_LOCK_REPLY = "พบรายการเดิมที่ยังปิดไม่สมบูรณ์";
+const PI_HEADER = "ผลไม้คงเหลือในบ้าน\n20/1/68";
+const NEW_PRODUCE_HEADER = "โอม-พาซิโอ้ผลไม้ เบิก 26/08/2569";
+
+function seedHistoricalAudit(db: BoundaryDatabase, pending: PendingSession) {
+  db.insert("pending_session_ingest", {
+    session_key: pending.session_key,
+    session_generation: pending.session_generation,
+    line_event_id: "hist-opener",
+    line_timestamp_ms: 1_000,
+    raw_text: pending.accumulated_text,
+  }, "insert");
+  db.insert("pending_session_admission", {
+    session_key: pending.session_key,
+    session_generation: pending.session_generation,
+    line_event_id: "hist-opener",
+    line_timestamp_ms: 1_000,
+  }, "insert");
+}
+
+function terminalizedPending(
+  status: NonNullable<PendingSession["finalization_status"]>,
+  sessionKey = SESSION_KEY,
+  sourceId = "group-1",
+): PendingSession {
+  return {
+    ...staleTerminalizedPendingSession("โอม-พาซิโอ้ผลไม้ เบิก 10/07/2569\n1.ทุเรียน100บาท\n1โล\nจบรายการเบิก"),
+    session_key: sessionKey,
+    source_id: sourceId,
+    finalization_status: status,
+    ingest_revision: 3,
+  };
+}
+
+function dmTextEvent(text: string, timestamp: number, replyToken?: string): LineMessageEvent {
+  eventSequence += 1;
+  return {
+    type: "message",
+    webhookEventId: `boundary-event-${eventSequence}`,
+    deliveryContext: { isRedelivery: false },
+    timestamp,
+    source: { type: "user", userId: "user-1" },
+    mode: "active",
+    replyToken,
+    message: { id: `boundary-message-${eventSequence}`, type: "text", text },
+  } as LineMessageEvent;
+}
+
+describe("terminalized pending sessions are never an active Produce lock", () => {
+  it("lookupActive does not return a terminalized row as the live session", async () => {
+    const pending = terminalizedPending("duplicate");
+    const db = new BoundaryDatabase(pending);
+    const active = await new PendingSessionService(db as never).lookupActive(SESSION_KEY);
+    expect(active.session).toBeNull();
+    expect(active.reason).toBe("terminalized");
+    const historical = await new PendingSessionService(db as never).lookup(SESSION_KEY);
+    expect(historical.session?.id).toBe(pending.id);
+    expect(historical.session?.terminalized).toBe(true);
+  });
+
+  it("a terminalized duplicate row does not block a new Produce opener", async () => {
+    const pending = terminalizedPending("duplicate");
+    const oldGeneration = pending.session_generation;
+    const db = new BoundaryDatabase(pending);
+    seedHistoricalAudit(db, pending);
+    const replies: string[] = [];
+    await service(db, replies).processEvents(
+      [textEvent(NEW_PRODUCE_HEADER, 9_000, "new-opener")],
+      "destination",
+    );
+
+    const current = db.rows("pending_sessions")[0];
+    expect(db.rows("pending_sessions")).toHaveLength(1);
+    expect(current.terminalized).toBe(false);
+    expect(current.accumulated_text).toBe(NEW_PRODUCE_HEADER);
+    expect(current.session_generation).not.toBe(oldGeneration);
+    expect(db.appendCalls).toBe(0);
+    expect(replies.join("\n")).not.toContain(STALE_LOCK_REPLY);
+    expect(db.rows("pending_session_ingest").some((row) =>
+      row.session_generation === oldGeneration
+      && row.line_event_id === "hist-opener",
+    )).toBe(true);
+    expect(db.rows("pending_session_admission").some((row) =>
+      row.session_generation === oldGeneration
+      && row.line_event_id === "hist-opener",
+    )).toBe(true);
+  });
+
+  it("a terminalized failed_closed row does not block a new Produce opener", async () => {
+    const pending = terminalizedPending("failed_closed");
+    const oldGeneration = pending.session_generation;
+    const db = new BoundaryDatabase(pending);
+    seedHistoricalAudit(db, pending);
+    const replies: string[] = [];
+    await service(db, replies).processEvents(
+      [textEvent(NEW_PRODUCE_HEADER, 9_000, "new-opener")],
+      "destination",
+    );
+
+    const current = db.rows("pending_sessions")[0];
+    expect(current.terminalized).toBe(false);
+    expect(current.accumulated_text).toBe(NEW_PRODUCE_HEADER);
+    expect(current.session_generation).not.toBe(oldGeneration);
+    expect(replies.join("\n")).not.toContain(STALE_LOCK_REPLY);
+  });
+
+  it("an unrelated Physical Inventory header is not appended to a terminalized Produce row", async () => {
+    const pending = terminalizedPending("duplicate");
+    const before = pending.accumulated_text;
+    const generation = pending.session_generation;
+    const db = new BoundaryDatabase(pending);
+    seedHistoricalAudit(db, pending);
+    const replies: string[] = [];
+    await service(db, replies).processEvents(
+      [textEvent(PI_HEADER, 9_000, "pi-header")],
+      "destination",
+    );
+
+    const current = db.rows("pending_sessions")[0];
+    expect(current.accumulated_text).toBe(before);
+    expect(current.terminalized).toBe(true);
+    expect(current.session_generation).toBe(generation);
+    expect(current.ingest_revision).toBe(3);
+    expect(db.appendCalls).toBe(0);
+    expect(db.rows("pending_session_ingest")).toHaveLength(1);
+    expect(db.rows("pending_session_admission")).toHaveLength(1);
+    expect(replies.join("\n")).not.toContain(STALE_LOCK_REPLY);
+    expect(isPhysicalInventoryLineGroupAllowed("group-1")).toBe(false);
+  });
+
+  it("จบ after terminalized history alone does not produce a stale-session reply", async () => {
+    const pending = terminalizedPending("failed_closed");
+    const db = new BoundaryDatabase(pending);
+    seedHistoricalAudit(db, pending);
+    const replies: string[] = [];
+    await service(db, replies).processEvents(
+      [textEvent("จบ", 9_000, "bare-close")],
+      "destination",
+    );
+
+    expect(db.appendCalls).toBe(0);
+    expect(db.rows("pending_sessions")[0].accumulated_text).toBe(pending.accumulated_text);
+    expect(db.rows("pending_sessions")[0].terminalized).toBe(true);
+    expect(replies).toHaveLength(0);
+    expect(replies.join("\n")).not.toContain(STALE_LOCK_REPLY);
+  });
+
+  it("a genuine active Produce pending session still accepts continuation items", async () => {
+    const db = new BoundaryDatabase(
+      pendingSession("โอม-พาซิโอ้ผลไม้ เบิก 30/06/2569"),
+    );
+    await service(db).processEvents(
+      [textEvent("1.ทุเรียน100บาท\n2โล", 2_000)],
+      "destination",
+    );
+    expect(db.appendCalls).toBe(1);
+    expect(db.rows("pending_sessions")[0].accumulated_text).toContain("ทุเรียน");
+    expect(db.rows("pending_sessions")[0].terminalized).toBe(false);
+  });
+
+  it("duplicate active-session prevention still keeps a single live row", async () => {
+    const live = pendingSession("โอม-พาซิโอ้ผลไม้ เบิก 30/06/2569");
+    const db = new BoundaryDatabase(live);
+    await service(db).processEvents(
+      [textEvent("โอม-พาซิโอ้ผลไม้ เบิก 31/06/2569", 2_000, "conflict-opener")],
+      "destination",
+    );
+    expect(db.rows("pending_sessions")).toHaveLength(1);
+    const current = db.rows("pending_sessions")[0];
+    expect(current.accumulated_text).toBe("โอม-พาซิโอ้ผลไม้ เบิก 31/06/2569");
+    expect(current.terminalized).toBe(false);
+  });
+
+  it("a closing but not-terminalized session still blocks a new opener", async () => {
+    const closing: PendingSession = {
+      ...pendingSession("โอม-พาซิโอ้ผลไม้ เบิก 30/06/2569\n1.ทุเรียน100บาท\n1โล"),
+      close_event_timestamp_ms: 5_000,
+      close_requested_at: new Date().toISOString(),
+      close_line_event_id: "close-live",
+    };
+    const db = new BoundaryDatabase(closing);
+    const replies: string[] = [];
+    await service(db, replies).processEvents(
+      [textEvent(NEW_PRODUCE_HEADER, 9_000, "blocked-opener")],
+      "destination",
+    );
+    expect(db.rows("pending_sessions")).toHaveLength(1);
+    expect(db.rows("pending_sessions")[0].session_generation).toBe(closing.session_generation);
+    expect(db.rows("pending_sessions")[0].accumulated_text).toBe(closing.accumulated_text);
+    expect(db.appendCalls).toBe(0);
+    expect(replies.join("\n")).toContain(STALE_LOCK_REPLY);
+  });
+
+  it("1:1 terminalized history stays readable and does not swallow a PI header", async () => {
+    const pending = terminalizedPending("duplicate", "dm:user-1", "user-1");
+    const db = new BoundaryDatabase(pending);
+    seedHistoricalAudit(db, pending);
+    const replies: string[] = [];
+    await service(db, replies).processEvents(
+      [dmTextEvent(PI_HEADER, 9_000, "dm-pi")],
+      "destination",
+    );
+
+    expect(db.appendCalls).toBe(0);
+    expect(db.rows("pending_sessions")[0].accumulated_text).toBe(pending.accumulated_text);
+    expect(db.rows("pending_sessions")[0].terminalized).toBe(true);
+    expect(db.rows("pending_session_ingest")).toHaveLength(1);
+    expect(db.rows("pending_session_admission")).toHaveLength(1);
+    expect(replies.join("\n")).not.toContain(STALE_LOCK_REPLY);
   });
 });

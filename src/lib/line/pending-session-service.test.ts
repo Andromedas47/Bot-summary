@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { rebuildPendingSessionText } from "./pending-session-service";
+import {
+  PendingSessionService,
+  isActivePendingSession,
+  rebuildPendingSessionText,
+  type PendingSession,
+} from "./pending-session-service";
 import { hasSessionStart } from "./webhook-service";
 import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
 
@@ -263,5 +268,73 @@ describe("fallback raw_messages contamination guard", () => {
     expect(() => rebuildPendingSessionText(header, rows, 6000)).toThrow(
       /not found in raw_messages/,
     );
+  });
+});
+
+describe("active pending-session lookup", () => {
+  const KEY = "dm:U-prod";
+
+  function row(terminalized: boolean, status: PendingSession["finalization_status"] = "pending"): PendingSession {
+    const now = new Date().toISOString();
+    return {
+      id: "pending-hist",
+      session_key: KEY,
+      source_id: "U-prod",
+      accumulated_text: "โอม-พาซิโอ้ผลไม้ เบิก 10/07/2569",
+      latest_reply_token: null,
+      line_user_id: "U-prod",
+      created_at: now,
+      updated_at: now,
+      session_generation: "11111111-1111-4111-8111-111111111111",
+      close_event_timestamp_ms: 1,
+      close_requested_at: now,
+      close_line_event_id: "close-1",
+      close_finalize_started_at: now,
+      terminalized,
+      next_attempt_at: null,
+      close_deadline_at: now,
+      close_session_generation: "11111111-1111-4111-8111-111111111111",
+      expected_item_count: 1,
+      ingest_revision: 2,
+      finalization_status: status,
+    };
+  }
+
+  function fakeDb(session: PendingSession | null) {
+    return {
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: async () => ({ data: session, error: null }),
+          }),
+        }),
+      }),
+    };
+  }
+
+  it("lookup still returns a terminalized historical row for audit readers", async () => {
+    const historical = row(true, "duplicate");
+    const service = new PendingSessionService(fakeDb(historical) as never);
+    const found = await service.lookup(KEY);
+    expect(found.reason).toBe("found");
+    expect(found.session?.id).toBe("pending-hist");
+    expect(found.session?.terminalized).toBe(true);
+    expect(isActivePendingSession(found.session)).toBe(false);
+  });
+
+  it("lookupActive never returns terminalized=true as the live pending session", async () => {
+    const service = new PendingSessionService(fakeDb(row(true, "failed_closed")) as never);
+    const active = await service.lookupActive(KEY);
+    expect(active.session).toBeNull();
+    expect(active.reason).toBe("terminalized");
+  });
+
+  it("lookupActive still returns a genuine non-terminalized session", async () => {
+    const live = row(false);
+    const service = new PendingSessionService(fakeDb(live) as never);
+    const active = await service.lookupActive(KEY);
+    expect(active.reason).toBe("found");
+    expect(active.session?.terminalized).toBe(false);
+    expect(isActivePendingSession(active.session)).toBe(true);
   });
 });

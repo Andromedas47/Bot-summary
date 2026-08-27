@@ -78,6 +78,14 @@ class QueryBuilder implements PromiseLike<Result> {
     this.filters.push((row) => row[column] !== null && row[column] !== undefined);
     return this;
   }
+  /**
+   * Produce preflight uses `.or()` as a documented SUPERSET server-side
+   * prefilter; the client-side check remains the authority. Pass through so
+   * ปิดรอบ can load settlement Produce status without inventing a second fake.
+   */
+  or(): this {
+    return this;
+  }
   order(): this {
     return this;
   }

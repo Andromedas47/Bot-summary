@@ -76,7 +76,7 @@ implements DataEntrySessionOwnershipResolver {
           params.senderLineUserId,
         ),
         pendingSessionKey
-          ? this.pendingSessions.lookup(pendingSessionKey)
+          ? this.pendingSessions.lookupActive(pendingSessionKey)
           : Promise.resolve({ session: null, reason: "no_row" } as const),
         this.manualSlipSessions.findOpenSession(params.sourceId),
       ]);
@@ -87,10 +87,7 @@ implements DataEntrySessionOwnershipResolver {
       );
     }
 
-    const legacyProduceSession =
-      pendingLookup.session && !pendingLookup.session.terminalized
-        ? pendingLookup.session
-        : null;
+    const legacyProduceSession = pendingLookup.session;
     const legacyKinds: LegacyDataEntrySessionKind[] = [];
     if (legacyProduceSession) legacyKinds.push("produce");
     if (manualSlipSession) legacyKinds.push("manual_slip");

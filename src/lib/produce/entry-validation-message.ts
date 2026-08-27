@@ -29,6 +29,11 @@ function formatPrice(value: number): string {
 
 function describe(exception: ProduceValidationException): string[] {
   switch (exception.kind) {
+    case "duplicate_item_number":
+      return [
+        `พบเลขข้อ ${exception.itemNumber} ซ้ำ ${exception.matchCount} รายการ`,
+        "   กรุณาแก้เลขข้อให้ไม่ซ้ำก่อน",
+      ];
     case "unknown_unit":
       return [
         `${exception.productName}`,
@@ -97,22 +102,37 @@ function numberedBlocks(
 }
 
 function correctionGuidance(exceptions: ProduceValidationException[]): string[] {
+  const duplicateNumbers = new Set(
+    exceptions
+      .filter((exception) => exception.kind === "duplicate_item_number")
+      .map((exception) => exception.itemNumber),
+  );
   const itemNumbers = [...new Set(
     exceptions.flatMap((exception) =>
-      "itemNumber" in exception ? [exception.itemNumber] : []),
-  )];
+      "itemNumber" in exception && exception.kind !== "duplicate_item_number"
+        && !duplicateNumbers.has(exception.itemNumber)
+        ? [exception.itemNumber]
+        : []),
+  )].slice(0, MAX_LISTED_EXCEPTIONS);
+  const lines = duplicateNumbers.size > 0
+    ? [
+        "เลขข้อที่ซ้ำใช้คำสั่ง “แก้ข้อ” หรือ “ลบข้อ” ไม่ได้ เพราะระบุเป้าหมายไม่ได้",
+        "กรุณาแก้เลขข้อให้ไม่ซ้ำก่อน",
+      ]
+    : [];
   if (itemNumbers.length === 1) {
-    return [
+    return [...lines,
       `ส่ง “แก้ข้อ ${itemNumbers[0]}”`,
       `แล้วส่งข้อ ${itemNumbers[0]} ที่ถูกต้องใหม่ พร้อมราคาและจำนวน`,
     ];
   }
   if (itemNumbers.length > 1) {
-    return [
+    return [...lines,
       `แก้ทีละข้อ: ${itemNumbers.map((number) => `“แก้ข้อ ${number}”`).join(", ")}`,
       "หลังแต่ละคำสั่ง ส่งรายการข้อนั้นใหม่พร้อมราคาและจำนวน",
     ];
   }
+  if (lines.length > 0) return lines;
   return ["แก้เฉพาะรายการที่ทำให้ยอดเกิน แล้วปิดรายการอีกครั้ง"];
 }
 
@@ -207,16 +227,30 @@ export function buildPriceAdvisoryNotification(
  * The round cannot finalize. Nothing was written and the round stays open, so
  * the operator can send the corrected line as an ordinary item message.
  */
-export function buildBlockingValidationReply(result: ProduceValidationResult): string {
-  return [
-    `⛔ พบ ${result.blocking.length} รายการที่ต้องแก้ไขก่อนจบรายการ`,
-    "",
-    ...numberedBlocks(result.blocking),
-    "",
+export function buildBlockingValidationReply(
+  result: ProduceValidationResult,
+  maxCodePoints = LINE_TEXT_MESSAGE_HARD_MAX_CODE_POINTS,
+): string {
+  const actionBlock = [
     "รายการอื่นยังอยู่ครบ ไม่ต้องยกเลิก",
     ...correctionGuidance(result.blocking),
     'แล้วส่งข้อความ "จบรายการ" อีกครั้ง',
-  ].join("\n");
+  ];
+  for (
+    let listed = Math.min(result.blocking.length, MAX_LISTED_EXCEPTIONS);
+    listed >= 0;
+    listed -= 1
+  ) {
+    const reply = [
+      `⛔ พบ ${result.blocking.length} รายการที่ต้องแก้ไขก่อนจบรายการ`,
+      "",
+      ...numberedBlocks(result.blocking, listed),
+      "",
+      ...actionBlock,
+    ].join("\n");
+    if (countCodePoints(reply) <= maxCodePoints) return reply;
+  }
+  throw new Error("blocking validation actions cannot fit within the LINE text limit");
 }
 
 function reviewHeadline(result: ProduceValidationResult): string {

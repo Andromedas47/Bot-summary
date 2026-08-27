@@ -193,6 +193,18 @@ function incompleteDataCause(count: number): string {
   return `พบข้อมูลที่ไม่สมบูรณ์ ${count} ชุด`;
 }
 
+function incompleteGoodReturnCause(count: number): string {
+  return `พบรายการชั่งคืน ${count} ชุดที่ยังบันทึกไม่สำเร็จ`;
+}
+
+function incompleteDamagedReturnCause(count: number): string {
+  return `พบรายการคืนเสีย ${count} ชุดที่ยังบันทึกไม่สำเร็จ`;
+}
+
+function unknownProduceTypeCause(count: number): string {
+  return `พบข้อมูล Produce ${count} ชุดที่ยังระบุประเภทรายการไม่ได้`;
+}
+
 /**
  * One operator-facing cause block from existing report metadata only.
  * A bullet is omitted when that cause did not occur.
@@ -202,8 +214,28 @@ export function buildIncompleteReasonBlock(report: PurchasePlanningReport): stri
   const unattributable =
     report.unsafeReportReason === "unattributable_withdrawal"
     || hasReason(report, "unattributable_withdrawal");
+  const typed = report.unresolvedSessionCounts;
+  const typedTotal = typed.withdrawal
+    + typed.goodReturn
+    + typed.damagedReturn
+    + typed.unknown;
 
-  if (unattributable) {
+  if (typedTotal > 0) {
+    if (typed.withdrawal > 0) {
+      bullets.push(unattributable
+        ? unattributableWithdrawalCause(typed.withdrawal)
+        : incompleteDataCause(typed.withdrawal));
+    }
+    if (typed.goodReturn > 0) bullets.push(incompleteGoodReturnCause(typed.goodReturn));
+    if (typed.damagedReturn > 0) {
+      bullets.push(incompleteDamagedReturnCause(typed.damagedReturn));
+    }
+    if (typed.unknown > 0) bullets.push(unknownProduceTypeCause(typed.unknown));
+    const unclassified = report.unresolvedSessionCount - typedTotal;
+    if (unclassified > 0) bullets.push(incompleteDataCause(unclassified));
+  } else if (unattributable) {
+    // Backward-compatible fail-closed rendering for manually built reports
+    // that predate typed evidence metadata.
     bullets.push(unattributableWithdrawalCause(report.unresolvedSessionCount));
   } else if (report.unresolvedSessionCount > 0) {
     bullets.push(incompleteDataCause(report.unresolvedSessionCount));

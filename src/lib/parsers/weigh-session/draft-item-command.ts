@@ -56,9 +56,9 @@ export function buildDraftItemActionReply(action: DraftItemAction): string {
 
   if (action.status === "ambiguous_target") {
     return [
-      `⛔ ${action.kind === "remove" ? "ลบ" : "แก้"}${item}ไม่ได้`,
-      `พบเลข${item}มากกว่า 1 รายการ จึงไม่เลือกรายการแทนให้`,
-      "รายการเดิมยังไม่เปลี่ยนแปลง",
+      `⚠️ พบเลข${item} ซ้ำ ${action.match_count} รายการ`,
+      "กรุณาแก้เลขข้อให้ไม่ซ้ำก่อน",
+      "รายการอื่นยังอยู่ครบ ไม่ต้องยกเลิก",
     ].join("\n");
   }
 

@@ -272,6 +272,20 @@ describe("priced House Stock summary", () => {
     }
     expect(text).toContain(`รวมมูลค่า 101.00 บาท`);
   });
+
+  test("explicit empty snapshot says no fruit remaining at 0.00, never missing-data copy", () => {
+    const report = buildHouseStockReport("2026-08-26", []);
+    expect(report).toMatchObject({ itemCount: 0, groupCount: 0, totalValueSatang: 0 });
+    const text = report.messages.join("\n\n");
+    expect(text).toBe(`🏠 สรุปสต๊อกคงเหลือในบ้าน
+ข้อมูลวันที่ 26 สิงหาคม 2569
+
+ไม่มีผลไม้คงเหลือ
+
+รวมมูลค่า 0.00 บาท`);
+    expect(text).not.toContain("ยังไม่มีการบันทึก");
+    expect(text).not.toContain("ไม่มีข้อมูล");
+  });
 });
 
 describe("authoritative House Stock snapshot", () => {
@@ -327,5 +341,20 @@ describe("authoritative House Stock snapshot", () => {
     ]);
     await expect(fetchAuthoritativeHouseStockReport(supabase, "2026-08-03"))
       .rejects.toBeInstanceOf(HouseStockSnapshotConflictError);
+  });
+
+  test("missing snapshot stays unknown", async () => {
+    const supabase = supabaseWith([]);
+    expect(await fetchAuthoritativeHouseStockReport(supabase, "2026-08-03")).toBeNull();
+  });
+
+  test("authoritative snapshot with zero items is known empty, not missing", async () => {
+    const supabase = supabaseWith([snapshot("empty", HOUSE_STOCK_PRICED_PARSER_VERSION)]);
+    const report = await fetchAuthoritativeHouseStockReport(supabase, "2026-08-03");
+    expect(report).not.toBeNull();
+    expect(report!.itemCount).toBe(0);
+    expect(report!.totalValueSatang).toBe(0);
+    expect(report!.messages.join("\n")).toContain("ไม่มีผลไม้คงเหลือ");
+    expect(report!.messages.join("\n")).not.toContain("ยังไม่มีการบันทึก");
   });
 });

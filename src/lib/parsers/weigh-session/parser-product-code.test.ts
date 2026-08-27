@@ -300,3 +300,62 @@ describe("resolution never escapes the product-name position", () => {
     });
   });
 });
+
+describe("dictionary extension 20260827090000 — ม73 มะม่วงฟ้าลั่น compact form", () => {
+  it("parses มะม่วงฟ้าลั่น50บาท / 5โล as a เบิก", () => {
+    const parsed = parseWeighSession(doc(
+      "กี้-วัดทุ่งลานนา เบิก 27/8/2569",
+      "มะม่วงฟ้าลั่น50บาท",
+      "5โล",
+      "จบรายการเบิก",
+    ));
+
+    expect(parsed.parse_errors).toEqual([]);
+    expect(identity(parsed.items[0])).toEqual({
+      item_number: 1, product_name: "มะม่วงฟ้าลั่น", price_per_unit: 50,
+      quantity: 5, unit: "โล", transaction_type: "เบิก",
+    });
+  });
+
+  it("parses the same compact form as a ชั่งคืน", () => {
+    const parsed = parseWeighSession(doc(
+      "กี้-วัดทุ่งลานนา ชั่งคืน 27/8/2569",
+      "มะม่วงฟ้าลั่น50บาท",
+      "5โล",
+      "จบรายการชั่งคืน",
+    ));
+
+    expect(parsed.parse_errors).toEqual([]);
+    expect(identity(parsed.items[0])).toMatchObject({
+      product_name: "มะม่วงฟ้าลั่น", price_per_unit: 50,
+      quantity: 5, unit: "โล", transaction_type: "คืน",
+    });
+  });
+
+  it("parses the same compact form as a คืนเสีย", () => {
+    const parsed = parseWeighSession(doc(
+      "กี้-วัดทุ่งลานนา คืนเสีย 27/8/2569",
+      "มะม่วงฟ้าลั่น50บาท",
+      "5โล",
+      "จบรายการคืนเสีย",
+    ));
+
+    expect(parsed.parse_errors).toEqual([]);
+    expect(identity(parsed.items[0])).toMatchObject({
+      product_name: "มะม่วงฟ้าลั่น", price_per_unit: 50,
+      quantity: 5, unit: "โล", transaction_type: "คืนเสีย",
+    });
+  });
+
+  it("resolves code ม73 to the same identity as the canonical spelling", () => {
+    const coded = parseWeighSession(doc(
+      HEADER, "ม73 50 บาท", "5 โล", CLOSER,
+    ));
+    const words = parseWeighSession(doc(
+      HEADER, "มะม่วงฟ้าลั่น50บาท", "5โล", CLOSER,
+    ));
+
+    expect(coded.parse_errors).toEqual([]);
+    expect(coded.items.map(identity)).toEqual(words.items.map(identity));
+  });
+});

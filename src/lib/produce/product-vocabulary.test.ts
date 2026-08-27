@@ -407,7 +407,13 @@ describe("deterministic product-name aliases", () => {
       productCode: "ม72",
       canonicalName: "มะม่วงแก้วขมิ้น",
     });
+    expect(resolveApprovedProductName("มะม่วงฟ้าลั่น")).toEqual({
+      productCode: "ม73",
+      canonicalName: "มะม่วงฟ้าลั่น",
+    });
     expect(approvedProductCode("มะม่วงจิ้ว")).not.toBe(approvedProductCode("มะม่วงแก้วขมิ้น"));
+    expect(approvedProductCode("มะม่วงฟ้าลั่น")).not.toBe(approvedProductCode("มะม่วงแก้วขมิ้น"));
+    expect(approvedProductCode("มะม่วงฟ้าลั่น")).not.toBe(approvedProductCode("มะม่วงจิ้ว"));
   });
 
   it("preserves full multiline session data and reviews only unresolved names", () => {
@@ -445,6 +451,45 @@ describe("deterministic product-name aliases", () => {
       "ผลไม้ต่างดาว",
       "มะม่วง",
     ]);
+  });
+});
+
+describe("dictionary extension 20260827090000 — ม73 (มะม่วงฟ้าลั่น)", () => {
+  it("looks up the exact canonical name and does not mark it unknown", () => {
+    expect(isApprovedProductName("มะม่วงฟ้าลั่น")).toBe(true);
+    expect(resolveApprovedProductName("มะม่วงฟ้าลั่น")).toEqual({
+      productCode: "ม73",
+      canonicalName: "มะม่วงฟ้าลั่น",
+    });
+    expect(withdraw("มะม่วงฟ้าลั่น").status).toBe("clean");
+    expect(vocabulary(withdraw("มะม่วงฟ้าลั่น"))).toEqual([]);
+  });
+
+  it("does not alias ฟ้าลั่น or มะม่วง into ม73", () => {
+    expect(resolveApprovedProductName("ฟ้าลั่น")).toBeNull();
+    expect(resolveApprovedProductName("มะม่วง")).toBeNull();
+    expect(withdraw("ฟ้าลั่น").status).toBe("review_required");
+    expect(withdraw("มะม่วง").status).toBe("review_required");
+  });
+
+  it("parses the compact scale form มะม่วงฟ้าลั่น50บาท / 5โล", () => {
+    const parsed = parseWeighSession([
+      "กี้-วัดทุ่งลานนา เบิก 27/8/2569",
+      "มะม่วงฟ้าลั่น50บาท",
+      "5โล",
+      "จบรายการเบิก",
+    ].join("\n"));
+
+    expect(parsed.parse_errors).toEqual([]);
+    expect(parsed.items).toHaveLength(1);
+    expect(parsed.items[0]).toMatchObject({
+      product_name: "มะม่วงฟ้าลั่น",
+      price_per_unit: 50,
+      quantity: 5,
+      unit: "โล",
+      transaction_type: "เบิก",
+    });
+    expect(validateProduceEntry({ parsed, roundRows: [], roundBound: true }).status).toBe("clean");
   });
 });
 

@@ -262,3 +262,18 @@ describe("code and word documents validate identically", () => {
     expect(coded.digest).toBe(words.digest);
   });
 });
+
+describe("dictionary extension 20260827090000 — ม73 มะม่วงฟ้าลั่น on เบิก / ชั่งคืน / คืนเสีย", () => {
+  it("withdraws the compact canonical name and returns it on both paths", () => {
+    const round = roundOf(withdrawal("มะม่วงฟ้าลั่น50บาท", "5โล"));
+    expect(round[0]).toMatchObject({ product_name: "มะม่วงฟ้าลั่น" });
+    expect(validate(goodReturn("มะม่วงฟ้าลั่น50บาท", "2โล"), round).status).toBe("clean");
+    expect(validate(damagedReturn("มะม่วงฟ้าลั่น50บาท", "1โล"), round).status).toBe("clean");
+  });
+
+  it("matches when the return uses code ม73", () => {
+    const round = roundOf(withdrawal("มะม่วงฟ้าลั่น50บาท", "5โล"));
+    expect(validate(goodReturn("ม73 50 บาท", "2 โล"), round).status).toBe("clean");
+    expect(validate(damagedReturn("ม73 50 บาท", "1 โล"), round).status).toBe("clean");
+  });
+});

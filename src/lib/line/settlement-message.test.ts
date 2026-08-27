@@ -105,6 +105,8 @@ describe("buildSettlementLineMessage", () => {
     expect(result).toContain("ยอดคืนเสีย: 213.00 บาท ⚠️ ยังไม่ยืนยัน");
     expect(result).toContain("ยอดขายสุทธิที่คำนวณได้: 3,194.50 บาท ⚠️ ยังไม่ยืนยัน");
     expect(result).toContain("⚠️ ยอดจากรายการเบิก/คืนยังมีข้อมูลที่ต้องตรวจสอบ");
+    expect(result.indexOf("⚠️ ยอดจากรายการเบิก/คืนยังมีข้อมูลที่ต้องตรวจสอบ"))
+      .toBeLessThan(result.indexOf("เงินโอน:"));
     expect(result).not.toContain("ยอดเบิก: ⚠️ ยังยืนยันไม่ได้");
     expectMoneySideUnchanged(result);
   });

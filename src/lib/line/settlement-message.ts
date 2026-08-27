@@ -52,6 +52,7 @@ export function buildSettlementLineMessage(input: SettlementLineMessageInput): s
       input.produceValueStatus,
       input.producePresence,
     ),
+    ...unconfirmedProduceFooter(input.produceValueStatus),
     `เงินโอน: ${fmt(input.settlement.ยอดโอน)} บาท`,
     `เงินสด: ${fmt(input.settlement.เงินสด)} บาท`,
     `ค่าใช้จ่าย: ${fmt(input.settlement.ค่าใช้จ่าย)} บาท`,
@@ -59,7 +60,6 @@ export function buildSettlementLineMessage(input: SettlementLineMessageInput): s
     `ยอดขายจากรายการส่งเงิน: ${fmt(input.settlement.ยอดขาย)} บาท`,
     diffLine,
     `เงินสดที่ควรเหลือส่งเจ๊: ${fmt(input.settlement.เงินสดต้องส่งเจ๊)} บาท`,
-    ...unconfirmedProduceFooter(input.produceValueStatus),
   ];
 
   if (input.notes?.trim()) {
@@ -111,6 +111,7 @@ export function buildFinalSettlementMessage(input: FinalSettlementMessageInput):
       input.produceValueStatus,
       input.producePresence,
     ),
+    ...unconfirmedProduceFooter(input.produceValueStatus),
     `เงินโอน: ${fmt(s.ยอดโอน)} บาท`,
     `เงินสด: ${fmt(s.เงินสด)} บาท`,
     `ค่าใช้จ่าย: ${fmt(s.ค่าใช้จ่าย)} บาท`,
@@ -118,7 +119,6 @@ export function buildFinalSettlementMessage(input: FinalSettlementMessageInput):
     `ยอดขายจากรายการส่งเงิน: ${fmt(s.ยอดขาย)} บาท`,
     salesDiffLine,
     `เงินสดที่ควรเหลือส่งเจ๊: ${fmt(s.เงินสดต้องส่งเจ๊)} บาท`,
-    ...unconfirmedProduceFooter(input.produceValueStatus),
     "",
     "— ตรวจสลิปโอน —",
     `ยอดสลิป AI: ${fmt(r.ai_verified_total)} บาท`,

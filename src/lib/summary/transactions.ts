@@ -88,7 +88,7 @@ export function summarizeProduceTransactionRows(
   const presence = emptyProduceBucketPresence();
   for (const row of rows) {
     const bucket = transactionBucket(row.transaction_type);
-    if (bucket) presence[bucket] = true;
+    if (bucket && row.total_amount !== null) presence[bucket] = true;
     addTransactionAmount(totals, row);
   }
   return { totals, presence, effectiveRowCount: rows.length };

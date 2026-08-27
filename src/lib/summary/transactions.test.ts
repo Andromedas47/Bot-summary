@@ -26,6 +26,16 @@ describe("summarizeProduceTransactionRows", () => {
     expect(totals.คืนเสีย).toBe(0);
   });
 
+  it("does not convert a null persisted amount into known zero", () => {
+    const { totals, presence } = summarizeProduceTransactionRows([
+      { transaction_type: "เบิก", total_amount: 9000 },
+      { transaction_type: "คืน", total_amount: 1000 },
+      { transaction_type: "คืนเสีย", total_amount: null },
+    ]);
+    expect(presence.คืนเสีย).toBe(false);
+    expect(totals.คืนเสีย).toBe(0);
+  });
+
   it("excludes voided/superseded Produce because callers only pass effective rows", () => {
     // produce_transactions already drops voided sessions and superseded
     // predecessors. A คืนเสีย that never reached that view is not passed in.

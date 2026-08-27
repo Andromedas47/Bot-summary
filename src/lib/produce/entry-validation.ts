@@ -43,6 +43,13 @@ const QUANTITY_EPSILON = 0.0005;
 export type ProduceValidationSeverity = "blocking" | "review_required" | "advisory";
 
 export type ProduceValidationException =
+  /** A printed number must identify exactly one draft item before close. */
+  | {
+      kind: "duplicate_item_number";
+      severity: "blocking";
+      itemNumber: number;
+      matchCount: number;
+    }
   /** The unit is not part of the shop vocabulary at all ("โลก"). */
   | {
       kind: "unknown_unit";
@@ -256,6 +263,24 @@ export function validateProduceEntry(input: ProduceValidationInput): ProduceVali
   const blocking: ProduceValidationBlocking[] = [];
   const reviews: ProduceValidationReview[] = [];
   const advisories: ProduceValidationAdvisory[] = [];
+
+  // ── 0. Printed item identity. The correction grammar deliberately targets
+  // one unique item_number (PR #81); allowing a duplicate-number draft to
+  // close would make the only safe correction/removal commands unusable.
+  const itemNumberCounts = new Map<number, number>();
+  for (const item of parsed.items) {
+    itemNumberCounts.set(item.item_number, (itemNumberCounts.get(item.item_number) ?? 0) + 1);
+  }
+  for (const [itemNumber, matchCount] of [...itemNumberCounts].sort((a, b) => a[0] - b[0])) {
+    if (matchCount > 1) {
+      blocking.push({
+        kind: "duplicate_item_number",
+        severity: "blocking",
+        itemNumber,
+        matchCount,
+      });
+    }
+  }
 
   // ── 1. Unit vocabulary. Applies to every item, withdrawal included: a
   // withdrawal booked in "โลก" poisons its own master cell.

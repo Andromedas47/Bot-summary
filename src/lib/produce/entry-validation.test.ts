@@ -366,6 +366,65 @@ describe("quantity invariant", () => {
   });
 });
 
+describe("duplicate printed item numbers", () => {
+  it("blocks an otherwise valid draft and never offers an ambiguous correction command", () => {
+    const parsed = session([
+      item({ product_name: "องุ่นแดง", quantity: 1.8, transaction_type: "คืน" }),
+      item({ product_name: "องุ่นไข่ปลา", quantity: 0.5, transaction_type: "คืน" }),
+    ]);
+    parsed.items[0]!.item_number = 16;
+    parsed.items[1]!.item_number = 16;
+
+    const result = bound(parsed, master([
+      { product_name: "องุ่นแดง", quantity: 2 },
+      { product_name: "องุ่นไข่ปลา", quantity: 1 },
+    ]));
+    const reply = buildBlockingValidationReply(result);
+
+    expect(result.blocking).toEqual([{
+      kind: "duplicate_item_number",
+      severity: "blocking",
+      itemNumber: 16,
+      matchCount: 2,
+    }]);
+    expect(reply).toContain("พบเลขข้อ 16 ซ้ำ 2 รายการ");
+    expect(reply).toContain("กรุณาแก้เลขข้อให้ไม่ซ้ำก่อน");
+    expect(reply).not.toContain("แก้ข้อ 16");
+  });
+
+  it("reports duplicate, absent-product, and excess-return blockers together", () => {
+    const parsed = session([
+      item({ product_name: "ลูกไหนแดง", quantity: 1, transaction_type: "คืน" }),
+      item({ product_name: "อะโวคาโด", quantity: 1, transaction_type: "คืน" }),
+      item({ product_name: "มะม่วงแก้วขมิ้น", quantity: 0.9, transaction_type: "คืน" }),
+      item({ product_name: "ไซมัส", quantity: 15.1, transaction_type: "คืน" }),
+    ]);
+    parsed.items[0]!.item_number = 16;
+    parsed.items[1]!.item_number = 16;
+
+    const result = bound(parsed, master([
+      { product_name: "มะม่วงแก้วขมิ้น", quantity: 0.09 },
+      { product_name: "ไซมัส", quantity: 9 },
+    ]));
+    const reply = buildBlockingValidationReply(result);
+
+    expect(result.blocking).toHaveLength(5);
+    expect(kinds(result.blocking)).toEqual([
+      "duplicate_item_number",
+      "product_not_withdrawn",
+      "product_not_withdrawn",
+      "return_exceeds_withdrawal",
+      "return_exceeds_withdrawal",
+    ]);
+    expect(reply).toContain("พบเลขข้อ 16 ซ้ำ 2 รายการ");
+    expect(reply).toContain("ลูกไหนแดง");
+    expect(reply).toContain("อะโวคาโด");
+    expect(reply).toContain("มะม่วงแก้วขมิ้น");
+    expect(reply).toContain("ไซมัส");
+    expect(reply).not.toContain("แก้ข้อ 16");
+  });
+});
+
 // ── The clean path stays clean ────────────────────────────────────────────────
 
 describe("clean sessions", () => {
@@ -557,6 +616,19 @@ describe("replies", () => {
     const reply = buildBlockingValidationReply(bound(session(items)));
     expect(reply).toContain("และอีก 15 รายการ");
     expect([...reply].length).toBeLessThan(2000);
+  });
+
+  it("keeps a pathological blocker reply within the LINE hard limit", () => {
+    const longName = "สินค้า" + "ก".repeat(500);
+    const items = Array.from({ length: 40 }, (_, index) =>
+      item({ product_name: `${longName}${index}`, unit: "โลก", quantity: 1 }),
+    );
+    const reply = buildBlockingValidationReply(bound(session(items)));
+
+    expect(countCodePoints(reply)).toBeLessThanOrEqual(
+      LINE_TEXT_MESSAGE_HARD_MAX_CODE_POINTS,
+    );
+    expect(reply).toMatch(/และอีก 3\d รายการ/);
   });
 });
 

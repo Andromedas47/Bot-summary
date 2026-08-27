@@ -40,6 +40,7 @@ import {
   type HouseStockEntry,
   type HouseStockSignal,
   type PurchasePlanningReport,
+  type UnresolvedProduceSessionCounts,
 } from "@/lib/summary/purchase-planning";
 import { collectUnattributableWithdrawalScopes } from "@/lib/summary/unattributable-withdrawal";
 
@@ -176,6 +177,28 @@ function hasUnattributedIncompleteReturns(
   );
 }
 
+/** Active failed documents split without changing their fail-closed lifecycle. */
+function unresolvedSessionCounts(
+  failures: Awaited<ReturnType<typeof loadProduceFailureScan>>,
+): UnresolvedProduceSessionCounts {
+  const counts: UnresolvedProduceSessionCounts = {
+    withdrawal: 0,
+    goodReturn: 0,
+    damagedReturn: 0,
+    unknown: 0,
+  };
+
+  for (const attempt of failures.attempts) {
+    if (!failures.activeIds.has(attempt.attemptId)) continue;
+    if (attempt.transactionKind === "เบิก") counts.withdrawal += 1;
+    else if (attempt.transactionKind === "คืน") counts.goodReturn += 1;
+    else if (attempt.transactionKind === "คืนเสีย") counts.damagedReturn += 1;
+    else counts.unknown += 1;
+  }
+
+  return counts;
+}
+
 export async function loadPurchasePlanningReport(
   supabase: Supabase,
   businessDate: string,
@@ -210,6 +233,7 @@ export async function loadPurchasePlanningReport(
     // it also counts lost raw messages and deferred rejects, which is the
     // conservative direction for a purchasing decision.
     unresolvedSessionCount: failures.activeIds.size,
+    unresolvedSessionCounts: unresolvedSessionCounts(failures),
     unattributableWithdrawalScopes: collectUnattributableWithdrawalScopes(
       failures.attempts,
       failures.classifications,

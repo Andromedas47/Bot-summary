@@ -355,6 +355,12 @@ describe("loadPurchasePlanningReport — unattributable withdrawal wiring", () =
     const pomegranate = report.items.find((item) => item.productName === "ทับทิม")!;
 
     expect(report.unresolvedSessionCount).toBe(1);
+    expect(report.unresolvedSessionCounts).toEqual({
+      withdrawal: 1,
+      goodReturn: 0,
+      damagedReturn: 0,
+      unknown: 0,
+    });
     expect(report.unsafeReportReason).toBeNull();
     expect(apple.status).toBe("strong");
     expect(apple.uncertaintyReasons).not.toContain("unattributable_withdrawal");
@@ -377,6 +383,12 @@ describe("loadPurchasePlanningReport — unattributable withdrawal wiring", () =
     const report = await loadPurchasePlanningReport(client(db), BUSINESS_DATE);
 
     expect(report.unresolvedSessionCount).toBe(1);
+    expect(report.unresolvedSessionCounts).toEqual({
+      withdrawal: 0,
+      goodReturn: 1,
+      damagedReturn: 0,
+      unknown: 0,
+    });
     expect(report.items[0]!.uncertaintyReasons).not.toContain("unattributable_withdrawal");
     expect(report.items[0]!.status).not.toBe("unknown");
   });
@@ -396,6 +408,12 @@ describe("loadPurchasePlanningReport — unattributable withdrawal wiring", () =
     const report = await loadPurchasePlanningReport(client(db), BUSINESS_DATE);
 
     expect(report.unresolvedSessionCount).toBe(0);
+    expect(report.unresolvedSessionCounts).toEqual({
+      withdrawal: 0,
+      goodReturn: 0,
+      damagedReturn: 0,
+      unknown: 0,
+    });
     expect(report.unsafeReportReason).toBeNull();
     expect(report.items).toHaveLength(1);
     expect(report.items[0]!.productName).toBe("แอปเปิ้ล");

@@ -32,7 +32,7 @@ const DATABASE = `dqi_${randomBytes(4).toString("hex")}`;
 const DB_NAME_PATTERN = /^dqi_[a-f0-9]+$/;
 const ALLOWED_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 const MIGRATION = join(ROOT, "supabase", "migrations", "20260825120000_data_quality_issues.sql");
-const RUNNER_MIGRATION = join(ROOT, "supabase", "migrations", "20260826100000_data_quality_atomic_upsert.sql");
+const RUNNER_MIGRATION = join(ROOT, "supabase", "migrations", "20260827120000_data_quality_atomic_upsert.sql");
 
 function assertSafe(): void {
   if (process.env.ALLOW_DISPOSABLE_POSTGRES_TESTS !== "1") {

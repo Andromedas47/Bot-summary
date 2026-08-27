@@ -889,6 +889,7 @@ async function scanLostProduceMessages(
   }
   const deferredLost: LostProduceCandidate[] = (rejectedDeferred ?? [])
     .filter((row) => row.status.startsWith("rejected_")
+      && isCompleteProduceMessage(row.raw_text)
       && produceBusinessDate(row.raw_text, row.line_timestamp_ms) === businessDate)
     .map((row) => ({
       id: row.raw_message_id,

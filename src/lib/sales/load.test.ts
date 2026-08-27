@@ -1312,18 +1312,36 @@ describe("P1 durable evidence for a rejected produce message", () => {
     expect(report.allMarkets.quantityAuthoritative).toBe(false);
   });
 
-  test("a rejected deferred item remains visible as possible lost Produce", async () => {
+  test("a rejected deferred item fragment is preserved as evidence but not treated as a lost document", async () => {
     const report = await loadSalesReport(fakeSupabase(fixture([], {
       deferredProduce: [{
         raw_message_id: "raw-deferred-orphan",
         source_id: SOURCE_A,
-        raw_text: "1อะโวคาโด้50บาท\n26.7.โล",
+        raw_text: "1อะโวคาโด้50บาท\n26.7.โลก",
+        line_timestamp_ms: Date.parse("2026-07-25T06:00:00.000Z"),
+        status: "rejected_after_close",
+      }],
+    })), DATE);
+
+    expect(report.scopeBlockers).toEqual([]);
+    expect(report.blocked.some((row) =>
+      row.reasons.includes("produce_message_never_landed"))).toBe(false);
+    expect(report.allMarkets.quantityAuthoritative).toBe(true);
+  });
+
+  test("a complete rejected deferred document remains visible as possible lost Produce", async () => {
+    const report = await loadSalesReport(fakeSupabase(fixture([], {
+      deferredProduce: [{
+        raw_message_id: "raw-deferred-document",
+        source_id: SOURCE_A,
+        raw_text: ["เสือ ตลาดกี้ เบิก 25/07/2569", "1.หมอนทอง119บาท", "38โล"].join("\n"),
         line_timestamp_ms: Date.parse("2026-07-25T06:00:00.000Z"),
         status: "rejected_orphan",
       }],
     })), DATE);
 
-    expect(report.scopeBlockers).toEqual([{ kind: "unattributable_session", count: 1 }]);
+    expect(report.blocked.some((row) =>
+      row.reasons.includes("produce_message_never_landed"))).toBe(true);
     expect(report.allMarkets.quantityAuthoritative).toBe(false);
   });
 

@@ -201,8 +201,19 @@ export interface ClaimFinalizeResult {
 
 export interface PendingSessionLookup {
   session: PendingSession | null;
-  reason: "found" | "no_row" | "db_error";
+  reason: "found" | "no_row" | "terminalized" | "db_error";
   error?: string;
+}
+
+/**
+ * Active Produce pending means terminalized = false.
+ * A terminalized row is immutable historical evidence for the same unique
+ * session_key — lookup() still returns it for journey/audit readers.
+ */
+export function isActivePendingSession(
+  row: PendingSession | null | undefined,
+): row is PendingSession {
+  return row != null && row.terminalized !== true;
 }
 
 export interface ReplacePendingSessionInput {
@@ -256,6 +267,19 @@ export class PendingSessionService {
     }
     if (!data) return { session: null, reason: "no_row" };
     return { session: data as PendingSession, reason: "found" };
+  }
+
+  /**
+   * Active-session resolution for append/close/open routing.
+   * Never returns a terminalized row as the live pending session.
+   */
+  async lookupActive(sessionKey: string): Promise<PendingSessionLookup> {
+    const result = await this.lookup(sessionKey);
+    if (result.reason !== "found" || !result.session) return result;
+    if (!isActivePendingSession(result.session)) {
+      return { session: null, reason: "terminalized" };
+    }
+    return result;
   }
 
   async openPlainTextGeneration(

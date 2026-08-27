@@ -193,6 +193,20 @@ describe("loadPurchasePlanningReport — house stock wiring", () => {
     expect(report.items[0]!.status).toBe("strong");
   });
 
+  test("an authoritative snapshot with zero item rows is known zero, not missing", async () => {
+    const db = highSellingDay()
+      .seed("physical_inventory_snapshots", [snapshotRow()])
+      .seed("physical_inventory_items", []);
+
+    const report = await loadPurchasePlanningReport(client(db), BUSINESS_DATE);
+
+    expect(report.stockAbsence).toBeNull();
+    expect(report.items[0]!.houseStockQuantity).toBe(0);
+    expect(report.items[0]!.stockAbsence).toBeNull();
+    expect(report.items[0]!.nextDayGoodStockQuantity).toBe(20);
+    expect(report.items[0]!.status).toBe("strong");
+  });
+
   test("pineapple absent from the complete 21/08-shaped snapshot is 🟢", async () => {
     const db = new FakeDatabase()
       .seed("produce_transactions", [

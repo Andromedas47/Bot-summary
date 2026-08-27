@@ -66,7 +66,23 @@ const displayUnit = (unit: string): string => unit === "โล" ? "กก." : un
 const displayPrice = (satang: number): string => satangToBahtText(satang).replace(/\.00$/, "");
 const milliToQuantity = (milli: bigint): number => Number(milli) / 1_000;
 
+function emptyHouseStockReport(businessDate: string): HouseStockReport {
+  const header = `🏠 สรุปสต๊อกคงเหลือในบ้าน\nข้อมูลวันที่ ${formatThaiDate(businessDate)}`;
+  return {
+    businessDate,
+    itemCount: 0,
+    groupCount: 0,
+    totalValueSatang: 0,
+    messages: chunkBlocks(
+      [header, "ไม่มีผลไม้คงเหลือ", `รวมมูลค่า ${satangToBahtText(0)} บาท`],
+      LINE_MESSAGE_MAX_CODE_POINTS,
+    ),
+  };
+}
+
 function reportFromItems(businessDate: string, items: readonly ItemRow[]): HouseStockReport {
+  if (items.length === 0) return emptyHouseStockReport(businessDate);
+
   const groups = new Map<string, Group>();
   const unitTotals = new Map<string, bigint>();
   let totalValueSatang = 0;

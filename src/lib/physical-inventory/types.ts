@@ -56,6 +56,11 @@ export interface PhysicalInventoryParsedSession {
   headerText: string | null;
   closeText: string | null;
   items: PhysicalInventoryParsedItem[];
+  /**
+   * Priced house-stock only. Operator explicitly declared zero remaining
+   * inventory. Never inferred from "zero item rows".
+   */
+  explicitEmpty: boolean;
   errors: PhysicalInventoryParseIssue[];
   warnings: PhysicalInventoryParseIssue[];
 }

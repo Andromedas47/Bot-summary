@@ -5,9 +5,8 @@ import { buildSettlementLineMessage } from "@/lib/line/settlement-message";
 import { displayMarketName } from "@/lib/market";
 import {
   KNOWN_TX_TYPES,
-  addTransactionAmount,
   calculateSettlementTotals,
-  emptyTransactionTotals,
+  summarizeProduceTransactionRows,
 } from "@/lib/summary/transactions";
 import { submitSettlementEntryForSource } from "@/lib/settlement/submit-entry";
 import { loadSettlementProduceValueStatus } from "@/lib/settlement/produce-value-status";
@@ -129,7 +128,7 @@ async function sendLineNotification(
   let lineTargets = 0;
   let lineError: string | null = null;
   try {
-    const { transactions, sourceIds, effectiveRowCount } = await getSettlementContext(supabase, {
+    const { transactions, presence, sourceIds, effectiveRowCount } = await getSettlementContext(supabase, {
       settlement_date: params.settlement_date,
       staff_name:      params.staff_name,
       market_name:     params.market_name,
@@ -156,6 +155,7 @@ async function sendLineNotification(
       marketName:  params.market_name,
       transactions,
       produceValueStatus,
+      producePresence: presence,
       settlement,
       notes:       params.notes,
     });
@@ -191,19 +191,18 @@ async function getSettlementContext(
     return displayMarketName(row.market_name ?? "", "") === marketLabel || row.market_name === market_name;
   });
 
-  const transactions = emptyTransactionTotals();
-  for (const row of rows) {
-    addTransactionAmount(transactions, {
+  const { totals: transactions, presence, effectiveRowCount } = summarizeProduceTransactionRows(
+    rows.map((row) => ({
       transaction_type: row.transaction_type as string,
-      total_amount: (row.total_amount as number) ?? 0,
-    });
-  }
+      total_amount: row.total_amount,
+    })),
+  );
 
   const rawMessageIds = Array.from(new Set(
     rows.map(row => row.raw_message_id as string | null).filter((id): id is string => Boolean(id)),
   ));
   if (rawMessageIds.length === 0) {
-    return { transactions, sourceIds: [] as string[], effectiveRowCount: rows.length };
+    return { transactions, presence, sourceIds: [] as string[], effectiveRowCount };
   }
 
   const { data: rawRows, error: rawError } = await supabase
@@ -215,5 +214,5 @@ async function getSettlementContext(
   const sourceIds = Array.from(new Set(
     (rawRows ?? []).map(row => row.source_id as string | null).filter((id): id is string => Boolean(id)),
   ));
-  return { transactions, sourceIds, effectiveRowCount: rows.length };
+  return { transactions, presence, sourceIds, effectiveRowCount };
 }

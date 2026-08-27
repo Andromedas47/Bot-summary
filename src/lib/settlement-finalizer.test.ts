@@ -519,6 +519,7 @@ describe("buildFinalSettlementMessage — content", () => {
     marketName: "วัดทุ่ง",
     transactions: { เบิก: 10000, คืน: 1000, คืนเสีย: 500, ยอดส่ง: 8500 },
     produceValueStatus: "complete" as const,
+    producePresence: { เบิก: true, คืน: true, คืนเสีย: true },
     settlement: {
       ยอดโอน:           3000,
       เงินสด:           4000,
@@ -547,6 +548,7 @@ describe("buildFinalSettlementMessage — content", () => {
     expect(msg).toContain("ยอดเบิก: 10,000.00 บาท");
     expect(msg).toContain("ยอดชั่งคืน: 1,000.00 บาท");
     expect(msg).toContain("ยอดคืนเสีย: 500.00 บาท");
+    expect(msg).not.toContain("ยังไม่ยืนยัน");
     expect(msg).toContain("เงินโอน: 3,000.00 บาท");
     expect(msg).toContain("เงินสด: 4,000.00 บาท");
     expect(msg).toContain("ค่าใช้จ่าย: 200.00 บาท");

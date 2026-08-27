@@ -3,7 +3,7 @@ import type {
   DailyClosePreflightResult,
   PreflightRoundStatus,
 } from "@/lib/produce/daily-close-preflight";
-import { settlementProduceValueStatus } from "./produce-value-status";
+import { settlementProduceValueStatus, produceComponentProvenance } from "./produce-value-status";
 
 function preflight(
   rounds: Array<{
@@ -92,6 +92,10 @@ describe("settlement Produce value confidence", () => {
       marketName: "วัดทุ่งลานนา2",
     }]), IDENTITY, 6);
     expect(result).toBe("blocked");
+    // Presentation may still show persisted W/R/D; status stays blocked.
+    expect(produceComponentProvenance(result, {
+      เบิก: true, คืน: true, คืนเสีย: true,
+    }).net).toBe("known");
   });
 
   it("does not leak another market's integrity blocker into the matched round", () => {
@@ -125,5 +129,67 @@ describe("settlement Produce value confidence", () => {
 
   it("fails closed when rows cannot be matched to exactly one trusted round", () => {
     expect(settlementProduceValueStatus(preflight([]), IDENTITY, 1)).toBe("blocked");
+  });
+});
+
+describe("produceComponentProvenance", () => {
+  it("COMPLETE treats missing buckets as known zero, not unknown", () => {
+    expect(produceComponentProvenance("complete", {
+      เบิก: true, คืน: false, คืนเสีย: false,
+    })).toEqual({
+      withdrawal: "known",
+      goodReturn: "known",
+      damagedReturn: "known",
+      net: "known",
+    });
+  });
+
+  it("PARTIAL/BLOCKED keep known persisted numbers even when overall status is not complete", () => {
+    const allPresent = { เบิก: true, คืน: true, คืนเสีย: true };
+    expect(produceComponentProvenance("partial", allPresent)).toEqual({
+      withdrawal: "known",
+      goodReturn: "known",
+      damagedReturn: "known",
+      net: "known",
+    });
+    expect(produceComponentProvenance("blocked", allPresent)).toEqual({
+      withdrawal: "known",
+      goodReturn: "known",
+      damagedReturn: "known",
+      net: "known",
+    });
+  });
+
+  it("does not treat a numeric-zero bucket as known without persisted rows", () => {
+    expect(produceComponentProvenance("partial", {
+      เบิก: true, คืน: true, คืนเสีย: false,
+    })).toEqual({
+      withdrawal: "known",
+      goodReturn: "known",
+      damagedReturn: "unknown",
+      net: "unknown",
+    });
+  });
+
+  it("missing withdrawal blocks net even when returns are known", () => {
+    expect(produceComponentProvenance("blocked", {
+      เบิก: false, คืน: true, คืนเสีย: true,
+    })).toEqual({
+      withdrawal: "unknown",
+      goodReturn: "known",
+      damagedReturn: "known",
+      net: "unknown",
+    });
+  });
+
+  it("missing overall status is unknown on every component", () => {
+    expect(produceComponentProvenance("missing", {
+      เบิก: true, คืน: true, คืนเสีย: true,
+    })).toEqual({
+      withdrawal: "unknown",
+      goodReturn: "unknown",
+      damagedReturn: "unknown",
+      net: "unknown",
+    });
   });
 });

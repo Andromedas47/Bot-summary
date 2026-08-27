@@ -12,9 +12,11 @@ import {
 } from "@/lib/line/reply";
 import {
   calculateSettlementTotals,
+  emptyProduceBucketPresence,
   emptyTransactionTotals,
-  addTransactionAmount,
   KNOWN_TX_TYPES,
+  summarizeProduceTransactionRows,
+  type ProduceBucketPresence,
 } from "@/lib/summary/transactions";
 import { displayMarketName } from "@/lib/market";
 import { logger } from "@/lib/logger";
@@ -77,14 +79,12 @@ async function computeTransactionTotals(
     );
   });
 
-  const totals = emptyTransactionTotals();
-  for (const row of rows) {
-    addTransactionAmount(totals, {
+  return summarizeProduceTransactionRows(
+    rows.map((row) => ({
       transaction_type: row.transaction_type as string,
-      total_amount:     (row.total_amount as number) ?? 0,
-    });
-  }
-  return { totals, effectiveRowCount: rows.length };
+      total_amount: (row.total_amount as number) ?? 0,
+    })),
+  );
 }
 
 // ── Main export ───────────────────────────────────────────────────────────────
@@ -302,7 +302,8 @@ export async function tryFinalizeSettlement(
   }
 
   // ── 7. Build combined message ──────────────────────────────────────────────
-  let transactions: ReturnType<typeof emptyTransactionTotals>;
+  let transactions = emptyTransactionTotals();
+  let producePresence: ProduceBucketPresence = emptyProduceBucketPresence();
   let produceValueStatus: Awaited<ReturnType<ProduceStatusLoader>>;
   try {
     const produce = await computeTransactionTotals(
@@ -313,6 +314,7 @@ export async function tryFinalizeSettlement(
       accountabilityRoundId,
     );
     transactions = produce.totals;
+    producePresence = produce.presence;
     produceValueStatus = await loadProduceStatus(
       supabase,
       businessDate,
@@ -347,6 +349,7 @@ export async function tryFinalizeSettlement(
     marketName:     entry.market_name  ?? "",
     transactions,
     produceValueStatus,
+    producePresence,
     settlement,
     reconciliation: reconcileResult.result,
     notes:          entry.notes        ?? "",

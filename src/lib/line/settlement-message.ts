@@ -1,12 +1,24 @@
 import { formatThaiDate } from "@/lib/date";
 import { displayMarketName } from "@/lib/market";
-import type { SettlementTotals, TransactionTotals } from "@/lib/summary/transactions";
+import type {
+  ProduceBucketPresence,
+  SettlementTotals,
+  TransactionTotals,
+} from "@/lib/summary/transactions";
 import type { ReconciliationResult } from "@/lib/reconciliation";
-import type { SettlementProduceValueStatus } from "@/lib/settlement/produce-value-status";
+import {
+  produceComponentProvenance,
+  type ProduceComponentAvailability,
+  type SettlementProduceValueStatus,
+} from "@/lib/settlement/produce-value-status";
 
 function fmt(n: number): string {
   return n.toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
+
+const UNKNOWN_PRODUCE = "⚠️ ยังยืนยันไม่ได้";
+const UNCONFIRMED_MARK = " ⚠️ ยังไม่ยืนยัน";
+const UNCONFIRMED_FOOTER = "⚠️ ยอดจากรายการเบิก/คืนยังมีข้อมูลที่ต้องตรวจสอบ";
 
 export interface SettlementLineMessageInput {
   date: string;
@@ -14,6 +26,7 @@ export interface SettlementLineMessageInput {
   marketName: string;
   transactions: TransactionTotals;
   produceValueStatus: SettlementProduceValueStatus;
+  producePresence: ProduceBucketPresence;
   settlement: SettlementTotals;
   notes?: string;
 }
@@ -34,7 +47,12 @@ export function buildSettlementLineMessage(input: SettlementLineMessageInput): s
     "",
     `${title} — ${formatThaiDate(input.date)}`,
     "",
-    ...buildProduceValueLines(input.transactions, input.produceValueStatus),
+    ...buildProduceValueLines(
+      input.transactions,
+      input.produceValueStatus,
+      input.producePresence,
+    ),
+    ...unconfirmedProduceFooter(input.produceValueStatus),
     `เงินโอน: ${fmt(input.settlement.ยอดโอน)} บาท`,
     `เงินสด: ${fmt(input.settlement.เงินสด)} บาท`,
     `ค่าใช้จ่าย: ${fmt(input.settlement.ค่าใช้จ่าย)} บาท`,
@@ -57,6 +75,7 @@ export interface FinalSettlementMessageInput {
   marketName:     string;
   transactions:   TransactionTotals;
   produceValueStatus: SettlementProduceValueStatus;
+  producePresence: ProduceBucketPresence;
   settlement:     SettlementTotals;
   reconciliation: ReconciliationResult;
   notes?:         string;
@@ -87,7 +106,12 @@ export function buildFinalSettlementMessage(input: FinalSettlementMessageInput):
     "",
     `${title} — ${formatThaiDate(input.date)}`,
     "",
-    ...buildProduceValueLines(input.transactions, input.produceValueStatus),
+    ...buildProduceValueLines(
+      input.transactions,
+      input.produceValueStatus,
+      input.producePresence,
+    ),
+    ...unconfirmedProduceFooter(input.produceValueStatus),
     `เงินโอน: ${fmt(s.ยอดโอน)} บาท`,
     `เงินสด: ${fmt(s.เงินสด)} บาท`,
     `ค่าใช้จ่าย: ${fmt(s.ค่าใช้จ่าย)} บาท`,
@@ -111,24 +135,38 @@ export function buildFinalSettlementMessage(input: FinalSettlementMessageInput):
   return lines.join("\n");
 }
 
+function formatProduceComponent(
+  label: string,
+  amount: number,
+  availability: ProduceComponentAvailability,
+  unconfirmed: boolean,
+): string {
+  if (availability === "unknown") return `${label}: ${UNKNOWN_PRODUCE}`;
+  return `${label}: ${fmt(amount)} บาท${unconfirmed ? UNCONFIRMED_MARK : ""}`;
+}
+
 function buildProduceValueLines(
   transactions: TransactionTotals,
   status: SettlementProduceValueStatus,
+  presence: ProduceBucketPresence,
 ): string[] {
-  if (status !== "complete") {
-    return [
-      "ยอดเบิก: ⚠️ ยังยืนยันไม่ได้",
-      "ยอดชั่งคืน: ⚠️ ยังยืนยันไม่ได้",
-      "ยอดคืนเสีย: ⚠️ ยังยืนยันไม่ได้",
-      "",
-      "ยอดขายสุทธิที่คำนวณได้: ⚠️ ยังยืนยันไม่ได้",
-    ];
-  }
+  const provenance = produceComponentProvenance(status, presence);
+  const unconfirmed = status !== "complete";
   return [
-    `ยอดเบิก: ${fmt(transactions.เบิก)} บาท`,
-    `ยอดชั่งคืน: ${fmt(transactions.คืน)} บาท`,
-    `ยอดคืนเสีย: ${fmt(transactions.คืนเสีย)} บาท`,
+    formatProduceComponent("ยอดเบิก", transactions.เบิก, provenance.withdrawal, unconfirmed),
+    formatProduceComponent("ยอดชั่งคืน", transactions.คืน, provenance.goodReturn, unconfirmed),
+    formatProduceComponent("ยอดคืนเสีย", transactions.คืนเสีย, provenance.damagedReturn, unconfirmed),
     "",
-    `ยอดขายสุทธิที่คำนวณได้: ${fmt(transactions.ยอดส่ง)} บาท`,
+    formatProduceComponent(
+      "ยอดขายสุทธิที่คำนวณได้",
+      transactions.ยอดส่ง,
+      provenance.net,
+      unconfirmed,
+    ),
   ];
+}
+
+function unconfirmedProduceFooter(status: SettlementProduceValueStatus): string[] {
+  if (status === "complete") return [];
+  return ["", UNCONFIRMED_FOOTER];
 }

@@ -37,7 +37,7 @@ const EMPTY_SNAPSHOT_MIGRATION = join(
   REPO_ROOT,
   "supabase",
   "migrations",
-  "20260826150000_house_stock_explicit_empty.sql",
+  "20260826102627_house_stock_explicit_empty.sql",
 );
 const HARDENING = join(REPO_ROOT, "supabase", "tests", "p2a_0047_hardening.sql");
 

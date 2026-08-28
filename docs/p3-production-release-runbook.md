@@ -1,6 +1,6 @@
 # P3 Profitability — Production Release Runbook
 
-Migration: `supabase/migrations/20260808130000_p3_profitability_snapshots.sql`
+Migration: `supabase/migrations/20260809075951_p3_profitability_snapshots.sql`
 Release branch: `codex/p3-release`
 
 Every query in this document is **READ-ONLY** unless a section is explicitly
@@ -260,7 +260,7 @@ SELECT
 ## 3. APPLY
 
 Apply only the exact reviewed contents of
-`supabase/migrations/20260808130000_p3_profitability_snapshots.sql` through the
+`supabase/migrations/20260809075951_p3_profitability_snapshots.sql` through the
 controlled Production migration runner. Record the resulting Production
 migration version and file SHA-256 before continuing. Do not use `supabase db
 push`: repository filenames do not match the already-recorded Production

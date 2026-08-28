@@ -218,7 +218,7 @@ async function claimDueNotifications(
   // 0061: claim is scoped to this process's own environment — Production and
   // Preview share one Supabase project and must never dequeue each other's
   // notification rows. See claim_due_produce_notifications in
-  // 0061_pending_session_runtime_environment.sql.
+  // 20260806111646_pending_session_runtime_environment.sql.
   const { data, error } = await supabase.rpc(
     "claim_due_produce_notifications",
     { p_limit: limit, p_environment: getRuntimeEnvironment() },

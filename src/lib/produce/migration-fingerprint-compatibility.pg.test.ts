@@ -310,7 +310,7 @@ describe.skipIf(!pgAvailable)("fingerprint compatibility on PostgreSQL 17", () =
     await apply(join(ROOT, "supabase", "tests", "produce_fingerprint_compatibility_bootstrap.sql"));
     // The 0061 function, then the compatibility reissue on top of it — the same
     // order Production applies them in.
-    await apply(join(ROOT, "supabase", "migrations", "0061_pending_session_runtime_environment.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260806111646_pending_session_runtime_environment.sql"));
 
     // STATE 0 — old schema. Before the compatibility migration lands, prove the
     // forbidden rollout state really is forbidden: the new application's call
@@ -326,7 +326,7 @@ describe.skipIf(!pgAvailable)("fingerprint compatibility on PostgreSQL 17", () =
          p_compatibility_hashes => ARRAY['a']::text[])`,
     ]);
 
-    await apply(join(ROOT, "supabase", "migrations", "20260815150000_produce_fingerprint_compatibility.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260815212554_produce_fingerprint_compatibility.sql"));
   }, 120_000);
 
   afterAll(async () => {

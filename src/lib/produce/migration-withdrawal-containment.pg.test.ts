@@ -305,15 +305,15 @@ describe.skipIf(!pgAvailable)("plain-withdrawal containment guard on PostgreSQL 
     expect(created.code, created.stderr).toBe(0);
     databaseCreated = true;
     await apply(join(ROOT, "supabase", "tests", "produce_fingerprint_compatibility_bootstrap.sql"));
-    await apply(join(ROOT, "supabase", "migrations", "0061_pending_session_runtime_environment.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260806111646_pending_session_runtime_environment.sql"));
     await apply(join(ROOT, "supabase", "tests", "produce_withdrawal_containment_bootstrap.sql"));
-    await apply(join(ROOT, "supabase", "migrations", "20260811090000_round_market_identity_consistency.sql"));
-    await apply(join(ROOT, "supabase", "migrations", "20260815160000_produce_market_identity_guard.sql"));
-    await apply(join(ROOT, "supabase", "migrations", "20260815150000_produce_fingerprint_compatibility.sql"));
-    await apply(join(ROOT, "supabase", "migrations", "20260817090100_produce_withdrawal_containment_guard.sql"));
-    await apply(join(ROOT, "supabase", "migrations", "20260817090400_produce_historical_withdrawal_containment.sql"));
-    await apply(join(ROOT, "supabase", "migrations", "20260810090000_p4a_produce_entry_validation_gate.sql"));
-    await apply(join(ROOT, "supabase", "migrations", "20260810160000_p4a_review_session_generation_uuid.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260811181727_round_market_identity_consistency.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260815213206_produce_market_identity_guard.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260815212554_produce_fingerprint_compatibility.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260817080346_produce_withdrawal_containment_guard.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260817090858_produce_historical_withdrawal_containment.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260810070313_p4a_produce_entry_validation_gate.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260810112416_p4a_review_session_generation_uuid.sql"));
   }, 120_000);
 
   afterAll(async () => {

@@ -28,7 +28,7 @@ const MIGRATION = join(
   REPO_ROOT,
   "supabase",
   "migrations",
-  "0052_purchase_receipt_persistence.sql",
+  "20260729084558_purchase_receipt_persistence.sql",
 );
 
 type PsqlResult = { code: number; stdout: string; stderr: string };

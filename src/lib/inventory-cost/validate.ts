@@ -220,7 +220,7 @@ function parseCostLine(row: unknown, path: string): InventoryCostLine {
 /**
  * Parses the result of any of the four 0054 posting/reversal RPCs — they all
  * share this exact response shape (see inventory_cost_movement_lines_payload
- * and every RETURN jsonb_build_object(...) in 0054_inventory_cost_valuation.sql).
+ * and every RETURN jsonb_build_object(...) in 20260809063116_inventory_cost_valuation.sql).
  */
 export function parseCostPostingResult(data: unknown): InventoryCostPostingResult {
   const root = requireObject(data, "cost_posting");

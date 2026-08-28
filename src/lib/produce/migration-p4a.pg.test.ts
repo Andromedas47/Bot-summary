@@ -136,13 +136,13 @@ describe.skipIf(!pgAvailable)("P4A produce entry validation gate on PostgreSQL 1
     databaseCreated = true;
     await apply(join(ROOT, "supabase", "tests", "p4a_produce_entry_validation_bootstrap.sql"));
     await apply(
-      join(ROOT, "supabase", "migrations", "20260810090000_p4a_produce_entry_validation_gate.sql"),
+      join(ROOT, "supabase", "migrations", "20260810070313_p4a_produce_entry_validation_gate.sql"),
     );
     // The corrective migration is part of the contract under test: the review
     // generation is the same uuid identity every other generation-scoped table
     // uses, which is what makes the price-review path reachable at all.
     await apply(
-      join(ROOT, "supabase", "migrations", "20260810160000_p4a_review_session_generation_uuid.sql"),
+      join(ROOT, "supabase", "migrations", "20260810112416_p4a_review_session_generation_uuid.sql"),
     );
   }, 60_000);
 
@@ -345,7 +345,7 @@ describe.skipIf(!pgAvailable)("P4A produce entry validation gate on PostgreSQL 1
 
   test("the corrective migration refuses to retype a table that already has rows", async () => {
     const migration = join(
-      ROOT, "supabase", "migrations", "20260810160000_p4a_review_session_generation_uuid.sql",
+      ROOT, "supabase", "migrations", "20260810112416_p4a_review_session_generation_uuid.sql",
     );
     const result = await psql(["-v", "ON_ERROR_STOP=1", "-f", migration]);
     expect(result.code).not.toBe(0);

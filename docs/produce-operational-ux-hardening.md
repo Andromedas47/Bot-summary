@@ -280,7 +280,7 @@ before the market identity migration, so no ordering is left to a runbook.
 Two things about Production's migration history have to be respected, both
 established by read-only inspection at preflight.
 
-**A prerequisite is outstanding.** `20260815090000_cancel_duplicate_plain_text_round.sql`
+**A prerequisite is outstanding.** `20260815212227_cancel_duplicate_plain_text_round.sql`
 shipped with PR #51 and was never applied — `cancel_duplicate_plain_text_round`
 does not exist in Production. The deployed finalizer already calls it inside a
 `try/catch` that only logs, so duplicate classification is unaffected, but the
@@ -293,7 +293,7 @@ touch.
 these filenames: 23 local migration versions are absent from
 `supabase_migrations.schema_migrations`, 22 of them because the same migration
 was recorded under a different, apply-time version string (repo
-`20260815081954_produce_out_of_order_admission.sql` is tracked as
+`20260815094931_produce_out_of_order_admission.sql` is tracked as
 `20260815094931`, and so on back to `0051`). A version-based tool therefore
 reads almost the whole recent history as pending, and those migrations are not
 idempotent — `CREATE TABLE` and `CREATE INDEX` without `IF NOT EXISTS` — so a

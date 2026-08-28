@@ -1,5 +1,5 @@
 /**
- * Real PostgreSQL 17 proof for migration 20260825120000_data_quality_issues.sql.
+ * Real PostgreSQL 17 proof for migration 20260825092703_data_quality_issues.sql.
  *
  * The table is standalone (no FKs into the rest of the schema), so the only
  * migration applied here is this one — no bootstrap chain needed. This test
@@ -31,8 +31,8 @@ const PGPORT = process.env.PGPORT ?? "5432";
 const DATABASE = `dqi_${randomBytes(4).toString("hex")}`;
 const DB_NAME_PATTERN = /^dqi_[a-f0-9]+$/;
 const ALLOWED_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
-const MIGRATION = join(ROOT, "supabase", "migrations", "20260825120000_data_quality_issues.sql");
-const RUNNER_MIGRATION = join(ROOT, "supabase", "migrations", "20260827120000_data_quality_atomic_upsert.sql");
+const MIGRATION = join(ROOT, "supabase", "migrations", "20260825092703_data_quality_issues.sql");
+const RUNNER_MIGRATION = join(ROOT, "supabase", "migrations", "20260827065840_data_quality_atomic_upsert.sql");
 
 function assertSafe(): void {
   if (process.env.ALLOW_DISPOSABLE_POSTGRES_TESTS !== "1") {

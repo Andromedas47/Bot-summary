@@ -31,8 +31,8 @@ function tuples(sql: string, block: RegExp): Array<[string, string]> {
   return rows;
 }
 
-const CATALOG_0055 = read("0055_guided_menu_seller_market_catalog.sql");
-const GUARD = read("20260815160000_produce_market_identity_guard.sql");
+const CATALOG_0055 = read("20260730090006_guided_menu_seller_market_catalog.sql");
+const GUARD = read("20260815213206_produce_market_identity_guard.sql");
 
 /** market_code -> canonical label, from both migrations. */
 const seededMarkets = new Map<string, string>([

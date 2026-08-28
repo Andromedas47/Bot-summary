@@ -145,7 +145,7 @@ describe.skipIf(!pgAvailable)("P4A plain-text round binding on PostgreSQL 17", (
     databaseCreated = true;
     await apply(join(ROOT, "supabase", "tests", "p4a_plain_text_round_binding_bootstrap.sql"));
     await apply(
-      join(ROOT, "supabase", "migrations", "20260810120000_p4a_plain_text_round_binding.sql"),
+      join(ROOT, "supabase", "migrations", "20260810100414_p4a_plain_text_round_binding.sql"),
     );
     await scalar(`
       INSERT INTO public.pending_sessions (session_key, session_generation, source_id, line_user_id)

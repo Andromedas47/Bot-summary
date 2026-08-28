@@ -1,10 +1,10 @@
 # P3 — COGS and Profit / Loss (round-identity final)
 
 Supersedes `docs/plans/p3-profit-loss.md`, which was correct about the accounting
-and wrong about identity. Migration: `20260808130000_p3_profitability_snapshots.sql`.
+and wrong about identity. Migration: `20260809075951_p3_profitability_snapshots.sql`.
 
-Requires **P2E** (`20260808105001_p2e_accountability_round_identity.sql`, PR #38)
-and **P2D** (`0054_inventory_cost_valuation.sql`, PR #36). Neither is merged; see
+Requires **P2E** (`20260809045345_p2e_accountability_round_identity_expand.sql`, PR #38)
+and **P2D** (`20260809063116_inventory_cost_valuation.sql`, PR #36). Neither is merged; see
 `docs/handoffs/p3-final-sprint-handoff.md`.
 
 ---

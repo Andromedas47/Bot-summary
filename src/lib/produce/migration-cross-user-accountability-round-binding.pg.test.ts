@@ -210,9 +210,9 @@ describe.skipIf(!pgAvailable)("cross-user accountability round binding on Postgr
         base_transaction_type text NOT NULL
       );
       SELECT 1`);
-    await apply(join(ROOT, "supabase", "migrations", "20260810120000_p4a_plain_text_round_binding.sql"));
-    await apply(join(ROOT, "supabase", "migrations", "20260811090000_round_market_identity_consistency.sql"));
-    await apply(join(ROOT, "supabase", "migrations", "20260814100000_cross_user_accountability_round_binding.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260810100414_p4a_plain_text_round_binding.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260811181727_round_market_identity_consistency.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260814104329_cross_user_accountability_round_binding.sql"));
     await scalar(`
       INSERT INTO public.line_guided_menu_markets (market_code, label) VALUES
         ('wat_thung_lanna', 'วัดทุ่งลานนา');

@@ -41,13 +41,13 @@ const MIGRATION_0052 = join(
   REPO_ROOT,
   "supabase",
   "migrations",
-  "0052_purchase_receipt_persistence.sql",
+  "20260729084558_purchase_receipt_persistence.sql",
 );
 const MIGRATION_0053 = join(
   REPO_ROOT,
   "supabase",
   "migrations",
-  "0053_inventory_movement_ledger.sql",
+  "20260729172613_inventory_movement_ledger.sql",
 );
 
 type PsqlResult = { code: number; stdout: string; stderr: string };

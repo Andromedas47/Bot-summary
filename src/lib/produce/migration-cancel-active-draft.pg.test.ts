@@ -303,15 +303,15 @@ describe.skipIf(!pgAvailable)("cancel the active produce draft on PostgreSQL 17"
     await apply(join(ROOT, "supabase", "tests", "produce_pending_lifecycle_bootstrap.sql"));
     await apply(join(
       ROOT, "supabase", "migrations",
-      "20260817090200_produce_pending_supersession_and_close_recovery.sql",
+      "20260817080439_produce_pending_supersession_and_close_recovery.sql",
     ));
     await apply(join(
       ROOT, "supabase", "migrations",
-      "20260817090300_produce_supersession_runtime_environment.sql",
+      "20260817085632_produce_supersession_runtime_environment.sql",
     ));
     await apply(join(
       ROOT, "supabase", "migrations",
-      "20260818090000_produce_cancel_active_pending_draft.sql",
+      "20260818034244_produce_cancel_active_pending_draft.sql",
     ));
   }, 120_000);
 
@@ -323,7 +323,7 @@ describe.skipIf(!pgAvailable)("cancel the active produce draft on PostgreSQL 17"
   test("the migration is idempotent", async () => {
     await apply(join(
       ROOT, "supabase", "migrations",
-      "20260818090000_produce_cancel_active_pending_draft.sql",
+      "20260818034244_produce_cancel_active_pending_draft.sql",
     ));
     expect(await scalar(`
       SELECT count(*)::text FROM pg_proc

@@ -5,8 +5,8 @@ import { join } from "path";
 
 const root = join(import.meta.dir, "..", "..", "..");
 const bootstrap = join(root, "supabase", "tests", "p2e_accountability_round_bootstrap.sql");
-const migration = join(root, "supabase", "migrations", "20260808105001_p2e_accountability_round_identity.sql");
-const contract = join(root, "supabase", "migrations", "20260808212137_p2e_accountability_round_identity_contract.sql");
+const migration = join(root, "supabase", "migrations", "20260809045345_p2e_accountability_round_identity_expand.sql");
+const contract = join(root, "supabase", "migrations", "20260809045849_p2e_accountability_round_identity_contract.sql");
 const psql = existsSync("C:\\Program Files\\PostgreSQL\\17\\bin\\psql.exe") ? "C:\\Program Files\\PostgreSQL\\17\\bin\\psql.exe" : "psql";
 const env = { ...process.env, PGHOST: process.env.PGHOST ?? "localhost", PGUSER: process.env.PGUSER ?? "postgres", PGPASSWORD: process.env.PGPASSWORD ?? "postgres", PGPORT: process.env.PGPORT ?? "5432", PGCLIENTENCODING: "UTF8" };
 

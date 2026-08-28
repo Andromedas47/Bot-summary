@@ -13,9 +13,9 @@ import { join } from "path";
 
 const root = join(import.meta.dir, "..", "..", "..");
 const bootstrap = join(root, "supabase", "tests", "p2e_accountability_round_bootstrap.sql");
-const identity = join(root, "supabase", "migrations", "20260808105001_p2e_accountability_round_identity.sql");
-const contract = join(root, "supabase", "migrations", "20260808212137_p2e_accountability_round_identity_contract.sql");
-const hotfix = join(root, "supabase", "migrations", "20260821140000_fix_accountability_round_slip_date_parsing.sql");
+const identity = join(root, "supabase", "migrations", "20260809045345_p2e_accountability_round_identity_expand.sql");
+const contract = join(root, "supabase", "migrations", "20260809045849_p2e_accountability_round_identity_contract.sql");
+const hotfix = join(root, "supabase", "migrations", "20260821082438_fix_accountability_round_slip_date_parsing.sql");
 const psql = existsSync("C:\\Program Files\\PostgreSQL\\17\\bin\\psql.exe")
   ? "C:\\Program Files\\PostgreSQL\\17\\bin\\psql.exe"
   : "psql";

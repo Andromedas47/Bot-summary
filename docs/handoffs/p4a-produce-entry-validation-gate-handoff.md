@@ -91,7 +91,7 @@ Blocking exceptions have no confirmation path at all — they must be corrected.
 | `src/lib/produce/entry-validation-message.ts` | Thai operator text, exceptions only, capped at 10 listed |
 | `src/lib/produce/entry-validation-gate.ts` | DB-facing gate: round master read, review record/confirm, close vs finalize decisions |
 | `src/lib/summary/pending-validation-notice.ts` | 08:00 "some produce never landed" notice |
-| `supabase/migrations/20260810090000_p4a_produce_entry_validation_gate.sql` | Additive append-only audit table + 2 SECURITY DEFINER RPCs |
+| `supabase/migrations/20260810070313_p4a_produce_entry_validation_gate.sql` | Additive append-only audit table + 2 SECURITY DEFINER RPCs |
 | `supabase/tests/p4a_produce_entry_validation_bootstrap.sql` | Disposable-DB bootstrap |
 | `src/lib/produce/entry-validation.test.ts` | 30 domain regressions (cases A–L) |
 | `src/lib/produce/entry-validation-gate.test.ts` | 17 gate regressions (idempotency, staleness, round scoping, fail-closed) |
@@ -113,7 +113,7 @@ Blocking exceptions have no confirmation path at all — they must be corrected.
 
 ## Migration
 
-`20260810090000_p4a_produce_entry_validation_gate.sql` — one table
+`20260810070313_p4a_produce_entry_validation_gate.sql` — one table
 (`produce_entry_validation_reviews`), two triggers, two RPCs.
 
 - Additive only. No existing table, view, function, constraint or grant is

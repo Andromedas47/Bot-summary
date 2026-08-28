@@ -109,7 +109,7 @@ EOSQL
 run_sql "bootstrap (0051 minimal stub)" \
   "$ROOT/supabase/tests/guided_menu_0051_bootstrap.sql"
 run_sql "apply candidate 0051" \
-  "$ROOT/supabase/migrations/0051_guided_menu_identity_and_state.sql"
+  "$ROOT/supabase/migrations/20260729074617_guided_menu_identity_and_state.sql"
 run_sql "0051 behavioural verification" \
   "$ROOT/supabase/tests/guided_menu_0051_verification.sql"
 

@@ -36,10 +36,10 @@ const DB_NAME_PATTERN = /^pdcl_[a-f0-9]+$/;
 const ALLOWED_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
 const BASE_MIGRATION = join(
-  ROOT, "supabase", "migrations", "20260813090000_produce_product_code_dictionary.sql",
+  ROOT, "supabase", "migrations", "20260813115826_produce_product_code_dictionary.sql",
 );
 const CLEANUP_MIGRATION = join(
-  ROOT, "supabase", "migrations", "20260818100000_produce_product_dictionary_cleanup.sql",
+  ROOT, "supabase", "migrations", "20260818105651_produce_product_dictionary_cleanup.sql",
 );
 
 function assertSafe(): void {

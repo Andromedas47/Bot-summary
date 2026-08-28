@@ -12,16 +12,16 @@
  * Apply order for the disposable database (NOT the ALL_FIXTURES array in
  * integration-slice-c2.pg.test.ts, which is unordered as written):
  *   purchase_capture_slice_b_bootstrap.sql
- *   0052_purchase_receipt_persistence.sql
+ *   20260729084558_purchase_receipt_persistence.sql
  *   20260805130000_purchase_capture_sessions.sql
  *   20260805140000_purchase_capture_draft_finalization.sql
  *   20260805150000_purchase_capture_slice_b_contract_hardening.sql
  *   purchase_capture_slice_c_pre_0053.sql
- *   0053_inventory_movement_ledger.sql
+ *   20260729172613_inventory_movement_ledger.sql
  *   purchase_capture_slice_c_post_0053.sql
  *   20260805160000_purchase_capture_confirm_post.sql
  *   purchase_capture_slice_c_hardening.sql
- *   0054_inventory_cost_valuation.sql
+ *   20260809063116_inventory_cost_valuation.sql
  *
  * ── On the direct inventory_movements/inventory_movement_lines inserts below ──
  *
@@ -58,7 +58,7 @@ const WIN_PSQL = "C:\\Program Files\\PostgreSQL\\17\\bin\\psql.exe";
 const REPO_ROOT = join(import.meta.dir, "..", "..", "..");
 
 const BOOTSTRAP = join(REPO_ROOT, "supabase", "tests", "purchase_capture_slice_b_bootstrap.sql");
-const MIGRATION_0052 = join(REPO_ROOT, "supabase", "migrations", "0052_purchase_receipt_persistence.sql");
+const MIGRATION_0052 = join(REPO_ROOT, "supabase", "migrations", "20260729084558_purchase_receipt_persistence.sql");
 const MIGRATION_SESSIONS = join(REPO_ROOT, "supabase", "migrations", "20260805130000_purchase_capture_sessions.sql");
 const MIGRATION_DRAFT_FINALIZATION = join(
   REPO_ROOT, "supabase", "migrations", "20260805140000_purchase_capture_draft_finalization.sql",
@@ -67,16 +67,16 @@ const MIGRATION_SLICE_B_HARDENING = join(
   REPO_ROOT, "supabase", "migrations", "20260805150000_purchase_capture_slice_b_contract_hardening.sql",
 );
 const PRE_0053 = join(REPO_ROOT, "supabase", "tests", "purchase_capture_slice_c_pre_0053.sql");
-const MIGRATION_0053 = join(REPO_ROOT, "supabase", "migrations", "0053_inventory_movement_ledger.sql");
+const MIGRATION_0053 = join(REPO_ROOT, "supabase", "migrations", "20260729172613_inventory_movement_ledger.sql");
 const POST_0053 = join(REPO_ROOT, "supabase", "tests", "purchase_capture_slice_c_post_0053.sql");
 const MIGRATION_CONFIRM_POST = join(
   REPO_ROOT, "supabase", "migrations", "20260805160000_purchase_capture_confirm_post.sql",
 );
 const SLICE_C_HARDENING = join(REPO_ROOT, "supabase", "tests", "purchase_capture_slice_c_hardening.sql");
 const P2E_BOOTSTRAP = join(REPO_ROOT, "supabase", "tests", "p2e_accountability_round_bootstrap.sql");
-const P2E_EXPAND = join(REPO_ROOT, "supabase", "migrations", "20260808105001_p2e_accountability_round_identity.sql");
-const P2E_CONTRACT = join(REPO_ROOT, "supabase", "migrations", "20260808212137_p2e_accountability_round_identity_contract.sql");
-const MIGRATION_0054 = join(REPO_ROOT, "supabase", "migrations", "0054_inventory_cost_valuation.sql");
+const P2E_EXPAND = join(REPO_ROOT, "supabase", "migrations", "20260809045345_p2e_accountability_round_identity_expand.sql");
+const P2E_CONTRACT = join(REPO_ROOT, "supabase", "migrations", "20260809045849_p2e_accountability_round_identity_contract.sql");
+const MIGRATION_0054 = join(REPO_ROOT, "supabase", "migrations", "20260809063116_inventory_cost_valuation.sql");
 
 const PRE_0054_CHAIN = [
   BOOTSTRAP,

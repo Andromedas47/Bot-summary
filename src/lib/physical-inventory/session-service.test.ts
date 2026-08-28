@@ -940,7 +940,7 @@ describe("PhysicalInventorySessionService — Slice B hardening", () => {
     expect(PHYSICAL_INVENTORY_VOID_SUPERSEDE_SLICE).toBe("E");
     expect(PHYSICAL_INVENTORY_CLOSE_QUIET_MS).toBe(8_000);
     const emptySql = readFileSync(
-      "supabase/migrations/20260826150000_house_stock_explicit_empty.sql",
+      "supabase/migrations/20260826102627_house_stock_explicit_empty.sql",
       "utf8",
     );
     expect(emptySql).toContain("CHECK (item_count >= 0)");

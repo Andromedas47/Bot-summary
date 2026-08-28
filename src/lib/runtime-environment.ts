@@ -1,7 +1,7 @@
 // Centralized, server-only source of truth for which deployment environment
 // this process is running in. Exists to stop Production and Preview workers
 // from claiming each other's rows in tables they share one Supabase project
-// with (see 0061_pending_session_runtime_environment.sql) — never derive
+// with (see 20260806111646_pending_session_runtime_environment.sql) — never derive
 // this from a deployment URL, which is ephemeral per-build and unsuitable as
 // an ownership key.
 

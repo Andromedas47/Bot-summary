@@ -319,7 +319,7 @@ describe("notification claim — runtime environment ownership", () => {
   // this fix — the write would succeed while the originating (Preview/Test
   // OA) channel never receives the summary. The actual claim-time isolation
   // is enforced inside claim_due_produce_notifications (SQL, see
-  // 0061_pending_session_runtime_environment.sql) — this only verifies the
+  // 20260806111646_pending_session_runtime_environment.sql) — this only verifies the
   // TypeScript caller always tells the RPC which environment it is.
 
   it("passes p_environment='production' when running as Production", async () => {
@@ -429,7 +429,7 @@ async function readMigrationSql(path: URL): Promise<string> {
 
 describe("notification environment ownership migration contract (0061)", () => {
   const envMigrationPath = new URL(
-    "../../../supabase/migrations/0061_pending_session_runtime_environment.sql",
+    "../../../supabase/migrations/20260806111646_pending_session_runtime_environment.sql",
     import.meta.url,
   );
 
@@ -490,7 +490,7 @@ describe("notification environment ownership migration contract (0061)", () => {
 
 describe("notification claim RPC overload disambiguation (0062)", () => {
   const overloadFixPath = new URL(
-    "../../../supabase/migrations/0062_claim_due_produce_notifications_require_environment.sql",
+    "../../../supabase/migrations/20260806112815_claim_due_produce_notifications_require_environment.sql",
     import.meta.url,
   );
 

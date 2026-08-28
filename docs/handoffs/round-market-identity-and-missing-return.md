@@ -104,7 +104,7 @@ identity `TRUSTED`, so `✅ ถือว่าขายหมดเพราะ�
 
 ## 3. What changed
 
-Migration `20260811090000_round_market_identity_consistency.sql` (additive; two
+Migration `20260811181727_round_market_identity_consistency.sql` (additive; two
 new helper functions, one `CREATE OR REPLACE` of the existing RPC; no table, no
 column, no data change):
 

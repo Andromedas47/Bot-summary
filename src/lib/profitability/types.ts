@@ -6,7 +6,7 @@
  * no quantity and no cost of its own. Every figure here is read out of the 0053
  * quantity ledger, the 0054 (P2D) value ledger, the 0040 central price catalog,
  * the 0038/0043 Digital White Sheet and the P2E accountability round, and then
- * frozen. See supabase/migrations/20260808130000_p3_profitability_snapshots.sql
+ * frozen. See supabase/migrations/20260809075951_p3_profitability_snapshots.sql
  * for the authoritative rules this module wraps.
  *
  * ── Identity ────────────────────────────────────────────────────────────────

@@ -212,11 +212,6 @@ const EVIDENCE_FAILED_REPLY = "รับรูปไม่สำเร็จ ก
 const BATCH_FINALIZED_LATE_IMAGE_REPLY =
   "รูปนี้ไม่ถูกรวมในชุดสลิป เนื่องจากระบบเริ่มสรุปแล้ว กรุณาเปิดชุดใหม่ก่อนส่งรูป";
 
-const NO_SESSION_IMAGE_REPLY = [
-  "กรุณาพิมพ์หัวชุดสลิปก่อนส่งรูป เช่น",
-  "กี้ วัดทุ่งลานนา สลิปเงินโอน 9/6/2569",
-].join("\n");
-
 const NO_ACTIVE_BATCH_REPLY = [
   "ยังไม่มีชุดสลิปที่เปิดอยู่",
   "กรุณาพิมพ์หัวชุดก่อน เช่น:",
@@ -3014,6 +3009,32 @@ export class WebhookService {
     const sourceId = getSourceId(event.source);
     const senderId = getUserId(event.source);
 
+    let activeSession: Awaited<ReturnType<SlipSessionIngestor["findActiveSession"]>>;
+    try {
+      activeSession = await this.slipSessionService.findActiveSession(sourceId);
+    } catch (error) {
+      log.error("slip session lookup failed — ignoring image", {
+        sourceId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return {
+        eventId,
+        eventType: event.type,
+        status: "saved",
+        parsed: false,
+      };
+    }
+
+    if (!activeSession) {
+      log.info("image ignored: no active slip session", { sourceId });
+      return {
+        eventId,
+        eventType: event.type,
+        status: "saved",
+        parsed: false,
+      };
+    }
+
     try {
       const result = await this.evidenceIngestor.ingest({
         rawMessageId,
@@ -3034,17 +3055,32 @@ export class WebhookService {
         let scheduleOcr = false;
 
         try {
-          const activeSession = await this.slipSessionService.findActiveSession(sourceId);
+          await this.batchService.attachEvidence(activeSession.batchId, evidenceId);
+          shouldReply = activeSession.imageCount === 0; // first image in this session
+          scheduleOcr = true; // attach succeeded — safe to process
+          log.info("image attached to active slip session", {
+            batchId:      activeSession.batchId,
+            imageCount:   activeSession.imageCount + 1,
+            isFirstImage: shouldReply,
+          });
+        } catch (attachError) {
+          const errMsg = attachError instanceof Error ? attachError.message : String(attachError);
+          const isBatchFinalized = errMsg.includes("not in collecting/closing status");
 
-          if (!activeSession) {
-            // No open session — instruct user to open one first.
-            // Evidence is saved but not processed; no OCR scheduled.
-            log.info("image received but no active slip session", { sourceId });
+          if (isBatchFinalized) {
+            // Finalizer claimed the batch before this image arrived.
+            // The evidence row exists (traceable) but is not part of the batch.
+            // Do NOT schedule OCR; reply with an explicit rejection.
+            log.info("image rejected: batch already processing/finalized", {
+              batchId:         activeSession.batchId,
+              evidenceId,
+              rejectionReason: "batch_already_processing",
+            });
             if (event.replyToken) {
               try {
-                await this.replyMessage(event.replyToken, NO_SESSION_IMAGE_REPLY);
+                await this.replyMessage(event.replyToken, BATCH_FINALIZED_LATE_IMAGE_REPLY);
               } catch (replyErr) {
-                log.error("no-session reply failed", {
+                log.error("batch-finalized rejection reply failed", {
                   error: replyErr instanceof Error ? replyErr.message : String(replyErr),
                 });
               }
@@ -3057,58 +3093,10 @@ export class WebhookService {
             };
           }
 
-          try {
-            await this.batchService.attachEvidence(activeSession.batchId, evidenceId);
-            shouldReply = activeSession.imageCount === 0; // first image in this session
-            scheduleOcr = true; // attach succeeded — safe to process
-            log.info("image attached to active slip session", {
-              batchId:      activeSession.batchId,
-              imageCount:   activeSession.imageCount + 1,
-              isFirstImage: shouldReply,
-            });
-          } catch (attachError) {
-            const errMsg = attachError instanceof Error ? attachError.message : String(attachError);
-            const isBatchFinalized = errMsg.includes("not in collecting/closing status");
-
-            if (isBatchFinalized) {
-              // Finalizer claimed the batch before this image arrived.
-              // The evidence row exists (traceable) but is not part of the batch.
-              // Do NOT schedule OCR; reply with an explicit rejection.
-              log.info("image rejected: batch already processing/finalized", {
-                batchId:         activeSession.batchId,
-                evidenceId,
-                rejectionReason: "batch_already_processing",
-              });
-              if (event.replyToken) {
-                try {
-                  await this.replyMessage(event.replyToken, BATCH_FINALIZED_LATE_IMAGE_REPLY);
-                } catch (replyErr) {
-                  log.error("batch-finalized rejection reply failed", {
-                    error: replyErr instanceof Error ? replyErr.message : String(replyErr),
-                  });
-                }
-              }
-              return {
-                eventId,
-                eventType: event.type,
-                status: "saved",
-                parsed: false,
-              };
-            }
-
-            // Other attach failure (network, unexpected DB error): fall back to
-            // plain ack so the sender knows the image was received.
-            log.error("slip evidence attach failed — sending plain ack", {
-              error: errMsg,
-            });
-            shouldReply = true;
-            // scheduleOcr stays false — do NOT process an unattached evidence
-          }
-
-        } catch (batchError) {
-          // findActiveSession threw
-          log.error("slip session lookup failed — sending plain ack", {
-            error: batchError instanceof Error ? batchError.message : String(batchError),
+          // Other attach failure (network, unexpected DB error): fall back to
+          // plain ack so the sender knows the image was received.
+          log.error("slip evidence attach failed — sending plain ack", {
+            error: errMsg,
           });
           shouldReply = true;
           // scheduleOcr stays false — do NOT process an unattached evidence

@@ -1,119 +1,98 @@
-/**
- * 🌅 สรุปประจำวัน — the LINE rendering for MorningBriefReport.
- *
- * Deliberately short: no per-product or per-issue itemization, ever — that is
- * what the on-demand detailed reports are for (see morning-brief.ts's header
- * comment). Financial numbers are read verbatim from
- * DailyFinancialSettlementResult; this module never computes expected cash,
- * actual cash, or a difference — see computeDailyFinancialSettlement
- * (src/lib/settlement/daily-financial-settlement.ts) for the one place that
- * arithmetic lives.
- */
-
 import { formatThaiDate } from "@/lib/date";
-import { displayMarketName } from "@/lib/market";
+import { satangToBahtText } from "@/lib/sales/calculate";
 import {
   capAtMaxMessages,
   chunkBlocks,
   LINE_MESSAGE_MAX_CODE_POINTS,
   LINE_REPLY_MAX_MESSAGES,
 } from "@/lib/summary/line-chunking";
-import type { MorningBriefFinancialEntry, MorningBriefReport } from "@/lib/summary/morning-brief";
-import type { DailyFinancialSettlementResult } from "@/lib/settlement/daily-financial-settlement";
+import {
+  MORNING_BRIEF_NAME_LIMIT,
+  type MorningBriefPurchaseGroup,
+  type MorningBriefReport,
+} from "@/lib/summary/morning-brief";
 
-export const MORNING_BRIEF_TITLE = "🌅 สรุปประจำวัน";
-
-/** This report has no web page of its own, so the notice names no destination. */
+export const MORNING_BRIEF_TITLE = "🌅 สรุปเช้า";
 export const MORNING_BRIEF_OVERFLOW_NOTICE =
   "\n\nแสดงได้ไม่ครบ — ข้อความยาวเกินที่ LINE ตอบได้ในครั้งเดียว";
 
-export const MORNING_BRIEF_NO_FINANCIAL_NOTICE = "ยังไม่พบข้อมูลปิดยอดของตลาดใดในวันนี้";
+const PRODUCT_NAME_MAX_CODE_POINTS = 80;
 
-/**
- * ponytail: a small duplicate of daily-financial-settlement-message.ts's own
- * (unexported) `fmt`. That file belongs to Task 4 and is not to be touched
- * for a formatting convenience. If a THIRD caller ever needs this exact Thai
- * 2-decimal money format, export the original from Task 4's module instead
- * of adding a third copy — that is the upgrade path, not more duplication.
- */
-function fmt(value: number): string {
-  return value.toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function boundedProductName(name: string): string {
+  const codePoints = [...name];
+  if (codePoints.length <= PRODUCT_NAME_MAX_CODE_POINTS) return name;
+  return `${codePoints.slice(0, PRODUCT_NAME_MAX_CODE_POINTS - 1).join("")}…`;
 }
 
-function buildPurchaseCountsLine(report: MorningBriefReport): string {
-  const { strong, surplus, reduce, unknown } = report.purchaseCounts;
-  return `🟢 ${strong} • 🟠 ${surplus} • 🔴 ${reduce} • ⚠️ ${unknown}`;
+function purchaseGroupLines(
+  icon: string,
+  label: string,
+  group: MorningBriefPurchaseGroup,
+): string[] {
+  const lines = [`${icon} ${label} — ${group.count} รายการ`];
+  if (group.productNames.length === 0) return lines;
+
+  const shownNames = group.productNames.slice(0, MORNING_BRIEF_NAME_LIMIT);
+  const suffix = group.count > shownNames.length
+    ? ` ... +อีก ${group.count - shownNames.length} รายการ`
+    : "";
+  lines.push(`${shownNames.map(boundedProductName).join(", ")}${suffix}`);
+  return lines;
 }
 
-/**
- * Status line only — the same three states Task 4's own formatter renders
- * (buildStatusLines in daily-financial-settlement-message.ts), reproduced
- * minimally here because that function is not exported. Reads only the
- * already-final `status`/`difference` fields; no arithmetic happens here.
- *
- * CRITICAL: INCOMPLETE must never render "เงินปิดตรง" — it renders the
- * waiting state instead.
- */
-function buildFinancialStatusLine(result: DailyFinancialSettlementResult): string {
-  if (result.status === "INCOMPLETE") return "⚠️ ยังปิดยอดไม่ได้";
-  if (result.status === "CLOSED_MATCHED") return "✅ เงินปิดตรง";
-  const difference = result.difference ?? 0;
-  const label = difference < 0 ? "ขาด" : "เกิน";
-  return `🚨 เงินปิดไม่ตรง / ${label} ${fmt(Math.abs(difference))} บาท`;
+function buildPurchaseBlock(report: MorningBriefReport): string {
+  const { strong, surplus, reduce, unknown } = report.purchasePlanning;
+  return [
+    "🛒 แผนซื้อของ",
+    ...purchaseGroupLines("🟢", "ควรซื้อเพิ่ม", strong),
+    "",
+    ...purchaseGroupLines("🟠", "ยังไม่ควรซื้อเพิ่ม", surplus),
+    "",
+    ...purchaseGroupLines("🔴", "ควรลดการซื้อ", reduce),
+    "",
+    `⚠️ ยังประเมินไม่ได้ ${unknown.count} รายการ`,
+  ].join("\n");
 }
 
-function buildFinancialBlock(
-  entry: MorningBriefFinancialEntry,
-  showMarketLabel: boolean,
-): string {
-  const { result } = entry;
-  const lines: string[] = ["💰 ผลประกอบการ"];
-  if (showMarketLabel) {
-    lines.push(displayMarketName(entry.marketLabelNormalized, entry.marketLabelNormalized));
+function buildSalesBlock(report: MorningBriefReport): string {
+  const sales = report.sales;
+  const amountLabel = sales.valueAuthoritative ? "ยอดขายรวม" : "⚠️ ยอดที่ยืนยันแล้ว";
+  const lines = [
+    "💰 ยอดขาย",
+    `${amountLabel} ${satangToBahtText(sales.confirmedSalesSatang)} บาท`,
+    `✅ ยืนยันได้ ${sales.trustedCount} รายการ • ⚠️ รอตรวจ ${sales.unresolvedCount} รายการ`,
+  ];
+  if (sales.soldOutCount > 0) {
+    lines.push(`✅ ถือว่าขายหมดเพราะไม่มีรายการคืน — ${sales.soldOutCount} รายการ`);
   }
-  lines.push(
-    `ยอดขายตามใบขาว ${result.whiteSheetSales === null ? "-" : `${fmt(result.whiteSheetSales)} บาท`}`,
-    `เงินโอน ${fmt(result.transferTotal)} บาท`,
-    `เงินสดที่ควรเหลือ ${result.expectedCash === null ? "-" : `${fmt(result.expectedCash)} บาท`}`,
-    `เงินสดคงเหลือจริง ${result.actualCash === null ? "-" : `${fmt(result.actualCash)} บาท`}`,
-    buildFinancialStatusLine(result),
-  );
   return lines.join("\n");
 }
 
-function buildIssuesBlock(report: MorningBriefReport): string | null {
-  const { critical, actionRequired } = report.issues;
-  if (critical <= 0 && actionRequired <= 0) return null;
-  const lines: string[] = [];
-  if (critical > 0) lines.push(`🚨 ต้องตรวจด่วน ${critical} เรื่อง`);
-  if (actionRequired > 0) lines.push(`⚠️ ต้องตรวจ ${actionRequired} เรื่อง`);
-  return lines.join("\n");
+function buildHouseStockBlock(report: MorningBriefReport): string {
+  const stock = report.houseStock;
+  if (stock.status === "missing") return "🏠 ของในบ้าน\nยังไม่มีข้อมูลสต๊อกบ้าน";
+  if (stock.status === "unavailable") return "🏠 ของในบ้าน\n⚠️ ยังตรวจสต๊อกบ้านไม่ได้";
+  return [
+    "🏠 ของในบ้าน",
+    `${stock.groupCount} รายการ • มูลค่า ${satangToBahtText(stock.totalValueSatang)} บาท`,
+  ].join("\n");
 }
 
-/**
- * Block list, one entry per logical section — always small and bounded
- * regardless of how much is happening underneath, because every section is a
- * count or a handful of final numbers, never a list of items. This is what
- * keeps the brief concise even on the busiest day.
- */
 export function buildMorningBriefBlocks(report: MorningBriefReport): string[] {
-  const blocks: string[] = [
-    [MORNING_BRIEF_TITLE, `ข้อมูลวันที่ ${formatThaiDate(report.businessDate)}`].join("\n"),
-    ["📦 แผนซื้อ", buildPurchaseCountsLine(report)].join("\n"),
+  const blocks = [
+    `${MORNING_BRIEF_TITLE} — ${formatThaiDate(report.businessDate)}`,
+    buildPurchaseBlock(report),
+    buildSalesBlock(report),
   ];
 
-  if (report.financial.length === 0) {
-    blocks.push(["💰 ผลประกอบการ", MORNING_BRIEF_NO_FINANCIAL_NOTICE].join("\n"));
-  } else {
-    const showMarketLabel = report.financial.length > 1;
-    for (const entry of report.financial) {
-      blocks.push(buildFinancialBlock(entry, showMarketLabel));
-    }
+  if (report.sales.priceConflictCount > 0) {
+    blocks.push([
+      "⚠️ ต้องตรวจ",
+      `ราคากลางขัดแย้ง ${report.sales.priceConflictCount} จุด / ${report.sales.priceConflictMarketCount} ตลาด`,
+    ].join("\n"));
   }
 
-  const issuesBlock = buildIssuesBlock(report);
-  if (issuesBlock) blocks.push(issuesBlock);
-
+  blocks.push(buildHouseStockBlock(report));
   return blocks;
 }
 
@@ -121,13 +100,6 @@ export function buildMorningBriefMessage(report: MorningBriefReport): string {
   return buildMorningBriefBlocks(report).join("\n\n");
 }
 
-/**
- * Splits into LINE-safe chunks using the same chunkBlocks convention every
- * other multi-message report in this codebase uses. In practice this report
- * is a handful of lines and should never need to split — kept anyway so a
- * pathological multi-market day degrades the same safe way every other
- * report does instead of silently overflowing LINE's limit.
- */
 export function buildMorningBriefMessages(
   report: MorningBriefReport,
   options: { maxCodePoints?: number; maxMessages?: number } = {},

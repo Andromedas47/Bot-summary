@@ -1,17 +1,23 @@
 import { describe, expect, test } from "bun:test";
+import type {
+  SalesIdentityRow,
+  SalesMarketSummary,
+  SalesReport,
+  SalesTotal,
+} from "@/lib/sales/calculate";
 import type { PurchasePlanningItem } from "@/lib/summary/purchase-planning";
-import { summarizePurchasePlanningCounts } from "./morning-brief";
+import { summarizePurchasePlanning, summarizeSales } from "./morning-brief";
 
-function item(status: PurchasePlanningItem["status"]): PurchasePlanningItem {
+function purchaseItem(status: PurchasePlanningItem["status"], productName: string): PurchasePlanningItem {
   return {
-    productName: `p-${Math.random()}`,
+    productName,
     unit: "กก.",
     withdrawnQuantity: 1,
     goodReturnQuantity: 0,
     damagedQuantity: 0,
-    estimatedSoldQuantity: 1,
-    sellThroughRate: 100,
-    band: "high",
+    estimatedSoldQuantity: status === "unknown" ? null : 1,
+    sellThroughRate: status === "unknown" ? null : 100,
+    band: status === "unknown" ? null : "high",
     status,
     uncertaintyReasons: [],
     houseStockQuantity: null,
@@ -22,28 +28,108 @@ function item(status: PurchasePlanningItem["status"]): PurchasePlanningItem {
   };
 }
 
-describe("summarizePurchasePlanningCounts", () => {
-  test("tallies each status from the report's own classification — no recomputation", () => {
-    const counts = summarizePurchasePlanningCounts({
-      items: [
-        item("strong"),
-        item("strong"),
-        item("surplus"),
-        item("reduce"),
-        item("reduce"),
-        item("reduce"),
-        item("unknown"),
-      ],
-    });
-    expect(counts).toEqual({ strong: 2, surplus: 1, reduce: 3, unknown: 1 });
-  });
+function total(overrides: Partial<SalesTotal> = {}): SalesTotal {
+  return {
+    expectedSalesSatang: 2_174_074,
+    quantityAuthoritative: false,
+    valueAuthoritative: false,
+    trustedRowCount: 77,
+    valueBlockedRowCount: 7,
+    quantityBlockedRowCount: 100,
+    ...overrides,
+  };
+}
 
-  test("an empty report tallies to all zero", () => {
-    expect(summarizePurchasePlanningCounts({ items: [] })).toEqual({
-      strong: 0,
-      surplus: 0,
-      reduce: 0,
-      unknown: 0,
+function salesRow(overrides: Partial<SalesIdentityRow> = {}): SalesIdentityRow {
+  return {
+    marketKey: "market-a",
+    marketLabel: "ตลาดเอ",
+    sourceId: "source-a",
+    businessDate: "2026-08-27",
+    productName: "สินค้า",
+    unit: "กก.",
+    withdrawnQuantity: 10,
+    goodReturnQuantity: 0,
+    damagedReturnQuantity: 0,
+    soldQuantity: 10,
+    centralPriceSatang: 1000,
+    expectedSalesSatang: 10_000,
+    status: "TRUSTED",
+    reasons: [],
+    ...overrides,
+  };
+}
+
+function market(marketKey: string, rows: SalesIdentityRow[]): SalesMarketSummary {
+  return { marketKey, marketLabel: rows[0]?.marketLabel ?? marketKey, rows, total: total() };
+}
+
+function salesReport(markets: SalesMarketSummary[]): SalesReport {
+  const rows = markets.flatMap((entry) => entry.rows);
+  return {
+    businessDate: "2026-08-27",
+    markets,
+    products: [],
+    allMarkets: total(),
+    blocked: rows.filter((row) => row.status !== "TRUSTED"),
+    scopeBlockers: [],
+  };
+}
+
+describe("summarizePurchasePlanning", () => {
+  test("uses existing status, preserves ordering, caps actionable names, and hides unknown names", () => {
+    const strong = Array.from({ length: 14 }, (_, index) =>
+      purchaseItem("strong", `ซื้อ-${index + 1}`),
+    );
+    const unknown = Array.from({ length: 88 }, (_, index) =>
+      purchaseItem("unknown", `ไม่รู้-${index + 1}`),
+    );
+
+    const summary = summarizePurchasePlanning({ items: [...strong, ...unknown] });
+
+    expect(summary.strong.count).toBe(14);
+    expect(summary.strong.productNames).toEqual(strong.slice(0, 10).map((item) => item.productName));
+    expect(summary.unknown).toEqual({ count: 88, productNames: [] });
+  });
+});
+
+describe("summarizeSales", () => {
+  test("copies SalesReport totals and uses isSoldOutByAbsentReturn semantics", () => {
+    const soldOut = salesRow();
+    const incompleteReturn = salesRow({
+      productName: "หลักฐานคืนไม่ครบ",
+      returnEvidenceIncomplete: true,
+    });
+    const conflictA = salesRow({
+      productName: "ขัดแย้งเอ",
+      status: "VALUE_BLOCKED",
+      expectedSalesSatang: null,
+      centralPriceSatang: null,
+      reasons: ["central_price_conflict"],
+    });
+    const conflictB = salesRow({
+      marketKey: "market-b",
+      marketLabel: "ตลาดบี",
+      productName: "ขัดแย้งบี",
+      status: "QUANTITY_BLOCKED",
+      soldQuantity: null,
+      expectedSalesSatang: null,
+      centralPriceSatang: null,
+      reasons: ["central_price_conflict"],
+    });
+    const report = salesReport([
+      market("market-a", [soldOut, incompleteReturn, conflictA]),
+      market("market-b", [conflictB]),
+    ]);
+
+    expect(summarizeSales(report)).toEqual({
+      confirmedSalesSatang: 2_174_074,
+      valueAuthoritative: false,
+      trustedCount: 77,
+      unresolvedCount: 107,
+      soldOutCount: 2,
+      priceConflictCount: 2,
+      priceConflictMarketCount: 2,
     });
   });
 });

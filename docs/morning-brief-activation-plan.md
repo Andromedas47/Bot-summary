@@ -7,11 +7,11 @@ accident.
 
 ## What exists today
 
-- `src/lib/summary/morning-brief.ts` — pure types + `PurchasePlanningCounts`
-  tally + the `ActionableIssueCountSource` port.
+- `src/lib/summary/morning-brief.ts` — pure bounded summaries derived from
+  Purchase Planning and Sales contracts.
 - `src/lib/summary/morning-brief-service.ts` — `loadMorningBriefReport`,
-  which calls the existing `loadPurchasePlanningReport` and Task 4's
-  `getDailyFinancialSettlement` and does not recompute either.
+  which calls the existing Purchase Planning, Sales, and authoritative House
+  Stock readers and does not recompute any business rule.
 - `src/lib/summary/morning-brief-message.ts` — `buildMorningBriefMessages`,
   the short LINE rendering.
 - `src/app/api/cron/daily-morning-brief/route.ts` — the cron entry point.
@@ -66,12 +66,10 @@ few real business days.
    Manually trigger `.github/workflows/daily-morning-brief.yml`
    (`workflow_dispatch`, `debug: true`, optionally a specific `date`) and read
    the returned `messages` array. Confirm:
-   - the purchase-planning counts match what `สรุปสินค้าขายดี` reports for
-     the same date;
-   - the financial block(s) match `buildDailyFinancialSettlementMessage`'s
-     own numbers for the same (source, market, date);
-   - a day with a missing financial input renders the waiting state, never
-     "เงินปิดตรง".
+   - the purchase decisions match what `สรุปสินค้าขายดี` reports for the same
+     date;
+   - the verified sales amount and unresolved count match `สรุปยอดขาย`;
+   - the compact House Stock count and value match `สรุปคงเหลือ`.
 
 3. **Add the Supabase Cron entry.**
    Once previews look right for a few different days (a normal day, a

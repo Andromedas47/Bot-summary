@@ -11,7 +11,7 @@ let loadedReport: unknown = { businessDate: "2026-08-22", financial: [] };
 let loadError: Error | null = null;
 let loadCalls: Array<{ client: unknown; businessDate: string }> = [];
 let formatterCalls: unknown[] = [];
-let formatterMessages = ["🌅 สรุปประจำวัน\nข้อมูลวันที่ 22/08/2569"];
+let formatterMessages = ["🌅 สรุปเช้า — 22 สิงหาคม 2569"];
 let pushCalls: Array<{ to: string; text: string; retryKey?: string }> = [];
 let failingTarget: string | null = null;
 
@@ -66,7 +66,7 @@ beforeEach(() => {
   loadError = null;
   loadCalls = [];
   formatterCalls = [];
-  formatterMessages = ["🌅 สรุปประจำวัน\nข้อมูลวันที่ 22/08/2569"];
+  formatterMessages = ["🌅 สรุปเช้า — 22 สิงหาคม 2569"];
   pushCalls = [];
   failingTarget = null;
   Date.now = realDateNow;

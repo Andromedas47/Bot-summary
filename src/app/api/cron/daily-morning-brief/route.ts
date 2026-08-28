@@ -52,9 +52,8 @@ export const MORNING_BRIEF_TARGETS_ENV = "MORNING_BRIEF_LINE_TARGETS";
  *   - Any failure returns 500 for monitoring/manual recovery. A same-date
  *     rerun is safe and idempotent via the deterministic retry keys.
  *   - ?debug=1 previews the exact messages without sending anything.
- *   - Shares MorningBriefReport with no other caller — every underlying
- *     number is loaded from the existing Purchase Planning / Task 4
- *     settlement contracts, never recomputed here.
+ *   - Every underlying number is loaded from the existing Purchase Planning,
+ *     Sales, and authoritative House Stock contracts, never recomputed here.
  */
 export async function GET(req: NextRequest) {
   const secret = process.env.CRON_SECRET;

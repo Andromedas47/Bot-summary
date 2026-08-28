@@ -47,9 +47,14 @@ function imageEvent(id: string, timestamp = Date.UTC(2026, 5, 1, 5, 0, 0)): Line
   };
 }
 
-function stubIngestor(status: "RECEIVED" | "STORAGE_FAILED" = "RECEIVED", evidenceId = "ev-1") {
+function stubIngestor(
+  status: "RECEIVED" | "STORAGE_FAILED" = "RECEIVED",
+  evidenceId = "ev-1",
+  calls?: { count: number },
+) {
   return {
     async ingest() {
+      if (calls) calls.count += 1;
       return {
         evidenceId: status === "RECEIVED" ? evidenceId : null,
         status,
@@ -78,6 +83,7 @@ function activeSession(imageCount: number): ActiveSlipSession {
 describe("WebhookService batch slip flow", () => {
   it("first image in open session (imageCount=0) triggers a reply and schedules OCR", async () => {
     const replies: string[] = [];
+    const ingestCalls = { count: 0 };
     const attachCalls: Array<{ batchId: string; evidenceId: string }> = [];
 
     const slipSessionService: SlipSessionIngestor = {
@@ -87,7 +93,7 @@ describe("WebhookService batch slip flow", () => {
 
     const bgTasks: Array<() => Promise<void>> = [];
     const service = new WebhookService(createRawMessageSupabase(), {
-      evidenceIngestor: stubIngestor("RECEIVED", "ev-1"),
+      evidenceIngestor: stubIngestor("RECEIVED", "ev-1", ingestCalls),
       checkProcessor: stubCheckProcessor,
       slipSessionService,
       batchService: {
@@ -103,12 +109,15 @@ describe("WebhookService batch slip flow", () => {
     expect(replies[0]).toBe(
       `รับรูปหลักฐานแล้วครับ\nถ้ามีหลายใบ ส่งต่อได้เลย\nพิมพ์ "จบสลิป" เมื่อส่งครบ`,
     );
+    expect(ingestCalls.count).toBe(1);
     expect(attachCalls).toEqual([{ batchId: "batch-1", evidenceId: "ev-1" }]);
     expect(bgTasks).toHaveLength(1);
   });
 
   it("subsequent image (imageCount>0) does not reply but still schedules OCR", async () => {
     const replies: string[] = [];
+    const ingestCalls = { count: 0 };
+    const attachCalls: Array<{ batchId: string; evidenceId: string }> = [];
     const bgTasks: Array<() => Promise<void>> = [];
 
     const slipSessionService: SlipSessionIngestor = {
@@ -117,10 +126,12 @@ describe("WebhookService batch slip flow", () => {
     };
 
     const service = new WebhookService(createRawMessageSupabase(), {
-      evidenceIngestor: stubIngestor("RECEIVED", "ev-2"),
+      evidenceIngestor: stubIngestor("RECEIVED", "ev-2", ingestCalls),
       checkProcessor: stubCheckProcessor,
       slipSessionService,
-      batchService: { async attachEvidence() {} },
+      batchService: {
+        async attachEvidence(batchId, evidenceId) { attachCalls.push({ batchId, evidenceId }); },
+      },
       async replyMessage(_, text) { replies.push(text); },
       scheduleBackgroundTask(task) { bgTasks.push(task); },
     });
@@ -128,6 +139,8 @@ describe("WebhookService batch slip flow", () => {
     await service.processEvents([imageEvent("msg-2")], "dest");
 
     expect(replies).toHaveLength(0);
+    expect(ingestCalls.count).toBe(1);
+    expect(attachCalls).toEqual([{ batchId: "batch-1", evidenceId: "ev-2" }]);
     expect(bgTasks).toHaveLength(1);
   });
 
@@ -158,8 +171,10 @@ describe("WebhookService batch slip flow", () => {
     expect(replies[0]).toContain("รับรูปหลักฐานแล้วครับ");
   });
 
-  it("image with no open session replies with open-session instructions and skips OCR", async () => {
+  it("image with no active session is silently ignored before evidence ingestion", async () => {
     const replies: string[] = [];
+    const ingestCalls = { count: 0 };
+    const attachCalls: Array<{ batchId: string; evidenceId: string }> = [];
     const bgTasks: Array<() => Promise<void>> = [];
 
     const slipSessionService: SlipSessionIngestor = {
@@ -168,23 +183,29 @@ describe("WebhookService batch slip flow", () => {
     };
 
     const service = new WebhookService(createRawMessageSupabase(), {
-      evidenceIngestor: stubIngestor(),
+      evidenceIngestor: stubIngestor("RECEIVED", "ev-nosession", ingestCalls),
       checkProcessor: stubCheckProcessor,
       slipSessionService,
-      batchService: { async attachEvidence() {} },
+      batchService: {
+        async attachEvidence(batchId, evidenceId) { attachCalls.push({ batchId, evidenceId }); },
+      },
       async replyMessage(_, text) { replies.push(text); },
       scheduleBackgroundTask(task) { bgTasks.push(task); },
     });
 
     await service.processEvents([imageEvent("msg-nosession")], "dest");
 
-    expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("กรุณาพิมพ์หัวชุดสลิปก่อนส่งรูป");
+    expect(replies).toHaveLength(0);
+    expect(ingestCalls.count).toBe(0);
+    expect(attachCalls).toHaveLength(0);
     expect(bgTasks).toHaveLength(0);
   });
 
-  it("session lookup failure falls back to plain ack so sender is not left silent", async () => {
+  it("session lookup failure ignores the image without evidence ingestion or a reply", async () => {
     const replies: string[] = [];
+    const ingestCalls = { count: 0 };
+    const attachCalls: Array<{ batchId: string; evidenceId: string }> = [];
+    const bgTasks: Array<() => Promise<void>> = [];
 
     const slipSessionService: SlipSessionIngestor = {
       async findActiveSession() { throw new Error("db unavailable"); },
@@ -192,18 +213,22 @@ describe("WebhookService batch slip flow", () => {
     };
 
     const service = new WebhookService(createRawMessageSupabase(), {
-      evidenceIngestor: stubIngestor(),
+      evidenceIngestor: stubIngestor("RECEIVED", "ev-lookup-fail", ingestCalls),
       checkProcessor: stubCheckProcessor,
       slipSessionService,
-      batchService: { async attachEvidence() {} },
+      batchService: {
+        async attachEvidence(batchId, evidenceId) { attachCalls.push({ batchId, evidenceId }); },
+      },
       async replyMessage(_, text) { replies.push(text); },
-      scheduleBackgroundTask() {},
+      scheduleBackgroundTask(task) { bgTasks.push(task); },
     });
 
     await service.processEvents([imageEvent("msg-fallback")], "dest");
 
-    expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("รับรูปหลักฐานแล้วครับ");
+    expect(replies).toHaveLength(0);
+    expect(ingestCalls.count).toBe(0);
+    expect(attachCalls).toHaveLength(0);
+    expect(bgTasks).toHaveLength(0);
   });
 
   it("attach failure does NOT schedule OCR (evidence would be orphaned with no batch_id)", async () => {
@@ -233,10 +258,15 @@ describe("WebhookService batch slip flow", () => {
 
   it("storage failure still replies with retry message regardless of session", async () => {
     const replies: string[] = [];
+    const slipSessionService: SlipSessionIngestor = {
+      async findActiveSession() { return activeSession(0); },
+      async openSession() { return { opened: true, batchId: "batch-1" }; },
+    };
 
     const service = new WebhookService(createRawMessageSupabase(), {
       evidenceIngestor: stubIngestor("STORAGE_FAILED"),
       checkProcessor: stubCheckProcessor,
+      slipSessionService,
       async replyMessage(_, text) { replies.push(text); },
       scheduleBackgroundTask() {},
     });
@@ -284,8 +314,10 @@ describe("WebhookService batch slip flow", () => {
     expect(bgTasks).toHaveLength(0);
   });
 
-  it("image with no open session still replies with open-session instruction (not rejection)", async () => {
+  it("multiple images with no active session are all silently ignored", async () => {
     const replies: string[] = [];
+    const ingestCalls = { count: 0 };
+    const attachCalls: Array<{ batchId: string; evidenceId: string }> = [];
     const bgTasks: Array<() => Promise<void>> = [];
 
     const slipSessionService: SlipSessionIngestor = {
@@ -294,20 +326,25 @@ describe("WebhookService batch slip flow", () => {
     };
 
     const service = new WebhookService(createRawMessageSupabase("raw-nosession"), {
-      evidenceIngestor: stubIngestor("RECEIVED", "ev-nosession"),
+      evidenceIngestor: stubIngestor("RECEIVED", "ev-nosession", ingestCalls),
       checkProcessor: stubCheckProcessor,
       slipSessionService,
-      batchService: { async attachEvidence() {} },
+      batchService: {
+        async attachEvidence(batchId, evidenceId) { attachCalls.push({ batchId, evidenceId }); },
+      },
       async replyMessage(_, text) { replies.push(text); },
       scheduleBackgroundTask(task) { bgTasks.push(task); },
     });
 
-    await service.processEvents([imageEvent("msg-nosession2")], "dest");
+    await service.processEvents([
+      imageEvent("msg-nosession2"),
+      imageEvent("msg-nosession3"),
+      imageEvent("msg-nosession4"),
+    ], "dest");
 
-    expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("กรุณาพิมพ์หัวชุดสลิปก่อนส่งรูป");
-    // Must NOT show the finalizer-rejection message
-    expect(replies[0]).not.toContain("เนื่องจากระบบเริ่มสรุปแล้ว");
+    expect(replies).toHaveLength(0);
+    expect(ingestCalls.count).toBe(0);
+    expect(attachCalls).toHaveLength(0);
     expect(bgTasks).toHaveLength(0);
   });
 });

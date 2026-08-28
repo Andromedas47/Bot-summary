@@ -171,6 +171,7 @@ describe("WebhookService image messages", () => {
           };
         },
       },
+      slipSessionService: newSessionService(),
       async replyMessage(_token, text) {
         replies.push(text);
       },

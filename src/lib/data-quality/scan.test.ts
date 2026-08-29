@@ -126,14 +126,13 @@ describe("scanDataQualityIssues — full wiring", () => {
       },
     });
 
-    // 1 produce candidate + 1 reconciliation candidate + 1 settlement candidate.
-    expect(result.candidateCount).toBe(3);
+    // The clean no-return warning is advisory and creates no inbox candidate.
+    expect(result.candidateCount).toBe(2);
     expect(rpcCalls).toHaveLength(1);
     const payload = rpcCalls[0].p_candidates as Array<Record<string, unknown>>;
-    expect(payload).toHaveLength(3);
+    expect(payload).toHaveLength(2);
     expect(payload.map((r) => r.category).sort()).toEqual(
       [
-        "produce_no_return",
         "financial_reconciliation_mismatch",
         "financial_settlement_mismatch",
       ].sort(),

@@ -303,6 +303,8 @@ describe.skipIf(!pgAvailable)("pending session inactivity lifecycle on PostgreSQ
     expect(await pendingField(key, "inactivity_warning_sent_at")).not.toBe("<null>");
     // No spam on an immediate re-run with no new activity.
     expect(await warn()).toEqual([]);
+    // Not expiry-eligible yet at 25m.
+    expect(await expire()).toEqual([]);
   });
 
   test("T3 — a partial (non-empty) draft at 25m also gets exactly one warning", async () => {
@@ -315,6 +317,34 @@ describe.skipIf(!pgAvailable)("pending session inactivity lifecycle on PostgreSQ
     const { key } = await seedPending({ idleMinutes: 0 });
     await touch(key, "updated_at", 24 + 55 / 60); // 24m55s idle
     expect(await warn()).toEqual([]);
+    expect(await expire()).toEqual([]);
+  });
+
+  // ── P3 fix: the warning sweep's upper bound. A row already expiry-eligible
+  // (>= 30m idle) must never be warned — the "5 minutes left" message would
+  // be factually wrong. Both `warn()` and `expire()` are asserted for each
+  // case, per the required contract: 25m <= idle < 30m is warn-only,
+  // idle >= 30m is expire-only, and the two are always mutually exclusive.
+
+  test("boundary — 29:59 idle still gets a warning and is not yet expiry-eligible", async () => {
+    const { key } = await seedPending({ idleMinutes: 0 });
+    await touch(key, "updated_at", 29 + 59 / 60); // 29m59s idle
+    expect(await warn()).toEqual([key]);
+    expect(await expire()).toEqual([]);
+  });
+
+  test("boundary — exactly 30m idle gets no warning and is expiry-eligible", async () => {
+    const { key } = await seedPending({ idleMinutes: 30, admissionCount: 0 });
+    expect(await warn()).toEqual([]);
+    const result = await expire();
+    expect(result.map((r) => r.sessionKey)).toEqual([key]);
+  });
+
+  test("boundary — well past 30m idle gets no warning and is expiry-eligible", async () => {
+    const { key } = await seedPending({ idleMinutes: 45, admissionCount: 0 });
+    expect(await warn()).toEqual([]);
+    const result = await expire();
+    expect(result.map((r) => r.sessionKey)).toEqual([key]);
   });
 
   // ── T2 / T4: expiry sweep ────────────────────────────────────────────────

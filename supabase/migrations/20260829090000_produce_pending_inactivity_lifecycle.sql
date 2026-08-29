@@ -170,11 +170,25 @@ ALTER TABLE public.pending_sessions
   ));
 
 -- ── 3) warning sweep ─────────────────────────────────────────────────────────
+--
+-- P3 fix: the warning sweep had no upper bound, so a row already >= 30
+-- minutes idle (expiry-eligible) could still receive the "5 minutes left"
+-- push — factually wrong once expiry eligibility is reached, and possible
+-- again on any later tick where the expiry sweep happened to skip the row.
+-- p_expire_after is now a 4th parameter, matching the expiry sweep's own
+-- parameter name and default, so both sweeps are configured from the same
+-- pair of values by the caller.
+
+-- Signature gained a 4th parameter (arity change) — CREATE OR REPLACE cannot
+-- change arity, and any environment that already applied an earlier version
+-- of this unmerged file must not be left with a stale 3-arg overload.
+DROP FUNCTION IF EXISTS public.sweep_pending_session_inactivity_warnings(integer, text, interval);
 
 CREATE OR REPLACE FUNCTION public.sweep_pending_session_inactivity_warnings(
   p_limit               integer,
   p_runtime_environment text,
-  p_warn_after          interval DEFAULT interval '25 minutes'
+  p_warn_after          interval DEFAULT interval '25 minutes',
+  p_expire_after        interval DEFAULT interval '30 minutes'
 ) RETURNS TABLE (
   session_key         text,
   session_generation  uuid,
@@ -205,6 +219,7 @@ BEGIN
       AND p.finalization_started_at IS NULL
       AND p.finalize_hold_until IS NULL
       AND p.updated_at <= clock_timestamp() - p_warn_after
+      AND p.updated_at > clock_timestamp() - p_expire_after
       AND (p.inactivity_warning_sent_at IS NULL OR p.inactivity_warning_sent_at < p.updated_at)
       AND (
         (p_runtime_environment = 'production'
@@ -230,6 +245,7 @@ BEGIN
        OR v_row.finalization_started_at IS NOT NULL
        OR v_row.finalize_hold_until IS NOT NULL
        OR v_row.updated_at > clock_timestamp() - p_warn_after
+       OR v_row.updated_at <= clock_timestamp() - p_expire_after
        OR (v_row.inactivity_warning_sent_at IS NOT NULL
            AND v_row.inactivity_warning_sent_at >= v_row.updated_at)
     THEN
@@ -261,7 +277,7 @@ BEGIN
 END;
 $fn$;
 
-COMMENT ON FUNCTION public.sweep_pending_session_inactivity_warnings(integer, text, interval) IS
+COMMENT ON FUNCTION public.sweep_pending_session_inactivity_warnings(integer, text, interval, interval) IS
   'Claims open, un-closed pending sessions idle for p_warn_after and stamps '
   'inactivity_warning_sent_at so the caller can push exactly one LINE warning per '
   'idle window. Never touches a closed, refused, or already-terminal row. Does not '
@@ -410,9 +426,9 @@ COMMENT ON FUNCTION public.sweep_pending_session_inactivity_expiry(integer, text
 
 -- ── 5) grants ─────────────────────────────────────────────────────────────────
 
-REVOKE ALL ON FUNCTION public.sweep_pending_session_inactivity_warnings(integer, text, interval)
+REVOKE ALL ON FUNCTION public.sweep_pending_session_inactivity_warnings(integer, text, interval, interval)
   FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.sweep_pending_session_inactivity_warnings(integer, text, interval)
+GRANT EXECUTE ON FUNCTION public.sweep_pending_session_inactivity_warnings(integer, text, interval, interval)
   TO service_role;
 
 REVOKE ALL ON FUNCTION public.sweep_pending_session_inactivity_expiry(integer, text, interval)

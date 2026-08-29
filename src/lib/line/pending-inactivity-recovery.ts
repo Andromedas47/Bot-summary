@@ -98,6 +98,9 @@ export async function sweepPendingSessionInactivityWarnings(
       p_limit: limit,
       p_runtime_environment: getRuntimeEnvironment(),
       p_warn_after: INACTIVITY_WARN_AFTER,
+      // Shared with the expiry sweep so a row already expiry-eligible is
+      // never warned — see the migration's P3 fix comment.
+      p_expire_after: INACTIVITY_EXPIRE_AFTER,
     },
   );
 

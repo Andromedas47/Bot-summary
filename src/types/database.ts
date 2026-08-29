@@ -2168,6 +2168,8 @@ export interface Database {
           p_limit: number;
           p_runtime_environment: string;
           p_warn_after?: string;
+          /** P3 fix: shared with the expiry sweep's own default/parameter. */
+          p_expire_after?: string;
         };
         Returns: Array<{
           session_key: string;

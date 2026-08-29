@@ -7,6 +7,7 @@ import {
   classifyRoundReturns,
   hasCloserLine,
   pendingRowCanBeReturn,
+  RESOLVED_PENDING_STATUSES,
   roundsWithIncompleteReturn,
   roundsWithPersistedReturn,
   type RoundReturnEvidence,
@@ -113,5 +114,15 @@ describe("round return classification", () => {
       [evidence(), evidence({ closeAttempted: true })],
     );
     expect(statuses[0]!.state).toBe("blocked");
+  });
+
+  test("T2 — an inactivity-expired empty draft is resolved, an expired incomplete one is not", () => {
+    // 20260829090000: expired_empty_draft (zero accepted items) is resolved —
+    // nothing was ever entered, so loadRoundReturnStatuses excludes it before
+    // it ever becomes evidence (same as 'finalized'/'duplicate'). failed_closed
+    // stays unresolved even when its reason is the >=1-item inactivity expiry
+    // (expired_incomplete): that draft DID accept real content.
+    expect(RESOLVED_PENDING_STATUSES.has("expired_empty_draft")).toBe(true);
+    expect(RESOLVED_PENDING_STATUSES.has("failed_closed")).toBe(false);
   });
 });

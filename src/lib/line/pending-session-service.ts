@@ -57,7 +57,9 @@ export interface PendingSession {
   finalization_started_at?:       string | null;
   finalized_at?:                  string | null;
   finalization_status?:
-    | "pending" | "processing" | "failed_closed" | "duplicate" | "finalized";
+    | "pending" | "processing" | "failed_closed" | "duplicate" | "finalized"
+    /** 20260829090000: inactivity-expired draft that accepted zero items. */
+    | "expired_empty_draft";
   finalization_error?:            unknown | null;
   finalized_produce_session_id?:  string | null;
   /** P2E: generated economic-cycle identity; NULL is legacy/unbound. */

@@ -2162,6 +2162,37 @@ export interface Database {
           close_refused_at: string;
         }>;
       };
+      /** 20260829090000: inactivity lifecycle for OPEN, un-closed pending sessions. */
+      sweep_pending_session_inactivity_warnings: {
+        Args: {
+          p_limit: number;
+          p_runtime_environment: string;
+          p_warn_after?: string;
+        };
+        Returns: Array<{
+          session_key: string;
+          session_generation: string;
+          line_user_id: string | null;
+          source_id: string | null;
+          updated_at: string;
+        }>;
+      };
+      sweep_pending_session_inactivity_expiry: {
+        Args: {
+          p_limit: number;
+          p_runtime_environment: string;
+          p_expire_after?: string;
+        };
+        Returns: Array<{
+          session_key: string;
+          session_generation: string;
+          line_user_id: string | null;
+          source_id: string | null;
+          accountability_round_id: string | null;
+          outcome: string;
+          accepted_item_count: number;
+        }>;
+      };
       close_accountability_round: {
         Args: {
           p_accountability_round_id: string;

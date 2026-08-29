@@ -9,6 +9,10 @@ import {
 } from "@/lib/line/produce-notification-delivery";
 import { processExpiredPendingProduceEvents } from "@/lib/line/pending-produce-reorder";
 import { recoverStrandedPendingCloses } from "@/lib/line/pending-close-recovery";
+import {
+  sweepPendingSessionInactivityWarnings,
+  sweepPendingSessionInactivityExpiry,
+} from "@/lib/line/pending-inactivity-recovery";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -42,11 +46,20 @@ export async function GET(req: NextRequest) {
     // was refused and never resolved. Deliberately last — it only ever touches
     // rows with NO close scheduled, which the finalizer above never looks at.
     const closeRecovery = await recoverStrandedPendingCloses(supabase);
+    // Inactivity lifecycle for OPEN pending sessions: never touches a row any
+    // sweep above already claimed (all four require a close boundary this
+    // pair deliberately excludes). Warning before expiry, so a session that
+    // crosses 30 minutes in one sweep run still gets its 25-minute warning
+    // recorded first.
+    const inactivityWarnings = await sweepPendingSessionInactivityWarnings(supabase);
+    const inactivityExpiry = await sweepPendingSessionInactivityExpiry(supabase);
     logger.info("pending produce finalizer completed", {
       ...result,
       deferredProduceEvents,
       notifications,
       closeRecovery,
+      inactivityWarnings,
+      inactivityExpiry,
     });
     return NextResponse.json({
       ok: true,
@@ -54,6 +67,8 @@ export async function GET(req: NextRequest) {
       deferredProduceEvents,
       notifications,
       closeRecovery,
+      inactivityWarnings,
+      inactivityExpiry,
       triggeredAt: new Date().toISOString(),
     });
   } catch (error) {

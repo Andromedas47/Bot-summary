@@ -455,7 +455,7 @@ describe("P1 pending-session lifecycle", () => {
 
     expect(report.scopeBlockers).toEqual([{ kind: "unresolved_pending_session", count: 1 }]);
     expect(filterLog).toContain(
-      "pending_sessions.or:finalization_status.is.null,finalization_status.not.in.(finalized,duplicate)",
+      "pending_sessions.or:finalization_status.is.null,finalization_status.not.in.(finalized,duplicate,expired_empty_draft)",
     );
   });
 

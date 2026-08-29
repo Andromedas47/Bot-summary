@@ -82,10 +82,14 @@ const BLOCKING_PARSE_ERROR_TYPES = ["parser_crash", "timeout", "validation_error
 
 /**
  * Pending finalization states that account for the produce: 'finalized' created
- * the produce_session, 'duplicate' proved one already existed. Everything else
- * ('pending', 'processing', 'failed_closed') is produce that never landed.
+ * the produce_session, 'duplicate' proved one already existed, and
+ * 'expired_empty_draft' (20260829090000) proves the inactivity sweep found
+ * ZERO accepted items — nothing was ever entered, so it is not missing
+ * produce. Everything else ('pending', 'processing', 'failed_closed',
+ * including the >=1-item 'expired_incomplete' reason on 'failed_closed') is
+ * produce that never landed.
  */
-const RESOLVED_PENDING_STATUSES = new Set(["finalized", "duplicate"]);
+const RESOLVED_PENDING_STATUSES = new Set(["finalized", "duplicate", "expired_empty_draft"]);
 
 /**
  * Identity columns a failed pending session needs before its lifecycle can be

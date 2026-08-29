@@ -29,6 +29,13 @@ function formatPrice(value: number): string {
 
 function describe(exception: ProduceValidationException): string[] {
   switch (exception.kind) {
+    case "subunit_confirmation":
+      return [
+        `${exception.productName}`,
+        `   กรอก: ${formatQuantity(exception.enteredQuantity)} ${exception.enteredUnit}`,
+        `   ระบบแปลงเป็น: ${formatQuantity(exception.canonicalQuantity)} ${exception.canonicalUnit}`,
+        `   กรุณาส่ง “ยืนยันข้อ ${exception.itemNumber}” หรือ “แก้ข้อ ${exception.itemNumber}”`,
+      ];
     case "duplicate_item_number":
       return [
         `พบเลขข้อ ${exception.itemNumber} ซ้ำ ${exception.matchCount} รายการ`,
@@ -258,6 +265,15 @@ function reviewHeadline(result: ProduceValidationResult): string {
 }
 
 function reviewCorrectionGuidance(result: ProduceValidationResult): string[] {
+  const subunitNumbers = [...new Set(result.reviews
+    .filter((review) => review.kind === "subunit_confirmation")
+    .map((review) => review.itemNumber))];
+  if (subunitNumbers.length > 0) {
+    return [
+      `ยืนยันทีละข้อ: ${subunitNumbers.map((number) => `“ยืนยันข้อ ${number}”`).join(", ")}`,
+      "ถ้าจะแก้ ให้ส่ง “แก้ข้อ <เลขข้อ>” แล้วส่งรายการใหม่",
+    ];
+  }
   const itemNumbers = [...new Set(result.reviews.map((review) => review.itemNumber))];
   if (itemNumbers.length === 1) {
     return [

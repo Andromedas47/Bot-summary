@@ -12,6 +12,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { WeighSession } from "@/lib/parsers/weigh-session/types";
 import {
   validateProduceEntry,
+  computeValidationDigest,
   type ProduceValidationResult,
   type RoundMasterRow,
 } from "./entry-validation";
@@ -112,12 +113,27 @@ export async function evaluateProduceEntryGate(
     parsed,
     roundRows,
     roundBound: ref.accountabilityRoundId !== null,
+    validationIdentity: {
+      sessionKey: ref.sessionKey,
+      sessionGeneration: ref.sessionGeneration,
+      accountabilityRoundId: ref.accountabilityRoundId,
+    },
   });
 
   if (result.reviews.length === 0) {
     return { result, reviewConfirmed: false };
   }
-  return { result, reviewConfirmed: await isReviewConfirmed(supabase, ref, result.digest) };
+  const subunits = result.reviews.filter((review) => review.kind === "subunit_confirmation");
+  const otherReviews = result.reviews.filter((review) => review.kind !== "subunit_confirmation");
+  const productConfirmed = otherReviews.length === 0
+    || await isReviewConfirmed(supabase, ref, result.digest);
+  const subunitsConfirmed = await Promise.all(subunits.map((review) =>
+    isReviewConfirmed(supabase, ref, computeValidationDigest(parsed, [], [review], {
+      sessionKey: ref.sessionKey,
+      sessionGeneration: ref.sessionGeneration,
+      accountabilityRoundId: ref.accountabilityRoundId,
+    }))));
+  return { result, reviewConfirmed: productConfirmed && subunitsConfirmed.every(Boolean) };
 }
 
 async function isReviewConfirmed(
@@ -152,6 +168,7 @@ export async function recordProduceValidationReview(
   ref: ProduceValidationSessionRef,
   result: ProduceValidationResult,
   lineEventId: string,
+  parsed?: WeighSession,
 ): Promise<RecordedProduceReview> {
   if (result.reviews.length === 0) {
     throw new ProduceValidationGateError("no validation review to record");
@@ -184,6 +201,30 @@ export async function recordProduceValidationReview(
     confirmed?: boolean;
     presented_line_event_id?: string | null;
   };
+  // Risky subunits are independently confirmable. Keep the full review row
+  // for existing product-vocabulary behavior, and add one row per item.
+  if (parsed) for (const review of result.reviews.filter((entry) => entry.kind === "subunit_confirmation")) {
+    const itemDigest = computeValidationDigest(parsed, [], [review], {
+      sessionKey: ref.sessionKey,
+      sessionGeneration: ref.sessionGeneration,
+      accountabilityRoundId: ref.accountabilityRoundId,
+    });
+    const itemRecord = await supabase.rpc("record_produce_validation_review", {
+      p_session_key: ref.sessionKey,
+      p_session_generation: ref.sessionGeneration,
+      p_accountability_round_id: ref.accountabilityRoundId,
+      p_validation_digest: itemDigest,
+      p_business_date: ref.businessDate,
+      p_market_label: ref.marketLabel,
+      p_staff_label: ref.staffLabel,
+      p_exceptions: [review],
+      p_line_user_id: ref.lineUserId,
+      p_line_event_id: lineEventId,
+    });
+    if (itemRecord.error) throw new ProduceValidationGateError(
+      `subunit validation review could not be recorded: ${itemRecord.error.message}`,
+    );
+  }
   return {
     confirmed: Boolean(row.confirmed),
     presentedLineEventId: row.presented_line_event_id ?? lineEventId,
@@ -218,8 +259,16 @@ export async function runProduceCloseGate(
   if (result.status === "blocked") return { decision: "blocked", result };
   if (result.status === "clean" || reviewConfirmed) return { decision: "proceed", result };
 
-  const recorded = await recordProduceValidationReview(supabase, ref, result, lineEventId);
-  if (recorded.confirmed) return { decision: "proceed", result };
+  const recorded = await recordProduceValidationReview(supabase, ref, result, lineEventId, parsed);
+  if (recorded.confirmed) {
+    // The legacy whole-review row may be acknowledged by the second close;
+    // risky subunit rows still have to be checked independently.
+    if (result.reviews.some((review) => review.kind === "subunit_confirmation")) {
+      const current = await evaluateProduceEntryGate(supabase, ref, parsed);
+      if (!current.reviewConfirmed) return { decision: "review_presented", result: current.result };
+    }
+    return { decision: "proceed", result };
+  }
   if (recorded.presentedLineEventId === lineEventId) {
     return { decision: "review_presented", result };
   }
@@ -230,9 +279,12 @@ export async function runProduceCloseGate(
     result.digest,
     lineEventId,
   );
-  return confirmation === "not_found"
-    ? { decision: "review_presented", result }
-    : { decision: "proceed", result };
+  if (confirmation === "not_found") return { decision: "review_presented", result };
+  if (result.reviews.some((review) => review.kind === "subunit_confirmation")) {
+    const current = await evaluateProduceEntryGate(supabase, ref, parsed);
+    if (!current.reviewConfirmed) return { decision: "review_presented", result: current.result };
+  }
+  return { decision: "proceed", result };
 }
 
 /**
@@ -256,6 +308,43 @@ export async function runProduceFinalizeGate(
 }
 
 export type ProduceReviewConfirmation = "confirmed" | "already_confirmed" | "not_found";
+
+/** Confirm exactly one currently parsed risky-subunit item. */
+export async function confirmProduceSubunitReview(
+  supabase: AnyClient,
+  ref: ProduceValidationSessionRef,
+  parsed: WeighSession,
+  itemNumber: number,
+  lineEventId: string,
+): Promise<ProduceReviewConfirmation> {
+  const roundRows = ref.accountabilityRoundId
+    ? await loadRoundMasterRows(supabase, ref.accountabilityRoundId)
+    : [];
+  const result = validateProduceEntry({
+    parsed,
+    roundRows,
+    roundBound: ref.accountabilityRoundId !== null,
+    validationIdentity: {
+      sessionKey: ref.sessionKey,
+      sessionGeneration: ref.sessionGeneration,
+      accountabilityRoundId: ref.accountabilityRoundId,
+    },
+  });
+  const review = result.reviews.find((entry) =>
+    entry.kind === "subunit_confirmation" && entry.itemNumber === itemNumber);
+  if (!review || result.reviews.filter((entry) => entry.kind === "subunit_confirmation"
+    && entry.itemNumber === itemNumber).length !== 1) return "not_found";
+  return confirmProduceValidationReview(
+    supabase,
+    ref,
+    computeValidationDigest(parsed, [], [review], {
+      sessionKey: ref.sessionKey,
+      sessionGeneration: ref.sessionGeneration,
+      accountabilityRoundId: ref.accountabilityRoundId,
+    }),
+    lineEventId,
+  );
+}
 
 /**
  * Acknowledge the exception set identified by `digest`.

@@ -4,6 +4,7 @@ import type { WeighSession, WeighSessionItem } from "@/lib/parsers/weigh-session
 import {
   runProduceCloseGate,
   runProduceFinalizeGate,
+  confirmProduceSubunitReview,
   ProduceValidationGateError,
   type ProduceValidationSessionRef,
 } from "./entry-validation-gate";
@@ -196,6 +197,22 @@ const withdrawal: RoundMasterRow[] = [
     transaction_type: "เบิก",
   },
 ];
+
+describe("per-item subunit confirmations", () => {
+  it("holds each item until its own confirmation is recorded", async () => {
+    const parsed = session([
+      item({ product_name: "องุ่น", entered_quantity: 300, entered_unit: "กรัม", quantity: 0.3 }),
+      item({ product_name: "มะม่วง", entered_quantity: 2, entered_unit: "ขีด", quantity: 0.2 }),
+    ]);
+    const db = new FakeDb();
+    const first = await runProduceCloseGate(db.client(), REF, parsed, "E1");
+    expect(first.decision).toBe("review_presented");
+    expect(db.reviews.length).toBe(3); // whole review + one row per item
+    expect(await confirmProduceSubunitReview(db.client(), REF, parsed, 1, "C1")).toBe("confirmed");
+    const second = await runProduceCloseGate(db.client(), REF, parsed, "E2");
+    expect(second.decision).toBe("review_presented");
+  });
+});
 
 const priceChange = (price = 120) =>
   session([

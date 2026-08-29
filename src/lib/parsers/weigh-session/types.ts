@@ -62,6 +62,9 @@ export interface WeighSessionItem {
    *  pending-session-finalizer.ts. Anything that spreads a WeighSessionItem
    *  toward storage has to strip it. */
   legacy_subunit_price_per_unit?: number;
+  /** Ephemeral operator evidence for risky subunit entry; never persisted. */
+  entered_quantity?: number;
+  entered_unit?: string;
 }
 
 export interface WeighSession {

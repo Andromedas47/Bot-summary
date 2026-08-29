@@ -609,6 +609,10 @@ function applyQuantity(
   // price basis. A price quoted per a different amount is its own grammar:
   // pricing_mode "basis" (see parseItemLine's ITEM_WITH_BASIS branch).
   const resolved = resolveUnitQuantity(quantity, unit);
+  if (unit.trim() === "ขีด" || unit.trim() === "กรัม") {
+    item.entered_quantity = quantity;
+    item.entered_unit = unit.trim();
+  }
   item.quantity  = resolved.quantity;
   item.unit      = resolved.unit;
 
@@ -642,6 +646,8 @@ function finalize(
     basis_unit:       p.basis_unit     ?? null,
     basis_price:      p.basis_price    ?? null,
     legacy_subunit_price_per_unit: p.legacy_subunit_price_per_unit,
+    entered_quantity: p.entered_quantity,
+    entered_unit: p.entered_unit,
   };
 }
 
@@ -702,6 +708,9 @@ function parseItemLine(
       basis_quantity: resolved.quantity,
       basis_unit:     resolved.unit,
       basis_price:    parseFloat(withBasis[5]),
+      ...(withBasis[4] === "ขีด" || withBasis[4] === "กรัม"
+        ? { entered_quantity: parseFloat(withBasis[3]), entered_unit: withBasis[4] }
+        : {}),
     };
   }
 

@@ -46,11 +46,13 @@ import {
   getWeighSessionFinalizationErrors,
   buildWeighSessionValidationReply,
 } from "@/lib/parsers/weigh-session/parser";
+import { buildSeedFromStructuredMetadata } from "@/lib/parsers/weigh-session/seed";
 import { RE } from "@/lib/parsers/weigh-session/regex";
 import {
   buildDraftItemActionReply,
   findDraftItemCommand,
   latestDraftItemAction,
+  parseSubunitConfirmCommandLine,
 } from "@/lib/parsers/weigh-session/draft-item-command";
 import { mainCloserRefusal } from "@/lib/parsers/weigh-session/main-closer";
 import {
@@ -148,7 +150,7 @@ import {
 } from "@/lib/line/data-entry-session-ownership";
 import { tryHandlePurchaseCaptureMessage } from "@/lib/purchase-capture/webhook-handler";
 import { bindPlainTextRound } from "@/lib/produce/plain-text-round-binding";
-import { runProduceCloseGate } from "@/lib/produce/entry-validation-gate";
+import { confirmProduceSubunitReview, runProduceCloseGate } from "@/lib/produce/entry-validation-gate";
 import {
   buildBlockingValidationReply,
   buildPlainTextReviewValidationReply,
@@ -1090,6 +1092,80 @@ export class WebhookService {
           }
         }
         return { eventId, eventType: event.type, status: "saved", parsed: true };
+      }
+
+      const subunitConfirm = parseSubunitConfirmCommandLine(text);
+      if (subunitConfirm) {
+        if (expired) {
+          log.warn("expired produce confirmation refused", {
+            sessionKey: pending.session_key,
+            sessionGeneration: pending.session_generation,
+          });
+          if (replyToken) await this.replyMessage(replyToken, STALE_PRODUCE_SESSION_REPLY);
+          return { eventId, eventType: event.type, status: "saved", parsed: false };
+        }
+        const structured = pending as StructuredPendingSession;
+        const parsed = structured.entry_origin != null
+          ? parseWeighSession(
+              pending.accumulated_text,
+              structured.business_date ?? bangkokToday(),
+              undefined,
+              buildSeedFromStructuredMetadata(structured),
+            )
+          : parseWeighSession(pending.accumulated_text, bangkokToday());
+        let roundId = pending.accountability_round_id ?? null;
+        try {
+          if ((pending as StructuredPendingSession).entry_origin == null) {
+            const binding = await bindPlainTextRound(
+              this.supabase,
+              {
+                sessionKey: pending.session_key,
+                sessionGeneration: pending.session_generation,
+                sourceId: pending.source_id,
+                lineUserId: pending.line_user_id,
+              },
+              parsed,
+            );
+            if (binding.status === "refused") {
+              if (replyToken) await this.replyMessage(replyToken, binding.detail);
+              return { eventId, eventType: event.type, status: "saved", parsed: false };
+            }
+            if (binding.status === "bound") roundId = binding.accountabilityRoundId;
+          }
+          const result = await confirmProduceSubunitReview(
+            this.supabase,
+            {
+              sessionKey: pending.session_key,
+              sessionGeneration: pending.session_generation,
+              accountabilityRoundId: roundId,
+              businessDate: structured.entry_origin != null
+                ? structured.business_date ?? null
+                : parsed.date,
+              marketLabel: structured.entry_origin != null
+                ? structured.market_label ?? null
+                : parsed.session_title,
+              staffLabel: structured.entry_origin != null
+                ? structured.staff_label ?? null
+                : parsed.staff_name,
+              lineUserId: pending.line_user_id,
+            },
+            parsed,
+            subunitConfirm.itemNumber,
+            eventId,
+          );
+          if (replyToken) await this.replyMessage(replyToken,
+            result === "not_found"
+              ? `⛔ ยืนยันข้อ ${subunitConfirm.itemNumber} ไม่ได้\nรายการนี้ไม่ใช่รายการย่อยที่ต้องยืนยัน หรือข้อมูลเปลี่ยนแล้ว`
+              : `✅ ยืนยันข้อ ${subunitConfirm.itemNumber} แล้ว\nกรุณาส่ง “จบรายการ” อีกครั้งเมื่อยืนยันครบทุกข้อ`,
+          );
+        } catch (error) {
+          log.error("subunit confirmation failed", {
+            sessionKey: pending.session_key,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          if (replyToken) await this.replyMessage(replyToken, PRODUCE_ENTRY_GATE_UNAVAILABLE_REPLY);
+        }
+        return { eventId, eventType: event.type, status: "saved", parsed: false };
       }
 
       if (isExactRecoverLatestCommand(text)) {

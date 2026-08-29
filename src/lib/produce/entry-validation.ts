@@ -28,6 +28,7 @@ import {
   isKnownUnit,
   nearestKnownUnit,
   normalizeUnitAlias,
+  resolveUnitQuantity,
 } from "@/lib/parsers/weigh-session/units";
 import { normalizeProductName } from "@/lib/summary/remaining-fruit";
 import { baseTransactionType } from "@/lib/summary/transactions";
@@ -43,6 +44,16 @@ const QUANTITY_EPSILON = 0.0005;
 export type ProduceValidationSeverity = "blocking" | "review_required" | "advisory";
 
 export type ProduceValidationException =
+  | {
+      kind: "subunit_confirmation";
+      severity: "review_required";
+      itemNumber: number;
+      productName: string;
+      enteredQuantity: number;
+      enteredUnit: "ขีด" | "กรัม";
+      canonicalQuantity: number;
+      canonicalUnit: string;
+    }
   /** A printed number must identify exactly one draft item before close. */
   | {
       kind: "duplicate_item_number";
@@ -253,6 +264,11 @@ export interface ProduceValidationInput {
    * guessing, not fail-closed. Unit vocabulary is checked either way.
    */
   roundBound: boolean;
+  validationIdentity?: {
+    sessionKey: string;
+    sessionGeneration: string;
+    accountabilityRoundId: string | null;
+  };
 }
 
 export function validateProduceEntry(input: ProduceValidationInput): ProduceValidationResult {
@@ -308,6 +324,7 @@ export function validateProduceEntry(input: ProduceValidationInput): ProduceVali
   // this round actually holds, and it is exactly what this section protects
   // from being created under a misspelled name in the first place.
   reviews.push(...vocabularyExceptions(parsed));
+  reviews.push(...subunitExceptions(parsed));
 
   // ── 2. Identity and price of every return line, against the master.
   // An unbound legacy session has no knowable round, so the only master it can
@@ -390,13 +407,37 @@ export function validateProduceEntry(input: ProduceValidationInput): ProduceVali
     }
   }
 
-  const digest = computeValidationDigest(parsed, blocking, reviews);
+  const digest = computeValidationDigest(parsed, blocking, reviews, input.validationIdentity);
   const status = blocking.length > 0
     ? "blocked"
     : reviews.length > 0
       ? "review_required"
       : "clean";
   return { status, blocking, reviews, advisories, digest };
+}
+
+function subunitExceptions(parsed: WeighSession): ProduceValidationReview[] {
+  return [...parsed.items]
+    .filter((item) => item.entered_quantity !== undefined
+      && (item.entered_unit === "ขีด" || item.entered_unit === "กรัม")
+      && item.quantity !== null && item.unit !== null)
+    .sort((a, b) => a.item_number - b.item_number)
+    .map((item) => {
+      // A risky unit can appear in a price-basis header while the final
+      // quantity arrives on a separate line. Show the conversion of the
+      // risky expression itself, not that later final quantity.
+      const canonical = resolveUnitQuantity(item.entered_quantity!, item.entered_unit!);
+      return {
+        kind: "subunit_confirmation" as const,
+        severity: "review_required" as const,
+        itemNumber: item.item_number,
+        productName: item.product_name,
+        enteredQuantity: item.entered_quantity!,
+        enteredUnit: item.entered_unit as "ขีด" | "กรัม",
+        canonicalQuantity: canonical.quantity,
+        canonicalUnit: canonical.unit,
+      };
+    });
 }
 
 /**
@@ -467,7 +508,15 @@ export function computeValidationDigest(
   parsed: WeighSession,
   blocking: ProduceValidationBlocking[],
   reviews: ProduceValidationReview[],
+  identity?: ProduceValidationInput["validationIdentity"],
 ): string {
+  // Legacy unbound finalizers already have review rows whose digest predates
+  // session identity. The review table's session_key + generation columns
+  // still bind those rows exactly; keep their digest stable. Bound rounds hash
+  // the full identity because the confirm RPC does not receive round id.
+  const identityFields = identity?.accountabilityRoundId
+    ? [identity.sessionKey, identity.sessionGeneration, identity.accountabilityRoundId]
+    : ["", "", ""];
   const canonicalItems = [...parsed.items]
     .sort((a, b) => a.item_number - b.item_number)
     .map((item: WeighSessionItem) =>
@@ -489,6 +538,7 @@ export function computeValidationDigest(
         parsed.date ?? "",
         parsed.staff_name,
         parsed.session_title ?? "",
+        ...identityFields,
         ...canonicalItems,
         "--",
         ...canonicalExceptions,

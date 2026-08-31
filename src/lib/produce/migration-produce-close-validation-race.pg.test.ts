@@ -242,11 +242,26 @@ describe.skipIf(!pgAvailable)("produce close validation race on PostgreSQL 17", 
     await scalar("DELETE FROM public.accountability_rounds RETURNING 1");
   });
 
-  test("the migration is idempotent", async () => {
+  test("the migrations are idempotent", async () => {
+    // Re-applied IN ORDER. 20260901090000 replaces record_/confirm_ that
+    // 20260831120000 also defines, so replaying only the older one would leave
+    // the database on the older definitions and silently disarm the delivery
+    // guard for every later test.
     await apply(join(
       ROOT, "supabase", "migrations",
       "20260831120000_produce_close_validation_race.sql",
     ));
+    await apply(join(
+      ROOT, "supabase", "migrations",
+      "20260901090000_produce_finalizer_review_presentation.sql",
+    ));
+
+    // The delivery guard must be the live definition after any replay.
+    expect(await scalar(`
+      SELECT (p.prosrc LIKE '%not_presented%')::text
+      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'public' AND p.proname = 'confirm_produce_validation_review'`))
+      .toBe("true");
     expect(await scalar(`
       SELECT count(*)::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
       WHERE n.nspname = 'public' AND p.proname = 'append_pending_session'`)).toBe("2");

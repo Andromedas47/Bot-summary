@@ -527,12 +527,18 @@ describe.skipIf(!pgAvailable)("produce close validation race on PostgreSQL 17", 
         SELECT translate(p.prosrc, E'\\n\\r\\t', '   ')
         FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname = 'public' AND p.proname = ${q(fn)}`);
-      // The pending_sessions lock must be taken, and taken first.
-      const pendingLock = src.indexOf("public.pending_sessions");
-      const reviewTouch = src.indexOf("public.produce_entry_validation_reviews");
+      // Compare STATEMENTS, not any mention: the DECLARE block names the
+      // review table as a row type long before either table is touched.
+      const pendingLock = src.indexOf("FROM public.pending_sessions");
+      const reviewStatements = [
+        src.indexOf("INSERT INTO public.produce_entry_validation_reviews"),
+        src.indexOf("FROM public.produce_entry_validation_reviews"),
+        src.indexOf("UPDATE public.produce_entry_validation_reviews"),
+      ].filter((index) => index > -1);
+
       expect(pendingLock).toBeGreaterThan(-1);
-      expect(reviewTouch).toBeGreaterThan(-1);
-      expect(pendingLock).toBeLessThan(reviewTouch);
+      expect(reviewStatements.length).toBeGreaterThan(0);
+      expect(pendingLock).toBeLessThan(Math.min(...reviewStatements));
     }
     expect(await scalar(`
       SELECT count(*)::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace

@@ -164,7 +164,7 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
         SELECT category_code, count(*) AS n
         FROM public.produce_product_codes GROUP BY category_code
       ) t`);
-    expect(rows).toBe("ท=26,ป=36,ผ=118,พ=7,ม=73,ห=4");
+    expect(rows).toBe("ท=26,ป=36,ผ=118,พ=7,ม=74,ห=4");
   });
 
   test("stores the canonical name of every code exactly as approved", async () => {

@@ -247,11 +247,11 @@ describe.skipIf(!pgAvailable)("pending session inactivity lifecycle on PostgreSQ
     // proves this migration lands on TOP of that lifecycle without disturbing it.
     await apply(join(
       ROOT, "supabase", "migrations",
-      "20260817090200_produce_pending_supersession_and_close_recovery.sql",
+      "20260817080439_produce_pending_supersession_and_close_recovery.sql",
     ));
     await apply(join(
       ROOT, "supabase", "migrations",
-      "20260817090300_produce_supersession_runtime_environment.sql",
+      "20260817085632_produce_supersession_runtime_environment.sql",
     ));
     await apply(join(
       ROOT, "supabase", "migrations",

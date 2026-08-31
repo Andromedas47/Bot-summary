@@ -76,7 +76,7 @@ function Await-Proc($Proc, [string]$Label, [int]$TimeoutSec = 60, [string]$OutFi
 }
 
 Run-Sql "bootstrap (0051 minimal stub)" (Join-Path $Root "supabase/tests/guided_menu_0051_bootstrap.sql")
-Run-Sql "apply candidate 0051" (Join-Path $Root "supabase/migrations/0051_guided_menu_identity_and_state.sql")
+Run-Sql "apply candidate 0051" (Join-Path $Root "supabase/migrations/20260729074617_guided_menu_identity_and_state.sql")
 Run-Sql "0051 behavioural verification" (Join-Path $Root "supabase/tests/guided_menu_0051_verification.sql")
 
 Write-Host "==> 0051 deterministic two-connection consume race"

@@ -1,5 +1,5 @@
 /**
- * Real PostgreSQL harness for P3 (20260808130000_p3_profitability_snapshots.sql).
+ * Real PostgreSQL harness for P3 (20260809075951_p3_profitability_snapshots.sql).
  *
  * Harness style (psql resolution, probe, REQUIRE_P3_POSTGRES hard-fail,
  * describe.skipIf, one disposable randomly-named database, unconditional
@@ -9,14 +9,14 @@
  * ── Apply chain ─────────────────────────────────────────────────────────────
  *
  *   supabase/tests/purchase_capture_slice_b_bootstrap.sql
- *   supabase/migrations/0052_purchase_receipt_persistence.sql
+ *   supabase/migrations/20260729084558_purchase_receipt_persistence.sql
  *   supabase/tests/purchase_capture_slice_c_pre_0053.sql
- *   supabase/migrations/0053_inventory_movement_ledger.sql
+ *   supabase/migrations/20260729172613_inventory_movement_ledger.sql
  *   supabase/tests/p3_profitability_bootstrap.sql
- *   supabase/migrations/20260808105001_p2e_accountability_round_identity.sql
- *   supabase/migrations/20260808212137_p2e_accountability_round_identity_contract.sql
- *   supabase/migrations/0054_inventory_cost_valuation.sql
- *   supabase/migrations/20260808130000_p3_profitability_snapshots.sql
+ *   supabase/migrations/20260809045345_p2e_accountability_round_identity_expand.sql
+ *   supabase/migrations/20260809045849_p2e_accountability_round_identity_contract.sql
+ *   supabase/migrations/20260809063116_inventory_cost_valuation.sql
+ *   supabase/migrations/20260809075951_p3_profitability_snapshots.sql
  *
  * That chain applies in about a second and is the MINIMUM that makes P3
  * exercisable end to end: 0052 + 0053 + 0054 give the real
@@ -80,16 +80,16 @@ const env = {
   PGCLIENTENCODING: "UTF8",
 };
 
-const P3_MIGRATION = join(ROOT, "supabase", "migrations", "20260808130000_p3_profitability_snapshots.sql");
+const P3_MIGRATION = join(ROOT, "supabase", "migrations", "20260809075951_p3_profitability_snapshots.sql");
 const APPLY_CHAIN = [
   join(ROOT, "supabase", "tests", "purchase_capture_slice_b_bootstrap.sql"),
-  join(ROOT, "supabase", "migrations", "0052_purchase_receipt_persistence.sql"),
+  join(ROOT, "supabase", "migrations", "20260729084558_purchase_receipt_persistence.sql"),
   join(ROOT, "supabase", "tests", "purchase_capture_slice_c_pre_0053.sql"),
-  join(ROOT, "supabase", "migrations", "0053_inventory_movement_ledger.sql"),
+  join(ROOT, "supabase", "migrations", "20260729172613_inventory_movement_ledger.sql"),
   join(ROOT, "supabase", "tests", "p3_profitability_bootstrap.sql"),
-  join(ROOT, "supabase", "migrations", "20260808105001_p2e_accountability_round_identity.sql"),
-  join(ROOT, "supabase", "migrations", "20260808212137_p2e_accountability_round_identity_contract.sql"),
-  join(ROOT, "supabase", "migrations", "0054_inventory_cost_valuation.sql"),
+  join(ROOT, "supabase", "migrations", "20260809045345_p2e_accountability_round_identity_expand.sql"),
+  join(ROOT, "supabase", "migrations", "20260809045849_p2e_accountability_round_identity_contract.sql"),
+  join(ROOT, "supabase", "migrations", "20260809063116_inventory_cost_valuation.sql"),
   P3_MIGRATION,
 ];
 

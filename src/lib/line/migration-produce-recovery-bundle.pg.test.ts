@@ -213,10 +213,10 @@ describe.skipIf(!pgAvailable)("Produce recovery-bundle durability on PostgreSQL 
       END $$;
       SELECT 1`);
     await apply(join(
-      ROOT, "supabase", "migrations", "20260815081954_produce_out_of_order_admission.sql",
+      ROOT, "supabase", "migrations", "20260815094931_produce_out_of_order_admission.sql",
     ));
     await apply(join(
-      ROOT, "supabase", "migrations", "20260825090000_produce_recovery_bundle_durability.sql",
+      ROOT, "supabase", "migrations", "20260825091605_produce_recovery_bundle_durability.sql",
     ));
   }, 60_000);
 

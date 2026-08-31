@@ -16,7 +16,7 @@ const PGPASSWORD = process.env.PGPASSWORD ?? "postgres";
 const PGPORT = process.env.PGPORT ?? "5432";
 const DATABASE = `gm_0057_${randomBytes(4).toString("hex")}`;
 const BOOTSTRAP = join(ROOT, "supabase", "tests", "produce_0049_bootstrap.sql");
-const MIGRATIONS = ["0048_pending_session_function_parity.sql", "0049_produce_structured_session_foundation.sql", "0057_atomic_guided_owner.sql"]
+const MIGRATIONS = ["0048_pending_session_function_parity.sql", "0049_produce_structured_session_foundation.sql", "20260730093019_atomic_guided_owner.sql"]
   .map((name) => join(ROOT, "supabase", "migrations", name));
 
 type PsqlResult = { code: number; stdout: string; stderr: string };

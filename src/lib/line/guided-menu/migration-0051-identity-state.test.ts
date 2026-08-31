@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { createHash } from "crypto";
 
 const migration = new URL(
-  "../../../../supabase/migrations/0051_guided_menu_identity_and_state.sql",
+  "../../../../supabase/migrations/20260729074617_guided_menu_identity_and_state.sql",
   import.meta.url,
 );
 const sql = await Bun.file(migration).text();

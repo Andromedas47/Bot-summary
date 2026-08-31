@@ -163,7 +163,7 @@ describe.skipIf(!pgAvailable)("duplicate round lifecycle on PostgreSQL 17", () =
       );
       SELECT 1`);
     await apply(join(
-      ROOT, "supabase", "migrations", "20260815090000_cancel_duplicate_plain_text_round.sql",
+      ROOT, "supabase", "migrations", "20260815212227_cancel_duplicate_plain_text_round.sql",
     ));
   }, 60_000);
 

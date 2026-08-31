@@ -31,19 +31,19 @@ const MIGRATION_0051 = join(
   ROOT,
   "supabase",
   "migrations",
-  "0051_guided_menu_identity_and_state.sql",
+  "20260729074617_guided_menu_identity_and_state.sql",
 );
 const MIGRATION_0055 = join(
   ROOT,
   "supabase",
   "migrations",
-  "0055_guided_menu_seller_market_catalog.sql",
+  "20260730090006_guided_menu_seller_market_catalog.sql",
 );
 const MIGRATION_0056 = join(
   ROOT,
   "supabase",
   "migrations",
-  "0056_guided_menu_seller_catalog_strict_cleanup.sql",
+  "20260730090937_guided_menu_seller_catalog_strict_cleanup.sql",
 );
 
 type PsqlResult = { code: number; stdout: string; stderr: string };

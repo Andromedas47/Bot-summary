@@ -2,11 +2,11 @@ import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 
 const additiveFile = new URL(
-  "../../../../supabase/migrations/0055_guided_menu_seller_market_catalog.sql",
+  "../../../../supabase/migrations/20260730090006_guided_menu_seller_market_catalog.sql",
   import.meta.url,
 );
 const strictFile = new URL(
-  "../../../../supabase/migrations/0056_guided_menu_seller_catalog_strict_cleanup.sql",
+  "../../../../supabase/migrations/20260730090937_guided_menu_seller_catalog_strict_cleanup.sql",
   import.meta.url,
 );
 const additive = await Bun.file(additiveFile).text();

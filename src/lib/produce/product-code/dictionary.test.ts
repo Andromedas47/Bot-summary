@@ -21,19 +21,19 @@ import {
 const HERE = import.meta.dir;
 const BASE_MIGRATION = join(
   HERE, "..", "..", "..", "..",
-  "supabase", "migrations", "20260813090000_produce_product_code_dictionary.sql",
+  "supabase", "migrations", "20260813115826_produce_product_code_dictionary.sql",
 );
 const CLEANUP_MIGRATION = join(
   HERE, "..", "..", "..", "..",
-  "supabase", "migrations", "20260818100000_produce_product_dictionary_cleanup.sql",
+  "supabase", "migrations", "20260818105651_produce_product_dictionary_cleanup.sql",
 );
 const KAEO_KHAMIN_MIGRATION = join(
   HERE, "..", "..", "..", "..",
-  "supabase", "migrations", "20260824090000_produce_product_dictionary_add_kaeo_khamin_mango.sql",
+  "supabase", "migrations", "20260824185542_produce_product_dictionary_add_kaeo_khamin_mango.sql",
 );
 const FAH_LAN_MIGRATION = join(
   HERE, "..", "..", "..", "..",
-  "supabase", "migrations", "20260827090000_produce_product_dictionary_add_fah_lan_mango.sql",
+  "supabase", "migrations", "20260827055728_produce_product_dictionary_add_fah_lan_mango.sql",
 );
 
 interface Row {

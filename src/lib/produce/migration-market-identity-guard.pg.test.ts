@@ -217,9 +217,9 @@ describe.skipIf(!pgAvailable)("produce market identity guard on PostgreSQL 17", 
         base_transaction_type text NOT NULL
       );
       SELECT 1`);
-    await apply(join(ROOT, "supabase", "migrations", "20260810120000_p4a_plain_text_round_binding.sql"));
-    await apply(join(ROOT, "supabase", "migrations", "20260811090000_round_market_identity_consistency.sql"));
-    await apply(join(ROOT, "supabase", "migrations", "20260814100000_cross_user_accountability_round_binding.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260810100414_p4a_plain_text_round_binding.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260811181727_round_market_identity_consistency.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260814104329_cross_user_accountability_round_binding.sql"));
     // The 0055 rows this phase must preserve. The guard migration seeds its own.
     await scalar(`
       INSERT INTO public.line_guided_menu_markets (market_code, label) VALUES
@@ -235,7 +235,7 @@ describe.skipIf(!pgAvailable)("produce market identity guard on PostgreSQL 17", 
     // migration-order.test.ts, and the RPC itself in
     // migration-fingerprint-compatibility.pg.test.ts, whose bootstrap does
     // carry that schema.
-    await apply(join(ROOT, "supabase", "migrations", "20260815160000_produce_market_identity_guard.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260815213206_produce_market_identity_guard.sql"));
   }, 60_000);
 
   afterAll(async () => {
@@ -247,7 +247,7 @@ describe.skipIf(!pgAvailable)("produce market identity guard on PostgreSQL 17", 
   // ── A/B/C — the reviewed catalog is the only thing that collapses labels ────
 
   test("the migration is idempotent and seeds exactly the reviewed rows", async () => {
-    await apply(join(ROOT, "supabase", "migrations", "20260815160000_produce_market_identity_guard.sql"));
+    await apply(join(ROOT, "supabase", "migrations", "20260815213206_produce_market_identity_guard.sql"));
     expect(await scalar(`
       SELECT count(*)::text FROM public.line_guided_menu_market_aliases
       WHERE market_code = 'paseo'`)).toBe("2");

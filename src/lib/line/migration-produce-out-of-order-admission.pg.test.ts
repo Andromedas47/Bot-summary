@@ -182,7 +182,7 @@ describe.skipIf(!pgAvailable)("Produce out-of-order admission on PostgreSQL 17",
       END $$;
       SELECT 1`);
     await apply(join(
-      ROOT, "supabase", "migrations", "20260815081954_produce_out_of_order_admission.sql",
+      ROOT, "supabase", "migrations", "20260815094931_produce_out_of_order_admission.sql",
     ));
   }, 60_000);
 

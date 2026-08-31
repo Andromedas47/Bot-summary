@@ -29,23 +29,23 @@ const DB_NAME_PATTERN = /^pcd_[a-f0-9]+$/;
 const ALLOWED_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
 const MIGRATION = join(
-  ROOT, "supabase", "migrations", "20260813090000_produce_product_code_dictionary.sql",
+  ROOT, "supabase", "migrations", "20260813115826_produce_product_code_dictionary.sql",
 );
 // 20260818100000 corrects ม54's canonical_name (ไชมัส → ไซมัส) and seeds
 // ม63-ม71. It is applied right after the base seed, same as it would run in
 // Production, so every assertion below reflects the composed 262-row state.
 const CLEANUP_MIGRATION = join(
-  ROOT, "supabase", "migrations", "20260818100000_produce_product_dictionary_cleanup.sql",
+  ROOT, "supabase", "migrations", "20260818105651_produce_product_dictionary_cleanup.sql",
 );
 // 20260824090000 adds one further code, ม72 (มะม่วงแก้วขมิ้น), on top of the
 // cleanup migration. 20260827090000 then adds ม73 (มะม่วงฟ้าลั่น). Applied last,
 // same order Production runs migrations in, so every assertion below reflects
 // the composed 264-row state.
 const KAEO_KHAMIN_MIGRATION = join(
-  ROOT, "supabase", "migrations", "20260824090000_produce_product_dictionary_add_kaeo_khamin_mango.sql",
+  ROOT, "supabase", "migrations", "20260824185542_produce_product_dictionary_add_kaeo_khamin_mango.sql",
 );
 const FAH_LAN_MIGRATION = join(
-  ROOT, "supabase", "migrations", "20260827090000_produce_product_dictionary_add_fah_lan_mango.sql",
+  ROOT, "supabase", "migrations", "20260827055728_produce_product_dictionary_add_fah_lan_mango.sql",
 );
 const BOOTSTRAP = join(
   ROOT, "supabase", "tests", "produce_product_code_dictionary_bootstrap.sql",

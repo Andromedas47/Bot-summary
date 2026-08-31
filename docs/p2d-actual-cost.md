@@ -6,7 +6,7 @@ function of it changes, and its `PURCHASE_RECEIPT` posting path is untouched.
 
 Migration number `0054` is claimed here. It has been reserved for P2D since
 0053 shipped and is named as such in six places, including
-`0053_inventory_movement_ledger.sql:7` and
+`20260729172613_inventory_movement_ledger.sql:7` and
 `20260805130000_purchase_capture_sessions.sql:15`.
 
 ---

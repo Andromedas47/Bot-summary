@@ -95,13 +95,13 @@ change, no schema impact.
 
 ```
 supabase/tests/purchase_capture_slice_b_bootstrap.sql
-supabase/migrations/0052_purchase_receipt_persistence.sql
+supabase/migrations/20260729084558_purchase_receipt_persistence.sql
 supabase/tests/purchase_capture_slice_c_pre_0053.sql
-supabase/migrations/0053_inventory_movement_ledger.sql
-supabase/migrations/0054_inventory_cost_valuation.sql          <- P2D
+supabase/migrations/20260729172613_inventory_movement_ledger.sql
+supabase/migrations/20260809063116_inventory_cost_valuation.sql          <- P2D
 supabase/tests/p3_profitability_bootstrap.sql
-supabase/migrations/20260808105001_p2e_accountability_round_identity.sql   <- P2E
-supabase/migrations/20260808130000_p3_profitability_snapshots.sql          <- P3
+supabase/migrations/20260809045345_p2e_accountability_round_identity_expand.sql   <- P2E
+supabase/migrations/20260809075951_p3_profitability_snapshots.sql          <- P3
 ```
 
 `purchase_capture_slice_c_hardening.sql`, `purchase_capture_slice_c_post_0053.sql`
@@ -115,7 +115,7 @@ PostgreSQL hang"**, not 0053/0054. Confirmed via `pg_stat_activity`
 
 | File | State |
 |---|---|
-| `supabase/migrations/20260808130000_p3_profitability_snapshots.sql` | new, applies clean |
+| `supabase/migrations/20260809075951_p3_profitability_snapshots.sql` | new, applies clean |
 | `supabase/tests/p3_profitability_bootstrap.sql` | new |
 | `docs/plans/p3-profit-loss-final.md` | new, frozen contract |
 | `docs/handoffs/p3-final-sprint-handoff.md` | this file |
@@ -223,7 +223,7 @@ the release-package record.
 
 | File | State |
 |---|---|
-| `supabase/migrations/20260808130000_p3_profitability_snapshots.sql` | new — the only migration |
+| `supabase/migrations/20260809075951_p3_profitability_snapshots.sql` | new — the only migration |
 | `supabase/tests/p3_profitability_bootstrap.sql` | new — test fixtures |
 | `src/lib/profitability/{types,validate,profitability-service,format}.ts` | new — service layer |
 | `src/lib/profitability/{format,profitability-service}.test.ts` | new — TypeScript suites |

@@ -52,7 +52,7 @@ const BOOTSTRAP = join(ROOT, "supabase", "tests", "manual_white_sheet_note_sessi
 const MIGRATIONS = [
   "0038_digital_white_sheet_cash_entries.sql",
   "0043_white_sheet_lifecycle.sql",
-  "0059_manual_white_sheet_note_sessions.sql",
+  "20260801092255_manual_white_sheet_note_sessions.sql",
 ].map((name) => join(ROOT, "supabase", "migrations", name));
 
 type PsqlResult = { code: number; stdout: string; stderr: string };

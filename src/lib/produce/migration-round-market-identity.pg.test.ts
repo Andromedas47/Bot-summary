@@ -145,10 +145,10 @@ describe.skipIf(!pgAvailable)("round market identity on PostgreSQL 17", () => {
     databaseCreated = true;
     await apply(join(ROOT, "supabase", "tests", "round_market_identity_bootstrap.sql"));
     await apply(
-      join(ROOT, "supabase", "migrations", "20260810120000_p4a_plain_text_round_binding.sql"),
+      join(ROOT, "supabase", "migrations", "20260810100414_p4a_plain_text_round_binding.sql"),
     );
     await apply(
-      join(ROOT, "supabase", "migrations", "20260811090000_round_market_identity_consistency.sql"),
+      join(ROOT, "supabase", "migrations", "20260811181727_round_market_identity_consistency.sql"),
     );
     // Production catalog rows, verbatim: ทุ่งลานนา is a REVIEWED alias of the
     // canonical market วัดทุ่งลานนา. ราชพฤกษ์ is a different market entirely.

@@ -7,7 +7,7 @@ posts **exactly once** into the MAIN warehouse and increases the stock balance.
 
 **Migration checksum (SHA-256, canonical LF):**
 `3390666864f5d4ccfcba832cef335fd8102e191b9192a9f481ca5551ab972a09`
-(`supabase/migrations/0053_inventory_movement_ledger.sql`, 1358 lines)
+(`supabase/migrations/20260729172613_inventory_movement_ledger.sql`, 1358 lines)
 
 ---
 

@@ -36,7 +36,7 @@ const ALLOWED_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
 const MIGRATION = join(
   ROOT, "supabase", "migrations",
-  "20260820090000_produce_notification_boundary_lockdown.sql",
+  "20260820095934_produce_notification_boundary_lockdown.sql",
 );
 const DEPENDENCY_MIGRATIONS = [
   "0034_produce_notification_delivery.sql",

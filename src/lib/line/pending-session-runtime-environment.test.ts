@@ -7,7 +7,7 @@ import type { PendingSession } from "./pending-session-service";
 // polls pending_sessions with no environment scope at all, so it claimed and
 // finalized a Preview-created UAT session with Production's own (older)
 // parser code — a session that never should have been visible to it. See
-// 0061_pending_session_runtime_environment.sql and src/lib/runtime-environment.ts.
+// 20260806111646_pending_session_runtime_environment.sql and src/lib/runtime-environment.ts.
 
 type Row = Record<string, unknown>;
 

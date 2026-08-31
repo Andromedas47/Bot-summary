@@ -4,8 +4,8 @@ Production project: `apjjsqibavjaitcedavn`. Production authorization is required
 
 ## Immutable artifacts
 
-- EXPAND: `supabase/migrations/20260808105001_p2e_accountability_round_identity.sql`
-- CONTRACT: `supabase/migrations/20260808212137_p2e_accountability_round_identity_contract.sql`
+- EXPAND: `supabase/migrations/20260809045345_p2e_accountability_round_identity_expand.sql`
+- CONTRACT: `supabase/migrations/20260809045849_p2e_accountability_round_identity_contract.sql`
 - App: exact approved PR #38 head; record the SHA before rollout.
 
 Never apply CONTRACT before the compatible app is fully deployed. Do not run P2D or P3 during this window.

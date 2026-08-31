@@ -39,7 +39,7 @@ const REQUIRE_POSTGRES_TESTS = process.env.REQUIRE_POSTGRES_TESTS === "1";
 const WIN_PSQL = "C:\\Program Files\\PostgreSQL\\17\\bin\\psql.exe";
 const REPO_ROOT = join(import.meta.dir, "..", "..", "..");
 const BOOTSTRAP = join(REPO_ROOT, "supabase", "tests", "purchase_capture_slice_b_bootstrap.sql");
-const MIGRATION_0052 = join(REPO_ROOT, "supabase", "migrations", "0052_purchase_receipt_persistence.sql");
+const MIGRATION_0052 = join(REPO_ROOT, "supabase", "migrations", "20260729084558_purchase_receipt_persistence.sql");
 
 /** Verbatim Production UAT document (2026-08-08 10:40, UAT-001). */
 const UAT_DOCUMENT = [

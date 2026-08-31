@@ -28,7 +28,7 @@ system, no P4A rewrite and no change to what the operator types.
 1. **Where does the guided flow create a round?** `GuidedSessionOpener.open`
    → `ProduceSessionCommandService.execute({kind:"open"})` → RPC
    `open_accountability_round_produce_session` (migration
-   `20260808105001_p2e_accountability_round_identity.sql`). That RPC creates the
+   `20260809045345_p2e_accountability_round_identity_expand.sql`). That RPC creates the
    round *only* for an initial main `เบิก` (`v_is_initial`), then `UPDATE
    pending_sessions SET accountability_round_id = …` for the generation it just
    opened.
@@ -176,7 +176,7 @@ pending would strand it waiting for a close that never comes.
 
 | File | What |
 |---|---|
-| `supabase/migrations/20260810120000_p4a_plain_text_round_binding.sql` | the only schema change: one SECURITY DEFINER RPC, `service_role` EXECUTE only |
+| `supabase/migrations/20260810100414_p4a_plain_text_round_binding.sql` | the only schema change: one SECURITY DEFINER RPC, `service_role` EXECUTE only |
 | `src/lib/produce/plain-text-round-binding.ts` | `isNewRoundDocument`, `bindPlainTextRound`, the enforcement cutover, the Thai refusals |
 | `src/lib/produce/entry-validation-message.ts` | `buildPlainTextReviewValidationReply` — same content, "send จบรายการ again" instead of "press ยืนยัน" |
 | `src/lib/line/webhook-service.ts` | `runPlainTextCloseGate` + the close-time hook; `markClose` becomes `let` so a refusal drops the close while still appending the text |
@@ -239,7 +239,7 @@ Exactly three mutations, in the mandated order.
 
 | | |
 |---|---|
-| Migration (repo) | `20260810120000_p4a_plain_text_round_binding.sql` |
+| Migration (repo) | `20260810100414_p4a_plain_text_round_binding.sql` |
 | Migration (Production) | `p4a_plain_text_round_binding` |
 | Merge commit / `main` | `9d2106ba680bd345f202db637da056b4eade6906` (PR #41, `--match-head-commit e443d22`) |
 | Deployment | `dpl_AzBq9LsbLbhxvUGxbjnRDy7CqSUN` — READY, target `production`, SHA `9d2106b`, alias `bot-summary.vercel.app`, `aliasError: null` |
@@ -301,7 +301,7 @@ This was **never plain-text-specific**. The guided flow passes the same uuid
 through `entryValidationRef`; it simply never reached the code, because until
 round binding shipped there was no round to validate against.
 
-**Fix.** `20260810160000_p4a_review_session_generation_uuid.sql` adopts the
+**Fix.** `20260810112416_p4a_review_session_generation_uuid.sql` adopts the
 identity the rest of the schema already uses: drop the `> 0` CHECK (meaningless
 for a uuid), `ALTER COLUMN … TYPE uuid`, and recreate both RPCs with a `uuid`
 parameter. No mapping, no hash, no truncation, no numeric surrogate — the audit

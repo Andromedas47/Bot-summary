@@ -81,12 +81,11 @@ BEGIN
   IF to_regclass('public.produce_entry_validation_reviews') IS NULL THEN
     RAISE EXCEPTION '20260831120000: produce_entry_validation_reviews is missing; apply P4A first';
   END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-    WHERE n.nspname = 'public' AND p.proname = 'append_pending_session'
-      AND pg_get_function_identity_arguments(p.oid)
-          = 'text, text, text, text, bigint, boolean, uuid, integer'
-  ) THEN
+  -- to_regprocedure resolves the exact overload by signature, without
+  -- depending on how pg_get_function_identity_arguments happens to render it.
+  IF to_regprocedure(
+       'public.append_pending_session(text,text,text,text,bigint,boolean,uuid,integer)'
+     ) IS NULL THEN
     RAISE EXCEPTION
       '20260831120000: the 8-arg append_pending_session this wrapper delegates to is missing';
   END IF;

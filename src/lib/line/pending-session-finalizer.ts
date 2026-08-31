@@ -61,6 +61,8 @@ export interface PendingFinalizerRun {
   /** 0050: structured sessions waiting for operator review confirmation. */
   awaitingConfirmation: number;
   failedClosed: number;
+  /** Parked for an unconfirmed entry review that grew past the close boundary. */
+  validationHeld: number;
   staleSnapshot: number;
   skipped: number;
   errors: number;
@@ -435,6 +437,49 @@ export async function finalizePendingGeneration(
       accountabilityRoundId,
       parsed,
     );
+
+    // 2026-08-30: a legitimate item whose LINE timestamp preceded the close
+    // committed after the boundary was stamped, and its content required a
+    // review. Terminalizing here is what turned a confirmable review into a
+    // silent failed_closed and stranded the operator's accepted items.
+    //
+    // A presented-but-unconfirmed review is a question waiting on the
+    // operator, not a validation failure. Park finalization instead: the
+    // review reply goes out, a distinct later close confirms it, and
+    // resume_pending_close_finalization re-schedules this generation.
+    //
+    // The hold is revision-pinned. If the document moved again between the
+    // gate reading it and the hold being taken, the hold is refused and this
+    // falls through to the normal path rather than parking a stale decision.
+    if (gate.reviewPresented) {
+      const held = await service.holdValidationReview(
+        snapshot.session_key,
+        snapshot.session_generation,
+        snapshot.ingest_revision ?? null,
+      );
+      if (held) {
+        log.info("produce finalization held for unconfirmed entry review", {
+          ingestRevision: snapshot.ingest_revision,
+          closeEventTimestampMs: closeTimestamp,
+        });
+        if (gate.detail && snapshot.line_user_id) {
+          try {
+            await push(snapshot.line_user_id, gate.detail);
+          } catch (pushError) {
+            // The hold is already committed. A failed push costs one
+            // notification, never the parked state — the review is still
+            // presentable and Data Quality still shows the session as
+            // action-required.
+            log.error("held review notification failed", { error: String(pushError) });
+          }
+        }
+        return { status: "validation_held", reason: "entry_review_unconfirmed" };
+      }
+      log.warn("validation hold refused; falling through to normal finalization", {
+        ingestRevision: snapshot.ingest_revision,
+      });
+    }
+
     validationErrors.push(...gate.errors);
     entryGateDetail = gate.detail;
     entryGateAdvisories = gate.advisories;
@@ -807,6 +852,7 @@ async function runEntryGateForFinalization(
   errors: string[];
   detail: string | null;
   advisories: ProduceValidationAdvisory[];
+  reviewPresented: boolean;
 }> {
   let gate: Awaited<ReturnType<typeof runProduceFinalizeGate>>;
   try {
@@ -828,6 +874,7 @@ async function runEntryGateForFinalization(
       errors: [error instanceof Error ? error.message : "entry validation failed"],
       detail: null,
       advisories: [],
+      reviewPresented: false,
     };
   }
 
@@ -836,6 +883,7 @@ async function runEntryGateForFinalization(
       errors: gate.result.blocking.map((exception) => exception.kind),
       detail: buildBlockingValidationReply(gate.result),
       advisories: [],
+      reviewPresented: false,
     };
   }
   if (gate.decision === "review_presented") {
@@ -843,12 +891,14 @@ async function runEntryGateForFinalization(
       errors: ["entry validation review was never confirmed"],
       detail: buildUnconfirmedReviewReply(gate.result),
       advisories: [],
+      reviewPresented: true,
     };
   }
   return {
     errors: [],
     detail: null,
     advisories: gate.result.advisories,
+    reviewPresented: false,
   };
 }
 
@@ -891,6 +941,7 @@ export async function finalizeDuePendingGenerations(
     pending: 0,
     awaitingConfirmation: 0,
     failedClosed: 0,
+    validationHeld: 0,
     staleSnapshot: 0,
     skipped: 0,
     errors: 0,
@@ -905,6 +956,7 @@ export async function finalizeDuePendingGenerations(
         run.awaitingConfirmation += 1;
       } else if (result.status === "pending") run.pending += 1;
       else if (result.status === "failed_closed") run.failedClosed += 1;
+      else if (result.status === "validation_held") run.validationHeld += 1;
       else if (result.status === "stale_snapshot") run.staleSnapshot += 1;
       else run.skipped += 1;
     } catch (finalizeError) {

@@ -60,6 +60,7 @@ import {
   PendingSessionAfterCloseBoundaryError,
   PendingSessionClosedError,
   PendingSessionGenerationConflictError,
+  PendingSessionStaleValidationSnapshotError,
   type PendingSession,
 } from "@/lib/line/pending-session-service";
 import {
@@ -232,6 +233,13 @@ const ALREADY_CLOSING_REPLY = "รับทราบแล้ว กำลัง
 
 const STALE_PRODUCE_SESSION_REPLY =
   "พบรายการเดิมที่ยังปิดไม่สมบูรณ์ กรุณาให้ทีมงานเคลียร์รายการเดิมก่อนเริ่มรายการใหม่";
+
+// The close raced a legitimate item that was still committing. Nothing was
+// lost and no close boundary was written, so the operator simply closes again
+// against the complete list. This must stay recoverable wording: the failure
+// mode it replaces was a silent terminal failed_closed.
+const CLOSE_RACED_LATE_ITEM_REPLY =
+  "มีรายการส่งเข้ามาเพิ่มพอดีตอนปิดรอบ ระบบยังไม่ได้ปิดรอบ รายการทั้งหมดยังอยู่ครบ กรุณาพิมพ์ปิดรอบอีกครั้ง";
 
 function buildPhysicalInventoryItemParseFailureReply(sequence: number | null): string {
   return [
@@ -1295,6 +1303,12 @@ export class WebhookService {
       // carries a header AND a closer rotates to a new generation, and the
       // review it would record would belong to the generation it replaced.
       let closeGateRefusal: string | null = null;
+      // The exact ingest_revision the entry gate inspected. The close boundary
+      // must be stamped against THIS document or not at all: on 2026-08-30 a
+      // legitimate pre-close item committed between the gate and the append,
+      // the boundary landed on a document the gate never saw, and the finalizer
+      // later terminalized the session for a review that was never presented.
+      let closeGatePinnedRevision: number | undefined;
       if (
         markClose
         && !incomingHeader
@@ -1307,6 +1321,33 @@ export class WebhookService {
           log,
         );
         if (closeGateRefusal) markClose = false;
+        else closeGatePinnedRevision = pending.ingest_revision ?? undefined;
+
+        // The gate just passed on a session that ALREADY has a close boundary,
+        // so this is the distinct later close that confirms a review the
+        // finalizer parked. hold_pending_validation_review set next_attempt_at
+        // to NULL; without this the confirmed session would sit held forever,
+        // because no sweep can see a closed row with no attempt scheduled.
+        if (!closeGateRefusal && pending.close_event_timestamp_ms !== null) {
+          try {
+            const resumed = await pendingService.resumeCloseFinalization(
+              sessionKey,
+              pending.session_generation,
+            );
+            log.info("produce finalization resumed after review confirmation", {
+              sessionKey,
+              sessionGeneration: pending.session_generation,
+              resumed,
+            });
+          } catch (resumeError) {
+            // The confirmation itself is already committed. A failed resume
+            // costs a delay, not the confirmation — and never terminalizes.
+            log.error("produce finalization resume failed", {
+              sessionKey,
+              error: String(resumeError),
+            });
+          }
+        }
       }
 
       let updated;
@@ -1457,6 +1498,7 @@ export class WebhookService {
           updated = await pendingService.append(
             sessionKey, text, replyToken, eventId, event.timestamp, markClose,
             pending.session_generation, expectedItemCount ?? undefined,
+            closeGatePinnedRevision,
           );
           const appendParse = parseWeighSession(updated.accumulated_text, bangkokToday());
           log.info("pending session append succeeded", {
@@ -1473,6 +1515,27 @@ export class WebhookService {
             });
           }
         } catch (appendError) {
+          // The document grew between the entry gate and the close boundary.
+          // No boundary was stamped and no content was lost, so this is a
+          // retry, not a failure: the operator closes again and the gate then
+          // validates the complete list.
+          if (appendError instanceof PendingSessionStaleValidationSnapshotError) {
+            log.warn("produce close refused — validation snapshot was stale", {
+              sessionKey,
+              sessionGeneration: pending.session_generation,
+              expectedIngestRevision: appendError.expectedRevision,
+              currentIngestRevision: appendError.currentRevision,
+              lineEventId: eventId,
+            });
+            if (replyToken) {
+              try {
+                await this.replyMessage(replyToken, CLOSE_RACED_LATE_ITEM_REPLY);
+              } catch (replyError) {
+                log.error("stale close reply failed", { error: String(replyError) });
+              }
+            }
+            return { eventId, eventType: event.type, status: "saved", parsed: false };
+          }
           if (
             appendError instanceof PendingSessionGenerationConflictError
             || appendError instanceof PendingSessionClosedError

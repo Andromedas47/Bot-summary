@@ -66,7 +66,7 @@ export const RE = {
   // units are stored as text. "บาท" itself is excluded so a bare price line
   // never gets misread as a quantity line (see parser.ts).
   // Captures: [1]=amount, [2]=unit
-  QUANTITY: new RegExp(`^(\\d+(?:\\.\\d+)?)\\.?\\s*([${TH}]+)\\s*$`),
+  QUANTITY: new RegExp(`^((?:\\d+(?:\\.\\d+)?|\\.\\d+))\\.?\\s*([${TH}]+)\\s*$`),
 
   // Full-line date (anchored to avoid false matches inside item lines):
   //   "25/5/69"   → short Buddhist year 2569 → Gregorian 2026

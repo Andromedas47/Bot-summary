@@ -67,6 +67,11 @@ export interface RoundReturnStatus extends RoundWithdrawal {
 export const RESOLVED_PENDING_STATUSES: ReadonlySet<string> = new Set([
   "finalized",
   "duplicate",
+  // 20260829090000: an inactivity-expired draft that accepted zero items is
+  // not incomplete business — nothing was ever entered. failed_closed (the
+  // >=1-item expiry outcome) is deliberately NOT here: that draft DID accept
+  // real content and must stay an action-required blocker.
+  "expired_empty_draft",
 ]);
 
 /** True when a produce document carries a closer line (จบรายการ…). */

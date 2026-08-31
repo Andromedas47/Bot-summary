@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { DailyClosePreflightResult, PreflightIssue } from "@/lib/produce/daily-close-preflight";
+import type { DataQualityCategory } from "../severity";
 import { preflightIssuesToCandidates } from "./preflight-source";
 
 function issue(overrides: Partial<PreflightIssue> & Pick<PreflightIssue, "code" | "severity" | "message">): PreflightIssue {
@@ -28,7 +29,7 @@ function baseResult(overrides: Partial<DailyClosePreflightResult> = {}): DailyCl
 }
 
 describe("preflightIssuesToCandidates", () => {
-  it("maps a round-level missing-return warning to produce_no_return / ACTION_REQUIRED category", () => {
+  it("does not create a candidate for a clean whole-round no-return warning", () => {
     const result = baseResult({
       rounds: [
         {
@@ -51,10 +52,102 @@ describe("preflightIssuesToCandidates", () => {
     });
 
     const candidates = preflightIssuesToCandidates(result);
-    expect(candidates).toHaveLength(1);
-    expect(candidates[0].category).toBe("produce_no_return");
-    expect(candidates[0].entityRefs).toEqual(["round-1"]);
-    expect(candidates[0].businessDate).toBe("2026-08-25");
+    expect(candidates).toEqual([]);
+  });
+
+  it("does not create a candidate when a persisted-return round has no omission issue", () => {
+    const result = baseResult({
+      rounds: [
+        {
+          accountabilityRoundId: "round-persisted",
+          staffName: "สมชาย",
+          marketName: "ตลาดเช้า",
+          status: "ready",
+          blockers: [],
+          warnings: [],
+        },
+      ],
+    });
+
+    expect(preflightIssuesToCandidates(result)).toEqual([]);
+  });
+
+  it("keeps blocked, failed, pending, unattributable, and integrity findings actionable", () => {
+    const result = baseResult({
+      rounds: [
+        {
+          accountabilityRoundId: "round-blocked",
+          staffName: "สมชาย",
+          marketName: "ตลาดเช้า",
+          status: "blocked",
+          blockers: [
+            issue({
+              code: "missing_successful_return",
+              severity: "blocker",
+              message: "พบการส่งชั่งคืน แต่ยังบันทึกไม่สำเร็จ",
+              accountabilityRoundId: "round-blocked",
+              evidenceIds: ["round-blocked"],
+            }),
+          ],
+          warnings: [],
+        },
+        {
+          accountabilityRoundId: "round-failed",
+          staffName: "สมชาย",
+          marketName: "ตลาดเช้า",
+          status: "blocked",
+          blockers: [
+            issue({
+              code: "active_failed_produce_session",
+              severity: "blocker",
+              message: "มีรายการที่บันทึกไม่สำเร็จ",
+              accountabilityRoundId: "round-failed",
+              evidenceIds: ["attempt-1"],
+            }),
+          ],
+          warnings: [],
+        },
+        {
+          accountabilityRoundId: "round-pending",
+          staffName: "สมชาย",
+          marketName: "ตลาดเช้า",
+          status: "blocked",
+          blockers: [
+            issue({
+              code: "pending_produce_session",
+              severity: "blocker",
+              message: "มีรายการชั่งคืนที่ยังปิดไม่สำเร็จ",
+              accountabilityRoundId: "round-pending",
+              evidenceIds: ["round-pending"],
+            }),
+          ],
+          warnings: [],
+        },
+      ],
+      integrityIssues: [
+        issue({
+          code: "unbound_produce_transaction",
+          severity: "warning",
+          message: "มีรายการที่ไม่ได้ผูกกับรอบ",
+          evidenceIds: ["session-unbound"],
+        }),
+        issue({
+          code: "round_identity_ambiguity",
+          severity: "blocker",
+          message: "พบรายการที่อาจมาแทนกันมากกว่า 1 ชุด",
+          evidenceIds: ["attempt-ambiguous"],
+        }),
+      ],
+    });
+
+    const expected: DataQualityCategory[] = [
+      "produce_lifecycle_ambiguity",
+      "produce_no_return",
+      "produce_stale_failed_session",
+      "produce_stale_failed_session",
+      "produce_unattributable",
+    ];
+    expect(preflightIssuesToCandidates(result).map((candidate) => candidate.category).sort()).toEqual(expected.sort());
   });
 
   it("distinguishes ambiguous vs. reviewable duplicate rounds by source severity", () => {
@@ -133,11 +226,20 @@ describe("preflightIssuesToCandidates", () => {
     expect(candidates[0].entityRefs).toEqual(["mango::kg"]);
   });
 
-  it("excludes audit-only superseded/abandoned failures (not part of PreflightIssue lists)", () => {
-    // supersededFailures is a separate, differently-shaped list — proving the
-    // mapper never reaches into it is implicit: baseResult()'s empty list here
-    // plus a non-empty rounds/integrityIssues scan still yields 0 for it.
-    const result = baseResult();
+  it("keeps superseded success audit-only and does not create a candidate", () => {
+    const result = baseResult({
+      supersededFailures: [
+        {
+          attemptId: "attempt-superseded",
+          origin: "pending_session",
+          supersededByProduceSessionId: "session-success",
+          state: "superseded",
+          marketName: "ตลาดเช้า",
+          staffName: "สมชาย",
+        },
+      ],
+    });
+
     expect(preflightIssuesToCandidates(result)).toHaveLength(0);
   });
 });

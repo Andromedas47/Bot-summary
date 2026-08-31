@@ -119,6 +119,45 @@ describe("unknown unit", () => {
   });
 });
 
+describe("risky subunit confirmation", () => {
+  it("preserves raw evidence and requires one review per current item", () => {
+    const parsed = parseWeighSession(
+      "กี้-ตลาด เบิก 29/8/69\n1.องุ่น100บาท\n.3ขีด\n2.มะม่วง100บาท\n500กรัม",
+      "2026-08-29",
+    );
+    expect(parsed.items.map((entry) => [entry.entered_quantity, entry.entered_unit,
+      entry.quantity, entry.unit])).toEqual([[0.3, "ขีด", 0.03, "โล"], [500, "กรัม", 0.5, "โล"]]);
+    const result = bound(parsed);
+    expect(result.status).toBe("review_required");
+    expect(result.reviews.filter((entry) => entry.kind === "subunit_confirmation")).toHaveLength(2);
+    expect(JSON.stringify(result.reviews)).toContain("0.03");
+    expect(JSON.stringify(result.reviews)).toContain("0.5");
+  });
+
+  it("reports the risky conversion itself when it is a price-basis expression", () => {
+    const parsed = parseWeighSession(
+      "กี้-ตลาด เบิก 29/8/69\n1.เงาะ30ขีด100บาท\n15.4โล",
+      "2026-08-29",
+    );
+    const review = bound(parsed).reviews.find((entry) => entry.kind === "subunit_confirmation");
+    expect(review).toMatchObject({
+      enteredQuantity: 30,
+      enteredUnit: "ขีด",
+      canonicalQuantity: 3,
+      canonicalUnit: "โล",
+    });
+  });
+
+  it("binds the digest to generation and accountability round", () => {
+    const parsed = session([item({ product_name: "องุ่น", entered_quantity: 500, entered_unit: "กรัม" })]);
+    const a = validateProduceEntry({ parsed, roundRows: [], roundBound: true,
+      validationIdentity: { sessionKey: "s", sessionGeneration: "g1", accountabilityRoundId: "r1" } });
+    const b = validateProduceEntry({ parsed, roundRows: [], roundBound: true,
+      validationIdentity: { sessionKey: "s", sessionGeneration: "g2", accountabilityRoundId: "r1" } });
+    expect(a.digest).not.toBe(b.digest);
+  });
+});
+
 // ── CASES B/C — product typo ──────────────────────────────────────────────────
 
 describe("product identity", () => {

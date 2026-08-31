@@ -104,9 +104,15 @@ export type PurchaseUncertaintyReason =
   | "unattributed_round"
   /** The round's return document is blocked or still open. */
   | "return_incomplete"
-  /** The round produced no return evidence of any kind. */
+  /**
+   * Retained for message/API compatibility. A clean round with no return is a
+   * legitimate zero-return sold-out result and no longer produces this reason.
+   */
   | "return_missing"
-  /** The round's return landed, but this product/unit cell is absent from it. */
+  /**
+   * Retained for message/API compatibility. A completed return that omits a
+   * withdrawn product/unit is a legitimate zero return for that cell.
+   */
   | "product_return_absent"
   /** A return for this product exists but carries no round, so it proves nothing. */
   | "return_not_round_tagged"
@@ -283,12 +289,14 @@ const NO_ROUND = "no-round";
 interface Cell {
   productName: string;
   unit: string;
+  rounds: Map<string, RoundCell>;
+}
+
+/** One product/unit's evidence inside one accountability round. */
+interface RoundCell {
   withdrawn: number;
   good: number;
   damaged: number;
-  withdrawalRounds: Set<string>;
-  /** Rounds that supplied a คืน / คืนเสีย row FOR THIS product+unit. */
-  returnRounds: Set<string>;
   withdrawalPrices: Set<number>;
   reasons: Set<PurchaseUncertaintyReason>;
   sawWithdrawal: boolean;
@@ -328,11 +336,15 @@ function emptyCell(productName: string, unit: string): Cell {
   return {
     productName,
     unit,
+    rounds: new Map(),
+  };
+}
+
+function emptyRoundCell(): RoundCell {
+  return {
     withdrawn: 0,
     good: 0,
     damaged: 0,
-    withdrawalRounds: new Set(),
-    returnRounds: new Set(),
     withdrawalPrices: new Set(),
     reasons: new Set(),
     sawWithdrawal: false,
@@ -343,46 +355,33 @@ function emptyCell(productName: string, unit: string): Cell {
 /**
  * Round-level return evidence, per withdrawal round that fed this cell.
  *
- * A round whose return document landed still does NOT prove that every product
- * it withdrew appears in that document: P4A checks containment (a return may
- * not exceed its withdrawal) but never coverage. So a cell absent from an
- * otherwise-persisted round is "no evidence about this product", not "sold
- * out" — the single rule that keeps a missing return from becoming a false 100%.
+ * A clean round with no return document is a sold-out round: absence means zero
+ * good return and zero damaged return. The same is true for a product/unit
+ * omitted from a completed return document. Pending, blocked, failed and any
+ * other incomplete return evidence remain fail-closed.
  */
 function applyRoundEvidence(
-  cell: Cell,
+  cell: RoundCell,
+  roundId: string,
   roundReturnStates: ReadonlyMap<string, RoundReturnState>,
   incompleteReturnRounds: ReadonlySet<string>,
 ): void {
-  for (const roundId of cell.withdrawalRounds) {
-    if (roundId === NO_ROUND) {
-      cell.reasons.add("unattributed_round");
-      continue;
-    }
-    if (incompleteReturnRounds.has(roundId)) {
-      cell.reasons.add("return_incomplete");
-      continue;
-    }
-    const state = roundReturnStates.get(roundId);
-    if (state === "blocked" || state === "pending") {
-      cell.reasons.add("return_incomplete");
-      continue;
-    }
-    if (state === "none") {
-      cell.reasons.add("return_missing");
-      continue;
-    }
-    if (state !== "persisted") {
-      cell.reasons.add("unattributed_round");
-      continue;
-    }
-    if (cell.returnRounds.has(roundId)) continue;
-    // A return DID come back for this product, it just is not tied to the round
-    // that issued it — so it still proves nothing about completeness, but
-    // saying "no return found" over the top of its own quantity would be false.
-    cell.reasons.add(
-      cell.sawUntaggedReturn ? "return_not_round_tagged" : "product_return_absent",
-    );
+  if (!cell.sawWithdrawal) return;
+  if (roundId === NO_ROUND) {
+    cell.reasons.add("unattributed_round");
+    return;
+  }
+  if (incompleteReturnRounds.has(roundId)) {
+    cell.reasons.add("return_incomplete");
+    return;
+  }
+  const state = roundReturnStates.get(roundId);
+  if (state === "blocked" || state === "pending") {
+    cell.reasons.add("return_incomplete");
+    return;
+  }
+  if (state !== "none" && state !== "persisted") {
+    cell.reasons.add("unattributed_round");
   }
 }
 
@@ -553,8 +552,8 @@ function cellHitByUnattributable(
   if (index.reportUnsafe) return true;
   if (index.productUnits.has(identityKey(cell.productName, cell.unit))) return true;
   if (index.products.has(cell.productName)) return true;
-  for (const roundId of cell.withdrawalRounds) {
-    if (roundId !== NO_ROUND && index.rounds.has(roundId)) return true;
+  for (const [roundId, round] of cell.rounds) {
+    if (round.sawWithdrawal && roundId !== NO_ROUND && index.rounds.has(roundId)) return true;
   }
   return false;
 }
@@ -581,38 +580,39 @@ export function buildPurchasePlanningReport(
     const cell = cells.get(key) ?? emptyCell(identity.productName, identity.unit);
     cells.set(key, cell);
 
+    const roundId = row.accountability_round_id?.trim() || NO_ROUND;
+    const round = cell.rounds.get(roundId) ?? emptyRoundCell();
+    cell.rounds.set(roundId, round);
+
     // A session that failed to parse, or persisted fewer rows than it claimed,
     // may have dropped a return line — so its products cannot be ranked.
     if (row.session_id && unreliableSessionIds.has(row.session_id)) {
-      cell.reasons.add("session_integrity");
+      round.reasons.add("session_integrity");
     }
 
     const bucket = baseTransactionType(row.transaction_type);
     if (!bucket) {
       // Must block its identity rather than disappear from the denominator.
-      cell.reasons.add("unknown_transaction_type");
+      round.reasons.add("unknown_transaction_type");
       continue;
     }
 
-    const roundId = row.accountability_round_id?.trim() || NO_ROUND;
     const quantity = row.quantity;
     const usable = typeof quantity === "number" && Number.isFinite(quantity) && quantity >= 0;
-    if (!usable) cell.reasons.add("invalid_quantity");
+    if (!usable) round.reasons.add("invalid_quantity");
 
     if (bucket === "เบิก") {
-      cell.sawWithdrawal = true;
-      cell.withdrawalRounds.add(roundId);
-      if (usable) cell.withdrawn += quantity;
+      round.sawWithdrawal = true;
+      if (usable) round.withdrawn += quantity;
       const price = row.price_per_unit;
-      if (typeof price === "number" && Number.isFinite(price)) cell.withdrawalPrices.add(price);
+      if (typeof price === "number" && Number.isFinite(price)) round.withdrawalPrices.add(price);
       continue;
     }
 
-    if (roundId !== NO_ROUND) cell.returnRounds.add(roundId);
-    else cell.sawUntaggedReturn = true;
+    if (roundId === NO_ROUND) round.sawUntaggedReturn = true;
     if (!usable) continue;
-    if (bucket === "คืน") cell.good += quantity;
-    else cell.damaged += quantity;
+    if (bucket === "คืน") round.good += quantity;
+    else round.damaged += quantity;
   }
 
   const stockIndex = indexHouseStock(input.houseStock);
@@ -624,7 +624,7 @@ export function buildPurchasePlanningReport(
     for (const roundId of unattributable.rounds) {
       let matched = false;
       for (const cell of cells.values()) {
-        if (cell.withdrawalRounds.has(roundId)) {
+        if (cell.rounds.get(roundId)?.sawWithdrawal) {
           matched = true;
           break;
         }
@@ -637,24 +637,49 @@ export function buildPurchasePlanningReport(
 
   const items: PurchasePlanningItem[] = [];
   for (const [, cell] of cells) {
-    applyRoundEvidence(cell, input.roundReturnStates, incompleteReturnRounds);
+    let withdrawn = 0;
+    let good = 0;
+    let damaged = 0;
+    const reasons = new Set<PurchaseUncertaintyReason>();
+    const withdrawalPrices = new Set<number>();
+    let sawWithdrawal = false;
+    let sawUntaggedReturn = false;
+
+    // Reconcile inside each round first. A product-level recommendation can
+    // aggregate clean round totals, but a return from round B must never cover
+    // a withdrawal from round A merely because the date/product/unit match.
+    for (const [roundId, round] of cell.rounds) {
+      applyRoundEvidence(round, roundId, input.roundReturnStates, incompleteReturnRounds);
+      if (!round.sawWithdrawal || round.withdrawn <= 0) round.reasons.add("no_withdrawal");
+      if (round.good + round.damaged > round.withdrawn + QUANTITY_EPSILON) {
+        round.reasons.add("returns_exceed_withdrawal");
+      }
+      withdrawn += round.withdrawn;
+      good += round.good;
+      damaged += round.damaged;
+      sawWithdrawal ||= round.sawWithdrawal;
+      sawUntaggedReturn ||= round.sawUntaggedReturn;
+      for (const reason of round.reasons) reasons.add(reason);
+      for (const price of round.withdrawalPrices) withdrawalPrices.add(price);
+    }
+
+    // A return without a round cannot be assigned to any explicit withdrawal.
+    // Preserve the diagnostic used by the existing formatter, rather than
+    // pretending its quantity belongs to whichever round has the same product.
+    if (sawUntaggedReturn && sawWithdrawal) reasons.add("return_not_round_tagged");
 
     // Carried at the column's own numeric(10,3) resolution, so 45.9 − 35.4 is
     // 10.5 rather than 10.499999999999996. This is a resolution choice, not a
     // clamp: an impossible quantity still blocks the product below.
-    const withdrawn = round3(cell.withdrawn);
-    const good = round3(cell.good);
-    const damaged = round3(cell.damaged);
+    withdrawn = round3(withdrawn);
+    good = round3(good);
+    damaged = round3(damaged);
 
-    if (!cell.sawWithdrawal || withdrawn <= 0) cell.reasons.add("no_withdrawal");
-    if (good + damaged > withdrawn + QUANTITY_EPSILON) {
-      cell.reasons.add("returns_exceed_withdrawal");
-    }
     if (cellHitByUnattributable(cell, unattributable)) {
-      cell.reasons.add("unattributable_withdrawal");
+      reasons.add("unattributable_withdrawal");
     }
 
-    const uncertain = cell.reasons.size > 0;
+    const uncertain = reasons.size > 0;
     // Guarded by the two checks above: withdrawn > 0 and returns <= withdrawn,
     // so this can be neither a division by zero nor a negative quantity. It is
     // never clamped — an impossible number blocks the product instead.
@@ -689,12 +714,12 @@ export function buildPurchasePlanningReport(
       status: band === null
         ? "unknown"
         : statusFor(band, nextStockToSoldRatio, hasUnattributedIncompleteReturns),
-      uncertaintyReasons: [...cell.reasons].sort(),
+      uncertaintyReasons: [...reasons].sort(),
       houseStockQuantity,
       stockAbsence: itemStockAbsence,
       nextDayGoodStockQuantity,
       nextStockToSoldRatio,
-      priceConflict: cell.withdrawalPrices.size > 1,
+      priceConflict: withdrawalPrices.size > 1,
     });
   }
 

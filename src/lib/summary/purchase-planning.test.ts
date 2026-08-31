@@ -418,6 +418,25 @@ describe("purchase planning — aggregation identity", () => {
     ]);
   });
 
+  test("a return from another round never covers this round's withdrawal", () => {
+    const rows = [
+      row({ transaction_type: WITHDRAW, quantity: 100, accountability_round_id: ROUND_A }),
+      row({ transaction_type: RETURN, quantity: 20, accountability_round_id: ROUND_B }),
+    ];
+    const item = only(build(rows, {
+      roundReturnStates: new Map<string, RoundReturnState>([
+        [ROUND_A, "none"],
+        [ROUND_B, "persisted"],
+      ]),
+    }));
+
+    // Round B has a return without its own withdrawal. It must block rather
+    // than being subtracted from round A merely because product/unit match.
+    expect(item.estimatedSoldQuantity).toBeNull();
+    expect(item.status).toBe("unknown");
+    expect(item.uncertaintyReasons).toContain("no_withdrawal");
+  });
+
   test("QA market scopes never reach the ranking", () => {
     const report = build(cell(100, 20, 0, { market_name: "ทดสอบ" }));
     expect(report.items).toHaveLength(0);
@@ -485,9 +504,9 @@ describe("purchase planning — quantity integrity never guesses", () => {
 });
 
 describe("purchase planning — missing and incomplete return evidence", () => {
-  test("case 15 — a withdrawal with no return for that product is never 100% sold", () => {
-    // The round's return document landed (state "persisted") but covers a
-    // different product. P4A never proves coverage, so this is no evidence.
+  test("a completed return that omits a withdrawn product is a zero return", () => {
+    // The round's completed return covers a different product. An absent row
+    // is a legitimate zero for this product/unit, not unknown evidence.
     const rows = [
       row({ transaction_type: WITHDRAW, quantity: 100 }),
       row({ product_name: "ส้มไต้หวัน", unit: "โล", transaction_type: WITHDRAW, quantity: 10 }),
@@ -496,19 +515,25 @@ describe("purchase planning — missing and incomplete return evidence", () => {
     const report = build(rows);
     const apple = report.items.find((i) => i.productName === "แอปเปิ้ล")!;
 
-    expect(apple.sellThroughRate).toBeNull();
-    expect(apple.estimatedSoldQuantity).toBeNull();
-    expect(apple.status).toBe("unknown");
-    expect(apple.uncertaintyReasons).toContain("product_return_absent");
+    expect(apple.goodReturnQuantity).toBe(0);
+    expect(apple.damagedQuantity).toBe(0);
+    expect(apple.estimatedSoldQuantity).toBe(100);
+    expect(apple.sellThroughRate).toBe(100);
+    expect(apple.status).toBe("surplus"); // no house-stock signal for 🟢
+    expect(apple.uncertaintyReasons).toEqual([]);
   });
 
-  test("a round with no return evidence at all is not a confident sell-out", () => {
-    const rows = cell(100, 20, 0);
+  test("a clean round with no return evidence is a zero-return sold-out round", () => {
+    const rows = [row({ transaction_type: WITHDRAW, quantity: 100 })];
     const item = only(build(rows, {
       roundReturnStates: new Map<string, RoundReturnState>([[ROUND_A, "none"]]),
     }));
-    expect(item.status).toBe("unknown");
-    expect(item.uncertaintyReasons).toContain("return_missing");
+    expect(item.goodReturnQuantity).toBe(0);
+    expect(item.damagedQuantity).toBe(0);
+    expect(item.estimatedSoldQuantity).toBe(100);
+    expect(item.sellThroughRate).toBe(100);
+    expect(item.status).toBe("surplus"); // no house-stock signal for 🟢
+    expect(item.uncertaintyReasons).toEqual([]);
   });
 
   test("case 16 — a blocked or pending return makes its own product uncertain", () => {
@@ -817,7 +842,7 @@ describe("purchase planning — unattributable withdrawal safety", () => {
     ]);
   });
 
-  test("product_return_absent is unchanged when no unattributable เบิก exists", () => {
+  test("an omitted product remains a confident zero return without an unattributable เบิก", () => {
     const rows = [
       row({ transaction_type: WITHDRAW, quantity: 100 }),
       row({ product_name: "ส้มไต้หวัน", unit: "โล", transaction_type: WITHDRAW, quantity: 10 }),
@@ -825,8 +850,9 @@ describe("purchase planning — unattributable withdrawal safety", () => {
     ];
     const apple = build(rows).items.find((i) => i.productName === "แอปเปิ้ล")!;
 
-    expect(apple.status).toBe("unknown");
-    expect(apple.uncertaintyReasons).toContain("product_return_absent");
+    expect(apple.status).toBe("surplus");
+    expect(apple.estimatedSoldQuantity).toBe(100);
+    expect(apple.uncertaintyReasons).not.toContain("product_return_absent");
     expect(apple.uncertaintyReasons).not.toContain("unattributable_withdrawal");
   });
 

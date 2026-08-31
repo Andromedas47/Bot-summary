@@ -5,8 +5,16 @@ export type DraftItemCommand = {
   itemNumber: number;
 };
 
+export type SubunitConfirmCommand = { itemNumber: number };
+
 const CORRECT_ITEM = /^แก้ข้อ\s*(\d+)\s*$/;
 const REMOVE_ITEM = /^ลบข้อ\s*(\d+)\s*$/;
+const CONFIRM_SUBUNIT = /^ยืนยันข้อ\s*(\d+)\s*$/;
+
+export function parseSubunitConfirmCommandLine(text: string): SubunitConfirmCommand | null {
+  const match = text.trim().match(CONFIRM_SUBUNIT);
+  return match ? { itemNumber: Number(match[1]) } : null;
+}
 
 /** Exact control grammar. Ordinary repeated item numbers keep legacy meaning. */
 export function parseDraftItemCommandLine(text: string): DraftItemCommand | null {

@@ -30,7 +30,11 @@ import type { DataQualityIssueCandidate } from "../types";
 function categoryFor(code: PreflightIssueCode, sourceSeverity: PreflightSeverity): DataQualityCategory | null {
   switch (code) {
     case "missing_successful_return":
-      return "produce_no_return";
+      // The warning is the clean whole-round `state === "none"` case: no
+      // return evidence exists, which is a legitimate sold-out outcome. A
+      // blocker still means a return was attempted but did not land, and must
+      // remain actionable in the inbox.
+      return sourceSeverity === "blocker" ? "produce_no_return" : null;
     case "active_failed_produce_session":
     case "pending_produce_session":
       return "produce_stale_failed_session";

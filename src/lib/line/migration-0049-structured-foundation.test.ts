@@ -452,6 +452,19 @@ describe("0049 — structured finalization path", () => {
     expect(source).toContain("if (seed) {");
   });
 
+  it("keeps active subunit confirmation on the structured frozen seed", async () => {
+    const source = await Bun.file(new URL("./webhook-service.ts", import.meta.url)).text();
+    const branch = source.slice(
+      source.indexOf("const subunitConfirm = parseSubunitConfirmCommandLine"),
+      source.indexOf("if (subunitConfirm) {", source.indexOf("const subunitConfirm")) + 2500,
+    );
+    expect(branch).toContain("buildSeedFromStructuredMetadata(structured)");
+    expect(branch).toContain("structured.business_date ?? bangkokToday()");
+    expect(branch).toContain("structured.market_label ?? null");
+    expect(branch).toContain("structured.staff_label ?? null");
+    expect(branch.indexOf("if (expired)")).toBeLessThan(branch.indexOf("confirmProduceSubunitReview"));
+  });
+
   it("consumes only the admitted set through the close boundary", async () => {
     const source = await Bun.file(finalizerPath).text();
     const seedBranch = source.slice(

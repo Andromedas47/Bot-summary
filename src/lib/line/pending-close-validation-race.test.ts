@@ -180,6 +180,52 @@ describe("finalizer ordering guarantee", () => {
   });
 });
 
+describe("migration invariants", () => {
+  const migrationPath = new URL(
+    "../../../supabase/migrations/20260831120000_produce_close_validation_race.sql",
+    import.meta.url,
+  );
+
+  it("gates the revision comparison on the same, still-live generation", async () => {
+    const sql = await Bun.file(migrationPath).text();
+    // Generation identity and terminal state outrank revision freshness: a
+    // stale close from a rotated generation must get generation_conflict, not
+    // an invitation to close again onto the replacement generation.
+    expect(sql).toContain(
+      "AND v_row.session_generation IS NOT DISTINCT FROM p_expected_session_generation",
+    );
+    expect(sql).toContain("AND NOT v_row.terminalized");
+
+    const generationGuard = sql.indexOf(
+      "AND v_row.session_generation IS NOT DISTINCT FROM p_expected_session_generation",
+    );
+    const revisionCompare = sql.indexOf(
+      "AND v_row.ingest_revision IS DISTINCT FROM p_expected_ingest_revision",
+    );
+    expect(generationGuard).toBeGreaterThan(0);
+    expect(generationGuard).toBeLessThan(revisionCompare);
+  });
+
+  it("locks the pending row before deciding either review mutation", async () => {
+    const sql = await Bun.file(migrationPath).text();
+    // Both review RPCs must take the pending_sessions lock; a bare read is a
+    // TOCTOU against every writer that terminalizes.
+    const guards = sql.split("SELECT terminalized INTO v_terminalized");
+    expect(guards).toHaveLength(3); // record_ + confirm_
+    for (const tail of guards.slice(1)) {
+      const lock = tail.indexOf("FOR UPDATE");
+      const decide = tail.indexOf("IF v_terminalized THEN");
+      expect(lock).toBeGreaterThan(-1);
+      expect(lock).toBeLessThan(decide);
+    }
+  });
+
+  it("keeps the forward version strictly above the Production ledger max", async () => {
+    // 20260831045503 is Production's ledger max after the #108 rollout.
+    expect("20260831120000" > "20260831045503").toBe(true);
+  });
+});
+
 describe("webhook close gate wiring", () => {
   const webhookPath = new URL("./webhook-service.ts", import.meta.url);
 

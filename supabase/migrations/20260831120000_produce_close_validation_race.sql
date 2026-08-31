@@ -39,9 +39,17 @@
 --      handling and every later change to it stay authoritative and can never
 --      drift from a copy. The nested FOR UPDATE inside the 8-arg is a no-op:
 --      the same transaction already holds the row lock.
+--      Generation identity and terminal state outrank revision freshness: the
+--      revision comparison is only reached for the SAME, still-live generation
+--      on its first close. Everything else is the delegate's verdict, so a
+--      stale close from a rotated generation is told generation_conflict and
+--      never invited to "close again" onto the replacement.
 --   2. Refuses to record or confirm a validation review against a terminalized
 --      generation, so a stale close can never grow a review nobody can act on
---      and an old generation can never authorize a new one.
+--      and an old generation can never authorize a new one. The check takes
+--      the pending_sessions row lock, so it serializes against every writer
+--      that terminalizes rather than racing it. Lock order everywhere is
+--      pending_sessions BEFORE produce_entry_validation_reviews.
 --   3. hold/resume RPCs so a late pre-close LINE event that introduces
 --      review_required AFTER the boundary parks finalization instead of
 --      terminalizing, and a distinct later confirmation can resume it.
@@ -123,16 +131,31 @@ BEGIN
     RETURN jsonb_build_object('accepted', false, 'reason', 'not_found');
   END IF;
 
+  -- ELIGIBILITY, NOT A SECOND OPINION.
+  --
+  -- Generation identity and terminal state OUTRANK revision freshness. A stale
+  -- close from a generation that has since rotated must be told
+  -- generation_conflict, never stale_validation_snapshot: the latter invites
+  -- the operator to "close again", and that retry would land on the
+  -- REPLACEMENT generation. Same for a terminalized row.
+  --
+  -- So the conditions below decide only whether this request is eligible for a
+  -- revision comparison at all. Every case that is not eligible falls straight
+  -- through to the delegate, which remains the single authority on generation
+  -- conflicts, terminal state, deadlines and their exact refusal reasons. This
+  -- wrapper never returns those verdicts itself, so the two cannot disagree.
+  --
   -- FIRST close only. A repeated close is a status request and must keep
   -- working after legitimate late pre-close admission has moved the revision;
   -- guarding it here would break the second-close status path.
-  --
-  -- Generation and terminalized state are deliberately NOT re-checked here.
-  -- The delegate owns those decisions and their exact refusal reasons; adding
-  -- a second copy would let the two disagree.
   IF p_mark_close
      AND v_row.close_event_timestamp_ms IS NULL
      AND p_expected_ingest_revision IS NOT NULL
+     -- Same, still-live generation: otherwise the delegate decides.
+     AND p_expected_session_generation IS NOT NULL
+     AND v_row.session_generation IS NOT DISTINCT FROM p_expected_session_generation
+     AND NOT v_row.terminalized
+     -- ...and revision is then the ONLY thing that changed.
      AND v_row.ingest_revision IS DISTINCT FROM p_expected_ingest_revision THEN
     RETURN jsonb_build_object(
       'accepted', false,
@@ -198,10 +221,23 @@ BEGIN
   -- mint a review the operator can never act on. Absence of the pending row is
   -- not treated as terminal: reviews are also recorded for generations this
   -- lookup cannot see, and refusing those would be a behaviour change.
+  --
+  -- FOR UPDATE, not a bare read. Every writer that terminalizes a generation
+  -- (try_finalize_pending_generation, the 20260829090000 expiry sweep,
+  -- recover_stranded_plain_text_closes) takes this same row lock first, so
+  -- without it the guard is a TOCTOU: read terminalized = false, another
+  -- transaction terminalizes and commits, then this one inserts a review
+  -- against a dead generation. Taking the lock here makes the check and the
+  -- insert one serialized decision.
+  --
+  -- LOCK ORDER: public.pending_sessions BEFORE
+  -- public.produce_entry_validation_reviews, matching confirm_ below and every
+  -- other writer in this schema. Nothing takes them in the opposite order.
   SELECT terminalized INTO v_terminalized
   FROM public.pending_sessions
   WHERE session_key = p_session_key
-    AND session_generation = p_session_generation;
+    AND session_generation = p_session_generation
+  FOR UPDATE;
 
   IF v_terminalized THEN
     RETURN jsonb_build_object('status', 'terminalized', 'confirmed', false);
@@ -255,10 +291,14 @@ DECLARE
   v_row          public.produce_entry_validation_reviews;
   v_terminalized boolean;
 BEGIN
+  -- Same lock, same order as record_ above: pending_sessions first, then the
+  -- review row below. A confirmation must not be able to land on a generation
+  -- that terminalizes concurrently.
   SELECT terminalized INTO v_terminalized
   FROM public.pending_sessions
   WHERE session_key = p_session_key
-    AND session_generation = p_session_generation;
+    AND session_generation = p_session_generation
+  FOR UPDATE;
 
   IF v_terminalized THEN
     RETURN jsonb_build_object('status', 'terminalized');

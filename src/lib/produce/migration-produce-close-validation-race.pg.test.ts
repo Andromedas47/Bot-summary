@@ -331,6 +331,64 @@ describe.skipIf(!pgAvailable)("produce close validation race on PostgreSQL 17", 
     expect(second.accepted).toBe("true");
   });
 
+  // ── A2. Generation identity outranks revision freshness ───────────────────
+
+  test("generation changed AND revision changed -> generation_conflict, never stale", async () => {
+    const s = await seedSession();
+    await admitItem(s, "evt-item-1", CLOSE_TS - 20_000);
+    const gateRevision = await revisionOf(s.key);
+
+    // The session rotates to a replacement generation and grows content.
+    const replacement = nextUuid();
+    await scalar(`
+      UPDATE public.pending_sessions
+      SET session_generation = ${q(replacement)}::uuid,
+          ingest_revision = ingest_revision + 1
+      WHERE session_key = ${q(s.key)} RETURNING 1`);
+
+    // A stale close from the ORIGINAL generation must be told the generation
+    // moved. stale_validation_snapshot would invite a retry that lands on the
+    // replacement generation.
+    const close = await closeWithPin(s, "evt-stale-close", gateRevision);
+    expect(close.reason).toBe("generation_conflict");
+    expect(close.reason).not.toBe("stale_validation_snapshot");
+    expect(close.accepted).toBe("false");
+
+    // The replacement generation got no close boundary out of it.
+    expect(await field(s.key, "close_event_timestamp_ms")).toBe("<null>");
+    expect(await field(s.key, "close_requested_at")).toBe("<null>");
+    expect(await field(s.key, "session_generation")).toBe(replacement);
+  });
+
+  test("terminalized generation AND revision changed -> terminalized, never stale", async () => {
+    const s = await seedSession();
+    await admitItem(s, "evt-item-1", CLOSE_TS - 20_000);
+    const gateRevision = await revisionOf(s.key);
+    await scalar(`
+      UPDATE public.pending_sessions
+      SET terminalized = true,
+          finalization_status = 'failed_closed',
+          ingest_revision = ingest_revision + 1
+      WHERE session_key = ${q(s.key)} RETURNING 1`);
+
+    const close = await closeWithPin(s, "evt-stale-close", gateRevision);
+    expect(close.reason).toBe("terminalized");
+    expect(close.reason).not.toBe("stale_validation_snapshot");
+    expect(await field(s.key, "close_event_timestamp_ms")).toBe("<null>");
+  });
+
+  test("generation changed but revision identical -> still generation_conflict", async () => {
+    const s = await seedSession();
+    const gateRevision = await revisionOf(s.key);
+    const replacement = nextUuid();
+    await scalar(`
+      UPDATE public.pending_sessions SET session_generation = ${q(replacement)}::uuid
+      WHERE session_key = ${q(s.key)} RETURNING 1`);
+
+    expect((await closeWithPin(s, "evt-stale-close", gateRevision)).reason)
+      .toBe("generation_conflict");
+  });
+
   // ── B. Out-of-order admission is unchanged ────────────────────────────────
 
   test("post-close LINE timestamps are still rejected", async () => {
@@ -457,6 +515,91 @@ describe.skipIf(!pgAvailable)("produce close validation race on PostgreSQL 17", 
     expect(await hold(impostor, null)).toBe("generation_conflict");
     expect(await resume(impostor)).toBe("generation_conflict");
   });
+
+  // ── D2. The terminalized guard is atomic, not a TOCTOU ────────────────────
+
+  test("lock order is pending_sessions before produce_entry_validation_reviews", async () => {
+    // A consistent order across both review RPCs is what makes the pair
+    // deadlock-free against every writer that terminalizes.
+    for (const fn of ["record_produce_validation_review", "confirm_produce_validation_review"]) {
+      // Flattened: scalar() reads a single line and prosrc is multi-line.
+      const src = await scalar(`
+        SELECT translate(p.prosrc, E'\\n\\r\\t', '   ')
+        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'public' AND p.proname = ${q(fn)}`);
+      // The pending_sessions lock must be taken, and taken first.
+      const pendingLock = src.indexOf("public.pending_sessions");
+      const reviewTouch = src.indexOf("public.produce_entry_validation_reviews");
+      expect(pendingLock).toBeGreaterThan(-1);
+      expect(reviewTouch).toBeGreaterThan(-1);
+      expect(pendingLock).toBeLessThan(reviewTouch);
+    }
+    expect(await scalar(`
+      SELECT count(*)::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'public'
+        AND p.proname IN ('record_produce_validation_review', 'confirm_produce_validation_review')
+        AND p.prosrc LIKE '%FOR UPDATE%'`)).toBe("2");
+  });
+
+  test("a review cannot be recorded across a concurrent terminalization", async () => {
+    const s = await seedSession();
+    await closeWithPin(s, "evt-close", await revisionOf(s.key));
+
+    // Holder takes the pending_sessions row lock, terminalizes, and only then
+    // commits. Any recorder that read terminalized WITHOUT the lock would slip
+    // its INSERT in during the sleep.
+    const holder = spawnPsql(["-v", "ON_ERROR_STOP=1", "-tA", "-f", "-"], DATABASE, `
+      BEGIN;
+      SELECT terminalized FROM public.pending_sessions
+      WHERE session_key = ${q(s.key)} FOR UPDATE;
+      SELECT pg_sleep(2);
+      UPDATE public.pending_sessions
+      SET terminalized = true, finalization_status = 'failed_closed'
+      WHERE session_key = ${q(s.key)};
+      COMMIT;
+    `);
+
+    // Let the holder acquire the lock before the recorder attempts anything.
+    await Bun.sleep(600);
+    const status = await recordReview(s, "digest-race", "evt-present");
+    const holderResult = await collect(holder);
+    expect(holderResult.code, holderResult.stderr).toBe(0);
+
+    // The recorder blocked on the lock, then observed the committed terminal
+    // state — it did not slip a review in beforehand.
+    expect(status).toBe("terminalized");
+    expect(await scalar(
+      `SELECT count(*)::text FROM public.produce_entry_validation_reviews
+       WHERE validation_digest = 'digest-race'`)).toBe("0");
+    expect(await field(s.key, "terminalized")).toBe("true");
+  }, 30_000);
+
+  test("a review cannot be confirmed across a concurrent terminalization", async () => {
+    const s = await seedSession();
+    await closeWithPin(s, "evt-close", await revisionOf(s.key));
+    expect(await recordReview(s, "digest-race-2", "evt-present")).toBe("recorded");
+
+    const holder = spawnPsql(["-v", "ON_ERROR_STOP=1", "-tA", "-f", "-"], DATABASE, `
+      BEGIN;
+      SELECT terminalized FROM public.pending_sessions
+      WHERE session_key = ${q(s.key)} FOR UPDATE;
+      SELECT pg_sleep(2);
+      UPDATE public.pending_sessions SET terminalized = true
+      WHERE session_key = ${q(s.key)};
+      COMMIT;
+    `);
+
+    await Bun.sleep(600);
+    const status = await confirmReview(s, "digest-race-2", "evt-confirm");
+    const holderResult = await collect(holder);
+    expect(holderResult.code, holderResult.stderr).toBe(0);
+
+    expect(status).toBe("terminalized");
+    expect(await scalar(
+      `SELECT coalesce(confirmed_at::text, '<null>')
+       FROM public.produce_entry_validation_reviews
+       WHERE validation_digest = 'digest-race-2'`)).toBe("<null>");
+  }, 30_000);
 
   // ── E. #108 inactivity interaction ────────────────────────────────────────
 

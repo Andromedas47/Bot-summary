@@ -11,7 +11,7 @@ import {
   buildAdditionalSessionSummary,
   buildWeighSessionSummary,
   pushLineMessage,
-  weighItemTotal,
+  sumWeighItemsSatang,
   type AdditionalSessionDayContext,
 } from "@/lib/line/reply";
 import { baseTransactionType } from "@/lib/summary/transactions";
@@ -208,7 +208,9 @@ async function loadAdditionalDayContext(
   supabase: Supabase,
   parsed: WeighSession,
 ): Promise<AdditionalSessionDayContext> {
-  const batchTotal = parsed.items.reduce((sum, item) => sum + weighItemTotal(item), 0);
+  // Exact milli-satang sum, rounded once at the end — see
+  // sumWeighItemsSatang in src/lib/line/reply.ts.
+  const batchTotal = sumWeighItemsSatang(parsed.items) / 100;
 
   const { data, error } = await supabase
     .from("produce_transactions")

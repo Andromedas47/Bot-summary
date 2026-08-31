@@ -40,14 +40,22 @@ import {
 import { RE } from "@/lib/parsers/weigh-session/regex";
 import { logger } from "@/lib/logger";
 import { seedCentralPricesFromPersistedWithdrawals } from "@/lib/white-sheet/seed-from-withdrawal";
-import { runProduceFinalizeGate } from "@/lib/produce/entry-validation-gate";
+import {
+  finalizerPresentationToken,
+  markProduceValidationReviewPresented,
+  recordFinalizerValidationReview,
+  runProduceFinalizeGate,
+} from "@/lib/produce/entry-validation-gate";
 import { bindPlainTextRound } from "@/lib/produce/plain-text-round-binding";
 import {
   buildBlockingValidationReply,
   buildPriceAdvisoryNotification,
   buildUnconfirmedReviewReply,
 } from "@/lib/produce/entry-validation-message";
-import type { ProduceValidationAdvisory } from "@/lib/produce/entry-validation";
+import type {
+  ProduceValidationAdvisory,
+  ProduceValidationResult,
+} from "@/lib/produce/entry-validation";
 import { getRuntimeEnvironment } from "@/lib/runtime-environment";
 
 type Supabase = SupabaseClient<Database>;
@@ -270,6 +278,98 @@ function ownsSnapshotEnvironment(snapshot: PendingSession): boolean {
   return owner === current;
 }
 
+/**
+ * The recovery protocol for a review the FINALIZER discovered after the close
+ * boundary. Order matters, and every step is chosen so that a crash or a failed
+ * LINE push leaves a state that cannot approve content the operator never saw.
+ *
+ *   1. record the review durably, NOT marked delivered
+ *   2. park finalization (revision-pinned)
+ *   3. push it to the operator
+ *   4. only if the push succeeded, record proof of delivery
+ *
+ * Because step 4 is the only thing that makes the review confirmable, ONE
+ * distinct later close is enough on the success path, and no close can ever
+ * confirm an undelivered review. Returns null when the session must fall
+ * through to normal finalization instead.
+ */
+export async function holdAndPresentFinalizerReview(
+  supabase: Supabase,
+  service: PendingSessionService,
+  snapshot: PendingSession,
+  accountabilityRoundId: string | null,
+  reviewResult: ProduceValidationResult,
+  detail: string | null,
+  push: PushMessage,
+  log: ReturnType<typeof logger.child>,
+): Promise<TryFinalizeResult | null> {
+  const ref = {
+    sessionKey: snapshot.session_key,
+    sessionGeneration: snapshot.session_generation,
+    accountabilityRoundId,
+    businessDate: null,
+    marketLabel: null,
+    staffLabel: null,
+    lineUserId: snapshot.line_user_id,
+  };
+  const token = finalizerPresentationToken(snapshot.session_generation, reviewResult.digest);
+
+  // 1. Durable, digest- and generation-bound, explicitly NOT delivered.
+  try {
+    await recordFinalizerValidationReview(supabase, ref, reviewResult, token);
+  } catch (recordError) {
+    // Nothing was parked and nothing claims delivery. Fall through: the normal
+    // path still refuses to finalize an unconfirmed review.
+    log.error("finalizer review could not be recorded", { error: String(recordError) });
+    return null;
+  }
+
+  // 2. Park. Revision-pinned, so a document that moved again is not parked
+  //    against a stale decision.
+  const held = await service.holdValidationReview(
+    snapshot.session_key,
+    snapshot.session_generation,
+    snapshot.ingest_revision ?? null,
+  );
+  if (!held) return null;
+
+  log.info("produce finalization held for unconfirmed entry review", {
+    ingestRevision: snapshot.ingest_revision,
+    closeEventTimestampMs: snapshot.close_event_timestamp_ms,
+  });
+
+  // 3. Present it. A push that throws leaves the review undelivered, so the
+  //    next close re-presents rather than confirming unseen content.
+  if (!detail) return { status: "validation_held", reason: "entry_review_unconfirmed" };
+  try {
+    await push(snapshot.line_user_id!, detail);
+  } catch (pushError) {
+    log.error("held review notification failed; review stays unpresented", {
+      error: String(pushError),
+    });
+    return { status: "validation_held", reason: "entry_review_undelivered" };
+  }
+
+  // 4. Delivery is proven only now. If THIS fails, the review stays
+  //    unconfirmable and the operator is shown it again — never the reverse.
+  try {
+    const presented = await markProduceValidationReviewPresented(
+      supabase,
+      ref,
+      reviewResult.digest,
+    );
+    if (presented !== "presented" && presented !== "already_presented") {
+      log.warn("review presentation could not be proven", { presented });
+      return { status: "validation_held", reason: "entry_review_undelivered" };
+    }
+  } catch (markError) {
+    log.error("review presentation could not be recorded", { error: String(markError) });
+    return { status: "validation_held", reason: "entry_review_undelivered" };
+  }
+
+  return { status: "validation_held", reason: "entry_review_presented" };
+}
+
 export async function finalizePendingGeneration(
   supabase: Supabase,
   snapshot: PendingSession,
@@ -451,30 +551,18 @@ export async function finalizePendingGeneration(
     // The hold is revision-pinned. If the document moved again between the
     // gate reading it and the hold being taken, the hold is refused and this
     // falls through to the normal path rather than parking a stale decision.
-    if (gate.reviewPresented) {
-      const held = await service.holdValidationReview(
-        snapshot.session_key,
-        snapshot.session_generation,
-        snapshot.ingest_revision ?? null,
+    if (gate.reviewPresented && gate.reviewResult && snapshot.line_user_id) {
+      const heldStatus = await holdAndPresentFinalizerReview(
+        supabase,
+        service,
+        snapshot,
+        accountabilityRoundId,
+        gate.reviewResult,
+        gate.detail,
+        push,
+        log,
       );
-      if (held) {
-        log.info("produce finalization held for unconfirmed entry review", {
-          ingestRevision: snapshot.ingest_revision,
-          closeEventTimestampMs: closeTimestamp,
-        });
-        if (gate.detail && snapshot.line_user_id) {
-          try {
-            await push(snapshot.line_user_id, gate.detail);
-          } catch (pushError) {
-            // The hold is already committed. A failed push costs one
-            // notification, never the parked state — the review is still
-            // presentable and Data Quality still shows the session as
-            // action-required.
-            log.error("held review notification failed", { error: String(pushError) });
-          }
-        }
-        return { status: "validation_held", reason: "entry_review_unconfirmed" };
-      }
+      if (heldStatus) return heldStatus;
       log.warn("validation hold refused; falling through to normal finalization", {
         ingestRevision: snapshot.ingest_revision,
       });
@@ -853,6 +941,9 @@ async function runEntryGateForFinalization(
   detail: string | null;
   advisories: ProduceValidationAdvisory[];
   reviewPresented: boolean;
+  /** The exact exception set the review describes. Present only when
+   *  reviewPresented — it is what the finalizer must persist and show. */
+  reviewResult: ProduceValidationResult | null;
 }> {
   let gate: Awaited<ReturnType<typeof runProduceFinalizeGate>>;
   try {
@@ -875,6 +966,7 @@ async function runEntryGateForFinalization(
       detail: null,
       advisories: [],
       reviewPresented: false,
+      reviewResult: null,
     };
   }
 
@@ -884,6 +976,7 @@ async function runEntryGateForFinalization(
       detail: buildBlockingValidationReply(gate.result),
       advisories: [],
       reviewPresented: false,
+      reviewResult: null,
     };
   }
   if (gate.decision === "review_presented") {
@@ -892,6 +985,7 @@ async function runEntryGateForFinalization(
       detail: buildUnconfirmedReviewReply(gate.result),
       advisories: [],
       reviewPresented: true,
+      reviewResult: gate.result,
     };
   }
   return {
@@ -899,6 +993,7 @@ async function runEntryGateForFinalization(
     detail: null,
     advisories: gate.result.advisories,
     reviewPresented: false,
+    reviewResult: null,
   };
 }
 

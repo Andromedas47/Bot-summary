@@ -223,6 +223,10 @@ describe.skipIf(!pgAvailable)("produce close validation race on PostgreSQL 17", 
       ROOT, "supabase", "migrations",
       "20260831120000_produce_close_validation_race.sql",
     ));
+    await apply(join(
+      ROOT, "supabase", "migrations",
+      "20260901090000_produce_finalizer_review_presentation.sql",
+    ));
   }, 120_000);
 
   afterAll(async () => {
@@ -606,6 +610,147 @@ describe.skipIf(!pgAvailable)("produce close validation race on PostgreSQL 17", 
        FROM public.produce_entry_validation_reviews
        WHERE validation_digest = 'digest-race-2'`)).toBe("<null>");
   }, 30_000);
+
+  // ── D3. Finalizer presentation protocol ───────────────────────────────────
+  //
+  // A LINE push is not transactional with PostgreSQL, so "recorded" and
+  // "delivered" are separate durable facts. Only delivery makes a review
+  // confirmable.
+
+  async function recordFinalizerReview(s: Session, digest: string, token: string): Promise<string> {
+    return await scalar(`
+      SELECT r->>'status' FROM public.record_finalizer_validation_review(
+        ${q(s.key)}, ${q(s.generation)}::uuid, ${q(s.roundId)}::uuid, ${q(digest)},
+        DATE '2026-08-30', 'ราชพฤก', 'จิ้ว', '[]'::jsonb, ${q(OWNER)}, ${q(token)}
+      ) AS r`);
+  }
+
+  async function markPresented(s: Session, digest: string): Promise<string> {
+    return await scalar(`
+      SELECT public.mark_produce_validation_review_presented(
+        ${q(s.key)}, ${q(s.generation)}::uuid, ${q(digest)})->>'status'`);
+  }
+
+  async function deliveredAt(digest: string): Promise<string> {
+    return await scalar(`
+      SELECT coalesce(presented_delivered_at::text, '<null>')
+      FROM public.produce_entry_validation_reviews WHERE validation_digest = ${q(digest)}`);
+  }
+
+  test("SUCCESS PATH — push proven, ONE distinct later close confirms", async () => {
+    const s = await seedSession();
+    await closeWithPin(s, "evt-close", await revisionOf(s.key));
+    const token = `finalizer:${s.generation}:digest-ok`;
+
+    // 1-2. recorded durably, explicitly NOT delivered
+    expect(await recordFinalizerReview(s, "digest-ok", token)).toBe("recorded");
+    expect(await deliveredAt("digest-ok")).toBe("<null>");
+
+    // 3-4. the push succeeded, so delivery is proven
+    expect(await markPresented(s, "digest-ok")).toBe("presented");
+    expect(await deliveredAt("digest-ok")).not.toBe("<null>");
+
+    // ONE distinct later close confirms. No third close.
+    expect(await confirmReview(s, "digest-ok", "evt-close-2")).toBe("confirmed");
+    expect(await scalar(
+      `SELECT coalesce(confirmed_line_event_id, '<null>')
+       FROM public.produce_entry_validation_reviews WHERE validation_digest = 'digest-ok'`))
+      .toBe("evt-close-2");
+  });
+
+  test("FAILED PUSH — an undelivered review cannot be confirmed by any close", async () => {
+    const s = await seedSession();
+    await closeWithPin(s, "evt-close", await revisionOf(s.key));
+    const token = `finalizer:${s.generation}:digest-undelivered`;
+    await recordFinalizerReview(s, "digest-undelivered", token);
+
+    // The operator never saw it. No close may approve it.
+    expect(await confirmReview(s, "digest-undelivered", "evt-close-2")).toBe("not_presented");
+    expect(await confirmReview(s, "digest-undelivered", "evt-close-3")).toBe("not_presented");
+    expect(await scalar(
+      `SELECT coalesce(confirmed_at::text, '<null>')
+       FROM public.produce_entry_validation_reviews
+       WHERE validation_digest = 'digest-undelivered'`)).toBe("<null>");
+  });
+
+  test("RE-PRESENT — the webhook recording an undelivered review proves delivery", async () => {
+    const s = await seedSession();
+    await closeWithPin(s, "evt-close", await revisionOf(s.key));
+    const token = `finalizer:${s.generation}:digest-repres`;
+    await recordFinalizerReview(s, "digest-repres", token);
+    expect(await deliveredAt("digest-repres")).toBe("<null>");
+
+    // The next close re-presents it (the webhook replies with it), which is
+    // what finally proves delivery — and must NOT confirm in the same breath.
+    expect(await recordReview(s, "digest-repres", "evt-close-2")).toBe("recorded");
+    expect(await deliveredAt("digest-repres")).not.toBe("<null>");
+    expect(await scalar(
+      `SELECT coalesce(confirmed_at::text, '<null>')
+       FROM public.produce_entry_validation_reviews WHERE validation_digest = 'digest-repres'`))
+      .toBe("<null>");
+
+    // The close AFTER that confirms.
+    expect(await confirmReview(s, "digest-repres", "evt-close-3")).toBe("confirmed");
+  });
+
+  test("the finalizer presentation token can never self-confirm", async () => {
+    const s = await seedSession();
+    await closeWithPin(s, "evt-close", await revisionOf(s.key));
+    const token = `finalizer:${s.generation}:digest-token`;
+    await recordFinalizerReview(s, "digest-token", token);
+    await markPresented(s, "digest-token");
+
+    // Redelivery of the presenting identity is not a confirmation.
+    expect(await confirmReview(s, "digest-token", token)).toBe("not_found");
+    expect(await scalar(
+      `SELECT coalesce(confirmed_at::text, '<null>')
+       FROM public.produce_entry_validation_reviews WHERE validation_digest = 'digest-token'`))
+      .toBe("<null>");
+  });
+
+  test("a changed document means a new digest, and the old review authorizes nothing", async () => {
+    const s = await seedSession();
+    await closeWithPin(s, "evt-close", await revisionOf(s.key));
+    await recordFinalizerReview(s, "digest-old", `finalizer:${s.generation}:digest-old`);
+    await markPresented(s, "digest-old");
+    expect(await confirmReview(s, "digest-old", "evt-close-2")).toBe("confirmed");
+
+    // The document moved; the gate now computes a different digest, which has
+    // no confirmed row of its own.
+    expect(await confirmReview(s, "digest-new", "evt-close-3")).toBe("not_found");
+  });
+
+  test("the finalizer record is idempotent across retries", async () => {
+    const s = await seedSession();
+    await closeWithPin(s, "evt-close", await revisionOf(s.key));
+    const token = `finalizer:${s.generation}:digest-retry`;
+    expect(await recordFinalizerReview(s, "digest-retry", token)).toBe("recorded");
+    expect(await recordFinalizerReview(s, "digest-retry", token)).toBe("recorded");
+    expect(await scalar(
+      `SELECT count(*)::text FROM public.produce_entry_validation_reviews
+       WHERE validation_digest = 'digest-retry'`)).toBe("1");
+    // A retry must not silently prove delivery.
+    expect(await deliveredAt("digest-retry")).toBe("<null>");
+  });
+
+  test("a terminalized generation refuses both finalizer record and delivery proof", async () => {
+    const s = await seedSession();
+    await closeWithPin(s, "evt-close", await revisionOf(s.key));
+    await recordFinalizerReview(s, "digest-term", `finalizer:${s.generation}:digest-term`);
+    await scalar(`
+      UPDATE public.pending_sessions SET terminalized = true
+      WHERE session_key = ${q(s.key)} RETURNING 1`);
+
+    expect(await recordFinalizerReview(s, "digest-term-2", "tok")).toBe("terminalized");
+    expect(await markPresented(s, "digest-term")).toBe("terminalized");
+    expect(await confirmReview(s, "digest-term", "evt-close-2")).toBe("terminalized");
+  });
+
+  test("marking a digest that was never recorded is not_found", async () => {
+    const s = await seedSession();
+    await closeWithPin(s, "evt-close", await revisionOf(s.key));
+    expect(await markPresented(s, "digest-absent")).toBe("not_found");
+  });
 
   // ── E. #108 inactivity interaction ────────────────────────────────────────
 

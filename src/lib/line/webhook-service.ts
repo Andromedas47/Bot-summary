@@ -151,7 +151,11 @@ import {
 } from "@/lib/line/data-entry-session-ownership";
 import { tryHandlePurchaseCaptureMessage } from "@/lib/purchase-capture/webhook-handler";
 import { bindPlainTextRound } from "@/lib/produce/plain-text-round-binding";
-import { confirmProduceSubunitReview, runProduceCloseGate } from "@/lib/produce/entry-validation-gate";
+import {
+  confirmProduceSubunitReview,
+  isProduceReviewApproved,
+  runProduceCloseGate,
+} from "@/lib/produce/entry-validation-gate";
 import {
   buildBlockingValidationReply,
   buildPlainTextReviewValidationReply,
@@ -1161,10 +1165,14 @@ export class WebhookService {
             subunitConfirm.itemNumber,
             eventId,
           );
+          // Only a genuine approval may report success. not_presented (recorded
+          // but never proven shown) and terminalized must never read as
+          // "✅ ยืนยันแล้ว" — that would tell the operator a subunit was
+          // confirmed when nothing authorized it.
           if (replyToken) await this.replyMessage(replyToken,
-            result === "not_found"
-              ? `⛔ ยืนยันข้อ ${subunitConfirm.itemNumber} ไม่ได้\nรายการนี้ไม่ใช่รายการย่อยที่ต้องยืนยัน หรือข้อมูลเปลี่ยนแล้ว`
-              : `✅ ยืนยันข้อ ${subunitConfirm.itemNumber} แล้ว\nกรุณาส่ง “จบรายการ” อีกครั้งเมื่อยืนยันครบทุกข้อ`,
+            isProduceReviewApproved(result)
+              ? `✅ ยืนยันข้อ ${subunitConfirm.itemNumber} แล้ว\nกรุณาส่ง “จบรายการ” อีกครั้งเมื่อยืนยันครบทุกข้อ`
+              : `⛔ ยืนยันข้อ ${subunitConfirm.itemNumber} ไม่ได้\nรายการนี้ไม่ใช่รายการย่อยที่ต้องยืนยัน หรือข้อมูลเปลี่ยนแล้ว`,
           );
         } catch (error) {
           log.error("subunit confirmation failed", {

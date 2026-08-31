@@ -1,5 +1,5 @@
 {
-  "source": "Production supabase_migrations.schema_migrations read-only audit on 2026-08-28",
+  "source": "Production supabase_migrations.schema_migrations read-only audit on 2026-08-31, after applying produce_pending_inactivity_lifecycle",
   "migrations": [
     "0001_initial_schema.sql",
     "0002_produce_weighing.sql",
@@ -95,6 +95,15 @@
     "20260825092703_data_quality_issues.sql",
     "20260826102627_house_stock_explicit_empty.sql",
     "20260827055728_produce_product_dictionary_add_fah_lan_mango.sql",
-    "20260827065840_data_quality_atomic_upsert.sql"
+    "20260827065840_data_quality_atomic_upsert.sql",
+    "20260829090000_produce_pending_inactivity_lifecycle.sql"
+  ],
+  "production_ledger_drift": [
+    {
+      "file": "20260829090000_produce_pending_inactivity_lifecycle.sql",
+      "applied_version": "20260831045503",
+      "applied_name": "produce_pending_inactivity_lifecycle",
+      "note": "Applied via the Supabase apply_migration operation, which stamps its own version from the apply time instead of the repository filename prefix. Production history is authoritative and is never rewritten to match the filename, so the divergence is recorded here instead."
+    }
   ]
 }

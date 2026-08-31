@@ -6,18 +6,32 @@ const ROOT = join(import.meta.dir, "..", "..", "..");
 const MIGRATIONS = join(ROOT, "supabase", "migrations");
 const MANIFEST = join(ROOT, "supabase", "migration-history-manifest.json");
 
-type MigrationManifest = { source: string; migrations: string[] };
+type LedgerDrift = {
+  file: string;
+  applied_version: string;
+  applied_name: string;
+  note: string;
+};
+type MigrationManifest = {
+  source: string;
+  migrations: string[];
+  production_ledger_drift: LedgerDrift[];
+};
 
 /**
  * HISTORICAL_PRODUCTION_BASELINE = the migrations recorded in Production's
- * supabase_migrations.schema_migrations ledger at the audited cutoff. These are
- * immutable: Production has already run them, so their filenames and SQL must
- * never change and their versions must never be reused.
+ * supabase_migrations.schema_migrations ledger. These are immutable: Production
+ * has already run them, so their filenames and SQL must never change and their
+ * versions must never be reused.
  *
  * PENDING_FORWARD_MIGRATIONS = migrations that exist in the repository but have
  * not been applied to Production yet. They are legitimate, not drift — but they
  * must sort strictly after the audited cutoff so they can never collide with, or
  * silently re-run before, an already-applied historical migration.
+ *
+ * The baseline advanced from 95 to 96 on 2026-08-31 when
+ * 20260829090000_produce_pending_inactivity_lifecycle.sql (PR #108) was applied
+ * to Production. Production history was not rewritten; the manifest followed it.
  */
 const manifest = JSON.parse(readFileSync(MANIFEST, "utf8")) as MigrationManifest;
 const HISTORICAL = [...manifest.migrations].sort();
@@ -30,7 +44,7 @@ function repoMigrationFiles(): string[] {
 }
 
 // Version is the filename prefix before the first underscore: "0001" or
-// "20260827065840". All are digit-only, so lexicographic order equals
+// "20260829090000". All are digit-only, so lexicographic order equals
 // chronological order (any 4-digit legacy version sorts before any 14-digit
 // timestamp version).
 function versionOf(filename: string): string {
@@ -42,9 +56,9 @@ const historicalSet = new Set(HISTORICAL);
 const pendingForward = repoFiles.filter((file) => !historicalSet.has(file));
 
 describe("Production migration-history baseline", () => {
-  it("is exactly the 95 audited Production migrations", () => {
-    expect(HISTORICAL).toHaveLength(95);
-    expect(new Set(HISTORICAL).size).toBe(95);
+  it("is exactly the 96 audited Production migrations", () => {
+    expect(HISTORICAL).toHaveLength(96);
+    expect(new Set(HISTORICAL).size).toBe(96);
   });
 
   it("still exists in the repository under its exact reconciled filenames", () => {
@@ -75,6 +89,38 @@ describe("Production migration-history baseline", () => {
       expect(byVersion.get(versionOf(historical))).toEqual([historical]);
     }
   });
+
+  it("includes the applied #108 inactivity lifecycle migration", () => {
+    expect(HISTORICAL).toContain("20260829090000_produce_pending_inactivity_lifecycle.sql");
+    expect(CUTOFF).toBe("20260829090000");
+  });
+});
+
+describe("Production ledger version drift", () => {
+  // Production's ledger version for a migration normally equals the repository
+  // filename prefix. The Supabase apply_migration operation stamps its own
+  // version from the apply time instead, so one entry diverges. Production
+  // history is authoritative and must never be hand-edited to match the
+  // filename — the divergence is recorded in the manifest and pinned here so a
+  // second, undocumented divergence cannot appear silently.
+  it("is limited to the entries the manifest documents", () => {
+    expect(manifest.production_ledger_drift).toEqual([
+      {
+        file: "20260829090000_produce_pending_inactivity_lifecycle.sql",
+        applied_version: "20260831045503",
+        applied_name: "produce_pending_inactivity_lifecycle",
+        note: expect.any(String),
+      },
+    ]);
+  });
+
+  it("only ever documents drift for a migration that is in the baseline", () => {
+    for (const drift of manifest.production_ledger_drift) {
+      expect(HISTORICAL).toContain(drift.file);
+      expect(drift.applied_name).toBe(drift.file.replace(/^\d+_/, "").replace(/\.sql$/, ""));
+      expect(/^\d+$/.test(drift.applied_version)).toBe(true);
+    }
+  });
 });
 
 describe("Pending forward migrations", () => {
@@ -85,17 +131,13 @@ describe("Pending forward migrations", () => {
   });
 
   it("all sort strictly after the audited Production cutoff", () => {
-    expect(CUTOFF).toBe("20260827065840");
     for (const file of pendingForward) {
       expect(versionOf(file) > CUTOFF).toBe(true);
     }
   });
 
-  it("classifies 20260829090000 as pending-forward, not historical drift", () => {
-    const inactivityLifecycle = "20260829090000_produce_pending_inactivity_lifecycle.sql";
-    expect(repoFiles).toContain(inactivityLifecycle);
-    expect(HISTORICAL).not.toContain(inactivityLifecycle);
-    expect(pendingForward).toContain(inactivityLifecycle);
+  it("is currently empty — Production is level with the repository", () => {
+    expect(pendingForward).toEqual([]);
   });
 
   it("do not invalidate historical reconciliation when more are added", () => {
@@ -104,6 +146,6 @@ describe("Pending forward migrations", () => {
     const withFutureForward = [...repoFiles, "20270101000000_future_forward.sql"].sort();
     const stillHistorical = withFutureForward.filter((file) => historicalSet.has(file));
     expect(stillHistorical).toEqual(HISTORICAL);
-    expect(stillHistorical).toHaveLength(95);
+    expect(stillHistorical).toHaveLength(96);
   });
 });

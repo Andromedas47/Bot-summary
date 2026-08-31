@@ -1,5 +1,7 @@
 {
   "source": "Production supabase_migrations.schema_migrations read-only audit on 2026-08-31, after applying produce_pending_inactivity_lifecycle",
+  "production_ledger_max_version": "20260831045503",
+  "production_ledger_max_version_note": "The greatest version in Production supabase_migrations.schema_migrations as of the audit in `source`. A pending forward migration must sort strictly after THIS, not merely after the largest historical repository filename — the two diverge whenever production_ledger_drift is non-empty.",
   "migrations": [
     "0001_initial_schema.sql",
     "0002_produce_weighing.sql",

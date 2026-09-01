@@ -44,14 +44,14 @@ import {
   finalizerPresentationToken,
   markProduceValidationReviewsPresented,
   recordProduceValidationReview,
-  reviewPresentationDigests,
+  deliveredPresentationDigests,
   runProduceFinalizeGate,
 } from "@/lib/produce/entry-validation-gate";
 import { bindPlainTextRound } from "@/lib/produce/plain-text-round-binding";
 import {
   buildBlockingValidationReply,
   buildPriceAdvisoryNotification,
-  buildPlainTextReviewPresentation,
+  buildPlainTextReviewPresentationPages,
   buildUnconfirmedReviewReply,
 } from "@/lib/produce/entry-validation-message";
 import type {
@@ -327,7 +327,10 @@ export async function holdAndPresentFinalizerReview(
   // delivered would let the next close confirm a digest whose contents nobody
   // ever read. The presentation also reports exactly which reviews its text
   // rendered, and only those may be authorized.
-  const presentation = buildPlainTextReviewPresentation(reviewResult, FINALIZER_REVIEW_CLOSE_COMMAND);
+  const { pages, complete } = buildPlainTextReviewPresentationPages(
+    reviewResult,
+    FINALIZER_REVIEW_CLOSE_COMMAND,
+  );
 
   // 1. Durable, digest- and generation-bound, explicitly NOT delivered.
   //    `parsed` is passed so the per-item subunit rows exist too: #109
@@ -357,19 +360,34 @@ export async function holdAndPresentFinalizerReview(
 
   // 3. Present it. A push that throws leaves the review undelivered, so the
   //    next close re-presents rather than confirming unseen content.
-  try {
-    await push(snapshot.line_user_id!, presentation.text);
-  } catch (pushError) {
-    log.error("held review notification failed; review stays unpresented", {
-      error: String(pushError),
-    });
+  // Push page by page. A page that fails stops the sequence: the pages that
+  // DID land still authorize the subunit items they showed, but the
+  // whole-review digest needs every page, so it stays unauthorized.
+  const deliveredPages: typeof pages = [];
+  for (const page of pages) {
+    try {
+      await push(snapshot.line_user_id!, page.text);
+      deliveredPages.push(page);
+    } catch (pushError) {
+      log.error("held review notification failed; review stays unpresented", {
+        error: String(pushError),
+        deliveredPages: deliveredPages.length,
+        totalPages: pages.length,
+      });
+      break;
+    }
+  }
+  const fullyDelivered = complete && deliveredPages.length === pages.length;
+  if (deliveredPages.length === 0) {
     return { status: "validation_held", reason: "entry_review_undelivered" };
   }
 
   // 4. Delivery is proven only now. If THIS fails, the review stays
   //    unconfirmable and the operator is shown it again — never the reverse.
   try {
-    const digests = reviewPresentationDigests(ref, reviewResult, presentation, parsed);
+    const digests = deliveredPresentationDigests(
+      ref, reviewResult, deliveredPages, fullyDelivered, parsed,
+    );
     const presented = await markProduceValidationReviewsPresented(
       supabase,
       ref,
@@ -385,7 +403,10 @@ export async function holdAndPresentFinalizerReview(
     return { status: "validation_held", reason: "entry_review_undelivered" };
   }
 
-  return { status: "validation_held", reason: "entry_review_presented" };
+  return {
+    status: "validation_held",
+    reason: fullyDelivered ? "entry_review_presented" : "entry_review_partially_presented",
+  };
 }
 
 export async function finalizePendingGeneration(

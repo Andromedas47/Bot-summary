@@ -501,6 +501,40 @@ export function reviewPresentationDigests(
 }
 
 /**
+ * The digests a set of DELIVERED presentation pages may authorize.
+ *
+ * Per-item subunit digests come from every page that was actually delivered, so
+ * a partly delivered sequence still tells the truth about the items the
+ * operator really saw. The whole-review digest is added only when `complete` —
+ * every exception in the set was delivered — because that one digest authorizes
+ * all of them.
+ */
+export function deliveredPresentationDigests(
+  ref: ProduceValidationSessionRef,
+  result: ProduceValidationResult,
+  deliveredPages: readonly { renderedReviews: ProduceValidationReview[] }[],
+  complete: boolean,
+  parsed?: WeighSession,
+): string[] {
+  const digests: string[] = [];
+  if (complete) digests.push(result.digest);
+
+  if (parsed) {
+    for (const page of deliveredPages) {
+      for (const review of page.renderedReviews) {
+        if (review.kind !== "subunit_confirmation") continue;
+        digests.push(computeValidationDigest(parsed, [], [review], {
+          sessionKey: ref.sessionKey,
+          sessionGeneration: ref.sessionGeneration,
+          accountabilityRoundId: ref.accountabilityRoundId,
+        }));
+      }
+    }
+  }
+  return [...new Set(digests)];
+}
+
+/**
  * Prove that ONE LINE message reached the operator, for every review row it
  * actually rendered. All-or-nothing: a message is one thing the operator saw,
  * so it cannot half-authorize.

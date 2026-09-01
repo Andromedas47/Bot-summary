@@ -321,17 +321,99 @@ export interface ProduceReviewPresentation {
   complete: boolean;
 }
 
+/** How many LINE messages one review presentation may occupy. */
+export const REVIEW_PRESENTATION_MAX_MESSAGES = 5;
+
+/** Told to the operator when the set is too large to show in one presentation. */
+const REVIEW_REMAINDER_INSTRUCTION = [
+  "",
+  "รายการที่เหลือยังแสดงไม่หมดในข้อความเดียว",
+  "กรุณาแก้รายการข้างต้นก่อน แล้วปิดรายการอีกครั้งเพื่อดูรายการที่เหลือ",
+];
+
+function renderReviewPage(
+  result: ProduceValidationResult,
+  reviews: ProduceValidationReview[],
+  tail: string[],
+): string {
+  return [
+    reviewHeadline(result),
+    "",
+    ...numberedBlocks(reviews, reviews.length),
+    ...tail,
+  ].join("\n");
+}
+
+/**
+ * The whole review set, split across as many LINE messages as it needs.
+ *
+ * There is deliberately NO arbitrary item cap here. The only real boundary is
+ * LINE's code-point limit, and capping at ten stranded any session with more
+ * than ten exceptions: every close re-rendered the same first ten, the eleventh
+ * stayed hidden forever, and because the whole-review digest may only be
+ * delivered once EVERY exception has been shown, the session could never become
+ * confirmable. Pagination gives that set a finite path again.
+ *
+ * A set too large even for `maxMessages` pages is reported incomplete, and its
+ * final page tells the operator to correct what they can see. Correcting
+ * shrinks the set, so the remainder becomes reachable — the path stays finite
+ * without ever authorizing something nobody read.
+ */
+export function buildPlainTextReviewPresentationPages(
+  result: ProduceValidationResult,
+  closeCommand: string,
+  maxCodePoints = LINE_TEXT_MESSAGE_HARD_MAX_CODE_POINTS,
+  maxMessages = REVIEW_PRESENTATION_MAX_MESSAGES,
+): { pages: ProduceReviewPresentation[]; complete: boolean } {
+  const actionBlock = ["", ...reviewActionBlock(result, `ส่ง “${closeCommand.trim()}” อีกครั้ง`)];
+  const pages: ProduceReviewPresentation[] = [];
+  let index = 0;
+
+  while (index < result.reviews.length && pages.length < maxMessages) {
+    const remainingPages = maxMessages - pages.length;
+    let taken: ProduceValidationReview[] = [];
+
+    for (let count = 1; index + count <= result.reviews.length; count += 1) {
+      const candidate = result.reviews.slice(index, index + count);
+      const finishesSet = index + count === result.reviews.length;
+      // The action block rides on the page that completes the set; the
+      // remainder notice rides on the last page we are allowed to send.
+      const tail = finishesSet
+        ? actionBlock
+        : (remainingPages === 1 ? REVIEW_REMAINDER_INSTRUCTION : []);
+      if (countCodePoints(renderReviewPage(result, candidate, tail)) > maxCodePoints) break;
+      taken = candidate;
+    }
+
+    if (taken.length === 0) {
+      // A single exception that cannot fit alone. Nothing can be shown safely,
+      // so nothing may be authorized.
+      throw new Error("product review actions cannot fit within the LINE text limit");
+    }
+
+    const finishesSet = index + taken.length === result.reviews.length;
+    const lastAllowed = remainingPages === 1;
+    const tail = finishesSet ? actionBlock : (lastAllowed ? REVIEW_REMAINDER_INSTRUCTION : []);
+    pages.push({
+      text: renderReviewPage(result, taken, tail),
+      renderedReviews: taken,
+      complete: finishesSet,
+    });
+    index += taken.length;
+  }
+
+  return { pages, complete: index >= result.reviews.length };
+}
+
 function buildReviewPresentationWithinBudget(
   result: ProduceValidationResult,
   confirmationInstruction: string,
   maxCodePoints: number,
 ): ProduceReviewPresentation {
   const actionBlock = reviewActionBlock(result, confirmationInstruction);
-  for (
-    let listed = Math.min(result.reviews.length, MAX_LISTED_EXCEPTIONS);
-    listed >= 0;
-    listed -= 1
-  ) {
+  // No arbitrary cap: start from the whole set and shed only what LINE's own
+  // limit forces.
+  for (let listed = result.reviews.length; listed >= 0; listed -= 1) {
     const reply = [
       reviewHeadline(result),
       "",

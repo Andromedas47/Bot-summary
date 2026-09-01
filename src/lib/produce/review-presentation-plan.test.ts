@@ -16,8 +16,10 @@
 import { describe, expect, it } from "bun:test";
 import {
   buildPlainTextReviewPresentation,
+  buildPlainTextReviewPresentationPages,
 } from "./entry-validation-message";
 import {
+  deliveredPresentationDigests,
   reviewPresentationDigests,
   type ProduceValidationSessionRef,
 } from "./entry-validation-gate";
@@ -194,5 +196,112 @@ describe("UNRENDERED IS NOT DELIVERED", () => {
 
     expect(truncated.text).toContain(shown.productName);
     expect(truncated.text).not.toContain(hidden.productName);
+  });
+});
+
+describe("no arbitrary cap — as many reviews as actually fit are shown", () => {
+  it("renders ELEVEN non-subunit reviews in one message", () => {
+    // The old MAX_LISTED_EXCEPTIONS = 10 hid the eleventh forever: every close
+    // re-rendered the same first ten, so the whole digest — which needs every
+    // exception shown — could never be delivered.
+    const reviews = Array.from({ length: 11 }, (_, i) => vocabulary(i + 1, `สินค้าทดสอบ${i + 1}`));
+    const result = resultOf(reviews);
+    const { pages, complete } = buildPlainTextReviewPresentationPages(result, "จบรายการ");
+
+    expect(pages).toHaveLength(1);
+    expect(complete).toBe(true);
+    expect(pages[0].renderedReviews).toHaveLength(11);
+    expect(pages[0].text).toContain("สินค้าทดสอบ11");
+
+    expect(deliveredPresentationDigests(REF, result, pages, complete, PARSED))
+      .toContain(result.digest);
+  });
+
+  it("renders eleven SUBUNIT items, so the eleventh is confirmable too", () => {
+    const reviews = Array.from({ length: 11 }, (_, i) => subunit(i + 1, `สินค้าทดสอบ${i + 1}`));
+    const result = resultOf(reviews);
+    const { pages, complete } = buildPlainTextReviewPresentationPages(result, "จบรายการ");
+
+    expect(complete).toBe(true);
+    const digests = deliveredPresentationDigests(REF, result, pages, complete, PARSED);
+    expect(digests).toContain(itemDigestOf(reviews[10]));
+    // whole + 11 items
+    expect(digests).toHaveLength(12);
+  });
+});
+
+describe("a set too large for one message paginates instead of stranding", () => {
+  const many = Array.from({ length: 40 }, (_, i) => subunit(i + 1, `สินค้าทดสอบ${i + 1}`));
+
+  it("splits across pages and still covers every review", () => {
+    const result = resultOf(many);
+    // A budget that forces several pages.
+    const { pages, complete } = buildPlainTextReviewPresentationPages(result, "จบรายการ", 1200, 5);
+
+    expect(pages.length).toBeGreaterThan(1);
+    expect(complete).toBe(true);
+
+    const shown = pages.flatMap((page) => page.renderedReviews);
+    expect(shown).toHaveLength(many.length);
+    // Pages are contiguous and in order — no review is skipped or repeated.
+    expect(shown.map((r) => r.itemNumber)).toEqual(many.map((r) => r.itemNumber));
+  });
+
+  it("delivers the whole digest only once every page is accounted for", () => {
+    const result = resultOf(many);
+    const { pages, complete } = buildPlainTextReviewPresentationPages(result, "จบรายการ", 1200, 5);
+
+    // Only the first page delivered: its items are authorized, the whole set is not.
+    const partial = deliveredPresentationDigests(REF, result, [pages[0]], false, PARSED);
+    expect(partial).not.toContain(result.digest);
+    for (const review of pages[0].renderedReviews) {
+      expect(partial).toContain(itemDigestOf(review));
+    }
+    // A review on a later page was NOT delivered.
+    const later = pages[pages.length - 1].renderedReviews[0];
+    expect(partial).not.toContain(itemDigestOf(later));
+
+    // All pages delivered: the whole digest joins them.
+    expect(deliveredPresentationDigests(REF, result, pages, complete, PARSED))
+      .toContain(result.digest);
+  });
+
+  it("is deterministic — a retry produces the identical pagination", () => {
+    const result = resultOf(many);
+    const first = buildPlainTextReviewPresentationPages(result, "จบรายการ", 1200, 5);
+    const second = buildPlainTextReviewPresentationPages(result, "จบรายการ", 1200, 5);
+    expect(second.pages.map((p) => p.text)).toEqual(first.pages.map((p) => p.text));
+  });
+});
+
+describe("a set beyond even the page budget keeps a finite correction path", () => {
+  const huge = Array.from({ length: 60 }, (_, i) => vocabulary(i + 1, `สินค้าทดสอบ${i + 1}`));
+
+  it("reports incomplete and never delivers the whole digest", () => {
+    const result = resultOf(huge);
+    const { pages, complete } = buildPlainTextReviewPresentationPages(result, "จบรายการ", 700, 2);
+
+    expect(complete).toBe(false);
+    expect(pages).toHaveLength(2);
+    expect(deliveredPresentationDigests(REF, result, pages, complete, PARSED))
+      .not.toContain(result.digest);
+  });
+
+  it("tells the operator to correct what they can see, which shrinks the set", () => {
+    const result = resultOf(huge);
+    const { pages } = buildPlainTextReviewPresentationPages(result, "จบรายการ", 700, 2);
+    // The forward path for an over-large set is correction, not confirmation —
+    // and correcting removes exceptions until the remainder fits.
+    expect(pages[pages.length - 1].text).toContain("กรุณาแก้รายการข้างต้นก่อน");
+  });
+
+  it("progresses once the operator corrects enough of the set", () => {
+    // Same session after fixing 40 of them: now everything fits and the whole
+    // digest becomes deliverable. That is the finite path.
+    const shrunk = resultOf(huge.slice(0, 20));
+    const { pages, complete } = buildPlainTextReviewPresentationPages(shrunk, "จบรายการ", 1200, 2);
+    expect(complete).toBe(true);
+    expect(deliveredPresentationDigests(REF, shrunk, pages, complete, PARSED))
+      .toContain(shrunk.digest);
   });
 });

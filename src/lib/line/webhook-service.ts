@@ -154,13 +154,13 @@ import { bindPlainTextRound } from "@/lib/produce/plain-text-round-binding";
 import {
   confirmProduceSubunitReview,
   markProduceValidationReviewsPresented,
-  reviewPresentationDigests,
+  deliveredPresentationDigests,
   isProduceReviewApproved,
   runProduceCloseGate,
 } from "@/lib/produce/entry-validation-gate";
 import {
   buildBlockingValidationReply,
-  buildPlainTextReviewPresentation,
+  buildPlainTextReviewPresentationPages,
 } from "@/lib/produce/entry-validation-message";
 import {
   CANCEL_ACTIVE_DRAFT_NONE_REPLY,
@@ -253,6 +253,8 @@ const STALE_PRODUCE_SESSION_REPLY =
  */
 interface PlainTextCloseGateRefusal {
   refusalText: string;
+  /** Extra pages when the review set needs more than one LINE message. */
+  refusalPages?: string[];
   /**
    * The review rows this exact refusal text actually RENDERED, and may
    * therefore authorize once it has been delivered. One message can present
@@ -1706,7 +1708,14 @@ export class WebhookService {
           if (replyToken) {
             let delivered = false;
             try {
-              await this.replyMessage(replyToken, closeGateRefusal.refusalText);
+              // One reply carries every page, so delivery is all-or-nothing:
+              // the operator either sees the whole presentation or none of it.
+              const texts = [
+                closeGateRefusal.refusalText,
+                ...(closeGateRefusal.refusalPages ?? []),
+              ];
+              if (texts.length > 1) await this.replyMessages(replyToken, texts);
+              else await this.replyMessage(replyToken, texts[0]);
               delivered = true;
             } catch (replyError) {
               log.error("produce entry gate refusal reply failed", {
@@ -2468,12 +2477,20 @@ export class WebhookService {
         return { refusalText: buildBlockingValidationReply(decision.result) };
       }
       if (decision.decision === "review_presented") {
-        // Render first, then authorize only what the rendering shows.
-        const presentation = buildPlainTextReviewPresentation(decision.result, closeText);
+        // Render first, then authorize only what the rendering shows. The set
+        // is paginated rather than capped, so a session with more exceptions
+        // than fit in one message still has a finite path to confirmation.
+        const { pages, complete } = buildPlainTextReviewPresentationPages(
+          decision.result,
+          closeText,
+        );
         return {
-          refusalText: presentation.text,
+          refusalText: pages[0].text,
+          refusalPages: pages.slice(1).map((page) => page.text),
           reviewPresentation: {
-            digests: reviewPresentationDigests(gateRef, decision.result, presentation, parsed),
+            digests: deliveredPresentationDigests(
+              gateRef, decision.result, pages, complete, parsed,
+            ),
             sessionGeneration: pending.session_generation,
           },
         };

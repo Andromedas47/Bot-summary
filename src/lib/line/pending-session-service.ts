@@ -34,6 +34,26 @@ export class PendingSessionClosedError extends Error {
   }
 }
 
+/**
+ * The first close was refused because the session's authoritative document
+ * moved between the entry gate validating a snapshot of it and the close
+ * boundary being stamped. Recoverable by construction: no boundary was
+ * written, so the operator can simply close again against the grown document.
+ */
+export class PendingSessionStaleValidationSnapshotError extends Error {
+  constructor(
+    sessionKey: string,
+    public readonly expectedRevision: number | null,
+    public readonly currentRevision: number | null,
+  ) {
+    super(
+      `pending session close refused for ${sessionKey}: validation snapshot was stale `
+      + `(expected ingest_revision ${expectedRevision}, found ${currentRevision})`,
+    );
+    this.name = "PendingSessionStaleValidationSnapshotError";
+  }
+}
+
 export interface PendingSession {
   id:                        string;
   session_key:               string;
@@ -180,6 +200,10 @@ export interface TryFinalizeResult {
     | "skipped"
     | "stale_snapshot"
     | "pending"
+    // The authoritative document grew after the close boundary and the new
+    // content needs a review the operator has never seen. Finalization is
+    // parked, not failed: a distinct later confirmation resumes it.
+    | "validation_held"
     | "failed_closed"
     | "duplicate"
     | "finalized";
@@ -644,9 +668,9 @@ export class PendingSessionService {
     markClose?:          boolean,
     expectedGeneration?: string,
     expectedItemCount?:  number,
+    expectedIngestRevision?: number,
   ): Promise<PendingSession> {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { data, error } = await (this.supabase as any).rpc("append_pending_session", {
+    const args: Record<string, unknown> = {
       p_session_key:                  sessionKey,
       p_new_text:                     newText,
       p_reply_token:                  replyToken,
@@ -655,9 +679,53 @@ export class PendingSessionService {
       p_mark_close:                   markClose       ?? false,
       p_expected_session_generation:  expectedGeneration ?? null,
       p_expected_item_count:          expectedItemCount  ?? null,
-    });
+    };
+    // The 9th argument is sent ONLY when a revision is actually being pinned,
+    // so ordinary appends keep resolving to the 8-arg overload. That keeps the
+    // hot path independent of 20260831120000 being deployed, instead of making
+    // every append depend on the new overload existing.
+    if (expectedIngestRevision != null) {
+      args.p_expected_ingest_revision = expectedIngestRevision;
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data, error } = await (this.supabase as any).rpc("append_pending_session", args);
     if (error) throw new Error(`pending session append failed: ${error.message}`);
     return this.mapAppendRpcResult(sessionKey, data, expectedGeneration, lineTimestampMs);
+  }
+
+  /**
+   * Park finalization for a closed generation whose document grew past the
+   * close boundary into review-required territory. Returns false when the row
+   * moved underneath us (generation conflict, terminalized, revision moved
+   * again) — the caller must then not treat the session as held.
+   */
+  async holdValidationReview(
+    sessionKey: string,
+    expectedGeneration: string,
+    expectedIngestRevision: number | null,
+  ): Promise<boolean> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data, error } = await (this.supabase as any).rpc("hold_pending_validation_review", {
+      p_session_key:                 sessionKey,
+      p_expected_session_generation: expectedGeneration,
+      p_expected_ingest_revision:    expectedIngestRevision,
+    });
+    if (error) throw new Error(`pending validation hold failed: ${error.message}`);
+    return (data as { accepted?: boolean } | null)?.accepted === true;
+  }
+
+  /** Re-schedule finalization for a held generation once its review is confirmed. */
+  async resumeCloseFinalization(
+    sessionKey: string,
+    expectedGeneration: string,
+  ): Promise<boolean> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data, error } = await (this.supabase as any).rpc("resume_pending_close_finalization", {
+      p_session_key:                 sessionKey,
+      p_expected_session_generation: expectedGeneration,
+    });
+    if (error) throw new Error(`pending close resume failed: ${error.message}`);
+    return (data as { accepted?: boolean } | null)?.accepted === true;
   }
 
   /** Shared by append() and recoverDeferredEvent() — both call an RPC that
@@ -681,6 +749,17 @@ export class PendingSessionService {
       const reason = result?.reason;
       if (reason === "generation_conflict" && expectedGeneration) {
         throw new PendingSessionGenerationConflictError(sessionKey, expectedGeneration);
+      }
+      if (reason === "stale_validation_snapshot") {
+        const payload = data as {
+          expected_revision?: number | null;
+          current_revision?: number | null;
+        };
+        throw new PendingSessionStaleValidationSnapshotError(
+          sessionKey,
+          payload?.expected_revision ?? null,
+          payload?.current_revision ?? null,
+        );
       }
       if (reason === "after_close_boundary") {
         const boundary = result?.session?.close_event_timestamp_ms ?? lineTimestampMs ?? 0;

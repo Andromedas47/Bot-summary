@@ -14,6 +14,7 @@ import {
   validateProduceEntry,
   computeValidationDigest,
   type ProduceValidationResult,
+  type ProduceValidationReview,
   type RoundMasterRow,
 } from "./entry-validation";
 
@@ -57,6 +58,13 @@ export class ProduceValidationGateError extends Error {}
 export interface RecordedProduceReview {
   /** True when this exception set already carried an explicit confirmation. */
   confirmed: boolean;
+  /**
+   * True only once delivery to the operator has been PROVEN. Recording the row
+   * does not set it: a LINE reply is a separate call that can fail.
+   */
+  presentedDelivered: boolean;
+  /** The generation is dead; nothing may be recorded or confirmed for it. */
+  terminalized: boolean;
   /**
    * The event that first presented this exception set. A later press carrying
    * a different event id is a genuine second press; the same id is a duplicate
@@ -198,9 +206,19 @@ export async function recordProduceValidationReview(
     );
   }
   const row = (data ?? {}) as {
+    status?: string;
     confirmed?: boolean;
     presented_line_event_id?: string | null;
+    presented_delivered?: boolean;
   };
+  if (row.status === "terminalized") {
+    return {
+      confirmed: false,
+      presentedDelivered: false,
+      terminalized: true,
+      presentedLineEventId: lineEventId,
+    };
+  }
   // Risky subunits are independently confirmable. Keep the full review row
   // for existing product-vocabulary behavior, and add one row per item.
   if (parsed) for (const review of result.reviews.filter((entry) => entry.kind === "subunit_confirmation")) {
@@ -227,6 +245,8 @@ export async function recordProduceValidationReview(
   }
   return {
     confirmed: Boolean(row.confirmed),
+    presentedDelivered: row.presented_delivered === true,
+    terminalized: false,
     presentedLineEventId: row.presented_line_event_id ?? lineEventId,
   };
 }
@@ -279,7 +299,14 @@ export async function runProduceCloseGate(
     result.digest,
     lineEventId,
   );
-  if (confirmation === "not_found") return { decision: "review_presented", result };
+  // Only confirmed/already_confirmed authorize. not_found (stale digest),
+  // not_presented (recorded but never proven delivered — the finalizer's push
+  // failed) and terminalized all mean re-present, never approve. record_ above
+  // has just marked this reply as the delivery, so the NEXT distinct close can
+  // confirm it.
+  if (!isProduceReviewApproved(confirmation)) {
+    return { decision: "review_presented", result };
+  }
   if (result.reviews.some((review) => review.kind === "subunit_confirmation")) {
     const current = await evaluateProduceEntryGate(supabase, ref, parsed);
     if (!current.reviewConfirmed) return { decision: "review_presented", result: current.result };
@@ -307,7 +334,47 @@ export async function runProduceFinalizeGate(
   return { decision: "review_presented", result };
 }
 
-export type ProduceReviewConfirmation = "confirmed" | "already_confirmed" | "not_found";
+/**
+ * `not_found`   — the digest no longer describes the session (stale press).
+ * `not_presented` — recorded but never proven delivered to the operator; the
+ *                 caller must re-present, never approve.
+ * `terminalized` — the generation is dead; nothing about it can be approved.
+ *
+ * Only `confirmed` and `already_confirmed` are approvals. Everything else means
+ * re-present.
+ */
+export type ProduceReviewConfirmation =
+  | "confirmed"
+  | "already_confirmed"
+  | "not_found"
+  | "not_presented"
+  | "terminalized";
+
+const REVIEW_CONFIRMATION_STATUSES: ReadonlySet<string> = new Set<ProduceReviewConfirmation>([
+  "confirmed",
+  "already_confirmed",
+  "not_found",
+  "not_presented",
+  "terminalized",
+]);
+
+/** True only for a status that actually authorizes the exception set. */
+export function isProduceReviewApproved(status: ProduceReviewConfirmation): boolean {
+  return status === "confirmed" || status === "already_confirmed";
+}
+
+/**
+ * A stable, deterministic presentation identity for a review the finalizer
+ * discovered. Generation- and digest-bound, identical across retries of the
+ * same decision, and prefixed so it can never collide with a real LINE event
+ * id — which is what stops a redelivered event from self-confirming.
+ */
+export function finalizerPresentationToken(
+  sessionGeneration: string,
+  digest: string,
+): string {
+  return `finalizer:${sessionGeneration}:${digest}`;
+}
 
 /** Confirm exactly one currently parsed risky-subunit item. */
 export async function confirmProduceSubunitReview(
@@ -378,8 +445,166 @@ export async function confirmProduceValidationReview(
     );
   }
   const status = (data as { status?: string } | null)?.status;
-  if (status === "confirmed" || status === "already_confirmed" || status === "not_found") {
-    return status;
+  if (status !== undefined && REVIEW_CONFIRMATION_STATUSES.has(status)) {
+    return status as ProduceReviewConfirmation;
   }
   throw new ProduceValidationGateError("validation confirmation returned an unknown status");
+}
+
+/**
+ * Record the review the finalizer discovered after the close boundary, WITHOUT
+ * claiming it was shown. Delivery is proven separately, only once the LINE push
+ * has actually succeeded, so nothing can confirm it in the meantime.
+ */
+export async function recordFinalizerValidationReview(
+  supabase: AnyClient,
+  ref: ProduceValidationSessionRef,
+  result: ProduceValidationResult,
+  presentationToken: string,
+): Promise<{ recorded: boolean; alreadyDelivered: boolean }> {
+  // Same recorder as the webhook: recording never claims delivery, so there is
+  // no second implementation that could drift from this one. The synthetic
+  // token stands in for the presenting event id until a successful push
+  // rebinds it.
+  const row = await recordProduceValidationReview(supabase, ref, result, presentationToken);
+  return { recorded: !row.terminalized, alreadyDelivered: row.presentedDelivered };
+}
+
+/**
+ * The digests one LINE message is entitled to authorize.
+ *
+ * Built ONLY from reviews the message actually rendered. The whole-review digest
+ * is included only when every review was shown: it authorizes the entire set, so
+ * a truncated message must not carry it. Each rendered risky-subunit review
+ * contributes its own item digest, because #109 confirms those individually.
+ */
+export function reviewPresentationDigests(
+  ref: ProduceValidationSessionRef,
+  result: ProduceValidationResult,
+  presentation: { renderedReviews: ProduceValidationReview[]; complete: boolean },
+  parsed?: WeighSession,
+): string[] {
+  const digests: string[] = [];
+  if (presentation.complete) digests.push(result.digest);
+
+  if (parsed) {
+    for (const review of presentation.renderedReviews) {
+      if (review.kind !== "subunit_confirmation") continue;
+      digests.push(computeValidationDigest(parsed, [], [review], {
+        sessionKey: ref.sessionKey,
+        sessionGeneration: ref.sessionGeneration,
+        accountabilityRoundId: ref.accountabilityRoundId,
+      }));
+    }
+  }
+  return [...new Set(digests)];
+}
+
+/**
+ * The digests a set of DELIVERED presentation pages may authorize.
+ *
+ * Per-item subunit digests come from every page that was actually delivered, so
+ * a partly delivered sequence still tells the truth about the items the
+ * operator really saw. The whole-review digest is added only when `complete` —
+ * every exception in the set was delivered — because that one digest authorizes
+ * all of them.
+ */
+export function deliveredPresentationDigests(
+  ref: ProduceValidationSessionRef,
+  result: ProduceValidationResult,
+  deliveredPages: readonly { renderedReviews: ProduceValidationReview[] }[],
+  complete: boolean,
+  parsed?: WeighSession,
+): string[] {
+  const digests: string[] = [];
+  if (complete) digests.push(result.digest);
+
+  if (parsed) {
+    for (const page of deliveredPages) {
+      for (const review of page.renderedReviews) {
+        if (review.kind !== "subunit_confirmation") continue;
+        digests.push(computeValidationDigest(parsed, [], [review], {
+          sessionKey: ref.sessionKey,
+          sessionGeneration: ref.sessionGeneration,
+          accountabilityRoundId: ref.accountabilityRoundId,
+        }));
+      }
+    }
+  }
+  return [...new Set(digests)];
+}
+
+/**
+ * Prove that ONE LINE message reached the operator, for every review row it
+ * actually rendered. All-or-nothing: a message is one thing the operator saw,
+ * so it cannot half-authorize.
+ */
+export async function markProduceValidationReviewsPresented(
+  supabase: AnyClient,
+  ref: ProduceValidationSessionRef,
+  digests: readonly string[],
+  presentedLineEventId: string,
+): Promise<{ status: string; marked: number }> {
+  if (digests.length === 0) return { status: "no_digests", marked: 0 };
+  const { data, error } = await supabase.rpc("mark_produce_validation_reviews_presented", {
+    p_session_key: ref.sessionKey,
+    p_session_generation: ref.sessionGeneration,
+    p_validation_digests: [...digests],
+    p_presented_line_event_id: presentedLineEventId,
+  });
+  if (error) {
+    throw new ProduceValidationGateError(
+      `validation review presentation could not be recorded: ${error.message}`,
+    );
+  }
+  const row = (data ?? {}) as { status?: string; marked?: number };
+  return { status: row.status ?? "unknown", marked: row.marked ?? 0 };
+}
+
+export type ReviewPresentationStatus =
+  | "presented"
+  | "already_presented"
+  | "not_found"
+  | "terminalized"
+  | "invalid_presentation_event";
+
+/**
+ * Prove this exact review reached the operator.
+ *
+ * Call ONLY after the LINE reply or push actually succeeded — this is the sole
+ * writer of delivery proof, and `presented_delivered_at IS NOT NULL` has exactly
+ * one meaning because of that.
+ *
+ * `presentedLineEventId` is the event that CAUSED the proven presentation, and
+ * it becomes the row's stored presenting identity. When a first close recorded
+ * the row but its reply failed, a later close that re-presents successfully
+ * takes ownership — otherwise a duplicate delivery of that later close would
+ * look like a distinct event and self-confirm.
+ */
+export async function markProduceValidationReviewPresented(
+  supabase: AnyClient,
+  ref: ProduceValidationSessionRef,
+  digest: string,
+  presentedLineEventId: string,
+): Promise<ReviewPresentationStatus> {
+  const { data, error } = await supabase.rpc("mark_produce_validation_review_presented", {
+    p_session_key: ref.sessionKey,
+    p_session_generation: ref.sessionGeneration,
+    p_validation_digest: digest,
+    p_presented_line_event_id: presentedLineEventId,
+  });
+  if (error) {
+    throw new ProduceValidationGateError(
+      `validation review presentation could not be recorded: ${error.message}`,
+    );
+  }
+  const status = (data as { status?: string } | null)?.status;
+  if (
+    status === "presented" || status === "already_presented"
+    || status === "not_found" || status === "terminalized"
+    || status === "invalid_presentation_event"
+  ) {
+    return status;
+  }
+  throw new ProduceValidationGateError("review presentation returned an unknown status");
 }

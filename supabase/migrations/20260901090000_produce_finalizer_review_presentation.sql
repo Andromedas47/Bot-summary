@@ -229,12 +229,21 @@ BEGIN
   SELECT count(DISTINCT d) INTO v_requested
   FROM unnest(p_validation_digests) AS d;
 
-  SELECT count(*) INTO v_found
+  -- Lock the target rows first. FOR UPDATE cannot be combined with an
+  -- aggregate, so the lock and the count are separate statements; the count
+  -- below is stable because this transaction now holds those row locks.
+  PERFORM 1
   FROM public.produce_entry_validation_reviews r
   WHERE r.session_key = p_session_key
     AND r.session_generation = p_session_generation
     AND r.validation_digest = ANY (p_validation_digests)
   FOR UPDATE;
+
+  SELECT count(*) INTO v_found
+  FROM public.produce_entry_validation_reviews r
+  WHERE r.session_key = p_session_key
+    AND r.session_generation = p_session_generation
+    AND r.validation_digest = ANY (p_validation_digests);
 
   IF v_found <> v_requested THEN
     -- Refuse the whole message rather than proving delivery for a subset.

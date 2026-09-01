@@ -9,6 +9,7 @@
 import { parseBuddhistDate } from "@/lib/parsers/weigh-session/parser";
 import { isKnownUnit, normalizeUnitAlias } from "@/lib/parsers/weigh-session/units";
 import { roundHalfUp, toMilliQuantity } from "@/lib/sales/calculate";
+import { parseExactDocumentMoney } from "@/lib/purchases/exact-decimal";
 import {
   isPhysicalInventoryHeaderLine,
   isPricedPhysicalInventoryHeaderText,
@@ -243,9 +244,20 @@ function parseUnitPrice(text: string): {
   const match = UNIT_PRICE_SUFFIX.exec(nfcCollapse(text));
   if (!match) return { product: nfcCollapse(text), unitPriceSatang: null, priceReason: "missing_unit_price" };
   const [, product, amount] = match;
-  const [, fraction = ""] = amount.split(".");
-  if (fraction.length > 2) return { product: nfcCollapse(product), unitPriceSatang: null, priceReason: "invalid_unit_price" };
-  const satang = Number(amount) * 100;
+  // Exact decimal -> satang. The previous `Number(amount) * 100` REJECTED
+  // ordinary prices: 2.01 becomes 200.99999999999997, 10.05 becomes
+  // 1005.0000000000001 and 1.10 becomes 110.00000000000001, none of which is a
+  // safe integer, so a perfectly valid operator line was refused as
+  // invalid_unit_price. parseExactDocumentMoney is this repository's
+  // authoritative decimal-money reader: it scales a BigInt coefficient rather
+  // than multiplying a float, and still enforces scale <= 2 and <= 15 total
+  // digits, so over-precise and oversized amounts keep failing closed. The
+  // grammar is unsigned, so a negative amount never reaches here.
+  const parsed = parseExactDocumentMoney(amount);
+  if (!parsed.ok) {
+    return { product: nfcCollapse(product), unitPriceSatang: null, priceReason: "invalid_unit_price" };
+  }
+  const satang = Number(parsed.value.satang);
   if (!Number.isSafeInteger(satang) || satang <= 0) {
     return { product: nfcCollapse(product), unitPriceSatang: null, priceReason: "invalid_unit_price" };
   }

@@ -11,7 +11,7 @@ import {
   buildAdditionalSessionSummary,
   buildWeighSessionSummary,
   pushLineMessage,
-  weighItemTotal,
+  weighSessionTotal,
   type AdditionalSessionDayContext,
 } from "@/lib/line/reply";
 import { baseTransactionType } from "@/lib/summary/transactions";
@@ -208,7 +208,9 @@ async function loadAdditionalDayContext(
   supabase: Supabase,
   parsed: WeighSession,
 ): Promise<AdditionalSessionDayContext> {
-  const batchTotal = parsed.items.reduce((sum, item) => sum + weighItemTotal(item), 0);
+  // Exact aggregation: compared against SUM(total_amount) from
+  // produce_transactions just below, which never rounds a unit row.
+  const batchTotal = weighSessionTotal(parsed.items);
 
   const { data, error } = await supabase
     .from("produce_transactions")

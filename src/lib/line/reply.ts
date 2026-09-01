@@ -4,6 +4,7 @@ import type { WeighSession, WeighSessionItem } from "@/lib/parsers/weigh-session
 import { ADDITIONAL_TYPE_LABEL } from "@/lib/parsers/weigh-session/parser";
 import { produceCategoryTotals, resolveProduceCategory } from "@/lib/summary/produce-category-totals";
 import { LINE_MESSAGE_MAX_CODE_POINTS, countCodePoints } from "@/lib/summary/line-chunking";
+import { exactLineTotalScaled, scaledToBaht } from "@/lib/produce/exact-line-total";
 import type { TransactionBucket } from "@/lib/summary/transactions";
 
 export function measureLineText(text: string): { codePoints: number; utf8Bytes: number } {
@@ -215,10 +216,38 @@ function round2(n: number): number {
 // approximation for those rows and multiplying it back out reintroduces
 // the rounding error.
 export function weighItemTotal(item: WeighSessionItem): number {
-  if (item.basis_quantity && item.basis_price != null) {
-    return round2((item.quantity ?? 0) * item.basis_price / item.basis_quantity);
-  }
-  return (item.price_per_unit ?? 0) * (item.quantity ?? 0);
+  return scaledToBaht(weighItemTotalScaled(item));
+}
+
+/**
+ * The same line total, kept at the exact 1e5 scale so callers can AGGREGATE
+ * before rounding. This is what keeps LINE in step with PostgreSQL: the
+ * database does not round a unit row, so summing rounded unit rows would drift
+ * from it whenever their sub-satang parts carry.
+ */
+export function weighItemTotalScaled(item: WeighSessionItem): bigint {
+  return exactLineTotalScaled({
+    quantity: item.quantity,
+    pricePerUnit: item.price_per_unit,
+    basisQuantity: item.basis_quantity,
+    basisPrice: item.basis_price,
+  }) ?? BigInt(0);
+}
+
+/**
+ * A whole session's total, aggregated exactly and rounded once.
+ *
+ * Use this — never `items.reduce((s, i) => s + weighItemTotal(i), 0)` — anywhere
+ * the result is compared against a SUM taken from produce_transactions. The
+ * database does not round a unit row, so summing rounded rows drifts from it as
+ * soon as any row carries a sub-satang part (3.5 โล × 8.29 บาท = 29.015 is
+ * ordinary data, not an edge case).
+ */
+export function weighSessionTotal(items: readonly WeighSessionItem[]): number {
+  return scaledToBaht(items.reduce(
+    (acc, item) => acc + weighItemTotalScaled(item),
+    BigInt(0),
+  ));
 }
 
 export function buildWeighSessionSummary(session: WeighSession): string {
@@ -240,8 +269,11 @@ export function buildWeighSessionSummary(session: WeighSession): string {
 
   const lineTotal = weighItemTotal;
 
+  // Aggregate at the exact scale, round once at the end. Summing the rounded
+  // per-row baht values would diverge from produce_transactions, which sums
+  // unrounded unit rows.
   const sumItems = (items: Item[]) =>
-    items.reduce((acc, it) => acc + lineTotal(it), 0);
+    scaledToBaht(items.reduce((acc, it) => acc + weighItemTotalScaled(it), BigInt(0)));
 
   const borrowTotal    = sumItems(borrowItems);
   const returnTotal    = sumItems(returnItems);
@@ -395,7 +427,9 @@ export function buildAdditionalSessionSummary(
   const label = session.declared_transaction_type
     ? ADDITIONAL_TYPE_LABEL[session.declared_transaction_type]
     : "เพิ่ม";
-  const batchTotal = session.items.reduce((sum, item) => sum + weighItemTotal(item), 0);
+  // Exact aggregation: this is differenced against a DB-sourced cumulative
+  // total below, so it must sum the way produce_transactions does.
+  const batchTotal = weighSessionTotal(session.items);
 
   // Previous day total before this addition; clamp floating-point residue.
   let previousTotal = round2(day.cumulativeTotal - batchTotal);

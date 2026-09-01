@@ -153,13 +153,14 @@ import { tryHandlePurchaseCaptureMessage } from "@/lib/purchase-capture/webhook-
 import { bindPlainTextRound } from "@/lib/produce/plain-text-round-binding";
 import {
   confirmProduceSubunitReview,
-  markProduceValidationReviewPresented,
+  markProduceValidationReviewsPresented,
+  reviewPresentationDigests,
   isProduceReviewApproved,
   runProduceCloseGate,
 } from "@/lib/produce/entry-validation-gate";
 import {
   buildBlockingValidationReply,
-  buildPlainTextReviewValidationReply,
+  buildPlainTextReviewPresentation,
 } from "@/lib/produce/entry-validation-message";
 import {
   CANCEL_ACTIVE_DRAFT_NONE_REPLY,
@@ -252,8 +253,15 @@ const STALE_PRODUCE_SESSION_REPLY =
  */
 interface PlainTextCloseGateRefusal {
   refusalText: string;
+  /**
+   * The review rows this exact refusal text actually RENDERED, and may
+   * therefore authorize once it has been delivered. One message can present
+   * the whole review plus a per-item row for every risky subunit (#109",
+   * confirms those individually). A review truncated out of the text is
+   * absent here: unrendered is not delivered.
+   */
   reviewPresentation?: {
-    digest: string;
+    digests: string[];
     sessionGeneration: string;
   };
 }
@@ -1718,9 +1726,14 @@ export class WebhookService {
             // of THIS close would look like a distinct later event and
             // self-confirm a review shown exactly once.
             if (delivered && closeGateRefusal.reviewPresentation) {
-              const { digest, sessionGeneration } = closeGateRefusal.reviewPresentation;
+              const { digests, sessionGeneration } = closeGateRefusal.reviewPresentation;
               try {
-                const presented = await markProduceValidationReviewPresented(
+                // One message, one all-or-nothing mark: the whole review plus
+                // every risky-subunit row it rendered. #109 confirms those item
+                // digests individually, so leaving them unmarked would make
+                // "ยืนยันข้อ N" answer not_presented for something the operator
+                // is looking at.
+                const presented = await markProduceValidationReviewsPresented(
                   this.supabase,
                   {
                     sessionKey: sessionKey,
@@ -1731,10 +1744,10 @@ export class WebhookService {
                     staffLabel: null,
                     lineUserId: pending.line_user_id,
                   },
-                  digest,
+                  digests,
                   eventId,
                 );
-                if (presented !== "presented" && presented !== "already_presented") {
+                if (presented.status !== "presented") {
                   // The operator saw it, but the database cannot prove it.
                   // Fail safe: it stays unconfirmable and is shown again.
                   log.warn("review presentation could not be proven", {
@@ -2434,18 +2447,19 @@ export class WebhookService {
         return { refusalText: binding.detail };
       }
 
+      const gateRef = {
+        sessionKey:            pending.session_key,
+        sessionGeneration:     pending.session_generation,
+        accountabilityRoundId:
+          binding.status === "bound" ? binding.accountabilityRoundId : null,
+        businessDate:  parsed.date,
+        marketLabel:   parsed.session_title,
+        staffLabel:    parsed.staff_name,
+        lineUserId:    pending.line_user_id,
+      };
       const decision = await runProduceCloseGate(
         this.supabase,
-        {
-          sessionKey:            pending.session_key,
-          sessionGeneration:     pending.session_generation,
-          accountabilityRoundId:
-            binding.status === "bound" ? binding.accountabilityRoundId : null,
-          businessDate:  parsed.date,
-          marketLabel:   parsed.session_title,
-          staffLabel:    parsed.staff_name,
-          lineUserId:    pending.line_user_id,
-        },
+        gateRef,
         parsed,
         eventId,
       );
@@ -2454,10 +2468,12 @@ export class WebhookService {
         return { refusalText: buildBlockingValidationReply(decision.result) };
       }
       if (decision.decision === "review_presented") {
+        // Render first, then authorize only what the rendering shows.
+        const presentation = buildPlainTextReviewPresentation(decision.result, closeText);
         return {
-          refusalText: buildPlainTextReviewValidationReply(decision.result, closeText),
+          refusalText: presentation.text,
           reviewPresentation: {
-            digest: decision.result.digest,
+            digests: reviewPresentationDigests(gateRef, decision.result, presentation, parsed),
             sessionGeneration: pending.session_generation,
           },
         };

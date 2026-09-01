@@ -42,14 +42,16 @@ import { logger } from "@/lib/logger";
 import { seedCentralPricesFromPersistedWithdrawals } from "@/lib/white-sheet/seed-from-withdrawal";
 import {
   finalizerPresentationToken,
-  markProduceValidationReviewPresented,
-  recordFinalizerValidationReview,
+  markProduceValidationReviewsPresented,
+  recordProduceValidationReview,
+  reviewPresentationDigests,
   runProduceFinalizeGate,
 } from "@/lib/produce/entry-validation-gate";
 import { bindPlainTextRound } from "@/lib/produce/plain-text-round-binding";
 import {
   buildBlockingValidationReply,
   buildPriceAdvisoryNotification,
+  buildPlainTextReviewPresentation,
   buildUnconfirmedReviewReply,
 } from "@/lib/produce/entry-validation-message";
 import type {
@@ -83,6 +85,12 @@ export function buildReviewNotConfirmedMessage(): string {
 export function buildUnconfirmedStructuredCloseMessage(): string {
   return "รายการโครงสร้างปิดโดยไม่ยืนยัน จึงไม่บันทึก";
 }
+
+/**
+ * The close command the held-review message tells the operator to send again.
+ * The plain-text flow has no button; its confirmation is a second close.
+ */
+const FINALIZER_REVIEW_CLOSE_COMMAND = "จบรายการ";
 
 const defaultPush: PushMessage = (to, text) => pushLineMessage(to, text);
 
@@ -299,7 +307,7 @@ export async function holdAndPresentFinalizerReview(
   snapshot: PendingSession,
   accountabilityRoundId: string | null,
   reviewResult: ProduceValidationResult,
-  detail: string | null,
+  parsed: WeighSession,
   push: PushMessage,
   log: ReturnType<typeof logger.child>,
 ): Promise<TryFinalizeResult | null> {
@@ -314,9 +322,18 @@ export async function holdAndPresentFinalizerReview(
   };
   const token = finalizerPresentationToken(snapshot.session_generation, reviewResult.digest);
 
+  // The ACTUAL operator-facing review, not a teaser. A message that only says
+  // "press again to see the review" shows no exception detail, so marking it
+  // delivered would let the next close confirm a digest whose contents nobody
+  // ever read. The presentation also reports exactly which reviews its text
+  // rendered, and only those may be authorized.
+  const presentation = buildPlainTextReviewPresentation(reviewResult, FINALIZER_REVIEW_CLOSE_COMMAND);
+
   // 1. Durable, digest- and generation-bound, explicitly NOT delivered.
+  //    `parsed` is passed so the per-item subunit rows exist too: #109
+  //    confirms each risky ขีด/กรัม item by its own digest.
   try {
-    await recordFinalizerValidationReview(supabase, ref, reviewResult, token);
+    await recordProduceValidationReview(supabase, ref, reviewResult, token, parsed);
   } catch (recordError) {
     // Nothing was parked and nothing claims delivery. Fall through: the normal
     // path still refuses to finalize an unconfirmed review.
@@ -340,9 +357,8 @@ export async function holdAndPresentFinalizerReview(
 
   // 3. Present it. A push that throws leaves the review undelivered, so the
   //    next close re-presents rather than confirming unseen content.
-  if (!detail) return { status: "validation_held", reason: "entry_review_unconfirmed" };
   try {
-    await push(snapshot.line_user_id!, detail);
+    await push(snapshot.line_user_id!, presentation.text);
   } catch (pushError) {
     log.error("held review notification failed; review stays unpresented", {
       error: String(pushError),
@@ -353,14 +369,15 @@ export async function holdAndPresentFinalizerReview(
   // 4. Delivery is proven only now. If THIS fails, the review stays
   //    unconfirmable and the operator is shown it again — never the reverse.
   try {
-    const presented = await markProduceValidationReviewPresented(
+    const digests = reviewPresentationDigests(ref, reviewResult, presentation, parsed);
+    const presented = await markProduceValidationReviewsPresented(
       supabase,
       ref,
-      reviewResult.digest,
+      digests,
       token,
     );
-    if (presented !== "presented" && presented !== "already_presented") {
-      log.warn("review presentation could not be proven", { presented });
+    if (presented.status !== "presented") {
+      log.warn("review presentation could not be proven", { presented: presented.status });
       return { status: "validation_held", reason: "entry_review_undelivered" };
     }
   } catch (markError) {
@@ -559,7 +576,7 @@ export async function finalizePendingGeneration(
         snapshot,
         accountabilityRoundId,
         gate.reviewResult,
-        gate.detail,
+        parsed,
         push,
         log,
       );

@@ -181,6 +181,90 @@ $$;
 
 -- ── 4) Delivery proof, recorded only after the push landed ───────────────────
 
+-- One LINE message may present SEVERAL review rows: the whole-review row plus
+-- one row per risky subunit item (#109 confirms those individually, by their
+-- own digests). Delivery proof for that message is therefore a set, and it must
+-- be all-or-nothing — a half-marked message would leave some exceptions
+-- confirmable and others not, from a single thing the operator saw once.
+--
+-- Every requested digest must already exist for this generation. A digest that
+-- does not is a caller bug, not something to partially apply, so the whole call
+-- refuses.
+CREATE OR REPLACE FUNCTION public.mark_produce_validation_reviews_presented(
+  p_session_key             text,
+  p_session_generation      uuid,
+  p_validation_digests      text[],
+  p_presented_line_event_id text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_terminalized boolean;
+  v_requested    integer;
+  v_found        integer;
+  v_marked       integer;
+BEGIN
+  IF p_validation_digests IS NULL OR array_length(p_validation_digests, 1) IS NULL THEN
+    RETURN jsonb_build_object('status', 'no_digests', 'marked', 0);
+  END IF;
+
+  IF p_presented_line_event_id IS NULL OR btrim(p_presented_line_event_id) = '' THEN
+    RETURN jsonb_build_object('status', 'invalid_presentation_event', 'marked', 0);
+  END IF;
+
+  -- LOCK ORDER: pending_sessions before produce_entry_validation_reviews.
+  SELECT terminalized INTO v_terminalized
+  FROM public.pending_sessions
+  WHERE session_key = p_session_key
+    AND session_generation = p_session_generation
+  FOR UPDATE;
+
+  IF v_terminalized THEN
+    RETURN jsonb_build_object('status', 'terminalized', 'marked', 0);
+  END IF;
+
+  SELECT count(DISTINCT d) INTO v_requested
+  FROM unnest(p_validation_digests) AS d;
+
+  SELECT count(*) INTO v_found
+  FROM public.produce_entry_validation_reviews r
+  WHERE r.session_key = p_session_key
+    AND r.session_generation = p_session_generation
+    AND r.validation_digest = ANY (p_validation_digests)
+  FOR UPDATE;
+
+  IF v_found <> v_requested THEN
+    -- Refuse the whole message rather than proving delivery for a subset.
+    RETURN jsonb_build_object(
+      'status', 'unknown_digest', 'marked', 0,
+      'requested', v_requested, 'found', v_found
+    );
+  END IF;
+
+  -- Idempotent: an already-delivered row keeps its original presenting event.
+  WITH updated AS (
+    UPDATE public.produce_entry_validation_reviews r
+    SET presented_delivered_at = now(),
+        presented_line_event_id = p_presented_line_event_id
+    WHERE r.session_key = p_session_key
+      AND r.session_generation = p_session_generation
+      AND r.validation_digest = ANY (p_validation_digests)
+      AND r.presented_delivered_at IS NULL
+    RETURNING 1
+  )
+  SELECT count(*) INTO v_marked FROM updated;
+
+  RETURN jsonb_build_object(
+    'status', 'presented',
+    'marked', v_marked,
+    'requested', v_requested
+  );
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION public.mark_produce_validation_review_presented(
   p_session_key             text,
   p_session_generation      uuid,
@@ -325,6 +409,16 @@ COMMENT ON FUNCTION public.mark_produce_validation_review_presented(text, uuid, 
   'Records proof that this exact review reached the operator. Called only after a '
   'successful LINE push. Refuses a terminalized generation.';
 
+
+COMMENT ON FUNCTION public.mark_produce_validation_reviews_presented(text, uuid, text[], text) IS
+  'Delivery proof for ONE LINE message that presented several review rows - the '
+  'whole review plus its per-item subunit rows. All-or-nothing: an unknown digest '
+  'refuses the whole call rather than half-authorizing a single message.';
+
+REVOKE ALL ON FUNCTION public.mark_produce_validation_reviews_presented(text, uuid, text[], text)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.mark_produce_validation_reviews_presented(text, uuid, text[], text)
+  TO service_role;
 
 REVOKE ALL ON FUNCTION public.mark_produce_validation_review_presented(text, uuid, text, text)
   FROM PUBLIC, anon, authenticated;

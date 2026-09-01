@@ -14,6 +14,7 @@ import {
   validateProduceEntry,
   computeValidationDigest,
   type ProduceValidationResult,
+  type ProduceValidationReview,
   type RoundMasterRow,
 } from "./entry-validation";
 
@@ -467,6 +468,63 @@ export async function recordFinalizerValidationReview(
   // rebinds it.
   const row = await recordProduceValidationReview(supabase, ref, result, presentationToken);
   return { recorded: !row.terminalized, alreadyDelivered: row.presentedDelivered };
+}
+
+/**
+ * The digests one LINE message is entitled to authorize.
+ *
+ * Built ONLY from reviews the message actually rendered. The whole-review digest
+ * is included only when every review was shown: it authorizes the entire set, so
+ * a truncated message must not carry it. Each rendered risky-subunit review
+ * contributes its own item digest, because #109 confirms those individually.
+ */
+export function reviewPresentationDigests(
+  ref: ProduceValidationSessionRef,
+  result: ProduceValidationResult,
+  presentation: { renderedReviews: ProduceValidationReview[]; complete: boolean },
+  parsed?: WeighSession,
+): string[] {
+  const digests: string[] = [];
+  if (presentation.complete) digests.push(result.digest);
+
+  if (parsed) {
+    for (const review of presentation.renderedReviews) {
+      if (review.kind !== "subunit_confirmation") continue;
+      digests.push(computeValidationDigest(parsed, [], [review], {
+        sessionKey: ref.sessionKey,
+        sessionGeneration: ref.sessionGeneration,
+        accountabilityRoundId: ref.accountabilityRoundId,
+      }));
+    }
+  }
+  return [...new Set(digests)];
+}
+
+/**
+ * Prove that ONE LINE message reached the operator, for every review row it
+ * actually rendered. All-or-nothing: a message is one thing the operator saw,
+ * so it cannot half-authorize.
+ */
+export async function markProduceValidationReviewsPresented(
+  supabase: AnyClient,
+  ref: ProduceValidationSessionRef,
+  digests: readonly string[],
+  presentedLineEventId: string,
+): Promise<{ status: string; marked: number }> {
+  if (digests.length === 0) return { status: "no_digests", marked: 0 };
+  const { data, error } = await supabase.rpc("mark_produce_validation_reviews_presented", {
+    p_session_key: ref.sessionKey,
+    p_session_generation: ref.sessionGeneration,
+    p_validation_digests: [...digests],
+    p_presented_line_event_id: presentedLineEventId,
+  });
+  if (error) {
+    throw new ProduceValidationGateError(
+      `validation review presentation could not be recorded: ${error.message}`,
+    );
+  }
+  const row = (data ?? {}) as { status?: string; marked?: number };
+  return { status: row.status ?? "unknown", marked: row.marked ?? 0 };
 }
 
 export type ReviewPresentationStatus =

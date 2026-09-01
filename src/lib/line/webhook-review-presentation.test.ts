@@ -13,7 +13,7 @@
  */
 import { describe, expect, it } from "bun:test";
 import {
-  markProduceValidationReviewPresented,
+  markProduceValidationReviewsPresented,
   recordProduceValidationReview,
   type ProduceValidationSessionRef,
 } from "@/lib/produce/entry-validation-gate";
@@ -79,17 +79,26 @@ class ReviewStore {
       };
     }
 
-    if (name === "mark_produce_validation_review_presented") {
-      const row = this.rows.get(digest);
-      if (!row) return { data: { status: "not_found" }, error: null };
-      if (row.deliveredAt !== null) return { data: { status: "already_presented" }, error: null };
+    if (name === "mark_produce_validation_reviews_presented") {
+      const requested = args.p_validation_digests as string[];
       const eventId = args.p_presented_line_event_id as string;
-      if (!eventId || eventId.trim() === "") {
-        return { data: { status: "invalid_presentation_event" }, error: null };
+      if (!requested || requested.length === 0) {
+        return { data: { status: "no_digests", marked: 0 }, error: null };
       }
-      row.deliveredAt = "now";
-      row.presentedLineEventId = eventId; // rebind to the delivering event
-      return { data: { status: "presented" }, error: null };
+      if (!eventId || eventId.trim() === "") {
+        return { data: { status: "invalid_presentation_event", marked: 0 }, error: null };
+      }
+      // All-or-nothing: an unknown digest refuses the whole message.
+      if (requested.some((d) => !this.rows.has(d))) {
+        return { data: { status: "unknown_digest", marked: 0 }, error: null };
+      }
+      for (const d of requested) {
+        const row = this.rows.get(d)!;
+        if (row.deliveredAt !== null) continue;
+        row.deliveredAt = "now";
+        row.presentedLineEventId = eventId; // rebind to the delivering event
+      }
+      return { data: { status: "presented", marked: requested.length }, error: null };
     }
 
     return { data: null, error: null };
@@ -125,7 +134,7 @@ async function closeWithReply(
     delivered = false;
   }
   if (delivered) {
-    await markProduceValidationReviewPresented(store as never, REF, DIGEST, eventId);
+    await markProduceValidationReviewsPresented(store as never, REF, [DIGEST], eventId);
   }
   return { delivered };
 }
@@ -140,7 +149,7 @@ describe("A. reply succeeds — next distinct close confirms, no third close", (
     await closeWithReply(store, "evt-close-1", replyOk);
     expect(store.calls).toEqual([
       "record_produce_validation_review",
-      "mark_produce_validation_review_presented",
+      "mark_produce_validation_reviews_presented",
     ]);
     expect(store.rows.get(DIGEST)!.deliveredAt).not.toBeNull();
 
@@ -155,7 +164,7 @@ describe("B. reply fails — nothing may authorize the review", () => {
 
     const { delivered } = await closeWithReply(store, "evt-close-1", replyFails);
     expect(delivered).toBe(false);
-    expect(store.calls).not.toContain("mark_produce_validation_review_presented");
+    expect(store.calls).not.toContain("mark_produce_validation_reviews_presented");
     expect(store.rows.get(DIGEST)!.deliveredAt).toBeNull();
 
     expect(store.confirm(DIGEST, "evt-close-2")).toBe("not_presented");
@@ -205,7 +214,7 @@ describe("D. reply succeeds but the delivery stamp fails", () => {
     const failingMark = {
       calls: [] as string[],
       rpc: async (name: string, args: Record<string, unknown>) => {
-        if (name === "mark_produce_validation_review_presented") {
+        if (name === "mark_produce_validation_reviews_presented") {
           return { data: null, error: { message: "boom" } };
         }
         return store.rpc(name, args);
@@ -216,7 +225,7 @@ describe("D. reply succeeds but the delivery stamp fails", () => {
 
     await recordProduceValidationReview(failingMark as never, REF, REVIEW_RESULT, "evt-close-1");
     await expect(
-      markProduceValidationReviewPresented(failingMark as never, REF, DIGEST, "evt-close-1"),
+      markProduceValidationReviewsPresented(failingMark as never, REF, [DIGEST], "evt-close-1"),
     ).rejects.toThrow();
 
     expect(store.rows.get(DIGEST)!.deliveredAt).toBeNull();
@@ -240,7 +249,7 @@ describe("webhook wiring", () => {
   it("marks delivery only inside the successful-reply branch", async () => {
     const source = await Bun.file(webhookPath).text();
     const replied = source.indexOf("delivered = true;");
-    const marked = source.indexOf("markProduceValidationReviewPresented(");
+    const marked = source.indexOf("markProduceValidationReviewsPresented(");
     expect(replied).toBeGreaterThan(0);
     expect(marked).toBeGreaterThan(replied);
     expect(source).toContain("if (delivered && closeGateRefusal.reviewPresentation)");
@@ -249,7 +258,7 @@ describe("webhook wiring", () => {
   it("passes the current LINE event id as the presenting identity", async () => {
     const source = await Bun.file(webhookPath).text();
     // Line-ending agnostic: the repository checks out CRLF on Windows.
-    expect(source).toMatch(/digest,\s*\r?\n\s*eventId,/);
+    expect(source).toMatch(/digests,\s*\r?\n\s*eventId,/);
   });
 
   it("only a review_presented decision carries a presentation to prove", async () => {

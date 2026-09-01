@@ -14,6 +14,7 @@ import {
 import type {
   ProduceValidationAdvisory,
   ProduceValidationException,
+  ProduceValidationReview,
   ProduceValidationResult,
 } from "./entry-validation";
 
@@ -303,11 +304,28 @@ function reviewActionBlock(
   ];
 }
 
-function buildReviewReplyWithinBudget(
+/**
+ * A rendered review message, plus EXACTLY which reviews its text actually
+ * shows.
+ *
+ * The two are separate because the renderer drops exception blocks to fit the
+ * LINE text budget. A review whose detail was truncated away was never
+ * presented to anyone, so it must not be marked delivered and must not become
+ * confirmable — an unrendered review is not a delivered review.
+ */
+export interface ProduceReviewPresentation {
+  text: string;
+  /** The reviews whose detail this exact text contains, in listed order. */
+  renderedReviews: ProduceValidationReview[];
+  /** True only when every review in the set was rendered. */
+  complete: boolean;
+}
+
+function buildReviewPresentationWithinBudget(
   result: ProduceValidationResult,
   confirmationInstruction: string,
   maxCodePoints: number,
-): string {
+): ProduceReviewPresentation {
   const actionBlock = reviewActionBlock(result, confirmationInstruction);
   for (
     let listed = Math.min(result.reviews.length, MAX_LISTED_EXCEPTIONS);
@@ -321,9 +339,28 @@ function buildReviewReplyWithinBudget(
       "",
       ...actionBlock,
     ].join("\n");
-    if (countCodePoints(reply) <= maxCodePoints) return reply;
+    if (countCodePoints(reply) <= maxCodePoints) {
+      const renderedReviews = result.reviews.slice(0, listed);
+      return {
+        text: reply,
+        renderedReviews,
+        complete: renderedReviews.length === result.reviews.length,
+      };
+    }
   }
   throw new Error("product review actions cannot fit within the LINE text limit");
+}
+
+function buildReviewReplyWithinBudget(
+  result: ProduceValidationResult,
+  confirmationInstruction: string,
+  maxCodePoints: number,
+): string {
+  return buildReviewPresentationWithinBudget(
+    result,
+    confirmationInstruction,
+    maxCodePoints,
+  ).text;
 }
 
 /**
@@ -354,6 +391,23 @@ export function buildPlainTextReviewValidationReply(
   maxCodePoints = LINE_TEXT_MESSAGE_HARD_MAX_CODE_POINTS,
 ): string {
   return buildReviewReplyWithinBudget(
+    result,
+    `ส่ง “${closeCommand.trim()}” อีกครั้ง`,
+    maxCodePoints,
+  );
+}
+
+/**
+ * The same plain-text message, with the record of which reviews it actually
+ * shows. Use this wherever the message is about to become delivery PROOF:
+ * only a review this text really rendered may be marked presented.
+ */
+export function buildPlainTextReviewPresentation(
+  result: ProduceValidationResult,
+  closeCommand: string,
+  maxCodePoints = LINE_TEXT_MESSAGE_HARD_MAX_CODE_POINTS,
+): ProduceReviewPresentation {
+  return buildReviewPresentationWithinBudget(
     result,
     `ส่ง “${closeCommand.trim()}” อีกครั้ง`,
     maxCodePoints,

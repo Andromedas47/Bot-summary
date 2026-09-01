@@ -834,6 +834,92 @@ describe.skipIf(!pgAvailable)("produce close validation race on PostgreSQL 17", 
       .toBe("false");
   });
 
+  // ── D4. One message, one all-or-nothing delivery mark ─────────────────────
+
+  async function markMany(s: Session, digests: string[], eventId: string): Promise<string> {
+    const list = digests.map((d) => q(d)).join(", ");
+    return await scalar(`
+      SELECT public.mark_produce_validation_reviews_presented(
+        ${q(s.key)}, ${q(s.generation)}::uuid,
+        ARRAY[${list}]::text[], ${q(eventId)})->>'status'`);
+  }
+
+  test("#109 — the whole review and each subunit item are delivered together", async () => {
+    const s = await seedSession();
+    await closeWithPin(s, "evt-close", await revisionOf(s.key));
+    // One message presents the whole review plus two per-item subunit rows.
+    await recordReview(s, "digest-whole", "evt-close-1");
+    await recordReview(s, "digest-item-3", "evt-close-1");
+    await recordReview(s, "digest-item-7", "evt-close-1");
+
+    expect(await markMany(s, ["digest-whole", "digest-item-3", "digest-item-7"], "evt-close-1"))
+      .toBe("presented");
+
+    // Every one of them is now confirmable in its own right — this is what
+    // makes "ยืนยันข้อ N" work on the very next message.
+    for (const digest of ["digest-whole", "digest-item-3", "digest-item-7"]) {
+      expect(await deliveredAt(digest)).not.toBe("<null>");
+      expect(await presentedEventId(digest)).toBe("evt-close-1");
+    }
+    expect(await confirmReview(s, "digest-item-3", "evt-confirm-3")).toBe("confirmed");
+    // Confirming one item does not confirm another.
+    expect(await scalar(
+      `SELECT coalesce(confirmed_at::text, '<null>')
+       FROM public.produce_entry_validation_reviews WHERE validation_digest = 'digest-item-7'`))
+      .toBe("<null>");
+  });
+
+  test("an unknown digest refuses the WHOLE mark — no half-delivered message", async () => {
+    const s = await seedSession();
+    await closeWithPin(s, "evt-close", await revisionOf(s.key));
+    await recordReview(s, "digest-real", "evt-close-1");
+
+    expect(await markMany(s, ["digest-real", "digest-never-recorded"], "evt-close-1"))
+      .toBe("unknown_digest");
+    // The one that DID exist must not have been marked.
+    expect(await deliveredAt("digest-real")).toBe("<null>");
+    expect(await confirmReview(s, "digest-real", "evt-close-2")).toBe("not_presented");
+  });
+
+  test("a digest belonging to another generation is not deliverable here", async () => {
+    const a = await seedSession();
+    const b = await seedSession();
+    await closeWithPin(a, "evt-close-a", await revisionOf(a.key));
+    await closeWithPin(b, "evt-close-b", await revisionOf(b.key));
+    await recordReview(b, "digest-other-gen", "evt-close-b");
+
+    // Session A cannot prove delivery of session B's review.
+    expect(await markMany(a, ["digest-other-gen"], "evt-close-a")).toBe("unknown_digest");
+    expect(await deliveredAt("digest-other-gen")).toBe("<null>");
+  });
+
+  test("the multi-digest mark refuses a terminalized generation and a blank event", async () => {
+    const s = await seedSession();
+    await closeWithPin(s, "evt-close", await revisionOf(s.key));
+    await recordReview(s, "digest-multi-term", "evt-close-1");
+
+    expect(await markMany(s, ["digest-multi-term"], "")).toBe("invalid_presentation_event");
+    expect(await markMany(s, [], "evt-close-1")).toBe("no_digests");
+
+    await scalar(`
+      UPDATE public.pending_sessions SET terminalized = true
+      WHERE session_key = ${q(s.key)} RETURNING 1`);
+    expect(await markMany(s, ["digest-multi-term"], "evt-close-1")).toBe("terminalized");
+    expect(await deliveredAt("digest-multi-term")).toBe("<null>");
+  });
+
+  test("re-marking an already-delivered set is idempotent and keeps the first presenter", async () => {
+    const s = await seedSession();
+    await closeWithPin(s, "evt-close", await revisionOf(s.key));
+    await recordReview(s, "digest-idem", "evt-close-1");
+
+    expect(await markMany(s, ["digest-idem"], "evt-close-1")).toBe("presented");
+    expect(await markMany(s, ["digest-idem"], "evt-close-9")).toBe("presented");
+    expect(await presentedEventId("digest-idem")).toBe("evt-close-1");
+    // The original presenter still cannot confirm what it presented.
+    expect(await confirmReview(s, "digest-idem", "evt-close-1")).toBe("not_found");
+  });
+
   test("marking a digest that was never recorded is not_found", async () => {
     const s = await seedSession();
     await closeWithPin(s, "evt-close", await revisionOf(s.key));

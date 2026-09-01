@@ -51,10 +51,22 @@ function snapshot(): PendingSession {
 const REVIEW_RESULT = {
   status: "review_required",
   digest: DIGEST,
-  reviews: [{ kind: "price_variance", itemNumber: 1 }],
+  reviews: [{
+    kind: "unknown_product_vocabulary",
+    itemNumber: 1,
+    productName: "ผลไม้ทดสอบเอ",
+    suggestions: [],
+  }],
   blocking: [],
   advisories: [],
 } as unknown as ProduceValidationResult;
+
+// The finalizer needs the parsed session so the per-item subunit rows can be
+// recorded alongside the whole review.
+const PARSED = {
+  items: [], parse_errors: [], staff_name: "ทดสอบ", session_title: "ตลาดทดสอบ",
+  date: "2017-01-01", session_kind: "main",
+} as unknown as import("@/lib/parsers/weigh-session/types").WeighSession;
 
 interface DoubleOptions {
   recordFails?: boolean;
@@ -75,9 +87,9 @@ class RpcDouble {
     if (name === "hold_pending_validation_review") {
       return { data: { accepted: this.options.holdAccepted !== false }, error: null };
     }
-    if (name === "mark_produce_validation_review_presented") {
+    if (name === "mark_produce_validation_reviews_presented") {
       if (this.options.markFails) return { data: null, error: { message: "boom" } };
-      return { data: { status: this.options.markStatus ?? "presented" }, error: null };
+      return { data: { status: this.options.markStatus ?? "presented", marked: 1 }, error: null };
     }
     return { data: null, error: null };
   };
@@ -98,7 +110,7 @@ async function run(options: DoubleOptions, push: (to: string, text: string) => P
     snapshot(),
     "round-1",
     REVIEW_RESULT,
-    "รายละเอียดที่ต้องตรวจ",
+    PARSED,
     push,
     silentLog,
   );
@@ -116,10 +128,16 @@ describe("finalizer review presentation protocol", () => {
     expect(db.calls).toEqual([
       "record_produce_validation_review",
       "hold_pending_validation_review",
-      "mark_produce_validation_review_presented",
+      "mark_produce_validation_reviews_presented",
     ]);
     // The push must land between the hold and the delivery proof.
     expect(pushes).toHaveLength(1);
+
+    // And it must be the ACTUAL review, not the teaser. Marking a message that
+    // only says "press again to see the review" as delivered would let the next
+    // close confirm a digest whose contents nobody ever read.
+    expect(pushes[0]).toContain("ผลไม้ทดสอบเอ");
+    expect(pushes[0]).not.toContain('กรุณากด "จบรายการ" อีกครั้งเพื่อดูรายการที่ต้องตรวจ');
     expect(result).toEqual({ status: "validation_held", reason: "entry_review_presented" });
   });
 
@@ -130,7 +148,7 @@ describe("finalizer review presentation protocol", () => {
     expect(db.calls).toContain("hold_pending_validation_review");
     // The whole point: an unseen review is never marked presented, so nothing
     // can confirm it.
-    expect(db.calls).not.toContain("mark_produce_validation_review_presented");
+    expect(db.calls).not.toContain("mark_produce_validation_reviews_presented");
     expect(result).toEqual({ status: "validation_held", reason: "entry_review_undelivered" });
   });
 
@@ -163,7 +181,7 @@ describe("finalizer review presentation protocol", () => {
 
     expect(result).toBeNull();
     expect(pushed).toBe(false);
-    expect(db.calls).not.toContain("mark_produce_validation_review_presented");
+    expect(db.calls).not.toContain("mark_produce_validation_reviews_presented");
   });
 
   it("records the review before parking, so a crash never parks an unrecorded one", async () => {

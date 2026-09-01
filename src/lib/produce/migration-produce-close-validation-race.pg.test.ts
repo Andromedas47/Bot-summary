@@ -473,6 +473,8 @@ describe.skipIf(!pgAvailable)("produce close validation race on PostgreSQL 17", 
     await hold(s, await revisionOf(s.key));
 
     expect(await recordReview(s, "digest-1", "evt-present")).toBe("recorded");
+    // Recording proves nothing; the presentation has to land first.
+    expect(await markPresented(s, "digest-1", "evt-present")).toBe("presented");
     expect(await confirmReview(s, "digest-1", "evt-confirm")).toBe("confirmed");
     expect(await resume(s)).toBe("resumed");
 
@@ -484,6 +486,7 @@ describe.skipIf(!pgAvailable)("produce close validation race on PostgreSQL 17", 
     const s = await seedSession();
     await closeWithPin(s, "evt-close", await revisionOf(s.key));
     await recordReview(s, "digest-1", "evt-present");
+    expect(await markPresented(s, "digest-1", "evt-present")).toBe("presented");
 
     // The very event that presented the set must never confirm it.
     expect(await confirmReview(s, "digest-1", "evt-present")).toBe("not_found");

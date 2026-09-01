@@ -58,6 +58,13 @@ export interface RecordedProduceReview {
   /** True when this exception set already carried an explicit confirmation. */
   confirmed: boolean;
   /**
+   * True only once delivery to the operator has been PROVEN. Recording the row
+   * does not set it: a LINE reply is a separate call that can fail.
+   */
+  presentedDelivered: boolean;
+  /** The generation is dead; nothing may be recorded or confirmed for it. */
+  terminalized: boolean;
+  /**
    * The event that first presented this exception set. A later press carrying
    * a different event id is a genuine second press; the same id is a duplicate
    * delivery of the first one and must not be read as an acknowledgement.
@@ -198,9 +205,19 @@ export async function recordProduceValidationReview(
     );
   }
   const row = (data ?? {}) as {
+    status?: string;
     confirmed?: boolean;
     presented_line_event_id?: string | null;
+    presented_delivered?: boolean;
   };
+  if (row.status === "terminalized") {
+    return {
+      confirmed: false,
+      presentedDelivered: false,
+      terminalized: true,
+      presentedLineEventId: lineEventId,
+    };
+  }
   // Risky subunits are independently confirmable. Keep the full review row
   // for existing product-vocabulary behavior, and add one row per item.
   if (parsed) for (const review of result.reviews.filter((entry) => entry.kind === "subunit_confirmation")) {
@@ -227,6 +244,8 @@ export async function recordProduceValidationReview(
   }
   return {
     confirmed: Boolean(row.confirmed),
+    presentedDelivered: row.presented_delivered === true,
+    terminalized: false,
     presentedLineEventId: row.presented_line_event_id ?? lineEventId,
   };
 }
@@ -442,50 +461,45 @@ export async function recordFinalizerValidationReview(
   result: ProduceValidationResult,
   presentationToken: string,
 ): Promise<{ recorded: boolean; alreadyDelivered: boolean }> {
-  if (result.reviews.length === 0) {
-    throw new ProduceValidationGateError("no validation review to record");
-  }
-  if (!ref.lineUserId) {
-    throw new ProduceValidationGateError(
-      "validation review requires the data-entry LINE actor",
-    );
-  }
-
-  const { data, error } = await supabase.rpc("record_finalizer_validation_review", {
-    p_session_key: ref.sessionKey,
-    p_session_generation: ref.sessionGeneration,
-    p_accountability_round_id: ref.accountabilityRoundId,
-    p_validation_digest: result.digest,
-    p_business_date: ref.businessDate,
-    p_market_label: ref.marketLabel,
-    p_staff_label: ref.staffLabel,
-    p_exceptions: result.reviews,
-    p_line_user_id: ref.lineUserId,
-    p_presentation_token: presentationToken,
-  });
-
-  if (error) {
-    throw new ProduceValidationGateError(
-      `finalizer validation review could not be recorded: ${error.message}`,
-    );
-  }
-  const row = (data ?? {}) as { status?: string; presented_delivered?: boolean };
-  return {
-    recorded: row.status === "recorded",
-    alreadyDelivered: row.presented_delivered === true,
-  };
+  // Same recorder as the webhook: recording never claims delivery, so there is
+  // no second implementation that could drift from this one. The synthetic
+  // token stands in for the presenting event id until a successful push
+  // rebinds it.
+  const row = await recordProduceValidationReview(supabase, ref, result, presentationToken);
+  return { recorded: !row.terminalized, alreadyDelivered: row.presentedDelivered };
 }
 
-/** Prove this exact review reached the operator. Only after a successful push. */
+export type ReviewPresentationStatus =
+  | "presented"
+  | "already_presented"
+  | "not_found"
+  | "terminalized"
+  | "invalid_presentation_event";
+
+/**
+ * Prove this exact review reached the operator.
+ *
+ * Call ONLY after the LINE reply or push actually succeeded — this is the sole
+ * writer of delivery proof, and `presented_delivered_at IS NOT NULL` has exactly
+ * one meaning because of that.
+ *
+ * `presentedLineEventId` is the event that CAUSED the proven presentation, and
+ * it becomes the row's stored presenting identity. When a first close recorded
+ * the row but its reply failed, a later close that re-presents successfully
+ * takes ownership — otherwise a duplicate delivery of that later close would
+ * look like a distinct event and self-confirm.
+ */
 export async function markProduceValidationReviewPresented(
   supabase: AnyClient,
   ref: ProduceValidationSessionRef,
   digest: string,
-): Promise<"presented" | "already_presented" | "not_found" | "terminalized"> {
+  presentedLineEventId: string,
+): Promise<ReviewPresentationStatus> {
   const { data, error } = await supabase.rpc("mark_produce_validation_review_presented", {
     p_session_key: ref.sessionKey,
     p_session_generation: ref.sessionGeneration,
     p_validation_digest: digest,
+    p_presented_line_event_id: presentedLineEventId,
   });
   if (error) {
     throw new ProduceValidationGateError(
@@ -496,6 +510,7 @@ export async function markProduceValidationReviewPresented(
   if (
     status === "presented" || status === "already_presented"
     || status === "not_found" || status === "terminalized"
+    || status === "invalid_presentation_event"
   ) {
     return status;
   }

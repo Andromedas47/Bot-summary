@@ -68,9 +68,9 @@ class RpcDouble {
   constructor(private readonly options: DoubleOptions = {}) {}
   rpc = async (name: string) => {
     this.calls.push(name);
-    if (name === "record_finalizer_validation_review") {
+    if (name === "record_produce_validation_review") {
       if (this.options.recordFails) return { data: null, error: { message: "boom" } };
-      return { data: { status: "recorded", presented_delivered: false }, error: null };
+      return { data: { confirmed: false, presented_delivered: false, presented_line_event_id: "tok" }, error: null };
     }
     if (name === "hold_pending_validation_review") {
       return { data: { accepted: this.options.holdAccepted !== false }, error: null };
@@ -114,7 +114,7 @@ describe("finalizer review presentation protocol", () => {
     const { db, result } = await run({}, async (_to, text) => { pushes.push(text); return {}; });
 
     expect(db.calls).toEqual([
-      "record_finalizer_validation_review",
+      "record_produce_validation_review",
       "hold_pending_validation_review",
       "mark_produce_validation_review_presented",
     ]);
@@ -126,7 +126,7 @@ describe("finalizer review presentation protocol", () => {
   it("never proves delivery when the LINE push fails", async () => {
     const { db, result } = await run({}, failingPush);
 
-    expect(db.calls).toContain("record_finalizer_validation_review");
+    expect(db.calls).toContain("record_produce_validation_review");
     expect(db.calls).toContain("hold_pending_validation_review");
     // The whole point: an unseen review is never marked presented, so nothing
     // can confirm it.
@@ -154,7 +154,7 @@ describe("finalizer review presentation protocol", () => {
     // claims delivery.
     expect(result).toBeNull();
     expect(pushed).toBe(false);
-    expect(db.calls).toEqual(["record_finalizer_validation_review"]);
+    expect(db.calls).toEqual(["record_produce_validation_review"]);
   });
 
   it("does not push when the hold is refused — no stale parked decision", async () => {
@@ -168,7 +168,7 @@ describe("finalizer review presentation protocol", () => {
 
   it("records the review before parking, so a crash never parks an unrecorded one", async () => {
     const { db } = await run({}, okPush);
-    expect(db.calls.indexOf("record_finalizer_validation_review"))
+    expect(db.calls.indexOf("record_produce_validation_review"))
       .toBeLessThan(db.calls.indexOf("hold_pending_validation_review"));
   });
 });

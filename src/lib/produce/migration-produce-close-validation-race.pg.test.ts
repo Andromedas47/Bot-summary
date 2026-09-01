@@ -632,18 +632,22 @@ describe.skipIf(!pgAvailable)("produce close validation race on PostgreSQL 17", 
   // "delivered" are separate durable facts. Only delivery makes a review
   // confirmable.
 
+  // The finalizer uses the SAME recorder as the webhook and passes its stable
+  // synthetic token as the presenting event id. Recording never claims delivery.
   async function recordFinalizerReview(s: Session, digest: string, token: string): Promise<string> {
-    return await scalar(`
-      SELECT r->>'status' FROM public.record_finalizer_validation_review(
-        ${q(s.key)}, ${q(s.generation)}::uuid, ${q(s.roundId)}::uuid, ${q(digest)},
-        DATE '2026-08-30', 'ราชพฤก', 'จิ้ว', '[]'::jsonb, ${q(OWNER)}, ${q(token)}
-      ) AS r`);
+    return await recordReview(s, digest, token);
   }
 
-  async function markPresented(s: Session, digest: string): Promise<string> {
+  async function markPresented(s: Session, digest: string, eventId: string): Promise<string> {
     return await scalar(`
       SELECT public.mark_produce_validation_review_presented(
-        ${q(s.key)}, ${q(s.generation)}::uuid, ${q(digest)})->>'status'`);
+        ${q(s.key)}, ${q(s.generation)}::uuid, ${q(digest)}, ${q(eventId)})->>'status'`);
+  }
+
+  async function presentedEventId(digest: string): Promise<string> {
+    return await scalar(`
+      SELECT presented_line_event_id FROM public.produce_entry_validation_reviews
+      WHERE validation_digest = ${q(digest)}`);
   }
 
   async function deliveredAt(digest: string): Promise<string> {
@@ -662,7 +666,7 @@ describe.skipIf(!pgAvailable)("produce close validation race on PostgreSQL 17", 
     expect(await deliveredAt("digest-ok")).toBe("<null>");
 
     // 3-4. the push succeeded, so delivery is proven
-    expect(await markPresented(s, "digest-ok")).toBe("presented");
+    expect(await markPresented(s, "digest-ok", "evt-present")).toBe("presented");
     expect(await deliveredAt("digest-ok")).not.toBe("<null>");
 
     // ONE distinct later close confirms. No third close.
@@ -695,10 +699,18 @@ describe.skipIf(!pgAvailable)("produce close validation race on PostgreSQL 17", 
     await recordFinalizerReview(s, "digest-repres", token);
     expect(await deliveredAt("digest-repres")).toBe("<null>");
 
-    // The next close re-presents it (the webhook replies with it), which is
-    // what finally proves delivery — and must NOT confirm in the same breath.
+    // The next close re-presents it. Recording still proves nothing; the
+    // delivery stamp comes only after that close's LINE reply succeeded, and
+    // it must NOT confirm in the same breath.
     expect(await recordReview(s, "digest-repres", "evt-close-2")).toBe("recorded");
+    expect(await deliveredAt("digest-repres")).toBe("<null>");
+    expect(await markPresented(s, "digest-repres", "evt-close-2")).toBe("presented");
     expect(await deliveredAt("digest-repres")).not.toBe("<null>");
+    // The presenting identity is now Close #2 — the event that actually
+    // delivered — not Close #1, which recorded it and never showed it.
+    expect(await presentedEventId("digest-repres")).toBe("evt-close-2");
+    // ...so a duplicate delivery of Close #2 cannot self-confirm.
+    expect(await confirmReview(s, "digest-repres", "evt-close-2")).toBe("not_found");
     expect(await scalar(
       `SELECT coalesce(confirmed_at::text, '<null>')
        FROM public.produce_entry_validation_reviews WHERE validation_digest = 'digest-repres'`))
@@ -713,7 +725,7 @@ describe.skipIf(!pgAvailable)("produce close validation race on PostgreSQL 17", 
     await closeWithPin(s, "evt-close", await revisionOf(s.key));
     const token = `finalizer:${s.generation}:digest-token`;
     await recordFinalizerReview(s, "digest-token", token);
-    await markPresented(s, "digest-token");
+    await markPresented(s, "digest-token", `finalizer:${s.generation}:digest-token`);
 
     // Redelivery of the presenting identity is not a confirmation.
     expect(await confirmReview(s, "digest-token", token)).toBe("not_found");
@@ -727,7 +739,7 @@ describe.skipIf(!pgAvailable)("produce close validation race on PostgreSQL 17", 
     const s = await seedSession();
     await closeWithPin(s, "evt-close", await revisionOf(s.key));
     await recordFinalizerReview(s, "digest-old", `finalizer:${s.generation}:digest-old`);
-    await markPresented(s, "digest-old");
+    await markPresented(s, "digest-old", "evt-present-old");
     expect(await confirmReview(s, "digest-old", "evt-close-2")).toBe("confirmed");
 
     // The document moved; the gate now computes a different digest, which has
@@ -757,14 +769,72 @@ describe.skipIf(!pgAvailable)("produce close validation race on PostgreSQL 17", 
       WHERE session_key = ${q(s.key)} RETURNING 1`);
 
     expect(await recordFinalizerReview(s, "digest-term-2", "tok")).toBe("terminalized");
-    expect(await markPresented(s, "digest-term")).toBe("terminalized");
+    expect(await markPresented(s, "digest-term", "evt-x")).toBe("terminalized");
     expect(await confirmReview(s, "digest-term", "evt-close-2")).toBe("terminalized");
+  });
+
+  test("RECORDING NEVER CLAIMS DELIVERY — not even on the webhook path", async () => {
+    const s = await seedSession();
+    await closeWithPin(s, "evt-close", await revisionOf(s.key));
+
+    // The webhook recorder writes the row and stops. The LINE reply is a
+    // separate call that can fail, so the row is not confirmable yet.
+    expect(await recordReview(s, "digest-webhook", "evt-close-1")).toBe("recorded");
+    expect(await deliveredAt("digest-webhook")).toBe("<null>");
+    expect(await confirmReview(s, "digest-webhook", "evt-close-2")).toBe("not_presented");
+  });
+
+  test("re-recording an undelivered review still does not deliver it", async () => {
+    const s = await seedSession();
+    await closeWithPin(s, "evt-close", await revisionOf(s.key));
+    await recordReview(s, "digest-rerecord", "evt-close-1");
+    // A second close records again (idempotent) — still no delivery proof.
+    expect(await recordReview(s, "digest-rerecord", "evt-close-2")).toBe("recorded");
+    expect(await deliveredAt("digest-rerecord")).toBe("<null>");
+    // The presenting identity is untouched by re-recording.
+    expect(await presentedEventId("digest-rerecord")).toBe("evt-close-1");
+  });
+
+  test("delivery rebinds the presenting event, and re-marking is idempotent", async () => {
+    const s = await seedSession();
+    await closeWithPin(s, "evt-close", await revisionOf(s.key));
+    await recordReview(s, "digest-rebind", "evt-close-1");
+
+    expect(await markPresented(s, "digest-rebind", "evt-close-2")).toBe("presented");
+    expect(await presentedEventId("digest-rebind")).toBe("evt-close-2");
+
+    // A second successful presentation does not move the identity again.
+    expect(await markPresented(s, "digest-rebind", "evt-close-3")).toBe("already_presented");
+    expect(await presentedEventId("digest-rebind")).toBe("evt-close-2");
+
+    // Close #2 cannot confirm what it presented; Close #3 can.
+    expect(await confirmReview(s, "digest-rebind", "evt-close-2")).toBe("not_found");
+    expect(await confirmReview(s, "digest-rebind", "evt-close-3")).toBe("confirmed");
+  });
+
+  test("delivery refuses a blank presenting event rather than proving nothing", async () => {
+    const s = await seedSession();
+    await closeWithPin(s, "evt-close", await revisionOf(s.key));
+    await recordReview(s, "digest-blank", "evt-close-1");
+    expect(await markPresented(s, "digest-blank", "")).toBe("invalid_presentation_event");
+    expect(await deliveredAt("digest-blank")).toBe("<null>");
+  });
+
+  test("no historical review was retroactively marked delivered", async () => {
+    // The migration must NOT backfill presented_delivered_at: recording a row
+    // was never evidence that a human saw it.
+    expect(await scalar(`
+      SELECT (position('SET presented_delivered_at = presented_at' in
+        pg_get_functiondef(p.oid)) > 0)::text
+      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'public' AND p.proname = 'record_produce_validation_review'`))
+      .toBe("false");
   });
 
   test("marking a digest that was never recorded is not_found", async () => {
     const s = await seedSession();
     await closeWithPin(s, "evt-close", await revisionOf(s.key));
-    expect(await markPresented(s, "digest-absent")).toBe("not_found");
+    expect(await markPresented(s, "digest-absent", "evt-x")).toBe("not_found");
   });
 
   // ── E. #108 inactivity interaction ────────────────────────────────────────

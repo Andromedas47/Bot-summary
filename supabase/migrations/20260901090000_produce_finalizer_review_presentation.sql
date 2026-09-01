@@ -78,23 +78,32 @@ ALTER TABLE public.produce_entry_validation_reviews
 
 COMMENT ON COLUMN public.produce_entry_validation_reviews.presented_delivered_at IS
   'When this exact review was proven to have reached the operator. NULL means '
-  'recorded but NOT yet shown - it must not be confirmable. Set by the webhook '
-  'the moment it replies with the review, and by the finalizer only AFTER its '
-  'LINE push succeeded.';
+  'recorded but NOT yet shown - it must not be confirmable. Written ONLY by '
+  'mark_produce_validation_review_presented, and only after the LINE reply or '
+  'push actually succeeded. Recording a review never sets it: the delivery is a '
+  'separate call that can fail.';
 
--- Backfill, one time. Every pre-existing review was created by the webhook
--- close gate, which records and replies with it in the same request: delivery
--- was proven by construction for all of them. Treating them as undelivered
--- would strand real, already-shown reviews.
-UPDATE public.produce_entry_validation_reviews
-SET presented_delivered_at = presented_at
-WHERE presented_delivered_at IS NULL;
+-- NO BACKFILL, deliberately.
+--
+-- An earlier draft set presented_delivered_at = presented_at for every existing
+-- row, on the theory that the webhook records and replies in one request. That
+-- is not provable: the LINE reply is a separate network call that is caught and
+-- logged, so a historical row may have been recorded and never shown. Stamping
+-- delivery across all of them would manufacture evidence that a human being saw
+-- financial exceptions they may never have seen.
+--
+-- Existing rows therefore stay NULL and are re-presented before anything can
+-- confirm them. Rows that were already confirmed keep confirmed_at, which
+-- records their historical outcome, and confirm_ returns already_confirmed
+-- before it ever reaches the delivery check — so no past decision is disturbed.
 
--- ── 2) Webhook path: recording IS presenting ─────────────────────────────────
--- Unchanged semantics, plus delivery proof. The webhook replies with the review
--- in the same request, so recording it and showing it are the same act. When
--- the row already exists but was never delivered (the finalizer recorded it and
--- its push failed), this re-presentation is what finally proves delivery.
+-- ── 2) Recording a review NEVER claims it was delivered ──────────────────────
+--
+-- Recording is a database write; delivering is a LINE call that happens later
+-- and can fail. The webhook's reply is caught and logged, so "we wrote the row"
+-- is not evidence that anyone saw it. Only
+-- mark_produce_validation_review_presented, called AFTER a successful reply or
+-- push, may stamp delivery.
 
 CREATE OR REPLACE FUNCTION public.record_produce_validation_review(
   p_session_key             text,
@@ -131,26 +140,19 @@ BEGIN
   INSERT INTO public.produce_entry_validation_reviews (
     session_key, session_generation, accountability_round_id, validation_digest,
     business_date, market_label, staff_label, exceptions,
-    presented_by_line_user_id, presented_line_event_id, presented_delivered_at
+    presented_by_line_user_id, presented_line_event_id
   )
   VALUES (
     p_session_key, p_session_generation, p_accountability_round_id, p_validation_digest,
     p_business_date, p_market_label, p_staff_label, p_exceptions,
-    p_line_user_id, p_line_event_id, now()
+    p_line_user_id, p_line_event_id
   )
   ON CONFLICT ON CONSTRAINT produce_entry_validation_reviews_identity DO NOTHING
   RETURNING * INTO v_row;
 
   IF NOT FOUND THEN
-    -- Existing row. If the finalizer recorded it and never proved delivery,
-    -- THIS reply is the delivery. Confirmation state is never touched.
-    UPDATE public.produce_entry_validation_reviews r
-    SET presented_delivered_at = now()
-    WHERE r.session_key = p_session_key
-      AND r.session_generation = p_session_generation
-      AND r.validation_digest = p_validation_digest
-      AND r.presented_delivered_at IS NULL;
-
+    -- Existing row: return it untouched. Delivery state and confirmation state
+    -- both belong to other functions.
     SELECT * INTO v_row
     FROM public.produce_entry_validation_reviews
     WHERE session_key = p_session_key
@@ -168,78 +170,22 @@ BEGIN
 END;
 $$;
 
--- ── 3) Finalizer path: record WITHOUT claiming delivery ──────────────────────
-
-CREATE OR REPLACE FUNCTION public.record_finalizer_validation_review(
-  p_session_key             text,
-  p_session_generation      uuid,
-  p_accountability_round_id uuid,
-  p_validation_digest       text,
-  p_business_date           date,
-  p_market_label            text,
-  p_staff_label             text,
-  p_exceptions              jsonb,
-  p_line_user_id            text,
-  p_presentation_token      text
-)
-RETURNS jsonb
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = pg_catalog, public
-AS $$
-DECLARE
-  v_row          public.produce_entry_validation_reviews;
-  v_terminalized boolean;
-BEGIN
-  SELECT terminalized INTO v_terminalized
-  FROM public.pending_sessions
-  WHERE session_key = p_session_key
-    AND session_generation = p_session_generation
-  FOR UPDATE;
-
-  IF v_terminalized THEN
-    RETURN jsonb_build_object('status', 'terminalized', 'confirmed', false);
-  END IF;
-
-  -- presented_delivered_at is deliberately left NULL: this row exists, but
-  -- nothing has shown it to anyone yet.
-  INSERT INTO public.produce_entry_validation_reviews (
-    session_key, session_generation, accountability_round_id, validation_digest,
-    business_date, market_label, staff_label, exceptions,
-    presented_by_line_user_id, presented_line_event_id
-  )
-  VALUES (
-    p_session_key, p_session_generation, p_accountability_round_id, p_validation_digest,
-    p_business_date, p_market_label, p_staff_label, p_exceptions,
-    p_line_user_id, p_presentation_token
-  )
-  ON CONFLICT ON CONSTRAINT produce_entry_validation_reviews_identity DO NOTHING
-  RETURNING * INTO v_row;
-
-  IF NOT FOUND THEN
-    SELECT * INTO v_row
-    FROM public.produce_entry_validation_reviews
-    WHERE session_key = p_session_key
-      AND session_generation = p_session_generation
-      AND validation_digest = p_validation_digest;
-  END IF;
-
-  RETURN jsonb_build_object(
-    'status', 'recorded',
-    'id', v_row.id,
-    'confirmed', v_row.confirmed_at IS NOT NULL,
-    'presented_line_event_id', v_row.presented_line_event_id,
-    'presented_delivered', v_row.presented_delivered_at IS NOT NULL
-  );
-END;
-$$;
+-- ── 3) One recorder, not two ────────────────────────────────────────────────
+--
+-- An earlier draft added a separate record_finalizer_validation_review that
+-- inserted the row WITHOUT delivery proof, while the webhook recorder stamped
+-- delivery inline. Now that recording never claims delivery, the two are the
+-- same operation and a second copy could only drift from the first. The
+-- finalizer calls record_produce_validation_review above and passes its stable
+-- synthetic token as the presenting event id.
 
 -- ── 4) Delivery proof, recorded only after the push landed ───────────────────
 
 CREATE OR REPLACE FUNCTION public.mark_produce_validation_review_presented(
-  p_session_key        text,
-  p_session_generation uuid,
-  p_validation_digest  text
+  p_session_key             text,
+  p_session_generation      uuid,
+  p_validation_digest       text,
+  p_presented_line_event_id text
 )
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -272,15 +218,34 @@ BEGIN
   END IF;
 
   IF v_row.presented_delivered_at IS NOT NULL THEN
-    RETURN jsonb_build_object('status', 'already_presented');
+    RETURN jsonb_build_object(
+      'status', 'already_presented',
+      'presented_line_event_id', v_row.presented_line_event_id
+    );
   END IF;
 
+  IF p_presented_line_event_id IS NULL OR btrim(p_presented_line_event_id) = '' THEN
+    RETURN jsonb_build_object('status', 'invalid_presentation_event');
+  END IF;
+
+  -- presented_line_event_id is REBOUND to the event that actually delivered.
+  --
+  -- Close #1 records the row and its reply fails, so the row carries Close #1's
+  -- id but was never shown. Close #2 re-presents successfully. If the id stayed
+  -- Close #1's, a duplicate delivery of Close #2 would look like a distinct
+  -- later event and self-confirm content shown exactly once. The stored
+  -- identity must always be the one that caused the PROVEN presentation.
   UPDATE public.produce_entry_validation_reviews
-  SET presented_delivered_at = now()
+  SET presented_delivered_at = now(),
+      presented_line_event_id = p_presented_line_event_id
   WHERE id = v_row.id
   RETURNING * INTO v_row;
 
-  RETURN jsonb_build_object('status', 'presented', 'id', v_row.id);
+  RETURN jsonb_build_object(
+    'status', 'presented',
+    'id', v_row.id,
+    'presented_line_event_id', v_row.presented_line_event_id
+  );
 END;
 $$;
 
@@ -355,27 +320,15 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.record_finalizer_validation_review(
-  text, uuid, uuid, text, date, text, text, jsonb, text, text
-) IS
-  'Records the review the finalizer discovered after the close boundary, WITHOUT '
-  'claiming it was shown. presented_delivered_at stays NULL until the LINE push '
-  'is proven, so nothing can confirm it in the meantime.';
 
-COMMENT ON FUNCTION public.mark_produce_validation_review_presented(text, uuid, text) IS
+COMMENT ON FUNCTION public.mark_produce_validation_review_presented(text, uuid, text, text) IS
   'Records proof that this exact review reached the operator. Called only after a '
   'successful LINE push. Refuses a terminalized generation.';
 
-REVOKE ALL ON FUNCTION public.record_finalizer_validation_review(
-  text, uuid, uuid, text, date, text, text, jsonb, text, text
-) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.record_finalizer_validation_review(
-  text, uuid, uuid, text, date, text, text, jsonb, text, text
-) TO service_role;
 
-REVOKE ALL ON FUNCTION public.mark_produce_validation_review_presented(text, uuid, text)
+REVOKE ALL ON FUNCTION public.mark_produce_validation_review_presented(text, uuid, text, text)
   FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.mark_produce_validation_review_presented(text, uuid, text)
+GRANT EXECUTE ON FUNCTION public.mark_produce_validation_review_presented(text, uuid, text, text)
   TO service_role;
 
 COMMIT;

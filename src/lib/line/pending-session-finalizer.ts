@@ -357,6 +357,7 @@ export async function holdAndPresentFinalizerReview(
       supabase,
       ref,
       reviewResult.digest,
+      token,
     );
     if (presented !== "presented" && presented !== "already_presented") {
       log.warn("review presentation could not be proven", { presented });

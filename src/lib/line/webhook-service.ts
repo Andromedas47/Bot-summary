@@ -153,6 +153,7 @@ import { tryHandlePurchaseCaptureMessage } from "@/lib/purchase-capture/webhook-
 import { bindPlainTextRound } from "@/lib/produce/plain-text-round-binding";
 import {
   confirmProduceSubunitReview,
+  markProduceValidationReviewPresented,
   isProduceReviewApproved,
   runProduceCloseGate,
 } from "@/lib/produce/entry-validation-gate";
@@ -242,6 +243,21 @@ const STALE_PRODUCE_SESSION_REPLY =
 // lost and no close boundary was written, so the operator simply closes again
 // against the complete list. This must stay recoverable wording: the failure
 // mode it replaces was a silent terminal failed_closed.
+/**
+ * What a plain-text close gate refusal carries back to the caller.
+ *
+ * `reviewPresentation` marks a CONFIRMABLE review that has been recorded but
+ * NOT yet proven delivered. The caller stamps delivery only after its LINE
+ * reply succeeds. Blocking errors carry none: they are not confirmable.
+ */
+interface PlainTextCloseGateRefusal {
+  refusalText: string;
+  reviewPresentation?: {
+    digest: string;
+    sessionGeneration: string;
+  };
+}
+
 const CLOSE_RACED_LATE_ITEM_REPLY =
   "มีรายการส่งเข้ามาเพิ่มพอดีตอนปิดรอบ ระบบยังไม่ได้ปิดรอบ รายการทั้งหมดยังอยู่ครบ กรุณาพิมพ์ปิดรอบอีกครั้ง";
 
@@ -1310,7 +1326,7 @@ export class WebhookService {
       // typed is lost. Only the ordinary append path is gated: a message that
       // carries a header AND a closer rotates to a new generation, and the
       // review it would record would belong to the generation it replaced.
-      let closeGateRefusal: string | null = null;
+      let closeGateRefusal: PlainTextCloseGateRefusal | null = null;
       // The exact ingest_revision the entry gate inspected. The close boundary
       // must be stamped against THIS document or not at all: on 2026-08-30 a
       // legitimate pre-close item committed between the gate and the append,
@@ -1680,12 +1696,60 @@ export class WebhookService {
             });
           }
           if (replyToken) {
+            let delivered = false;
             try {
-              await this.replyMessage(replyToken, closeGateRefusal);
+              await this.replyMessage(replyToken, closeGateRefusal.refusalText);
+              delivered = true;
             } catch (replyError) {
               log.error("produce entry gate refusal reply failed", {
                 error: String(replyError),
               });
+            }
+
+            // Delivery proof is written ONLY here, after the reply actually
+            // succeeded. Recording the review earlier proved nothing: this
+            // reply is a separate network call that is caught and logged, so a
+            // failed one must leave the review unconfirmable and force a
+            // re-presentation rather than letting the next close approve
+            // financial content nobody saw.
+            //
+            // eventId becomes the row's presenting identity, taking over from
+            // whichever event recorded it. Without that, a duplicate delivery
+            // of THIS close would look like a distinct later event and
+            // self-confirm a review shown exactly once.
+            if (delivered && closeGateRefusal.reviewPresentation) {
+              const { digest, sessionGeneration } = closeGateRefusal.reviewPresentation;
+              try {
+                const presented = await markProduceValidationReviewPresented(
+                  this.supabase,
+                  {
+                    sessionKey: sessionKey,
+                    sessionGeneration,
+                    accountabilityRoundId: null,
+                    businessDate: null,
+                    marketLabel: null,
+                    staffLabel: null,
+                    lineUserId: pending.line_user_id,
+                  },
+                  digest,
+                  eventId,
+                );
+                if (presented !== "presented" && presented !== "already_presented") {
+                  // The operator saw it, but the database cannot prove it.
+                  // Fail safe: it stays unconfirmable and is shown again.
+                  log.warn("review presentation could not be proven", {
+                    sessionKey,
+                    sessionGeneration,
+                    presented,
+                  });
+                }
+              } catch (markError) {
+                log.error("review presentation stamp failed", {
+                  sessionKey,
+                  sessionGeneration,
+                  error: markError instanceof Error ? markError.message : String(markError),
+                });
+              }
             }
           }
           return { eventId, eventType: event.type, status: "saved", parsed: false };
@@ -2332,12 +2396,21 @@ export class WebhookService {
    * exception set; the second acknowledges exactly that set. Price differences
    * are advisories and do not enter this protocol.
    */
+  /**
+   * A close-gate refusal, plus what the caller needs to prove delivery.
+   *
+   * `reviewPresentation` is present ONLY for a confirmable review that was
+   * recorded but not yet shown. Recording it is a database write; showing it is
+   * a LINE reply that can fail, so the caller marks delivery only after that
+   * reply succeeds. A blocking error carries no presentation — nothing about it
+   * is confirmable, so it must never be stamped as a delivered review.
+   */
   private async runPlainTextCloseGate(
     pending:   PendingSession,
     closeText: string,
     eventId:   string,
     log:       ChildLogger,
-  ): Promise<string | null> {
+  ): Promise<PlainTextCloseGateRefusal | null> {
     const document = `${pending.accumulated_text}\n${closeText}`;
     const parsed = parseWeighSession(document, bangkokToday());
     if (getWeighSessionFinalizationErrors(parsed).length > 0) return null;
@@ -2358,7 +2431,7 @@ export class WebhookService {
           sessionKey: pending.session_key,
           reason:     binding.reason,
         });
-        return binding.detail;
+        return { refusalText: binding.detail };
       }
 
       const decision = await runProduceCloseGate(
@@ -2377,10 +2450,17 @@ export class WebhookService {
         eventId,
       );
       if (decision.decision === "blocked") {
-        return buildBlockingValidationReply(decision.result);
+        // Not confirmable: no presentation to prove.
+        return { refusalText: buildBlockingValidationReply(decision.result) };
       }
       if (decision.decision === "review_presented") {
-        return buildPlainTextReviewValidationReply(decision.result, closeText);
+        return {
+          refusalText: buildPlainTextReviewValidationReply(decision.result, closeText),
+          reviewPresentation: {
+            digest: decision.result.digest,
+            sessionGeneration: pending.session_generation,
+          },
+        };
       }
       return null;
     } catch (error) {
@@ -2390,7 +2470,7 @@ export class WebhookService {
         sessionKey: pending.session_key,
         error:      error instanceof Error ? error.message : String(error),
       });
-      return PRODUCE_ENTRY_GATE_UNAVAILABLE_REPLY;
+      return { refusalText: PRODUCE_ENTRY_GATE_UNAVAILABLE_REPLY };
     }
   }
 

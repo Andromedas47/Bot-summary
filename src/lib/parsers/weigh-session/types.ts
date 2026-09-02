@@ -65,6 +65,19 @@ export interface WeighSessionItem {
   /** Ephemeral operator evidence for risky subunit entry; never persisted. */
   entered_quantity?: number;
   entered_unit?: string;
+  /**
+   * True only when the operator actually WROTE this number in the source
+   * document. Absent for the sequential number the parser synthesizes for an
+   * unnumbered line (see parseItemLine's ITEM_NO_INDEX branch).
+   *
+   * Transient parser evidence, never persisted: the number itself is the
+   * business fact, this only records where it came from. Read by
+   * validateProduceEntry to tell a real "ข้อ 5 หายไป" from a list that was
+   * never numbered in the first place — absent must always read as "no
+   * evidence", so a path that loses this field goes quiet rather than
+   * blocking a legitimate free-form draft.
+   */
+  item_number_explicit?: boolean;
 }
 
 export interface WeighSession {

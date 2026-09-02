@@ -451,6 +451,7 @@ export function parseWeighSession(
           closeCurrentPendingItem();
           pendingItem = {
             item_number:    parseInt(nameOnly[1], 10),
+            item_number_explicit: true,
             product_name:   nameOnly[2].trim(),
             quantity:       null,
             unit:           null,
@@ -648,6 +649,7 @@ function finalize(
     legacy_subunit_price_per_unit: p.legacy_subunit_price_per_unit,
     entered_quantity: p.entered_quantity,
     entered_unit: p.entered_unit,
+    item_number_explicit: p.item_number_explicit,
   };
 }
 
@@ -663,6 +665,9 @@ function pushOrMergeItem(items: WeighSessionItem[], item: WeighSessionItem): voi
     items[existingIndex] = {
       ...item,
       item_number: items[existingIndex].item_number,
+      // The kept number's provenance travels with it; the incoming line's
+      // flag describes a number that is being discarded here.
+      item_number_explicit: items[existingIndex].item_number_explicit,
       section: items[existingIndex].section,
       transaction_type: items[existingIndex].transaction_type,
     };
@@ -700,6 +705,7 @@ function parseItemLine(
 
     return {
       item_number:    parseInt(withBasis[1], 10),
+      item_number_explicit: true,
       product_name:   withBasis[2].trim(),
       price_per_unit: Number((parseFloat(withBasis[5]) / resolved.quantity).toFixed(2)),
       quantity:       null,
@@ -725,6 +731,7 @@ function parseItemLine(
 
     return {
       item_number:    parseInt(indexed[1], 10),
+      item_number_explicit: true,
       product_name:   productName,
       price_per_unit: parseFloat(indexed[3]),
       quantity:       null,

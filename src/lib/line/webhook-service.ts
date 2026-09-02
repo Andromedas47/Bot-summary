@@ -60,6 +60,7 @@ import {
   PendingSessionAfterCloseBoundaryError,
   PendingSessionClosedError,
   PendingSessionGenerationConflictError,
+  PendingSessionStaleValidationSnapshotError,
   type PendingSession,
 } from "@/lib/line/pending-session-service";
 import {
@@ -150,10 +151,16 @@ import {
 } from "@/lib/line/data-entry-session-ownership";
 import { tryHandlePurchaseCaptureMessage } from "@/lib/purchase-capture/webhook-handler";
 import { bindPlainTextRound } from "@/lib/produce/plain-text-round-binding";
-import { confirmProduceSubunitReview, runProduceCloseGate } from "@/lib/produce/entry-validation-gate";
+import {
+  confirmProduceSubunitReview,
+  markProduceValidationReviewsPresented,
+  deliveredPresentationDigests,
+  isProduceReviewApproved,
+  runProduceCloseGate,
+} from "@/lib/produce/entry-validation-gate";
 import {
   buildBlockingValidationReply,
-  buildPlainTextReviewValidationReply,
+  buildPlainTextReviewPresentationPages,
 } from "@/lib/produce/entry-validation-message";
 import {
   CANCEL_ACTIVE_DRAFT_NONE_REPLY,
@@ -232,6 +239,37 @@ const ALREADY_CLOSING_REPLY = "รับทราบแล้ว กำลัง
 
 const STALE_PRODUCE_SESSION_REPLY =
   "พบรายการเดิมที่ยังปิดไม่สมบูรณ์ กรุณาให้ทีมงานเคลียร์รายการเดิมก่อนเริ่มรายการใหม่";
+
+// The close raced a legitimate item that was still committing. Nothing was
+// lost and no close boundary was written, so the operator simply closes again
+// against the complete list. This must stay recoverable wording: the failure
+// mode it replaces was a silent terminal failed_closed.
+/**
+ * What a plain-text close gate refusal carries back to the caller.
+ *
+ * `reviewPresentation` marks a CONFIRMABLE review that has been recorded but
+ * NOT yet proven delivered. The caller stamps delivery only after its LINE
+ * reply succeeds. Blocking errors carry none: they are not confirmable.
+ */
+interface PlainTextCloseGateRefusal {
+  refusalText: string;
+  /** Extra pages when the review set needs more than one LINE message. */
+  refusalPages?: string[];
+  /**
+   * The review rows this exact refusal text actually RENDERED, and may
+   * therefore authorize once it has been delivered. One message can present
+   * the whole review plus a per-item row for every risky subunit (#109",
+   * confirms those individually). A review truncated out of the text is
+   * absent here: unrendered is not delivered.
+   */
+  reviewPresentation?: {
+    digests: string[];
+    sessionGeneration: string;
+  };
+}
+
+const CLOSE_RACED_LATE_ITEM_REPLY =
+  "มีรายการส่งเข้ามาเพิ่มพอดีตอนปิดรอบ ระบบยังไม่ได้ปิดรอบ รายการทั้งหมดยังอยู่ครบ กรุณาพิมพ์ปิดรอบอีกครั้ง";
 
 function buildPhysicalInventoryItemParseFailureReply(sequence: number | null): string {
   return [
@@ -1153,10 +1191,14 @@ export class WebhookService {
             subunitConfirm.itemNumber,
             eventId,
           );
+          // Only a genuine approval may report success. not_presented (recorded
+          // but never proven shown) and terminalized must never read as
+          // "✅ ยืนยันแล้ว" — that would tell the operator a subunit was
+          // confirmed when nothing authorized it.
           if (replyToken) await this.replyMessage(replyToken,
-            result === "not_found"
-              ? `⛔ ยืนยันข้อ ${subunitConfirm.itemNumber} ไม่ได้\nรายการนี้ไม่ใช่รายการย่อยที่ต้องยืนยัน หรือข้อมูลเปลี่ยนแล้ว`
-              : `✅ ยืนยันข้อ ${subunitConfirm.itemNumber} แล้ว\nกรุณาส่ง “จบรายการ” อีกครั้งเมื่อยืนยันครบทุกข้อ`,
+            isProduceReviewApproved(result)
+              ? `✅ ยืนยันข้อ ${subunitConfirm.itemNumber} แล้ว\nกรุณาส่ง “จบรายการ” อีกครั้งเมื่อยืนยันครบทุกข้อ`
+              : `⛔ ยืนยันข้อ ${subunitConfirm.itemNumber} ไม่ได้\nรายการนี้ไม่ใช่รายการย่อยที่ต้องยืนยัน หรือข้อมูลเปลี่ยนแล้ว`,
           );
         } catch (error) {
           log.error("subunit confirmation failed", {
@@ -1294,7 +1336,13 @@ export class WebhookService {
       // typed is lost. Only the ordinary append path is gated: a message that
       // carries a header AND a closer rotates to a new generation, and the
       // review it would record would belong to the generation it replaced.
-      let closeGateRefusal: string | null = null;
+      let closeGateRefusal: PlainTextCloseGateRefusal | null = null;
+      // The exact ingest_revision the entry gate inspected. The close boundary
+      // must be stamped against THIS document or not at all: on 2026-08-30 a
+      // legitimate pre-close item committed between the gate and the append,
+      // the boundary landed on a document the gate never saw, and the finalizer
+      // later terminalized the session for a review that was never presented.
+      let closeGatePinnedRevision: number | undefined;
       if (
         markClose
         && !incomingHeader
@@ -1307,6 +1355,33 @@ export class WebhookService {
           log,
         );
         if (closeGateRefusal) markClose = false;
+        else closeGatePinnedRevision = pending.ingest_revision ?? undefined;
+
+        // The gate just passed on a session that ALREADY has a close boundary,
+        // so this is the distinct later close that confirms a review the
+        // finalizer parked. hold_pending_validation_review set next_attempt_at
+        // to NULL; without this the confirmed session would sit held forever,
+        // because no sweep can see a closed row with no attempt scheduled.
+        if (!closeGateRefusal && pending.close_event_timestamp_ms !== null) {
+          try {
+            const resumed = await pendingService.resumeCloseFinalization(
+              sessionKey,
+              pending.session_generation,
+            );
+            log.info("produce finalization resumed after review confirmation", {
+              sessionKey,
+              sessionGeneration: pending.session_generation,
+              resumed,
+            });
+          } catch (resumeError) {
+            // The confirmation itself is already committed. A failed resume
+            // costs a delay, not the confirmation — and never terminalizes.
+            log.error("produce finalization resume failed", {
+              sessionKey,
+              error: String(resumeError),
+            });
+          }
+        }
       }
 
       let updated;
@@ -1457,6 +1532,7 @@ export class WebhookService {
           updated = await pendingService.append(
             sessionKey, text, replyToken, eventId, event.timestamp, markClose,
             pending.session_generation, expectedItemCount ?? undefined,
+            closeGatePinnedRevision,
           );
           const appendParse = parseWeighSession(updated.accumulated_text, bangkokToday());
           log.info("pending session append succeeded", {
@@ -1473,6 +1549,27 @@ export class WebhookService {
             });
           }
         } catch (appendError) {
+          // The document grew between the entry gate and the close boundary.
+          // No boundary was stamped and no content was lost, so this is a
+          // retry, not a failure: the operator closes again and the gate then
+          // validates the complete list.
+          if (appendError instanceof PendingSessionStaleValidationSnapshotError) {
+            log.warn("produce close refused — validation snapshot was stale", {
+              sessionKey,
+              sessionGeneration: pending.session_generation,
+              expectedIngestRevision: appendError.expectedRevision,
+              currentIngestRevision: appendError.currentRevision,
+              lineEventId: eventId,
+            });
+            if (replyToken) {
+              try {
+                await this.replyMessage(replyToken, CLOSE_RACED_LATE_ITEM_REPLY);
+              } catch (replyError) {
+                log.error("stale close reply failed", { error: String(replyError) });
+              }
+            }
+            return { eventId, eventType: event.type, status: "saved", parsed: false };
+          }
           if (
             appendError instanceof PendingSessionGenerationConflictError
             || appendError instanceof PendingSessionClosedError
@@ -1609,12 +1706,72 @@ export class WebhookService {
             });
           }
           if (replyToken) {
+            let delivered = false;
             try {
-              await this.replyMessage(replyToken, closeGateRefusal);
+              // One reply carries every page, so delivery is all-or-nothing:
+              // the operator either sees the whole presentation or none of it.
+              const texts = [
+                closeGateRefusal.refusalText,
+                ...(closeGateRefusal.refusalPages ?? []),
+              ];
+              if (texts.length > 1) await this.replyMessages(replyToken, texts);
+              else await this.replyMessage(replyToken, texts[0]);
+              delivered = true;
             } catch (replyError) {
               log.error("produce entry gate refusal reply failed", {
                 error: String(replyError),
               });
+            }
+
+            // Delivery proof is written ONLY here, after the reply actually
+            // succeeded. Recording the review earlier proved nothing: this
+            // reply is a separate network call that is caught and logged, so a
+            // failed one must leave the review unconfirmable and force a
+            // re-presentation rather than letting the next close approve
+            // financial content nobody saw.
+            //
+            // eventId becomes the row's presenting identity, taking over from
+            // whichever event recorded it. Without that, a duplicate delivery
+            // of THIS close would look like a distinct later event and
+            // self-confirm a review shown exactly once.
+            if (delivered && closeGateRefusal.reviewPresentation) {
+              const { digests, sessionGeneration } = closeGateRefusal.reviewPresentation;
+              try {
+                // One message, one all-or-nothing mark: the whole review plus
+                // every risky-subunit row it rendered. #109 confirms those item
+                // digests individually, so leaving them unmarked would make
+                // "ยืนยันข้อ N" answer not_presented for something the operator
+                // is looking at.
+                const presented = await markProduceValidationReviewsPresented(
+                  this.supabase,
+                  {
+                    sessionKey: sessionKey,
+                    sessionGeneration,
+                    accountabilityRoundId: null,
+                    businessDate: null,
+                    marketLabel: null,
+                    staffLabel: null,
+                    lineUserId: pending.line_user_id,
+                  },
+                  digests,
+                  eventId,
+                );
+                if (presented.status !== "presented") {
+                  // The operator saw it, but the database cannot prove it.
+                  // Fail safe: it stays unconfirmable and is shown again.
+                  log.warn("review presentation could not be proven", {
+                    sessionKey,
+                    sessionGeneration,
+                    presented,
+                  });
+                }
+              } catch (markError) {
+                log.error("review presentation stamp failed", {
+                  sessionKey,
+                  sessionGeneration,
+                  error: markError instanceof Error ? markError.message : String(markError),
+                });
+              }
             }
           }
           return { eventId, eventType: event.type, status: "saved", parsed: false };
@@ -2261,12 +2418,21 @@ export class WebhookService {
    * exception set; the second acknowledges exactly that set. Price differences
    * are advisories and do not enter this protocol.
    */
+  /**
+   * A close-gate refusal, plus what the caller needs to prove delivery.
+   *
+   * `reviewPresentation` is present ONLY for a confirmable review that was
+   * recorded but not yet shown. Recording it is a database write; showing it is
+   * a LINE reply that can fail, so the caller marks delivery only after that
+   * reply succeeds. A blocking error carries no presentation — nothing about it
+   * is confirmable, so it must never be stamped as a delivered review.
+   */
   private async runPlainTextCloseGate(
     pending:   PendingSession,
     closeText: string,
     eventId:   string,
     log:       ChildLogger,
-  ): Promise<string | null> {
+  ): Promise<PlainTextCloseGateRefusal | null> {
     const document = `${pending.accumulated_text}\n${closeText}`;
     const parsed = parseWeighSession(document, bangkokToday());
     if (getWeighSessionFinalizationErrors(parsed).length > 0) return null;
@@ -2287,29 +2453,47 @@ export class WebhookService {
           sessionKey: pending.session_key,
           reason:     binding.reason,
         });
-        return binding.detail;
+        return { refusalText: binding.detail };
       }
 
+      const gateRef = {
+        sessionKey:            pending.session_key,
+        sessionGeneration:     pending.session_generation,
+        accountabilityRoundId:
+          binding.status === "bound" ? binding.accountabilityRoundId : null,
+        businessDate:  parsed.date,
+        marketLabel:   parsed.session_title,
+        staffLabel:    parsed.staff_name,
+        lineUserId:    pending.line_user_id,
+      };
       const decision = await runProduceCloseGate(
         this.supabase,
-        {
-          sessionKey:            pending.session_key,
-          sessionGeneration:     pending.session_generation,
-          accountabilityRoundId:
-            binding.status === "bound" ? binding.accountabilityRoundId : null,
-          businessDate:  parsed.date,
-          marketLabel:   parsed.session_title,
-          staffLabel:    parsed.staff_name,
-          lineUserId:    pending.line_user_id,
-        },
+        gateRef,
         parsed,
         eventId,
       );
       if (decision.decision === "blocked") {
-        return buildBlockingValidationReply(decision.result);
+        // Not confirmable: no presentation to prove.
+        return { refusalText: buildBlockingValidationReply(decision.result) };
       }
       if (decision.decision === "review_presented") {
-        return buildPlainTextReviewValidationReply(decision.result, closeText);
+        // Render first, then authorize only what the rendering shows. The set
+        // is paginated rather than capped, so a session with more exceptions
+        // than fit in one message still has a finite path to confirmation.
+        const { pages, complete } = buildPlainTextReviewPresentationPages(
+          decision.result,
+          closeText,
+        );
+        return {
+          refusalText: pages[0].text,
+          refusalPages: pages.slice(1).map((page) => page.text),
+          reviewPresentation: {
+            digests: deliveredPresentationDigests(
+              gateRef, decision.result, pages, complete, parsed,
+            ),
+            sessionGeneration: pending.session_generation,
+          },
+        };
       }
       return null;
     } catch (error) {
@@ -2319,7 +2503,7 @@ export class WebhookService {
         sessionKey: pending.session_key,
         error:      error instanceof Error ? error.message : String(error),
       });
-      return PRODUCE_ENTRY_GATE_UNAVAILABLE_REPLY;
+      return { refusalText: PRODUCE_ENTRY_GATE_UNAVAILABLE_REPLY };
     }
   }
 

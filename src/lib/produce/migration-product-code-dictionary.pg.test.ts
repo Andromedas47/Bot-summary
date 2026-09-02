@@ -40,12 +40,15 @@ const CLEANUP_MIGRATION = join(
 // 20260824090000 adds one further code, ม72 (มะม่วงแก้วขมิ้น), on top of the
 // cleanup migration. 20260827090000 then adds ม73 (มะม่วงฟ้าลั่น). Applied last,
 // same order Production runs migrations in, so every assertion below reflects
-// the composed 264-row state.
+// the composed 265-row state.
 const KAEO_KHAMIN_MIGRATION = join(
   ROOT, "supabase", "migrations", "20260824185542_produce_product_dictionary_add_kaeo_khamin_mango.sql",
 );
 const FAH_LAN_MIGRATION = join(
   ROOT, "supabase", "migrations", "20260827055728_produce_product_dictionary_add_fah_lan_mango.sql",
+);
+const CHINESE_JUJUBE_MIGRATION = join(
+  ROOT, "supabase", "migrations", "20260901093000_produce_product_dictionary_add_chinese_jujube.sql",
 );
 const BOOTSTRAP = join(
   ROOT, "supabase", "tests", "produce_product_code_dictionary_bootstrap.sql",
@@ -137,6 +140,7 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
     await apply(CLEANUP_MIGRATION);
     await apply(KAEO_KHAMIN_MIGRATION);
     await apply(FAH_LAN_MIGRATION);
+    await apply(CHINESE_JUJUBE_MIGRATION);
   });
 
   afterAll(async () => {
@@ -146,11 +150,11 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
 
   // ── The seed is the approved dictionary ───────────────────────────────────
 
-  test("seeds exactly the 264 approved codes (base + cleanup + kaeo khamin + fah lan), all enabled", async () => {
-    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("264");
+  test("seeds exactly the 265 approved codes (base + cleanup + kaeo khamin + fah lan + chinese jujube), all enabled", async () => {
+    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("265");
     expect(await scalar(
       "SELECT count(*)::text FROM public.produce_product_codes WHERE code_enabled",
-    )).toBe("264");
+    )).toBe("265");
   });
 
   test("keeps the approved namespace ranges", async () => {
@@ -160,7 +164,7 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
         SELECT category_code, count(*) AS n
         FROM public.produce_product_codes GROUP BY category_code
       ) t`);
-    expect(rows).toBe("ท=26,ป=36,ผ=118,พ=7,ม=73,ห=4");
+    expect(rows).toBe("ท=26,ป=36,ผ=118,พ=7,ม=74,ห=4");
   });
 
   test("stores the canonical name of every code exactly as approved", async () => {
@@ -198,7 +202,7 @@ describe.skipIf(!pgAvailable)("Produce Product Code Dictionary on PostgreSQL 17"
       "DELETE FROM public.produce_product_codes WHERE product_code = 'ม02'",
     );
     expect(error).toContain("must not be deleted");
-    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("264");
+    expect(await scalar("SELECT count(*)::text FROM public.produce_product_codes")).toBe("265");
   });
 
   test("refuses to repoint a code at a different product", async () => {

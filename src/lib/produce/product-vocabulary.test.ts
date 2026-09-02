@@ -510,3 +510,58 @@ describe("review digest", () => {
     expect(withdraw("สินค้าใหม่ABC").digest).toBe(withdraw("สินค้าใหม่ABC").digest);
   });
 });
+
+describe("พุทราจีน (ม74) is its own vocabulary identity", () => {
+  it("is an approved name that resolves to its own code", () => {
+    expect(isApprovedProductName("พุทราจีน")).toBe(true);
+    expect(approvedProductCode("พุทราจีน")).toBe("ม74");
+  });
+
+  it("does not collapse into any existing jujube", () => {
+    // PRODUCT_ALIASES folds business identity, not just report labels. If any
+    // of these ever resolved to the same code, this product's stock and money
+    // would silently merge with a different one.
+    expect(approvedProductCode("พุทรา")).toBe("ม25");
+    expect(approvedProductCode("พุทราไทย")).toBe("ม26");
+    expect(approvedProductCode("พุทรานม")).toBe("ม27");
+    expect(approvedProductCode("พุทรานมสด")).toBe("ม28");
+
+    const codes = ["พุทราจีน", "พุทรา", "พุทราไทย", "พุทรานม", "พุทรานมสด"]
+      .map((name) => approvedProductCode(name));
+    expect(new Set(codes).size).toBe(5);
+  });
+
+  it("no alias was introduced that reaches พุทราจีน from a shorter form", () => {
+    // A bare พุทรา must keep meaning ม25, never the new product.
+    expect(resolveApprovedProductName("พุทรา")).not.toBeNull();
+    expect(approvedProductCode("พุทรา")).toBe("ม25");
+    expect(resolveApprovedProductName("พุทราจีน")).not.toBeNull();
+    expect(approvedProductCode("พุทราจีน")).toBe("ม74");
+  });
+
+  it("parses as an ordinary withdrawal item line", () => {
+    const parsed = parseWeighSession(
+      ["ทดสอบ-ตลาดทดสอบ เบิก 15/8/2569", "พุทราจีน 100 บาท", "5 โล", "จบรายการเบิก"].join("\n"),
+    );
+    expect(parsed.parse_errors).toEqual([]);
+    expect(parsed.items).toHaveLength(1);
+    expect(parsed.items[0].product_name).toBe("พุทราจีน");
+    expect(approvedProductCode(parsed.items[0].product_name)).toBe("ม74");
+  });
+
+  it("resolves through its own product code on an item line", () => {
+    const parsed = parseWeighSession(
+      ["ทดสอบ-ตลาดทดสอบ เบิก 15/8/2569", "ม74 100 บาท", "5 โล", "จบรายการเบิก"].join("\n"),
+    );
+    expect(parsed.parse_errors).toEqual([]);
+    expect(parsed.items[0].product_name).toBe("พุทราจีน");
+  });
+
+  it("is reachable in the dictionary exactly once", () => {
+    const matches = PRODUCT_CODE_ENTRIES.filter((e) => e.canonicalName === "พุทราจีน");
+    expect(matches).toHaveLength(1);
+    expect(matches[0].code).toBe("ม74");
+    expect(matches[0].enabled).toBe(true);
+    expect(matches[0].categoryCode).toBe("ม");
+  });
+});

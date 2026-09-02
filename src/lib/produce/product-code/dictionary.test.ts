@@ -31,6 +31,10 @@ const KAEO_KHAMIN_MIGRATION = join(
   HERE, "..", "..", "..", "..",
   "supabase", "migrations", "20260824185542_produce_product_dictionary_add_kaeo_khamin_mango.sql",
 );
+const CHINESE_JUJUBE_MIGRATION = join(
+  HERE, "..", "..", "..", "..",
+  "supabase", "migrations", "20260901093000_produce_product_dictionary_add_chinese_jujube.sql",
+);
 const FAH_LAN_MIGRATION = join(
   HERE, "..", "..", "..", "..",
   "supabase", "migrations", "20260827055728_produce_product_dictionary_add_fah_lan_mango.sql",
@@ -109,6 +113,10 @@ const APPLIED_MIGRATIONS: AppliedMigration[] = [
     file: FAH_LAN_MIGRATION,
     insertAfterCode: "ม72",
   },
+  {
+    file: CHINESE_JUJUBE_MIGRATION,
+    insertAfterCode: "ม73",
+  },
 ];
 
 /**
@@ -150,11 +158,11 @@ const moduleRows = (): Row[] =>
   }));
 
 describe("the approved dictionary is the source of truth", () => {
-  it("carries exactly the 264 approved codes", () => {
-    expect(PRODUCT_CODE_COUNT).toBe(264);
-    expect(PRODUCT_CODE_ENABLED_COUNT).toBe(264);
-    expect(PRODUCT_CODE_ENTRIES).toHaveLength(264);
-    expect(csvRows()).toHaveLength(264);
+  it("carries exactly the 265 approved codes", () => {
+    expect(PRODUCT_CODE_COUNT).toBe(265);
+    expect(PRODUCT_CODE_ENABLED_COUNT).toBe(265);
+    expect(PRODUCT_CODE_ENTRIES).toHaveLength(265);
+    expect(csvRows()).toHaveLength(265);
   });
 
   it("matches the CSV row for row, in the approved order and numbering", () => {
@@ -177,7 +185,7 @@ describe("the approved dictionary is the source of truth", () => {
       counts.set(entry.categoryCode, (counts.get(entry.categoryCode) ?? 0) + 1);
     }
     expect(Object.fromEntries(counts)).toEqual({
-      ม: 73, ผ: 118, ป: 36, ท: 26, ห: 4, พ: 7,
+      ม: 74, ผ: 118, ป: 36, ท: 26, ห: 4, พ: 7,
     });
   });
 
@@ -225,9 +233,9 @@ describe("real mappings from the approved CSV resolve", () => {
 });
 
 describe("unregistered codes do not resolve", () => {
-  // ม63-ม73 exist as of this extension, so ม74 — the code right past the new
-  // boundary — is the genuinely unissued example, not ม63, ม69, ม72 or ม73.
-  for (const code of ["ม99", "ม999", "ผ999", "ป99", "ท99", "ห99", "พ99", "ผ119", "ม74"]) {
+  // ม63-ม74 exist as of this extension, so ม75 — the code right past the new
+  // boundary — is the genuinely unissued example, not ม73 or ม74.
+  for (const code of ["ม99", "ม999", "ผ999", "ป99", "ท99", "ห99", "พ99", "ผ119", "ม75"]) {
     it(`${code} is unknown`, () => {
       expect(resolveProductCode(code)).toBeNull();
       expect(resolveItemLineProductCode(`${code} 50 บาท`)).toEqual({ kind: "unknown", code });
@@ -485,6 +493,71 @@ describe("dictionary extension 20260827090000 — ม73 (มะม่วงฟ�
     expect(resolveProductCode("ม62")).toBe("แอปเปิ้ล");
     expect(resolveProductCode("ม71")).toBe("ลิ้นจี่");
     expect(resolveProductCode("ม72")).toBe("มะม่วงแก้วขมิ้น");
+  });
+
+  it("the composed migration-parity check still holds with the new INSERT block", () => {
+    expect(migrationRows()).toEqual(csvRows());
+  });
+});
+
+describe("dictionary extension 20260901093000 — ม74 (พุทราจีน)", () => {
+  it("ม74 → พุทราจีน", () => {
+    expect(resolveProductCode("ม74")).toBe("พุทราจีน");
+  });
+
+  describe("independence — a distinct jujube, not a merge of an existing one", () => {
+    it("the four existing jujube codes keep their own identities", () => {
+      expect(resolveProductCode("ม25")).toBe("พุทรา");
+      expect(resolveProductCode("ม26")).toBe("พุทราไทย");
+      expect(resolveProductCode("ม27")).toBe("พุทรานม");
+      expect(resolveProductCode("ม28")).toBe("พุทรานมสด");
+    });
+
+    it("ม74 resolves to a name distinct from every other jujube code", () => {
+      const chineseJujube = resolveProductCode("ม74");
+      for (const code of ["ม25", "ม26", "ม27", "ม28"]) {
+        expect(resolveProductCode(code)).not.toBe(chineseJujube);
+      }
+    });
+  });
+
+  it("no alias silently folds พุทราจีน into another jujube", () => {
+    // PRODUCT_ALIASES (src/lib/summary/remaining-fruit.ts) folds business
+    // identity, not just report labels, so an alias there would merge this
+    // product's stock and money with a different one. The short form พุทรา
+    // would collide with ม25 outright.
+    expect(resolveProductCode("ม74")).not.toBe(resolveProductCode("ม25")); // พุทรา
+    expect(resolveProductCode("ม74")).not.toBe(resolveProductCode("ม26")); // พุทราไทย
+    expect(resolveProductCode("ม74")).not.toBe(resolveProductCode("ม27")); // พุทรานม
+    expect(resolveProductCode("ม74")).not.toBe(resolveProductCode("ม28")); // พุทรานมสด
+  });
+
+  it("no product code collision — ม74 appears exactly once in the full set", () => {
+    const codes = PRODUCT_CODE_ENTRIES.map((e) => e.code);
+    expect(new Set(codes).size).toBe(codes.length);
+    expect(codes.filter((c) => c === "ม74")).toHaveLength(1);
+    expect(codes.filter((c) => c === "ม73")).toHaveLength(1);
+  });
+
+  it("ม74 is the next unused code, not a reuse", () => {
+    const mCodes = PRODUCT_CODE_ENTRIES
+      .filter((e) => e.categoryCode === "ม")
+      .map((e) => Number(e.code.slice(1)))
+      .sort((a, b) => a - b);
+    expect(mCodes).toHaveLength(74);
+    expect(mCodes[mCodes.length - 1]).toBe(74);
+    // Contiguous 1..74: a gap would mean a code was retired and this one
+    // should have reused it instead of extending the range.
+    expect(mCodes).toEqual(Array.from({ length: 74 }, (_, i) => i + 1));
+  });
+
+  it("no pre-existing code changed by this extension", () => {
+    expect(resolveProductCode("ม01")).toBe("กล้วยไข่");
+    expect(resolveProductCode("ม54")).toBe("ไซมัส");
+    expect(resolveProductCode("ม62")).toBe("แอปเปิ้ล");
+    expect(resolveProductCode("ม71")).toBe("ลิ้นจี่");
+    expect(resolveProductCode("ม72")).toBe("มะม่วงแก้วขมิ้น");
+    expect(resolveProductCode("ม73")).toBe("มะม่วงฟ้าลั่น");
   });
 
   it("the composed migration-parity check still holds with the new INSERT block", () => {

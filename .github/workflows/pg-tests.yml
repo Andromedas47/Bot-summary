@@ -525,6 +525,7 @@ jobs:
       REQUIRE_ROUND_REUSE_POSTGRES: "1"
       REQUIRE_CONTAINMENT_POSTGRES: "1"
       REQUIRE_PENDING_LIFECYCLE_POSTGRES: "1"
+      REQUIRE_CLOSE_VALIDATION_RACE_POSTGRES: "1"
       REQUIRE_MARKET_IDENTITY_GUARD_POSTGRES: "1"
       REQUIRE_FINGERPRINT_COMPATIBILITY_POSTGRES: "1"
       PGHOST: localhost
@@ -549,6 +550,12 @@ jobs:
       # no-auto-finalization guarantee actually hold in SQL.
       - name: Pending session inactivity lifecycle real-PostgreSQL suite
         run: bun run test:pg:pending-inactivity
+      # The 2026-08-30 stale close-validation race. Whether a close boundary
+      # can land on a document the entry gate never saw, and whether a late
+      # pre-close item can turn a confirmable review into a terminal
+      # failed_closed, are both decided in SQL under a row lock.
+      - name: Produce close validation race real-PostgreSQL suite
+        run: bun run test:pg:close-validation-race
       # Whether the operator's "ยกเลิกรายการ" can ever touch a round holding
       # business data, race a close in flight, or cross a source or environment
       # boundary is decided entirely in SQL. It shares the lifecycle fixture and

@@ -525,6 +525,7 @@ jobs:
       REQUIRE_ROUND_REUSE_POSTGRES: "1"
       REQUIRE_CONTAINMENT_POSTGRES: "1"
       REQUIRE_PENDING_LIFECYCLE_POSTGRES: "1"
+      REQUIRE_MONEY_PARITY_POSTGRES: "1"
       REQUIRE_CLOSE_VALIDATION_RACE_POSTGRES: "1"
       REQUIRE_MARKET_IDENTITY_GUARD_POSTGRES: "1"
       REQUIRE_FINGERPRINT_COMPATIBILITY_POSTGRES: "1"
@@ -544,6 +545,11 @@ jobs:
         run: bun run test:pg:withdrawal-containment
       - name: P1-A/P1-B pending lifecycle recovery real-PostgreSQL suite
         run: bun run test:pg:pending-lifecycle
+      # LINE-calculated money must equal what produce_transactions computes in
+      # NUMERIC. Only a real server can prove that, and only in satang - a
+      # formatted-string comparison would hide a last-place disagreement.
+      - name: Produce line total PostgreSQL NUMERIC parity
+        run: bun run test:pg:money-parity
       # The inactivity sweeps land on top of the P1-A/P1-B lifecycle and share
       # its fixtures, so they run here. This is the only proof that the 25/30
       # minute windows, the expired_empty_draft vs failed_closed split, and the

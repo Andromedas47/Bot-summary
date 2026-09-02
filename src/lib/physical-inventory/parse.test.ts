@@ -448,3 +448,45 @@ describe("priced House Stock explicit empty declaration", () => {
     expect(parsed.items).toHaveLength(0);
   });
 });
+
+describe("priced house stock — exact decimal money, no floating multiplication", () => {
+  const priced = (price: string) => parsePhysicalInventoryDocument(
+    `ผลไม้คงเหลือในบ้าน\n26/8/69\n1สาลี่${price}บาท\n16.โล\nจบ`,
+    { requireUnitPrice: true },
+  ).items.find((i) => i.sequence === 1);
+
+  // Every one of these was REJECTED as invalid_unit_price before the fix:
+  // Number("2.01") * 100 is 200.99999999999997, which is not a safe integer.
+  test.each([
+    ["2.01", 201],
+    ["10.05", 1005],
+    ["1.10", 110],
+    ["8.29", 829],
+    ["1.15", 115],
+    ["0.1", 10],
+    ["0.2", 20],
+    ["0.3", 30],
+    ["100", 10000],
+    ["0.01", 1],
+  ])("%s บาท is accepted as %i satang", (price, satang) => {
+    const item = priced(price as string);
+    expect(item?.reason).toBeNull();
+    expect(item?.unitPriceSatang).toBe(satang as number);
+  });
+
+  test("more than two decimal places still fails closed", () => {
+    const item = priced("1.234");
+    expect(item?.unitPriceSatang ?? null).toBeNull();
+  });
+
+  test("zero is not a price", () => {
+    const item = priced("0");
+    expect(item?.unitPriceSatang ?? null).toBeNull();
+  });
+
+  test("an oversized amount fails closed rather than losing precision", () => {
+    // Past numeric(10,2) / the document money digit limit.
+    const item = priced("99999999999999999.99");
+    expect(item?.unitPriceSatang ?? null).toBeNull();
+  });
+});

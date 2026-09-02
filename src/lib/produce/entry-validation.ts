@@ -41,6 +41,9 @@ import {
 /** Quantities are numeric(10,3); prices numeric(10,2). Compare inside that grid. */
 const QUANTITY_EPSILON = 0.0005;
 
+/** Upper bound on the holes one gap blocker enumerates; see section 0b. */
+const MAX_REPORTED_ITEM_NUMBER_GAPS = 50;
+
 export type ProduceValidationSeverity = "blocking" | "review_required" | "advisory";
 
 export type ProduceValidationException =
@@ -60,6 +63,17 @@ export type ProduceValidationException =
       severity: "blocking";
       itemNumber: number;
       matchCount: number;
+    }
+  /**
+   * The operator's own numbering skips a number inside its own range, so a
+   * whole priced line may have been dropped in transit. Never confirmable:
+   * a missing line has no content for a human to look at and approve, and
+   * "จบรายการ" must not be able to wave it through.
+   */
+  | {
+      kind: "item_number_gap";
+      severity: "blocking";
+      missingItemNumbers: number[];
     }
   /** The unit is not part of the shop vocabulary at all ("โลก"). */
   | {
@@ -294,6 +308,47 @@ export function validateProduceEntry(input: ProduceValidationInput): ProduceVali
         severity: "blocking",
         itemNumber,
         matchCount,
+      });
+    }
+  }
+
+  // ── 0b. Internal gaps in the operator's own numbering. A corrected list
+  // resent with one line accidentally dropped ("...4, 6, 7...") used to be
+  // accepted silently, taking a whole financial line with it.
+  //
+  // Only numbers the operator actually WROTE define the range: the parser
+  // synthesizes sequential numbers for unnumbered lines, and a free-form
+  // draft that was never numbered has no numbering to be missing from.
+  // Every item still OCCUPIES its number, synthesized or not, so an
+  // unnumbered line sitting between two numbered ones is not a hole.
+  const explicitNumbers = parsed.items
+    .filter((item) => item.item_number_explicit)
+    .map((item) => item.item_number);
+  if (explicitNumbers.length > 0) {
+    const occupied = new Set(parsed.items.map((item) => item.item_number));
+    // "ลบข้อ 5" is an accounted-for removal, not a silent disappearance —
+    // blocking it would make the removal grammar unusable on a numbered list.
+    const deliberatelyRemoved = new Set(
+      (parsed.draft_item_actions ?? [])
+        .filter((action) => action.kind === "remove" && action.status === "applied")
+        .map((action) => action.item_number),
+    );
+    const lowest = Math.min(...explicitNumbers);
+    const highest = Math.max(...explicitNumbers);
+    const missingItemNumbers: number[] = [];
+    for (let number = lowest + 1; number < highest; number += 1) {
+      if (occupied.has(number) || deliberatelyRemoved.has(number)) continue;
+      // A mistyped far-away number ("ข้อ 900" in a 7-line list) would other-
+      // wise enumerate hundreds of holes. Truncating only shortens the list
+      // the operator is shown; the block itself still stands.
+      if (missingItemNumbers.length >= MAX_REPORTED_ITEM_NUMBER_GAPS) break;
+      missingItemNumbers.push(number);
+    }
+    if (missingItemNumbers.length > 0) {
+      blocking.push({
+        kind: "item_number_gap",
+        severity: "blocking",
+        missingItemNumbers,
       });
     }
   }

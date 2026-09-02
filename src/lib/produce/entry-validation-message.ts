@@ -20,12 +20,23 @@ import type {
 
 /** Beyond this the reply summarizes the remainder instead of listing it. */
 const MAX_LISTED_EXCEPTIONS = 10;
+/** One gap blocker can carry many numbers; the reply lists only the first few. */
+const MAX_LISTED_ITEM_NUMBERS = 10;
 const ADVISORY_SEPARATOR = "\n\n";
 const PRICE_ADVISORY_SUMMARY_TRUNCATED_NOTICE = "…สรุปรายการถูกย่อเพื่อแสดงคำเตือนราคา";
 const GENERIC_SUMMARY_TRUNCATED_NOTICE = "…สรุปรายการถูกย่อเนื่องจากข้อความยาวเกินกำหนด";
 
 function formatPrice(value: number): string {
   return Number.isInteger(value) ? value.toString() : value.toFixed(2);
+}
+
+/** Missing item numbers, kept short enough that a wide gap cannot bloat the reply. */
+function formatItemNumberList(numbers: number[]): string {
+  const listed = numbers.slice(0, MAX_LISTED_ITEM_NUMBERS);
+  const hidden = numbers.length - listed.length;
+  return hidden > 0
+    ? `${listed.join(", ")} และอีก ${hidden} ข้อ`
+    : listed.join(", ");
 }
 
 function describe(exception: ProduceValidationException): string[] {
@@ -41,6 +52,12 @@ function describe(exception: ProduceValidationException): string[] {
       return [
         `พบเลขข้อ ${exception.itemNumber} ซ้ำ ${exception.matchCount} รายการ`,
         "   กรุณาแก้เลขข้อให้ไม่ซ้ำก่อน",
+      ];
+    case "item_number_gap":
+      return [
+        "พบเลขข้อขาดในรายการ",
+        `   ขาดข้อ ${formatItemNumberList(exception.missingItemNumbers)}`,
+        "   กรุณาตรวจสอบและส่งรายการที่ขาดก่อน “จบรายการ”",
       ];
     case "unknown_unit":
       return [
@@ -141,6 +158,16 @@ function correctionGuidance(exceptions: ProduceValidationException[]): string[] 
     ];
   }
   if (lines.length > 0) return lines;
+  // A gap names no existing item, so the "แก้ข้อ N" guidance above never
+  // fires for it — and telling the operator to fix an over-total would be
+  // the wrong instruction entirely.
+  const gap = exceptions.find((exception) => exception.kind === "item_number_gap");
+  if (gap) {
+    return [
+      `ส่งรายการข้อ ${formatItemNumberList(gap.missingItemNumbers)} พร้อมราคาและจำนวน`,
+      "หรือแก้เลขข้อให้ต่อเนื่องแล้วส่งใหม่",
+    ];
+  }
   return ["แก้เฉพาะรายการที่ทำให้ยอดเกิน แล้วปิดรายการอีกครั้ง"];
 }
 

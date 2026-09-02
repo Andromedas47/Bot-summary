@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { WeighSession, WeighSessionItem } from "@/lib/parsers/weigh-session/types";
+import { parseWeighSession } from "@/lib/parsers/weigh-session/parser";
 import {
   runProduceCloseGate,
   runProduceFinalizeGate,
@@ -470,5 +471,63 @@ describe("unknown product vocabulary", () => {
     const gate = await runProduceCloseGate(db.client(), REF, mixed, "E1");
     expect(gate.decision).toBe("review_presented");
     expect(gate.result.status).toBe("review_required");
+  });
+});
+
+// ── Internal item-number gaps cannot be closed or finalized ───────────────────
+//
+// The 2 SEP incident: a resent list skipped item #5 and closed anyway, taking
+// a whole priced line with it. Both gates check `status === "blocked"` before
+// any present/confirm path, so a gap can never reach the review flow — these
+// pin that ordering rather than trusting it.
+
+describe("item-number gap at the close boundary", () => {
+  const gapped = () => parseWeighSession(
+    [
+      "ดำ-ตลาด เบิก 2/9/69",
+      "1.องุ่นดำ100บาท", "10โล",
+      "2.อินทผรัม50บาท", "5โล",
+      "4.องุ่นดำ20บาท", "4โล",
+    ].join("\n"),
+    "2026-09-02",
+  );
+
+  it("refuses the close and records nothing to confirm later", async () => {
+    const db = new FakeDb({ [ROUND]: [] });
+    const gate = await runProduceCloseGate(db.client(), REF, gapped(), "E1");
+    expect(gate.decision).toBe("blocked");
+    expect(gate.result.blocking.map((entry) => entry.kind)).toContain("item_number_gap");
+    // Nothing was presented, so no digest exists for a second press to confirm.
+    expect(db.reviews).toHaveLength(0);
+  });
+
+  it("stays blocked on a second “จบรายการ” — the button cannot wave it through", async () => {
+    const db = new FakeDb({ [ROUND]: [] });
+    await runProduceCloseGate(db.client(), REF, gapped(), "E1");
+    const second = await runProduceCloseGate(db.client(), REF, gapped(), "E2");
+    expect(second.decision).toBe("blocked");
+    expect(db.reviews).toHaveLength(0);
+  });
+
+  it("refuses to finalize", async () => {
+    const db = new FakeDb({ [ROUND]: [] });
+    const gate = await runProduceFinalizeGate(db.client(), REF, gapped());
+    expect(gate.decision).toBe("blocked");
+  });
+
+  it("proceeds normally once the missing line is supplied", async () => {
+    const db = new FakeDb({ [ROUND]: [] });
+    const repaired = parseWeighSession(
+      [
+        "ดำ-ตลาด เบิก 2/9/69",
+        "1.องุ่นดำ100บาท", "10โล",
+        "2.อินทผรัม50บาท", "5โล",
+        "3.แอปเปิ้ล10บาท", "84ลูก",
+        "4.องุ่นดำ20บาท", "4โล",
+      ].join("\n"),
+      "2026-09-02",
+    );
+    const gate = await runProduceFinalizeGate(db.client(), REF, repaired);
+    expect(gate.result.blocking.map((entry) => entry.kind)).not.toContain("item_number_gap");
   });
 });

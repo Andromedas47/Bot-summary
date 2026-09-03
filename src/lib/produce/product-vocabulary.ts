@@ -22,7 +22,7 @@
  * goods. Raw operator evidence is not rewritten.
  */
 
-import { boundedEditDistance } from "@/lib/parsers/weigh-session/units";
+import { boundedEditDistance, normalizeUnitAlias } from "@/lib/parsers/weigh-session/units";
 import { normalizeProductName, PRODUCT_ALIASES } from "@/lib/summary/remaining-fruit";
 import { PRODUCT_CODE_ENTRIES } from "./product-code/dictionary";
 
@@ -89,6 +89,56 @@ export function isApprovedProductName(name: string): boolean {
 /** The code a canonical spelling or reviewed deterministic alias belongs to. */
 export function approvedProductCode(name: string): string | null {
   return resolveApprovedProductName(name)?.productCode ?? null;
+}
+
+/**
+ * The one packaging word this rule covers. แพ็ค / ถุง / ลัง / เข่ง are
+ * deliberately NOT here: each needs its own evidence that the shop uses it as
+ * packaging rather than as part of a product's name.
+ */
+const BOX_SUFFIX = "กล่อง";
+
+/**
+ * Canonical business identity for a line whose product name carries a trailing
+ * packaging word.
+ *
+ * The incident: "แอปเปิ้ลกล่อง 50 บาท / 3 กล่อง" parses correctly as
+ * product แอปเปิ้ลกล่อง in unit กล่อง, but the dictionary holds แอปเปิ้ล. That
+ * costs a needless vocabulary review, and worse, mints a second product
+ * identity — so the return typed as plain แอปเปิ้ล later reads as
+ * product_not_withdrawn against a master that never knew it.
+ *
+ * Stripping is guarded four ways, and every guard is load-bearing:
+ *
+ *  1. the name ends in exactly this suffix;
+ *  2. the line's own unit IS that packaging word. "แอปเปิ้ลกล่อง" sold by ลูก
+ *     is not an apple in a box, it is a name nobody can vouch for — it stays
+ *     suspicious;
+ *  3. the FULL name is not already approved. This is the one that keeps the
+ *     rule honest: ผลไม้กล่อง, ทุเรียนกล่อง, หมอนทองกล่อง and ก้านยาวกล่อง are
+ *     real registered products whose identity INCLUDES the word, and an
+ *     endsWith-strip would silently fold them into ผลไม้ / ทุเรียน / หมอนทอง /
+ *     ก้านยาว. Canonical exact match always wins;
+ *  4. the stripped remainder resolves exactly — canonical spelling or reviewed
+ *     deterministic alias, never fuzzy. An unregistered "สินค้าใหม่กล่อง" stays
+ *     review-required, because guessing is what this whole module refuses to do.
+ *
+ * Returns the mechanical form of the input unchanged when any guard fails, so
+ * a caller can always use the result as the comparison identity. Raw operator
+ * evidence is never rewritten: callers pass raw names in and keep storing them.
+ */
+export function canonicalProduceProductName(
+  rawName: string,
+  rawUnit: string | null | undefined,
+): string {
+  const name = mechanical(rawName);
+  if (!name.endsWith(BOX_SUFFIX)) return name;
+  if (normalizeUnitAlias(mechanical(rawUnit ?? "")) !== BOX_SUFFIX) return name;
+  if (resolveApprovedProductName(name)) return name;
+
+  const stripped = name.slice(0, -BOX_SUFFIX.length).trim();
+  if (!stripped) return name;
+  return resolveApprovedProductName(stripped)?.canonicalName ?? name;
 }
 
 /**

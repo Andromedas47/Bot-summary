@@ -33,6 +33,7 @@ import {
 import { normalizeProductName } from "@/lib/summary/remaining-fruit";
 import { baseTransactionType } from "@/lib/summary/transactions";
 import {
+  canonicalProduceProductName,
   isApprovedProductName,
   suggestDictionaryProducts,
   type ProductVocabularySuggestion,
@@ -191,7 +192,21 @@ export interface RoundMasterRow {
 }
 
 export function masterCellKey(productName: string, unit: string): string {
-  return `${normalizeProductName(productName)}|${normalizeUnitAlias(unit)}`;
+  return `${canonicalProductIdentity(productName, unit)}|${normalizeUnitAlias(unit)}`;
+}
+
+/**
+ * The single comparison identity for a produce line: guarded packaging-suffix
+ * canonicalization, then the ordinary alias/report canonicalization.
+ *
+ * Every site that decides "are these the same product" goes through this —
+ * the withdrawal master, return and damaged-return matching, and the
+ * withdrawal vocabulary check — so a box-suffixed spelling can never be
+ * approved on one axis and unknown on another. Both layers are exact-match;
+ * neither invents a product.
+ */
+function canonicalProductIdentity(productName: string, unit: string | null | undefined): string {
+  return normalizeProductName(canonicalProduceProductName(productName, unit));
 }
 
 export function emptyWithdrawalMaster(): WithdrawalMaster {
@@ -214,7 +229,7 @@ export function buildWithdrawalMaster(rows: Iterable<RoundMasterRow>): Withdrawa
     const base = baseTransactionType(row.transaction_type);
     if (!base) continue;
 
-    const product = normalizeProductName(row.product_name);
+    const product = canonicalProductIdentity(row.product_name, unitRaw);
     const unit = normalizeUnitAlias(unitRaw);
     const key = `${product}|${unit}`;
     let cell = master.cells.get(key);
@@ -396,7 +411,7 @@ export function validateProduceEntry(input: ProduceValidationInput): ProduceVali
       // only add a second, confusing exception for the same line.
       if (unknownUnitItems.has(item.item_number)) continue;
 
-      const product = normalizeProductName(item.product_name);
+      const product = canonicalProductIdentity(item.product_name, unitRaw);
       const unit = normalizeUnitAlias(unitRaw);
       const withdrawnUnits = master.unitsByProduct.get(product);
 
@@ -510,7 +525,10 @@ function vocabularyExceptions(parsed: WeighSession): ProduceValidationReview[] {
     const name = item.product_name.normalize("NFC").replace(/\s+/g, " ").trim();
     if (!name || seen.has(name)) continue;
     seen.add(name);
-    if (isApprovedProductName(name)) continue;
+    // A box-suffixed spelling is judged on the identity the master will use,
+    // so the operator is not asked to vouch for a name the round already
+    // treats as แอปเปิ้ล. The suggestion list still describes what they typed.
+    if (isApprovedProductName(canonicalProduceProductName(name, item.unit))) continue;
     exceptions.push({
       kind: "unknown_product_vocabulary",
       severity: "review_required",

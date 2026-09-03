@@ -1,6 +1,6 @@
 {
-  "source": "Production supabase_migrations.schema_migrations read-only audit on 2026-08-31, after applying produce_pending_inactivity_lifecycle",
-  "production_ledger_max_version": "20260831045503",
+  "source": "Production supabase_migrations.schema_migrations read-only audit on 2026-09-03, after applying #111 close-validation/finalizer migrations and #112 Chinese jujube dictionary migration",
+  "production_ledger_max_version": "20260902042836",
   "production_ledger_max_version_note": "The greatest version in Production supabase_migrations.schema_migrations as of the audit in `source`. A pending forward migration must sort strictly after THIS, not merely after the largest historical repository filename — the two diverge whenever production_ledger_drift is non-empty.",
   "migrations": [
     "0001_initial_schema.sql",
@@ -98,7 +98,10 @@
     "20260826102627_house_stock_explicit_empty.sql",
     "20260827055728_produce_product_dictionary_add_fah_lan_mango.sql",
     "20260827065840_data_quality_atomic_upsert.sql",
-    "20260829090000_produce_pending_inactivity_lifecycle.sql"
+    "20260829090000_produce_pending_inactivity_lifecycle.sql",
+    "20260831120000_produce_close_validation_race.sql",
+    "20260901090000_produce_finalizer_review_presentation.sql",
+    "20260901093000_produce_product_dictionary_add_chinese_jujube.sql"
   ],
   "production_ledger_drift": [
     {
@@ -106,6 +109,24 @@
       "applied_version": "20260831045503",
       "applied_name": "produce_pending_inactivity_lifecycle",
       "note": "Applied via the Supabase apply_migration operation, which stamps its own version from the apply time instead of the repository filename prefix. Production history is authoritative and is never rewritten to match the filename, so the divergence is recorded here instead."
+    },
+    {
+      "file": "20260831120000_produce_close_validation_race.sql",
+      "applied_version": "20260901084806",
+      "applied_name": "produce_close_validation_race",
+      "note": "Applied via the Supabase apply_migration operation; Production recorded the apply-time version instead of the repository filename prefix. Production history is authoritative and is never rewritten."
+    },
+    {
+      "file": "20260901090000_produce_finalizer_review_presentation.sql",
+      "applied_version": "20260901084830",
+      "applied_name": "produce_finalizer_review_presentation",
+      "note": "Applied via the Supabase apply_migration operation; Production recorded the apply-time version instead of the repository filename prefix. Production history is authoritative and is never rewritten."
+    },
+    {
+      "file": "20260901093000_produce_product_dictionary_add_chinese_jujube.sql",
+      "applied_version": "20260902042836",
+      "applied_name": "produce_product_dictionary_add_chinese_jujube",
+      "note": "Applied via the Supabase apply_migration operation; Production recorded the apply-time version instead of the repository filename prefix. Production history is authoritative and is never rewritten."
     }
   ]
 }

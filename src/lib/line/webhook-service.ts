@@ -1331,9 +1331,9 @@ export class WebhookService {
       // P4A completion: the entry gate runs on the plain-text close BEFORE the
       // immutable close boundary is written. A refusal therefore leaves the
       // session in capture with its original header and business date, where
-      // the corrected line is still an ordinary item message — and the text
-      // that arrived with this close is still appended, so nothing the operator
-      // typed is lost. Only the ordinary append path is gated: a message that
+      // the corrected line is still an ordinary item message. The refused
+      // closer remains event evidence but is not appended to the business
+      // document. Only the ordinary append path is gated: a message that
       // carries a header AND a closer rotates to a new generation, and the
       // review it would record would belong to the generation it replaced.
       let closeGateRefusal: PlainTextCloseGateRefusal | null = null;
@@ -1385,7 +1385,29 @@ export class WebhookService {
       }
 
       let updated;
-      if (
+      if (closeGateRefusal) {
+        // A closer is control-plane input, not part of the Produce document.
+        // Keeping a refused closer out of accumulated_text makes the review
+        // digest stable across the two-close protocol. The event itself is
+        // still durably captured by raw_messages and mark_plain_text_close_refused.
+        // Transport activity still belongs to this event. The service update
+        // is generation-scoped in the UPDATE predicate, so a close that raced
+        // a replacement cannot touch the replacement row.
+        updated = await pendingService.touchControlActivity(
+          sessionKey,
+          pending.session_generation,
+          replyToken ?? null,
+        );
+        if (!updated) {
+          log.warn("refused Produce close lost generation race", {
+            sessionKey,
+            staleSessionGeneration: pending.session_generation,
+            lineEventId: eventId,
+          });
+          if (replyToken) await this.replyMessage(replyToken, STALE_PRODUCE_SESSION_REPLY);
+          return { eventId, eventType: event.type, status: "saved", parsed: false };
+        }
+      } else if (
         incomingHeader
         && (
           pending.terminalized

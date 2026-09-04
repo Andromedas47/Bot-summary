@@ -1390,7 +1390,23 @@ export class WebhookService {
         // Keeping a refused closer out of accumulated_text makes the review
         // digest stable across the two-close protocol. The event itself is
         // still durably captured by raw_messages and mark_plain_text_close_refused.
-        updated = pending;
+        // Transport activity still belongs to this event. The service update
+        // is generation-scoped in the UPDATE predicate, so a close that raced
+        // a replacement cannot touch the replacement row.
+        updated = await pendingService.touchControlActivity(
+          sessionKey,
+          pending.session_generation,
+          replyToken ?? null,
+        );
+        if (!updated) {
+          log.warn("refused Produce close lost generation race", {
+            sessionKey,
+            staleSessionGeneration: pending.session_generation,
+            lineEventId: eventId,
+          });
+          if (replyToken) await this.replyMessage(replyToken, STALE_PRODUCE_SESSION_REPLY);
+          return { eventId, eventType: event.type, status: "saved", parsed: false };
+        }
       } else if (
         incomingHeader
         && (

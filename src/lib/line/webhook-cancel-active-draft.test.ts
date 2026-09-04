@@ -70,10 +70,19 @@ class CancelDatabase {
 
   from(table: string) {
     const filters: Array<(row: Row) => boolean> = [];
+    let updatePayload: Row | null = null;
     const source = () =>
       table === "produce_entry_validation_reviews"
         ? (this.reviews as unknown as Row[])
         : this.rows(table);
+    const matching = () => source().filter((row) => filters.every((f) => f(row)));
+    const applyUpdate = () => {
+      const rows = matching();
+      if (updatePayload) {
+        for (const row of rows) Object.assign(row, updatePayload);
+      }
+      return rows;
+    };
     const builder = {
       select: () => builder,
       eq: (column: string, value: unknown) => {
@@ -83,16 +92,16 @@ class CancelDatabase {
       limit: () => builder,
       order: () => builder,
       maybeSingle: async () => ({
-        data: source().filter((row) => filters.every((f) => f(row)))[0] ?? null,
+        data: applyUpdate()[0] ?? null,
         error: null,
       }),
       single: async () => ({
-        data: source().filter((row) => filters.every((f) => f(row)))[0] ?? null,
+        data: applyUpdate()[0] ?? null,
         error: null,
       }),
       then: (resolve: (value: { data: Row[]; error: null }) => unknown) =>
         Promise.resolve({
-          data: source().filter((row) => filters.every((f) => f(row))),
+          data: applyUpdate(),
           error: null,
         }).then(resolve),
       insert: (payload: Row) => ({
@@ -115,7 +124,10 @@ class CancelDatabase {
           },
         }),
       }),
-      update: () => ({ eq: () => Promise.resolve({ data: null, error: null }) }),
+      update: (payload: Row) => {
+        updatePayload = payload;
+        return builder;
+      },
     };
     return builder;
   }

@@ -401,6 +401,47 @@ describe("pending produce session — sender identity isolation (Release A)", ()
     expect(u2.accumulated_text).not.toContain("ทุเรียน");
     expect(u1.latest_reply_token).toBe("u1-close");
     expect(u2.latest_reply_token).toBe("u2-close");
+    expect(u1.accumulated_text).not.toContain("จบรายการเบิก");
+    expect(u2.accumulated_text).not.toContain("จบรายการเบิก");
+    expect(u1.ingest_revision).toBe(2);
+    expect(u2.ingest_revision).toBe(2);
+    expect(u1.close_event_timestamp_ms).toBeNull();
+    expect(u2.close_event_timestamp_ms).toBeNull();
+    expect(db.rows("raw_messages")).toHaveLength(6);
+    expect(db.rows("pending_session_ingest")).toHaveLength(4);
+    expect(db.rows("pending_session_admission")).toHaveLength(4);
+  });
+
+  it("a stale control-plane close cannot update a replacement generation", async () => {
+    const db = new IdentityDatabase();
+    const pendingService = new PendingSessionService(db as never);
+    const sessionKey = `group:${GROUP}:user:${U1}`;
+    db.insert("pending_sessions", {
+      session_key: sessionKey,
+      source_id: GROUP,
+      line_user_id: U1,
+      session_generation: "generation-old",
+      accumulated_text: U1_HEADER,
+      latest_reply_token: "old-token",
+      ingest_revision: 1,
+    }, "insert");
+    const row = db.rows("pending_sessions")[0]!;
+    row.session_generation = "generation-replacement";
+    row.latest_reply_token = "replacement-token";
+    const replacementUpdatedAt = row.updated_at;
+
+    const touched = await pendingService.touchControlActivity(
+      sessionKey,
+      "generation-old",
+      "stale-close-token",
+    );
+
+    expect(touched).toBeNull();
+    expect(row.session_generation).toBe("generation-replacement");
+    expect(row.latest_reply_token).toBe("replacement-token");
+    expect(row.updated_at).toBe(replacementUpdatedAt);
+    expect(row.accumulated_text).toBe(U1_HEADER);
+    expect(row.ingest_revision).toBe(1);
   });
 
   it("rejects a group event without userId — no pending session mutation", async () => {

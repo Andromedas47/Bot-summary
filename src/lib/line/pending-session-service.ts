@@ -694,6 +694,39 @@ export class PendingSessionService {
   }
 
   /**
+   * Record transport/operator activity for control-plane input that must not
+   * enter the authoritative Produce document.
+   *
+   * The key + generation + live-row predicates are evaluated by PostgreSQL in
+   * the same UPDATE as the metadata write. A stale event therefore returns
+   * null and cannot touch a replacement generation. Deliberately does not
+   * change accumulated_text, ingest_revision, close-boundary fields, or the
+   * ingest/admission ledgers.
+   */
+  async touchControlActivity(
+    sessionKey: string,
+    expectedGeneration: string,
+    replyToken: string | null,
+  ): Promise<PendingSession | null> {
+    const { data, error } = await this.supabase
+      .from("pending_sessions")
+      .update({
+        latest_reply_token: replyToken,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("session_key", sessionKey)
+      .eq("session_generation", expectedGeneration)
+      .eq("terminalized", false)
+      .select("*")
+      .maybeSingle();
+
+    if (error) {
+      throw new Error(`pending session control activity update failed: ${error.message}`);
+    }
+    return data as PendingSession | null;
+  }
+
+  /**
    * Park finalization for a closed generation whose document grew past the
    * close boundary into review-required territory. Returns false when the row
    * moved underneath us (generation conflict, terminalized, revision moved

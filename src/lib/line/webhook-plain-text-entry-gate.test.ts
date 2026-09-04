@@ -21,6 +21,7 @@ const PRODUCE_CLOSE_PENDING_REPLY =
 interface Review {
   digest: string;
   presented_line_event_id: string;
+  presented_delivered_at: string | null;
   confirmed_at: string | null;
 }
 
@@ -34,6 +35,7 @@ class PlainTextGateDatabase {
   }> = [];
   /** Non-null makes the stamp RPC resolve with a PostgREST error. */
   closeRefusalError: string | null = null;
+  presentationError: string | null = null;
   tables: Record<string, Row[]> = {
     pending_sessions: [],
     produce_transactions: [],
@@ -107,6 +109,7 @@ class PlainTextGateDatabase {
         review = {
           digest,
           presented_line_event_id: args.p_line_event_id as string,
+          presented_delivered_at: null,
           confirmed_at: null,
         };
         this.reviews.push(review);
@@ -115,6 +118,7 @@ class PlainTextGateDatabase {
         data: {
           confirmed: review.confirmed_at !== null,
           presented_line_event_id: review.presented_line_event_id,
+          presented_delivered: review.presented_delivered_at !== null,
         },
         error: null,
       };
@@ -123,8 +127,33 @@ class PlainTextGateDatabase {
       const review = this.reviews.find((r) => r.digest === args.p_validation_digest);
       if (!review) return { data: { status: "not_found" }, error: null };
       if (review.confirmed_at) return { data: { status: "already_confirmed" }, error: null };
+      if (!review.presented_delivered_at) {
+        return { data: { status: "not_presented" }, error: null };
+      }
+      if (review.presented_line_event_id === args.p_line_event_id) {
+        return { data: { status: "not_found" }, error: null };
+      }
       review.confirmed_at = new Date().toISOString();
       return { data: { status: "confirmed" }, error: null };
+    }
+    if (name === "mark_produce_validation_reviews_presented") {
+      if (this.presentationError) {
+        return { data: null, error: { message: this.presentationError } };
+      }
+      const digests = [...new Set(args.p_validation_digests as string[])];
+      const reviews = digests.map((digest) => this.reviews.find((row) => row.digest === digest));
+      if (reviews.some((review) => !review)) {
+        return { data: { status: "unknown_digest", marked: 0 }, error: null };
+      }
+      let marked = 0;
+      for (const review of reviews as Review[]) {
+        if (!review.presented_delivered_at) {
+          review.presented_delivered_at = new Date().toISOString();
+          review.presented_line_event_id = args.p_presented_line_event_id as string;
+          marked += 1;
+        }
+      }
+      return { data: { status: "presented", marked }, error: null };
     }
     if (name === "admit_pending_session_event" || name === "register_pending_session_ingest") {
       return { data: null, error: null };
@@ -394,12 +423,87 @@ describe("P4A on the plain-text close", () => {
     expect(db.pending.close_line_event_id).toBeNull();
     expect(db.reviews).toHaveLength(1);
     expect(db.reviews[0]?.confirmed_at).toBeNull();
+    expect(db.reviews[0]?.presented_delivered_at).not.toBeNull();
+    expect(db.reviews[0]?.presented_line_event_id).toBe("review-close-1");
+    expect(db.pending.accumulated_text).not.toContain("จบรายการเบิก");
 
     await service.processEvents([textEvent("จบรายการเบิก", "review-close-2")], "dest");
 
     expect(replies.at(-1)).toBe(PRODUCE_CLOSE_PENDING_REPLY);
     expect(db.pending.close_line_event_id).toBe("review-close-2");
     expect(db.reviews[0]?.confirmed_at).not.toBeNull();
+  });
+
+  it("keeps the review identity stable when the first close event is redelivered", async () => {
+    const original = [
+      "ดำ-ราชพฤกษ์ เบิก 11/8/2569",
+      "4.มะม่วง20บาท",
+      "1โล",
+    ].join("\n");
+    const db = new PlainTextGateDatabase(pendingRow(original), []);
+    const replies: string[] = [];
+    const service = build(db, replies);
+
+    await service.processEvents([textEvent("จบรายการเบิก", "duplicate-close")], "dest");
+    const digest = db.reviews[0]?.digest;
+    await service.processEvents([textEvent("จบรายการเบิก", "duplicate-close")], "dest");
+
+    expect(db.pending.accumulated_text).toBe(original);
+    expect(db.reviews.map((review) => review.digest)).toEqual([digest]);
+    expect(db.reviews[0]?.confirmed_at).toBeNull();
+
+    await service.processEvents([textEvent("จบรายการเบิก", "distinct-close")], "dest");
+    expect(db.reviews[0]?.confirmed_at).not.toBeNull();
+    expect(db.pending.close_line_event_id).toBe("distinct-close");
+  });
+
+  it("recovers from a failed delivery stamp without growing review rows", async () => {
+    const original = [
+      "ดำ-ราชพฤกษ์ เบิก 11/8/2569",
+      "4.มะม่วง20บาท",
+      "1โล",
+    ].join("\n");
+    const db = new PlainTextGateDatabase(pendingRow(original), []);
+    db.presentationError = "temporary database failure";
+    const replies: string[] = [];
+    const service = build(db, replies);
+
+    await service.processEvents([textEvent("จบรายการเบิก", "failed-stamp")], "dest");
+    expect(db.reviews).toHaveLength(1);
+    expect(db.reviews[0]?.presented_delivered_at).toBeNull();
+
+    db.presentationError = null;
+    await service.processEvents([textEvent("จบรายการเบิก", "re-present")], "dest");
+    expect(db.reviews).toHaveLength(1);
+    expect(db.reviews[0]?.presented_delivered_at).not.toBeNull();
+    expect(db.reviews[0]?.presented_line_event_id).toBe("re-present");
+    expect(db.reviews[0]?.confirmed_at).toBeNull();
+
+    await service.processEvents([textEvent("จบรายการเบิก", "confirm-after-recovery")], "dest");
+    expect(db.reviews[0]?.confirmed_at).not.toBeNull();
+    expect(db.pending.close_line_event_id).toBe("confirm-after-recovery");
+  });
+
+  it("invalidates a delivered review when the Produce document changes", async () => {
+    const db = new PlainTextGateDatabase(pendingRow([
+      "ดำ-ราชพฤกษ์ เบิก 11/8/2569",
+      "4.มะม่วง20บาท",
+      "1โล",
+    ].join("\n")), []);
+    const replies: string[] = [];
+    const service = build(db, replies);
+
+    await service.processEvents([textEvent("จบรายการเบิก", "before-change")], "dest");
+    const oldDigest = db.reviews[0]!.digest;
+    db.pending.accumulated_text = `${db.pending.accumulated_text}\n5.ฝรั่ง30บาท\n1โล`;
+    db.pending.ingest_revision = 1;
+
+    await service.processEvents([textEvent("จบรายการเบิก", "after-change")], "dest");
+    expect(db.reviews).toHaveLength(2);
+    expect(db.reviews[1]?.digest).not.toBe(oldDigest);
+    expect(db.reviews[0]?.confirmed_at).toBeNull();
+    expect(db.reviews[1]?.confirmed_at).toBeNull();
+    expect(db.pending.close_event_timestamp_ms).toBeNull();
   });
 });
 

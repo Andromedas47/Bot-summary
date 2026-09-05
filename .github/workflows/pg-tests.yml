@@ -541,6 +541,8 @@ jobs:
       - run: bun install
       - name: P0-A same-day round reuse real-PostgreSQL suite
         run: bun run test:pg:round-reuse
+      - name: Legacy anonymous surface lockdown real-PostgreSQL suite
+        run: bun run test:pg:legacy-anon-surface-lockdown
       - name: P0-B withdrawal containment real-PostgreSQL suite
         run: bun run test:pg:withdrawal-containment
       - name: P1-A/P1-B pending lifecycle recovery real-PostgreSQL suite

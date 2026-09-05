@@ -152,6 +152,7 @@ import {
 import { tryHandlePurchaseCaptureMessage } from "@/lib/purchase-capture/webhook-handler";
 import { bindPlainTextRound } from "@/lib/produce/plain-text-round-binding";
 import {
+  closeGapBlockIsStragglerFabricable,
   confirmProduceSubunitReview,
   markProduceValidationReviewsPresented,
   deliveredPresentationDigests,
@@ -2423,6 +2424,33 @@ export class WebhookService {
     }
   }
 
+  /**
+   * A bounded, single re-read barrier: did a same-generation append advance
+   * ingest_revision while the entry gate was validating the snapshot it was
+   * handed? A true answer means the document grew under the gate, so any
+   * item-number gap it computed may be a straggler artefact rather than a lost
+   * line. No polling and no sleep — one lookup. A read failure, a rotated
+   * generation, or a missing row all return false, so the gate falls through to
+   * its ordinary verdict and never swallows a genuine block.
+   */
+  private async closeSnapshotMovedUnderGate(
+    pending: PendingSession,
+    log:     ChildLogger,
+  ): Promise<boolean> {
+    try {
+      const current = await new PendingSessionService(this.supabase).lookup(pending.session_key);
+      const row = current.session;
+      if (!row || row.session_generation !== pending.session_generation) return false;
+      return (row.ingest_revision ?? 0) > (pending.ingest_revision ?? 0);
+    } catch (error) {
+      log.warn("close-gate snapshot recheck failed", {
+        sessionKey: pending.session_key,
+        error:      error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  }
+
   // ── Additional produce batch: open (append-only, no direct persist) ──────
   // Creates a fresh pending generation for an additional batch and, when the
   // message already carries its closer, marks the close so the Release B
@@ -2495,6 +2523,28 @@ export class WebhookService {
         eventId,
       );
       if (decision.decision === "blocked") {
+        // Before committing to a definitive item-number-gap rejection, make one
+        // bounded check that the document the gate just validated is still the
+        // current one. The gate does real async work (round binding, master
+        // read, review lookups); a legitimate same-generation item can commit
+        // during that window and only an item-number gap can be FABRICATED by
+        // such a straggler (see closeGapBlockIsStragglerFabricable). If the
+        // snapshot grew under the gate, the "missing" numbers are in flight, not
+        // lost — answer with the same recoverable copy the close-boundary race
+        // uses (#108) instead of a false missing-item block. No boundary is
+        // stamped, nothing is confirmed, and a genuine gap re-blocks on the next
+        // close once ingest_revision has settled.
+        if (
+          closeGapBlockIsStragglerFabricable(decision.result)
+          && await this.closeSnapshotMovedUnderGate(pending, log)
+        ) {
+          log.warn("produce close gap suppressed — snapshot grew under the entry gate", {
+            sessionKey:        pending.session_key,
+            sessionGeneration: pending.session_generation,
+            snapshotRevision:  pending.ingest_revision,
+          });
+          return { refusalText: CLOSE_RACED_LATE_ITEM_REPLY };
+        }
         // Not confirmable: no presentation to prove.
         return { refusalText: buildBlockingValidationReply(decision.result) };
       }

@@ -260,6 +260,31 @@ export type ProduceCloseGateDecision =
   | { decision: "review_presented"; result: ProduceValidationResult };
 
 /**
+ * Whether a blocking verdict could have been fabricated by a late/out-of-order
+ * straggler for the SAME generation.
+ *
+ * A close-gate snapshot can only ever be MISSING later items, never carry extra
+ * ones: appends grow the document, they never remove content. So the only
+ * blocking kind a straggler can invent is an item-number gap — numbers the
+ * operator really sent that had not been folded into the snapshot when the
+ * close was observed (Production 2026-09-05: items 15,16 committed after the
+ * close event and the gate reported 9,11,12,15,16 "missing"). Every other
+ * blocking kind describes content that is actually present — a duplicate
+ * number, an unknown unit, a return with no withdrawal — which a straggler
+ * cannot conjure by arriving late.
+ *
+ * The caller uses this to decide whether a bounded snapshot re-read is worth
+ * doing before it commits to the rejection; a genuine gap re-blocks on the next
+ * close once the revision has settled.
+ */
+export function closeGapBlockIsStragglerFabricable(
+  result: ProduceValidationResult,
+): boolean {
+  return result.status === "blocked"
+    && result.blocking.some((exception) => exception.kind === "item_number_gap");
+}
+
+/**
  * The gate as it runs on "จบรายการ".
  *
  * No close boundary exists yet at this point, which is the whole reason the
